@@ -1,0 +1,28 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "configure (debug)",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--preset", "macos-debug"],
+      "problemMatcher": []
+    },
+    {
+      "label": "build (debug)",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--build", "--preset", "macos-debug"],
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "test (debug)",
+      "type": "shell",
+      "command": "ctest",
+      "args": ["--preset", "macos-debug"],
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    }
+  ]
+}

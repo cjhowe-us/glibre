@@ -1,0 +1,30 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "glibre",
+  "version-string": "0.0.0",
+  "description": "No-code game engine",
+  "homepage": "https://github.com/cjhowe/glibre",
+  "supports": "osx & arm64",
+  "dependencies": [
+    "sdl3",
+    "entt",
+    "joltphysics",
+    "meshoptimizer",
+    "metal-cpp",
+    "freeimage",
+    "freetype",
+    "fory",
+    "imgui",
+    "spdlog",
+    "fmt",
+    "xxhash",
+    "blake3",
+    "cgltf",
+    "directx-shader-compiler"
+  ],
+  "features": {
+    "tests":  { "description": "Build Catch2 test suite",  "dependencies": ["catch2"] },
+    "editor": { "description": "Build editor",             "dependencies": [] }
+  },
+  "default-features": ["tests", "editor"]
+}

@@ -1,0 +1,35 @@
+---
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: c++20
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+PointerAlignment: Left
+ReferenceAlignment: Left
+AccessModifierOffset: -4
+AlignAfterOpenBracket: BlockIndent
+AlwaysBreakTemplateDeclarations: Yes
+BinPackArguments: false
+BinPackParameters: false
+BreakBeforeBraces: Attach
+BreakConstructorInitializers: BeforeColon
+EmptyLineBeforeAccessModifier: LogicalBlock
+FixNamespaceComments: true
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<[^/]+>$'
+    Priority: 1
+  - Regex: '^<.+>$'
+    Priority: 2
+  - Regex: '^"glibre/.+"$'
+    Priority: 3
+  - Regex: '.*'
+    Priority: 4
+NamespaceIndentation: None
+PackConstructorInitializers: Never
+SeparateDefinitionBlocks: Always
+SortIncludes: CaseSensitive
+SpaceAfterTemplateKeyword: false
+SpacesBeforeTrailingComments: 2

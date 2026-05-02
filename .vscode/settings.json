@@ -1,0 +1,23 @@
+{
+  "C_Cpp.default.cppStandard": "c++23",
+  "C_Cpp.default.intelliSenseMode": "macos-clang-arm64",
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/macos-debug/compile_commands.json",
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "C_Cpp.formatting": "clangFormat",
+  "C_Cpp.codeAnalysis.clangTidy.enabled": true,
+  "C_Cpp.codeAnalysis.clangTidy.useBuildPath": true,
+  "cmake.configureOnOpen": false,
+  "cmake.buildBeforeRun": true,
+  "cmake.useCMakePresets": "always",
+  "files.associations": {
+    "*.hlsl": "hlsl",
+    "*.h": "cpp",
+    "*.hpp": "cpp"
+  },
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true,
+  "editor.formatOnSave": true,
+  "editor.rulers": [100],
+  "[cpp]": { "editor.defaultFormatter": "ms-vscode.cpptools" },
+  "[c]":   { "editor.defaultFormatter": "ms-vscode.cpptools" }
+}

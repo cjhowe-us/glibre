@@ -1,0 +1,22 @@
+name: Bug
+description: Reproducible defect.
+title: "[BUG] "
+labels: ["type:bug"]
+body:
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Exact steps. Prefer a `.glibre-trace` if applicable.
+    validations: { required: true }
+  - type: textarea
+    id: expected
+    attributes: { label: Expected }
+    validations: { required: true }
+  - type: textarea
+    id: actual
+    attributes: { label: Actual }
+    validations: { required: true }
+  - type: input
+    id: env
+    attributes: { label: Environment, placeholder: "macOS 15.x, M3, debug build" }

@@ -1,0 +1,74 @@
+name: User Story
+description: Persona-grounded testable acceptance criterion.
+title: "[STORY] "
+labels: ["type:user-story"]
+body:
+  - type: dropdown
+    id: domain
+    attributes:
+      label: Domain
+      options:
+        - core
+        - platform
+        - data
+        - shader
+        - render
+        - geometry
+        - physics
+        - content
+        - tools
+        - e2e
+        - scripting
+        - material
+        - vfx
+        - animation
+        - audio
+        - ai
+        - networking
+        - simulation
+    validations: { required: true }
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Phase
+      options: [ "phase:mvp", "phase:post-mvp", "phase:long-term" ]
+    validations: { required: true }
+  - type: dropdown
+    id: points
+    attributes:
+      label: Story Points (Fibonacci)
+      options: [ "pts:1", "pts:2", "pts:3", "pts:5", "pts:8" ]
+    validations: { required: true }
+  - type: input
+    id: persona
+    attributes:
+      label: Persona
+      placeholder: "e.g. game developer, engine developer, technical artist"
+    validations: { required: true }
+  - type: textarea
+    id: story
+    attributes:
+      label: User Story
+      description: As a `<persona>`, I want `<capability>`, so that `<outcome>`.
+      placeholder: "As a game developer, I want ... so that ..."
+    validations: { required: true }
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria (Gherkin)
+      description: One or more Given/When/Then blocks. Each maps to ≥1 Catch2 test.
+      placeholder: |
+        Given ...
+        When ...
+        Then ...
+      render: gherkin
+    validations: { required: true }
+  - type: input
+    id: harmonius
+    attributes:
+      label: Harmonius Source (optional)
+      placeholder: "US-X.Y.Z or path under /docs/user-stories/"
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes / Open Questions

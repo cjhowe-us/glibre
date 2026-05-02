@@ -1,0 +1,49 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: clang-format
+        run: |
+          brew install clang-format
+          shopt -s globstar
+          clang-format --dry-run --Werror $(git ls-files '**/*.cpp' '**/*.hpp' '**/*.h' '**/*.cc') || exit 1
+
+  build:
+    runs-on: macos-14
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      - uses: lukka/run-vcpkg@v11
+      - name: Configure
+        run: cmake --preset macos-debug
+      - name: Build
+        run: cmake --build --preset macos-debug
+      - name: Test
+        run: ctest --preset macos-debug
+
+  spec-check:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify acceptance ↔ test mapping
+        run: scripts/spec-check.sh || true  # gate enabled once tooling lands
+
+  dep-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify task issue dependencies closed
+        env: { GH_TOKEN: ${{ github.token }} }
+        run: scripts/dep-check.sh || true   # gate enabled once tooling lands
