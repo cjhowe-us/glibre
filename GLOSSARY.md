@@ -54,17 +54,24 @@ inside each `specs/<context>/SPEC.md`. Terms used unchanged in code.
 
 ## Stories, Tasks, Issues
 
-All live in GitHub Issues; not in the repo filesystem.
+All live in GitHub Issues; not in the repo filesystem. Three kinds only.
 
-- **User Story** — GitHub issue, `type:user-story`. Persona-grounded
-  testable acceptance criterion. `As a <persona>, I want <capability>,
-  so that <outcome>.` Includes acceptance criteria + story points.
-- **Task** — GitHub issue, `type:task`. Unit of implementation work;
-  story-pointed; satisfies ≥1 user story; sub-issued under an epic.
-- **Epic** — GitHub issue, `type:epic`. Milestone-scale; tracks an
-  entire context's MVP / post-MVP / long-term slice.
-- **Spike** — `type:spike`. Time-boxed research with concrete output.
+- **Tracking Issue** — `type:tracking`. Non-leaf. Aggregates child
+  issues. **No own story-point estimate**; total = sum of leaves.
+  Source of truth for plan execution status; subagents post updates
+  here as comments in English. Plays one of four roles via `role:*`:
+  `role:epic` (full context slice), `role:plan` (one Claude Code
+  session), `role:slice` (mid-level grouping), `role:review` (review
+  iteration).
+- **User Story** — `type:user-story`. Persona-grounded testable
+  acceptance criterion. `As a <persona>, I want <capability>, so that
+  <outcome>.` Has its own `pts:*` estimate.
+- **Task Execution** — `type:task-execution`. Leaf unit of work.
+  Kind label: `kind:implementation`, `kind:design`, `kind:planning`,
+  `kind:bug`, or `kind:chore`. Has its own `pts:*` estimate. Satisfies
+  ≥1 user story (or none for `kind:chore`); lives under exactly one
+  tracking issue parent.
 - **Story Point** — Fibonacci 1/2/3/5/8 relative effort. > 8 must split.
-- **Pull Request** — granular, single-purpose, conventional-commit
-  subject (`feat(core):`, `fix(render):`, `chore(repo):`, etc.). One
-  task issue may have multiple PRs.
+  Rolls up from leaves only.
+- **Pull Request** — granular, single-purpose, Conventional Commit
+  subject. One task-execution issue may have multiple PRs.

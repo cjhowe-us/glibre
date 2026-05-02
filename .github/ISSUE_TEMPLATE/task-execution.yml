@@ -1,8 +1,19 @@
-name: Task
-description: Unit of implementation work satisfying ≥1 user story.
+name: Task Execution
+description: Implementation, design, or planning task. Leaf-level work.
 title: "[TASK] "
-labels: ["type:task"]
+labels: ["type:task-execution"]
 body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - implementation
+        - design
+        - planning
+        - bug
+        - chore
+    validations: { required: true }
   - type: dropdown
     id: domain
     attributes:
@@ -44,29 +55,39 @@ body:
     id: stories
     attributes:
       label: User Stories Satisfied
-      description: List `#NNN` issue refs to `type:user-story` issues.
-      placeholder: |
-        - #12
-        - #34
+      description: GitHub `#NNN` refs to type:user-story issues.
+    validations: { required: true }
+  - type: input
+    id: parent
+    attributes:
+      label: Parent Tracking Issue
+      placeholder: "#42"
     validations: { required: true }
   - type: textarea
     id: scope
     attributes:
       label: Scope
-      description: What this task changes. Single SRP slice.
+      description: Single SRP slice. What changes; what does not.
     validations: { required: true }
   - type: textarea
     id: dependencies
     attributes:
       label: Depends on
-      description: GitHub native issue dependencies. Topological order required.
+      description: Topologically ordered. Use GitHub native dependencies.
       placeholder: "- #1\n- #5"
   - type: textarea
     id: pr-plan
     attributes:
       label: PR Plan
-      description: Granular conventional-commit PRs intended to close this task.
+      description: Granular Conventional Commit PRs intended to close this.
       placeholder: |
         - feat(core): add Plugin manifest type
-        - feat(core): wire dlopen loader
         - test(core): manifest round-trip
+  - type: textarea
+    id: agent-notes
+    attributes:
+      label: Agent Execution Notes
+      description: |
+        Plan-executor subagents post status comments here in English:
+        `agent:<name> status:<started|done|blocked> notes:<…>`.
+        Final closure must reference all merged PRs.

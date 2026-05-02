@@ -10,7 +10,18 @@ SDL3 + Metal (via metal-cpp) + HLSL (DXC + metal-shaderconverter).
 - **Spec → story → test → code.** Stories and tasks live in **GitHub
   Issues**, not in this repo. Always reference issues from `plans/*.md`
   and PR bodies.
+- **Three issue kinds only**: tracking (no estimate; rolls up),
+  user-story, task-execution (kind: implementation / design / planning).
+  See `AGENTS.md`.
+- **Plan execution via parallel nested subagents**: ≤5 concurrent
+  top-level plan executors; children may also be parallel. Each
+  generated plan must fit in a single Claude Code session.
+- **Progress tracked in GitHub issue comments (English)**. No on-disk
+  progress logs. Tracking issues are the source of truth.
+- **≥3 passes** for every plan / design / issue set before leaves
+  execute (coverage → cohesion+SRP → topology+estimation).
 - **No time estimates.** Story points only (Fibonacci 1/2/3/5/8). > 8 → split.
+  Story points roll up from leaves; tracking issues carry no `pts:*`.
 - **Cohesion AND completeness.** Abstractions are the foundation
   completeness rests on. Reject the false trade-off.
 - **SOLID, SRP first.** One responsibility per module. Two reasons to
