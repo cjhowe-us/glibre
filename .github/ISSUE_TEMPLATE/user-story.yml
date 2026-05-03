@@ -80,6 +80,18 @@ body:
       description: Path to `.glibre-trace` file (or planned name) that asserts each acceptance criterion via the InputDriver replay harness.
       placeholder: "tests/e2e/<context>/<topic>.glibre-trace + assertions"
     validations: { required: true }
+  - type: checkboxes
+    id: closure
+    attributes:
+      label: Closure Checklist (in order)
+      description: |
+        Story may NOT be closed until every box is checked. E2E test must
+        be green before manual testing begins.
+      options:
+        - label: "E2E test authored and passing in CI"
+        - label: "Manual test script reviewed by a second human"
+        - label: "Manual test executed; PASS recorded as a comment"
+    validations: { required: true }
   - type: input
     id: harmonius
     attributes:

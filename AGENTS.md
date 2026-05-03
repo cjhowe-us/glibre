@@ -18,7 +18,11 @@ Aggregators carry **no estimate**; leaves carry estimates that roll up.
    (or another sub-epic). No estimate.
 4. **User Story** (`type:user-story`) — persona-grounded testable
    acceptance criterion. **Tests required: manual test script + E2E
-   trace.** Has its own estimate.
+   trace.** Has its own estimate. **Closure rules**:
+   1. E2E test must be authored and **passing in CI** before any human
+      manual testing begins.
+   2. Manual test must be executed; PASS recorded as an issue comment.
+   3. Story may not be closed until both (1) and (2) hold.
 5. **Plan** (`type:plan`) — leaf; closes with **exactly one PR**.
    Conventional Commit subject pre-declared on the issue.
    **Tests required: unit tests (Catch2).** Has estimate.

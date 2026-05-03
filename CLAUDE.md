@@ -15,6 +15,9 @@ SDL3 + Metal (via metal-cpp) + HLSL (DXC + metal-shaderconverter).
   No roles, no kinds. See `AGENTS.md`.
 - **Tests by type**: `user-story` → manual test script + E2E trace.
   `plan` → unit tests. `spike` → deliverable doc / decision (no tests).
+- **Story closure**: E2E test must be green in CI before any manual
+  testing. Story closes only after manual test PASS recorded as a
+  comment. Stories drive the test suite — never close prematurely.
 - **Plan execution via parallel nested subagents**: ≤5 concurrent
   top-level plan executors; children may also be parallel. Each
   generated plan must fit in a single Claude Code session.

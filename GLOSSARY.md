@@ -70,7 +70,9 @@ Aggregators carry no estimate; leaves do; estimates roll up.
 - **User Story** — `type:user-story`. Persona-grounded testable
   acceptance criterion. `As a <persona>, I want <capability>, so that
   <outcome>.` Each story carries a manual test script and an E2E test
-  plan (replay trace + assertions). Has its own `pts:*` estimate.
+  plan (replay trace + assertions). Closure rule: E2E green in CI
+  before manual testing; story closes only after manual PASS recorded.
+  Has its own `pts:*` estimate.
 - **Plan** — `type:plan`. Leaf; closes with **exactly one PR**.
   Conventional Commit subject pre-declared on the issue. Carries a
   unit test plan (≥1 Catch2 test name).
