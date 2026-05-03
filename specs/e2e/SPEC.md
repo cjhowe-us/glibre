@@ -1938,7 +1938,627 @@ Non-binding sketch for implementers.
 
 ## 7. Persistence & Schemas
 
-Fory schemas. Migration rules.
+The e2e context's persistence surface is the `.glibre-trace` corpus —
+the **playable evidence** every `type:user-story` cites. Per §3.3 the
+producer side (`tools::TraceWriter`) is owned outside e2e; this
+section pins the **consumer-side bytes** the runner ingests, so
+authoring tools and the runner cannot drift. Per the `Trace`
+aggregate's reason-to-change boundary (§4.1.1) and the §4.2
+cross-aggregate "read-only post-parse" invariant, there is no in-place
+trace mutation; persistence here is read-only on the e2e side and
+write-once on the authoring side.
+
+Per `reviews/decisions/fory-codegen.md`, every persistent type below
+is authored as `data/schemas/e2e/<Type>.fory` and rides the
+`glibre-foryc` → `glibre-types.dylib` pipeline. FQNs are
+`glibre.e2e.<Type>`. The schema-source hashes contribute to
+`glibre_types_abi_hash` per data SPEC §7.2.3; a bump invalidates the
+trace corpus by definition (§7.4 below). One exception is the
+`GoldenImage` PNG payload, which is **not** Fory-encoded — only its
+metadata index is. The collapse rationale is in §3.2 #4 (one
+`GoldenStore` with one update path) and is reified by §7.1.4.
+
+Each schema ships with at least one Catch2 round-trip test under
+`tests/data/schemas/e2e/<Type>.cpp` per the data SPEC §7 mandate; the
+trace-corpus migration tests live alongside under
+`tests/e2e/persistence/`.
+
+### 7.1 Persistent types
+
+#### 7.1.1 `TraceFile` — the `.glibre-trace` byte container
+
+**File:** `data/schemas/e2e/TraceFile.fory`
+**FQN:** `glibre.e2e.TraceFile`
+**Lifetime scope:** repo-checked-in evidence. Authored once per
+user-story by the editor's record mode, committed under
+`tests/e2e/<ctx>/<story>.glibre-trace`, read-only on the e2e side
+(§4.1.2 inv 1).
+
+`TraceFile` is the **on-disk shape** of one `Trace` (§4.1.1): a
+versioned magic + Fory schema version, the embedded `TraceManifest`
+(§7.1.2), the framed ordered `(FrameIndex, TraceOp)` stream (the
+"frame-locked TraceOp sequence" the spike requires), the terminating
+`TraceOp::End`, and a `Blake3Hash` footer over the canonical Fory
+encoding of manifest + stream. The bytes are the unit the runner
+parses; nothing else in e2e opens this file.
+
+```fory
+schema glibre.e2e.TraceFile {
+  version 1
+  since   "0.1.0"
+
+  field magic           : u32                tag 1 since 1   // "GLTR" (0x47_4C_54_52, little-endian)
+  field schema_version  : u32                tag 2 since 1
+  field manifest        : TraceManifest      tag 3 since 1
+  field stream          : list<TraceFrameOp> tag 4 since 1
+  field footer_hash     : bytes              tag 5 since 1   // Blake3-256 of canonical(manifest + stream)
+}
+
+schema glibre.e2e.TraceFrameOp {
+  version 1
+  since   "0.1.0"
+
+  field frame_index : u64     tag 1 since 1
+  field op          : TraceOp tag 2 since 1
+}
+```
+
+`TraceOp` and `InputOp` are sealed-sum schemas authored beside this
+file; their byte layouts are pinned in §7.1.5 / §7.1.6. The order of
+entries in `stream` is the recorded intra-frame order (§4.1.1
+"intra-frame order preserved") and is part of the canonical encoding
+the footer hashes.
+
+**Invariants** (echoing §4.1.1 / §4.1.2 where the runtime aggregate
+enforces them):
+
+1. **Magic-first parse.** The Fory decoder reads the leading `magic`
+   field before anything else; a value other than `0x47_4C_54_52`
+   short-circuits with `E2eError::TraceParse`. This is the bytes-level
+   form of §4.1.2 inv 3.
+2. **Schema-version bumps trigger explicit re-record.** A `TraceFile`
+   whose `schema_version` does not match the current build's value is
+   `E2eError::TraceParse`; there is **no** silent up-conversion of
+   trace bytes (§4.1.2 inv 3). Re-recording is the only path forward;
+   migration of trace files across schema bumps is by replaying the
+   user-story under the new build, never by codegen migration.
+3. **Footer covers everything.** `footer_hash` is exactly 32 bytes
+   (Blake3-256 of `canonical_encode(manifest) ++ canonical_encode(stream)`);
+   any byte mutation between disk and parsed `Trace` is rejected with
+   `E2eError::TraceParse` (§4.1.1 inv 4). Lengths or hashes outside
+   the 32-byte fixed shape are also `TraceParse`.
+4. **Stream is monotonic with one terminating `End`.** Parsed
+   ordering enforces §4.1.1 inv 2 (`frame_index_i ≤ frame_index_{i+1}`)
+   and inv 5 (exactly one `TraceOp::End`, last). Both are
+   parse-time validations, not run-time.
+5. **One trace per file (§4.1.2 inv 4).** The schema admits exactly
+   one stream; bundling concerns belong to `content`, not e2e.
+6. **Canonical-path discipline (§4.1.2 inv 2).** The file is opened
+   through `platform::CanonicalPath`; raw paths never reach the
+   decoder. The schema itself stores no path — addressing is the
+   caller's concern.
+7. **Authoring-side parity.** `tools::TraceWriter` (§3.3) emits
+   bytes that round-trip byte-equal through this schema; a Catch2
+   test under `tests/e2e/persistence/round_trip.cpp` enforces
+   `parse(write(trace)) == trace` for the meta-corpus.
+
+#### 7.1.2 `TraceManifest` — environment header + golden refs + runner-host hint
+
+**File:** `data/schemas/e2e/TraceManifest.fory`
+**FQN:** `glibre.e2e.TraceManifest`
+**Lifetime scope:** embedded by-value inside every `TraceFile`;
+read-only post-parse (§4.1.3 inv 4).
+
+The manifest is the **gate** for replay — its Fory encoding is the
+input to `EnvHash` (one of the two §3.2 #3 collapses), and its
+`golden_refs` list is the up-front existence check that turns "missing
+golden" into a gate-time refusal rather than an assert-time surprise
+(§4.1.3 inv 3). The `runner_host_hint` field is the
+`target_driver_tier` (§4.1.3 composition bullet 8) made byte-explicit:
+the recorded host class the trace was authored under.
+
+```fory
+schema glibre.e2e.TraceManifest {
+  version 1
+  since   "0.1.0"
+
+  // --- Engine identity --------------------------------------------------
+  field engine_semver        : string  tag 1  since 1
+  field engine_git_sha        : string  tag 2  since 1   // 40-char lowercase hex
+  field plugin_abi_hash       : string  tag 3  since 1   // 64-char lowercase hex Blake3-256, mirrors data §7.2.3 abi_hash_hex
+  field asset_pack_hash       : string  tag 4  since 1   // 64-char lowercase hex Blake3-256 over the cooked content bundle
+
+  // --- Replay environment -----------------------------------------------
+  field locale                : string  tag 5  since 1   // BCP-47 tag
+  field window_logical_w      : u32     tag 6  since 1   // platform::LogicalSize at record
+  field window_logical_h      : u32     tag 7  since 1
+  field dpi_scale_x1000       : u32     tag 8  since 1   // platform::DpiScale * 1000, rounded
+  field rng_seed              : u64     tag 9  since 1
+  field runner_host_hint      : u8      tag 10 since 1   // RunnerHostTier (§7.1.7)
+
+  // --- Golden references the stream cites --------------------------------
+  field golden_refs           : list<GoldenRef>  tag 11 since 1
+
+  // --- Frame budget (§4.1.7 inv 6) --------------------------------------
+  field declared_frame_count  : u64     tag 12 since 1
+  field frame_budget_safety_x100 : u32  tag 13 since 1   // multiplier × 100; e.g. 200 = 2×
+}
+
+schema glibre.e2e.GoldenRef {
+  version 1
+  since   "0.1.0"
+
+  field assert_op_id  : u64    tag 1 since 1   // matches AssertOpId in §5
+  field kind          : u8     tag 2 since 1   // GoldenKind enum: Image | EcsSnapshot
+  field store_path    : string tag 3 since 1   // GoldenStore-relative, slash-separated
+  field content_hash  : bytes  tag 4 since 1   // 32 bytes Blake3-256 of payload at record (§7.1.3 invariant 3)
+  field tolerance     : option<PixelTolerance> tag 5 since 1   // present iff kind == Image
+}
+
+schema glibre.e2e.PixelTolerance {
+  version 1
+  since   "0.1.0"
+
+  field max_per_pixel_dE_x1000   : u32   tag 1 since 1   // CIEDE2000 ΔE × 1000
+  field max_pct_differing_x10000 : u32   tag 2 since 1   // percentage × 10000 (i.e. 50000 = 5%)
+  field tier_name                : string tag 3 since 1   // "" iff per-assert override only
+  field region_mask              : list<RegionRect> tag 4 since 1
+}
+
+schema glibre.e2e.RegionRect {
+  version 1
+  since   "0.1.0"
+
+  field x : u32 tag 1 since 1
+  field y : u32 tag 2 since 1
+  field w : u32 tag 3 since 1
+  field h : u32 tag 4 since 1
+}
+```
+
+**Invariants** (echoing §4.1.3, §4.1.11):
+
+1. **All `EnvHash` inputs frozen.** Fields tag 1-10 are the
+   `EnvHash` preimage; their byte representation is the canonical
+   Fory encoding of the manifest with `golden_refs`,
+   `declared_frame_count`, and `frame_budget_safety_x100` masked
+   out (these last three are *trace shape*, not *environment*, and
+   participate in the footer hash via the stream-level encoding
+   instead). `EnvHash = blake3_256(canonical_encode(manifest_with_env_fields_only))`.
+   Adding, removing, or reshaping any of tags 1-10 invalidates every
+   pre-existing `.glibre-trace` in the repo by construction; this is
+   §4.1.3 inv 2 reified at the bytes level. See §7.4 for the
+   migration consequence.
+2. **Golden-ref content-addressing.** `GoldenRef.content_hash` is the
+   Blake3-256 of the referenced payload **at record time** (PNG bytes
+   for `Image`, Fory-encoded `EcsSnapshot` bytes for `EcsSnapshot`).
+   The runner re-hashes the on-disk payload at gate time and compares;
+   mismatch = `E2eError::GoldenMissing` (the same arm covers
+   absent-and-substituted cases — see the §10 mapping).
+3. **Hash widths fixed.** `engine_git_sha` is exactly 40 hex chars;
+   `plugin_abi_hash` and `asset_pack_hash` are exactly 64 hex chars
+   (matching the data §7.2.3 `abi_hash_hex` shape); `content_hash`
+   and the file-level `footer_hash` are exactly 32 raw bytes. Any
+   other length is `E2eError::TraceParse`.
+4. **`runner_host_hint` is closed.** Value set is fixed at
+   `{0=DevHeadless, 1=DevInteractive, 2=CiHeadless, 3=CiIsolated}`
+   (§7.1.7). A loaded value outside this set is
+   `E2eError::TraceParse`, never silently saturated — same closed-sum
+   discipline `render` §7.1.1 applies to its enums.
+5. **Frame budget is content-derived.** `declared_frame_count` is
+   the number of frame indices observed at record;
+   `frame_budget_safety_x100 ≥ 100` (the runner refuses to run a
+   trace whose declared budget is below the recorded length —
+   `E2eError::TraceParse`).
+
+#### 7.1.3 `GoldenStoreIndex` — manifest-of-goldens for a trace corpus
+
+**File:** `data/schemas/e2e/GoldenStoreIndex.fory`
+**FQN:** `glibre.e2e.GoldenStoreIndex`
+**Lifetime scope:** one index per repo, checked in alongside the
+`.glibre-trace` corpus at `tests/e2e/golden-store/index.fory`. Read at
+`TraceRunner` construction time **before** any `TraceFile` is parsed,
+to amortise existence checks across all traces in a CI run (§4.1.10
+inv 2 collapse).
+
+The index is the **`(trace_path, env_hash) → (golden_image_hash,
+tolerance)` map** the spike calls out. It serves three purposes:
+
+1. **Up-front existence pre-check** — the runner can refuse the whole
+   batch when an index entry is missing, rather than discovering a
+   `GoldenMissing` mid-run (§4.1.3 inv 3 / §4.1.10 inv 2).
+2. **Content-addressed audit** — every reference's payload hash is
+   recorded once in the index, so a payload mutation produces a clean
+   `IndexHashMismatch` diagnostic instead of a silent green-to-red
+   flap.
+3. **Tolerance pinning** — the per-`AssertScreenshot` `PixelTolerance`
+   is stored both inline in the trace (§7.1.2) **and** in the index;
+   the two must agree at gate time. The duplication is deliberate so
+   editing the index alone (without re-recording the trace) is
+   refused.
+
+```fory
+schema glibre.e2e.GoldenStoreIndex {
+  version 1
+  since   "0.1.0"
+
+  field schema_version : u32                       tag 1 since 1
+  field entries        : list<GoldenStoreEntry>    tag 2 since 1
+  field entry_count    : u32                       tag 3 since 1   // mirrors len(entries) for cheap audits
+  field index_blake3   : bytes                     tag 4 since 1   // Blake3-256 over canonical(entries) sorted by key
+}
+
+schema glibre.e2e.GoldenStoreEntry {
+  version 1
+  since   "0.1.0"
+
+  // --- Key (composite, sorted lex) --------------------------------------
+  field trace_path     : string  tag 1 since 1   // workspace-relative, slash-separated, NFC, no leading "./"
+  field env_hash_hex   : string  tag 2 since 1   // 64-char lowercase hex Blake3-256 of the trace's TraceManifest
+  field assert_op_id   : u64     tag 3 since 1   // matches GoldenRef.assert_op_id
+
+  // --- Value ------------------------------------------------------------
+  field kind           : u8      tag 4 since 1   // GoldenKind: 0=Image, 1=EcsSnapshot
+  field store_path     : string  tag 5 since 1   // GoldenStore-relative, e.g. "tests/e2e/render/golden/triangle.png"
+  field content_hash   : bytes   tag 6 since 1   // 32-byte Blake3-256 of the on-disk payload
+  field byte_size      : u64     tag 7 since 1   // payload size in bytes (cheap drift fence)
+  field tolerance      : option<PixelTolerance> tag 8 since 1   // present iff kind == Image
+  field recorded_at_unix_ms : u64 tag 9 since 1  // informational only; not part of index_blake3
+}
+```
+
+**Invariants:**
+
+1. **Composite key uniqueness.** `(trace_path, env_hash_hex,
+   assert_op_id)` is unique across `entries`; duplicates =
+   `E2eError::TraceParse` (the index parses through the same arm
+   the trace files do — there is one parse-failure surface per
+   §4.1.13). The composite is the `(trace path + env)` mapping the
+   spike requires.
+2. **Sort order is canonical.** `entries` is sorted ascending by
+   `(trace_path, env_hash_hex, assert_op_id)` (lexicographic byte
+   order); out-of-order lists are `E2eError::TraceParse`. This makes
+   `index_blake3` a faithful audit artefact (mirroring data §7.2.3's
+   `entries` rule).
+3. **`index_blake3` covers the value tuple too.** Computed as
+   `blake3_256( canonical_encode( entries ) )` over fields 1-8 of
+   each entry (`recorded_at_unix_ms` is excluded so re-running the
+   recorder on the same payload does not perturb the hash).
+4. **Cross-check against `TraceManifest.golden_refs`.** At
+   `TraceRunner` construction the gate joins `index.entries` against
+   `manifest.golden_refs` on `(trace_path, assert_op_id)` and
+   asserts byte-equality of `(content_hash, tolerance)` between the
+   two surfaces. Mismatch = `E2eError::GoldenMissing` (extended:
+   the trace and the index disagree about the reference); editing
+   one without the other is refused.
+5. **Index missing = whole-batch refusal.** If `index.fory` is
+   absent at `TraceRunner` construction, the run aborts with
+   `E2eError::GoldenMissing` before any `TraceFile` is opened. This
+   collapses "no index" and "missing entry" into one failure arm
+   per the §3.2 #4 collapse; CI cannot silently degrade to "no
+   golden checking".
+6. **`entry_count` is redundant on purpose.** `entry_count` MUST
+   equal `len(entries)`; mismatch = `E2eError::TraceParse`. Cheap
+   bit-rot check; the field is also useful for tooling that wants
+   the row count without decoding the full list.
+
+#### 7.1.4 `GoldenImage` — PNG payload, NOT Fory-encoded
+
+**Storage:** raw PNG files under
+`tests/e2e/<ctx>/golden/<file>.png`. **No `.fory` schema.**
+**Lifetime scope:** repo-checked-in reference asset; read-only at run
+time (§4.1.10 inv 1).
+
+The PNG payload is **deliberately excluded** from the Fory codegen
+pipeline. Three reasons:
+
+1. **Existing image-format tooling.** PNGs are reviewable with any
+   image viewer / git-diff plugin, sized correctly by browsers, and
+   linked in PR bodies. Wrapping them in a Fory envelope would be
+   pure friction.
+2. **`GoldenStoreIndex` already provides the metadata layer.** The
+   index records every property the spine cares about
+   (`content_hash`, `byte_size`, `tolerance`, `kind`); the image
+   itself is opaque payload to the dispatcher.
+3. **Round-trip semantics differ.** Fory schemas are migration-aware
+   (`reviews/decisions/fory-codegen.md` §"Migration Mechanic"); image
+   payloads are content-addressed and re-record-only — exactly the
+   `PSOCacheRecord` "invalidate, never migrate" pattern from
+   `render` §7.2.2.
+
+The contract the runner relies on:
+
+1. **PNG profile fixed.** Reference PNGs are sRGB color space, 8-bit
+   per channel, no alpha for the MVP visual asserts. Other profiles
+   produce a deterministic decode error mapped to
+   `E2eError::TraceParse` (the same arm covers any reference-asset
+   parse failure).
+2. **Address by index, never by glob.** The runner addresses a PNG
+   only via a `GoldenStoreEntry.store_path`; filesystem walks are
+   forbidden in the runner per §4.1.10 inv 2. The corollary: a PNG
+   on disk with no index entry is invisible to the runner — exactly
+   the discipline that prevents silent shadow goldens.
+3. **EcsSnapshot is the symmetric Fory-encoded counterpart.** Every
+   `AssertEcsSnapshot` op references a Fory-encoded
+   `EcsSnapshot.fory` blob beside the PNG; that one **does** ride
+   the codegen pipeline because its bytes are already a Fory
+   payload by construction. The schema is owned by the `World`'s
+   originating context, not by e2e — e2e references it by hash, not
+   by name. (This is the same "we own pointers, you own the bytes"
+   pattern `render` §7.1.2 uses for `archive_blob`.)
+
+The "PNG payload — NOT Fory; only metadata indexed" requirement from
+the spike's persistent-types list is satisfied by the
+§7.1.3 + §7.1.4 split above: the index is indexed, the image is not.
+
+#### 7.1.5 `TraceOp` — sealed-sum schema, frame-locked variants
+
+**File:** `data/schemas/e2e/TraceOp.fory`
+**FQN:** `glibre.e2e.TraceOp`
+
+The sum is closed at compile time per §4.1.4 inv 1; the schema below
+pins the wire-form.
+
+```fory
+schema glibre.e2e.TraceOp {
+  version 1
+  since   "0.1.0"
+
+  // Closed sum encoded as discriminator + per-variant payload union.
+  // Tag values are the variant ids; new variants take new tag values
+  // (additive only — see §7.2 below).
+  field variant_tag : u8                  tag 1 since 1
+  field input_op    : option<InputOp>             tag 2 since 1   // present iff variant_tag == 0
+  field assert_state          : option<AssertStatePayload>      tag 3 since 1   // 1
+  field assert_screenshot     : option<AssertScreenshotPayload> tag 4 since 1   // 2
+  field assert_ecs_snapshot   : option<AssertEcsSnapshotPayload> tag 5 since 1  // 3
+  field assert_log_contains   : option<AssertLogContainsPayload> tag 6 since 1  // 4
+  field end_marker            : option<EndPayload> tag 7 since 1  // 5
+}
+
+schema glibre.e2e.AssertStatePayload {
+  version 1
+  since   "0.1.0"
+
+  field op_id              : u64    tag 1 since 1
+  field component_path     : string tag 2 since 1   // dotted path, e.g. "scene.player.transform.translation"
+  field expected_fory_blob : bytes  tag 3 since 1   // canonical Fory encoding of the expected value
+}
+
+schema glibre.e2e.AssertScreenshotPayload {
+  version 1
+  since   "0.1.0"
+
+  field op_id      : u64           tag 1 since 1
+  field golden_ref : GoldenRef     tag 2 since 1   // the runner cross-checks against the index (§7.1.3 inv 4)
+}
+
+schema glibre.e2e.AssertEcsSnapshotPayload {
+  version 1
+  since   "0.1.0"
+
+  field op_id      : u64       tag 1 since 1
+  field world_id   : string    tag 2 since 1   // known world tag; validated at parse (§4.1.4 inv 3)
+  field golden_ref : GoldenRef tag 3 since 1
+}
+
+schema glibre.e2e.AssertLogContainsPayload {
+  version 1
+  since   "0.1.0"
+
+  field op_id  : u64    tag 1 since 1
+  field needle : string tag 2 since 1
+  field is_regex : bool tag 3 since 1
+}
+
+schema glibre.e2e.EndPayload {
+  version 1
+  since   "0.1.0"
+  // intentionally empty; the marker carries no fields. Present so the
+  // option<EndPayload> can be a non-null tag.
+}
+```
+
+**Invariants:**
+
+1. **Discriminator gates payload presence.** Exactly one of
+   `input_op`, `assert_state`, `assert_screenshot`,
+   `assert_ecs_snapshot`, `assert_log_contains`, `end_marker` is
+   `Some(...)` for any given `TraceOp`; the other five are `None`.
+   The chosen one corresponds to `variant_tag`. Mismatch =
+   `E2eError::TraceParse` (the §4.1.4 inv 1 closed-variant rule
+   reified in bytes).
+2. **Unknown `variant_tag` is `TraceParse`, not forward-compat.**
+   Per §4.1.1 inv 3, the parser does not silently skip unknown
+   ops. Adding a variant is a deliberate central edit — see §7.2.
+3. **Per-variant payload validity.** `expected_fory_blob` is a
+   non-empty `bytes`; `golden_ref.content_hash` is exactly 32
+   bytes; `world_id` is non-empty; `needle` length ≤ 4096 bytes.
+   Failures are `E2eError::TraceParse` at parse time, not at
+   replay time (§4.1.4 inv 3).
+
+#### 7.1.6 `InputOp` — wraps `platform::InputEvent` byte-equal
+
+**File:** `data/schemas/e2e/InputOp.fory`
+**FQN:** `glibre.e2e.InputOp`
+
+```fory
+schema glibre.e2e.InputOp {
+  version 1
+  since   "0.1.0"
+
+  field event : InputEvent tag 1 since 1   // glibre.platform.InputEvent (cross-context reference)
+}
+```
+
+`InputEvent` is the `platform::InputEvent` schema from
+`specs/platform/SPEC.md` §7; e2e references it without re-declaring
+its sealed-variant set. When `platform::InputEvent` gains a variant
+(§4.1.5 inv 2), its schema-version bump propagates into
+`glibre_types_abi_hash`; per §7.4 below, that bump invalidates the
+trace corpus by construction, which is the correct outcome — input
+recordings against an old SDL3 pump are not replayable against a new
+one without re-recording.
+
+#### 7.1.7 `RunnerHostTier` — closed enum mirroring §4.1.9
+
+```fory
+# (declared inline as a u8 in TraceManifest; no separate file.)
+# 0 = DevHeadless, 1 = DevInteractive, 2 = CiHeadless, 3 = CiIsolated
+```
+
+The single source of truth is the `RunnerHost` value object (§4.1.9
+inv 2 policy table); the manifest field carries the **recorded** host
+tier as an advisory hint. The runner uses it to detect mismatch
+against the **live** `RunnerHost` and, where the policy table forbids
+the pair, returns `E2eError::InjectionRefused` at gate time (§4.1.9
+inv 4).
+
+### 7.2 Migration rules
+
+Per `reviews/decisions/fory-codegen.md` §"Migration Mechanic", every
+schema-version bump emits a generated dispatcher hookup. e2e owns the
+migration *bodies* for the types above; their *plumbing* is generated.
+
+#### 7.2.1 `TraceOp` variant additions — additive only
+
+Adding a `TraceOp` variant follows the **additive defaulted-discriminator**
+pattern:
+
+1. **Adding a variant takes the next free `variant_tag` value and a
+   new `option<...Payload>` field at a new tag.** Old payload
+   options remain in the schema with `since` matching their original
+   version. Old `.glibre-trace` payloads decode under the new build
+   because the new option<> defaults to `None` for any frame whose
+   `variant_tag` predates this version.
+2. **Codegen emits `migrate_TraceOp_v<N>_to_v<N+1>` as the identity
+   mapping.** No hand-written body is required for the additive
+   case; the codegen tool (data §7.2 / fory-codegen.md) emits the
+   identity dispatcher and the round-trip golden test under
+   `tests/e2e/persistence/trace_op_migration_v<N>_to_v<N+1>.cpp`
+   asserts the recorded `vN` corpus replays unchanged under
+   `vN+1` semantics — same pattern as `render` §7.2.1 case 1.
+3. **Removing or renaming a variant is breaking.** The discriminator
+   value becomes `reserved` (per data §7.1 reserved-clause rule);
+   the option<> field stays but the codegen emits a hard
+   `E2eError::TraceParse` for any input carrying the reserved
+   value. A rename is not in scope for MVP.
+4. **Variant-payload field changes follow the same additive rule
+   one level deeper.** Adding a field to `AssertScreenshotPayload`
+   (e.g. a `clipped_to_window` bool) takes the next free tag and a
+   `default` clause; the recorded corpus replays under the new
+   default.
+
+#### 7.2.2 `AssertOp` payload additions — additive only
+
+The four assert-payload schemas (`AssertStatePayload`,
+`AssertScreenshotPayload`, `AssertEcsSnapshotPayload`,
+`AssertLogContainsPayload`) follow the same additive rule. New
+fields take new tags with `default` clauses; codegen synthesises the
+default for older payloads. New assert kinds are *not* added by
+extending an existing payload — they are new `TraceOp` variants per
+§7.2.1.
+
+#### 7.2.3 Manifest env-hash inputs — frozen, never migrated
+
+The fields named in §7.1.2 invariant 1 (tags 1-10 of `TraceManifest`)
+are the **`EnvHash` preimage**. Per §3.2 #3 (one hash, one refusal,
+one diagnosis), they are **frozen**: any change — addition, removal,
+or shape — invalidates every pre-existing `.glibre-trace` in the
+repo by definition.
+
+Implementation: the `TraceManifest` schema does **not** declare any
+`migration` clauses for the env-input fields. Any future bump
+forces the author to either (a) re-record the entire trace corpus
+under the new manifest version (the only allowed path), or (b)
+explicitly add an `EnvHash`-preserving migration body — which review
+will reject because the whole point of `EnvDrift` is that
+environment changes must be detected, not migrated through.
+
+This is **structurally identical** to `render` §7.2.2's
+"`PSOCacheRecord` — invalidate, never migrate" pattern, and matches
+data §7.4's freeze-and-bump rule for breaking changes. The
+golden-update workflow (§4.1.10 inv 3) is the audit trail for the
+re-record.
+
+Trace-shape fields (tags 11-13: `golden_refs`,
+`declared_frame_count`, `frame_budget_safety_x100`) are *not*
+`EnvHash` inputs and may be migrated additively per §7.2.1 if
+needed.
+
+#### 7.2.4 `GoldenImage` refs — content-addressed, no migration
+
+`GoldenRef` and `GoldenStoreEntry` carry `content_hash` (Blake3-256
+of the payload). Reference assets are addressed by content, not by
+schema-versioned bytes:
+
+1. **Updating a PNG payload bumps its `content_hash`.** The
+   `golden-update` workflow (§4.1.10 inv 3) writes the new PNG and
+   updates both `GoldenStoreIndex.content_hash` and every
+   `TraceManifest.golden_refs[i].content_hash` that references the
+   payload, in one atomic PR. A reviewer signs off on the visual
+   diff; CI re-runs the gate.
+2. **Stale traces fail loudly.** A trace whose
+   `manifest.golden_refs[i].content_hash` does not match the
+   index's current `content_hash` for the same key fails at gate
+   time with `E2eError::GoldenMissing` (the "missing or
+   substituted" arm). This is exactly the §4.1.3 inv 3 surface; no
+   silent up-conversion of golden refs is permitted.
+3. **No migration for the binary payload.** PNG files are not
+   versioned by Fory schemas — invalidate-and-replace is the only
+   path, mirroring `PSOCacheRecord`'s "invalidate, never migrate"
+   discipline (`render` §7.2.2). The hash bump is the migration
+   record; the PR is the audit trail.
+4. **`GoldenStoreEntry` schema additions are additive only.** The
+   `recorded_at_unix_ms` field already exists at v1; future
+   additions (e.g. `recorded_by_engine_version`) take new tags with
+   defaults and inherit the §7.2.1 identity-migration pattern.
+   `index_blake3` excludes the new field unless explicitly added
+   to the digest input — that change is a breaking index-schema
+   bump and requires re-emitting the index under the new build.
+
+### 7.3 Trace-corpus invalidation rule
+
+The `glibre_types_abi_hash` is the engine-wide ABI value the plugin
+loader compares (data §7.2.3, fory-codegen.md). The e2e schemas
+above contribute to that hash. The corollary, made explicit:
+
+**A `glibre_types_abi_hash` bump invalidates the entire
+`.glibre-trace` corpus.** The runner's gate detects the change via
+`manifest.plugin_abi_hash` (§7.1.2 tag 3); a mismatch returns
+`E2eError::EnvDrift` at gate time, before any frame advances. The
+`golden-update` workflow re-records the corpus under the new ABI;
+there is no partial-validity middle state — the same discipline as
+`render`'s "invalidate the entire archive directory wholesale".
+
+This invalidation is **deliberate**, not accidental. The whole
+point of `EnvHash` is that one hash drifts the corpus the moment
+the environment drifts; the §4.2 cross-aggregate invariants make
+the rule load-bearing. CI will surface the re-record requirement
+when a PR bumps any schema source under `data/schemas/`.
+
+### 7.4 What is NOT persisted
+
+To make the boundary explicit (in line with the §1 "scope is the
+consumer side of `.glibre-trace`" framing):
+
+| Artefact            | Why not persisted                                                                                           |
+|---------------------|-------------------------------------------------------------------------------------------------------------|
+| `TraceRunner`       | Per-run process state; constructed fresh from `(TraceFile, GoldenStoreIndex)` and destroyed on report.      |
+| `ReplayDriver`      | Per-run input pump; lives inside the `TraceRunner`.                                                         |
+| `TraceReport`       | Emitted to a runner-private artefact directory and consumed by `ClosureGate`; not committed (§4.1.12).      |
+| `DivergenceReport`  | Same as `TraceReport`; emitted only on `--compare` runs.                                                    |
+| `RunnerHost`        | Detected fresh at runner construction (§4.1.9 inv 3); never persisted — the *trace*'s recorded tier is the only persisted host tag (§7.1.7). |
+| Captured artefacts  | Diff images, snapshot diffs, log slices written to a per-run temp directory; CI uploads as build artefacts but they are not Fory-encoded. |
+| Wall-clock duration | Captured only in the live `TraceReport`; never participates in pass/fail (§4.1.12 inv 3) and never persisted to disk schemas. |
+| `EnvHash` (cached)  | Computed on demand at gate time; never stored as a separate artefact. The manifest's bytes are the only source of truth. |
+
+These appear in the persistence surface only as **structured
+fields inside `TraceReport`** (consumed by `ClosureGate`), never
+as Fory-encoded standalone files. This keeps the persisted surface
+minimal — one corpus, one index, one image format — and makes
+"what survives a re-record" a one-line answer: nothing the runner
+produces, everything the recorder produces.
 
 ## 8. Hot-Reload Contract
 
