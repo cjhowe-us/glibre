@@ -2229,7 +2229,461 @@ platform context without bisecting the full engine.
 
 ## 10. Failure Modes & Error Model
 
-Typed errors. Recovery.
+Platform's failure surface is the closed sum `platform::Error` declared
+in §4.7 and laid out in §5.1. Every public function in §5 returns
+`Result<T> = std::expected<T, glibre::Error>`, and platform contributes
+exactly one arm to the engine-wide variant per
+`reviews/decisions/error-model.md`. §10 fills three slots that §4.7 left
+implicit:
+
+1. **Per-arm semantics** — for each variant: trigger, recovery contract,
+   and log severity.
+2. **OS-side translation** — how POSIX `errno`, SDL3 `SDL_GetError()`,
+   and AppKit `NSException` codes map onto typed arms so no raw `int`
+   leaks past the bridge.
+3. **Aggregate-specific recovery shapes** — `Surface` recreation on
+   `SurfaceLost`, `FileWatcher` re-arm / polling fallback on
+   `WatcherUnavailable`, and the loud-but-bounded paths every other
+   aggregate exposes.
+
+§10 introduces no new public types. `SurfaceLost` and
+`WatcherUnavailable` are documented *recovery situations*, not new
+variants — both surface as `Error::IoFailure { OsCode }` with a known
+diagnostic prefix that the §6.10 translation seam stamps. Adding either
+as a first-class arm is deferred to §12; doing so before two callers
+need to discriminate would violate the "closed sum, deliberate central
+edit" rule of §4.7 inv #1.
+
+### 10.1 Per-arm contract
+
+Trigger / Recovery / Severity for each `platform::Error` arm. "Recovery"
+names what the *caller* may do; the platform itself never auto-retries
+across the boundary (§4.7 inv #2).
+
+#### `NotFound`
+
+- **Trigger.** A path, `WindowId`, `DisplayId`, or `WatchToken` named in
+  the call does not resolve to a live OS or aggregate-internal entity.
+  Examples: `FileIo::read_all` on a missing path, `Window::display()`
+  after the display was unplugged but before `DisplayChanged` was
+  drained, `FileWatcher::unwatch` on a stale token.
+- **Recovery.** Caller-domain decision. Content / asset code surfaces
+  it as a missing-asset error and falls back to the engine's default
+  asset; window code re-queries `Display` snapshots after the next
+  pump cycle.
+- **Severity.** `info` when the platform logs it at the boundary
+  (most callers handle silently); the *caller's* domain may escalate
+  (e.g. render's missing shader is `error`).
+
+#### `PermissionDenied`
+
+- **Trigger.** OS denied an otherwise well-formed operation: sandbox
+  refusal on read, lack of accessibility entitlement for a global key
+  hook, code-signing rule rejecting a watched directory, App Sandbox
+  refusing `~/Library` access.
+- **Recovery.** Not retryable inside the same process. Caller logs at
+  `error`, reports through the editor / first-launch UX, and either
+  prompts the user to grant permission (editor) or aborts the
+  operation (engine). Platform does not synthesize a permission
+  dialog.
+- **Severity.** `error` at the handling boundary. This is loud because
+  it is almost always actionable by the operator (grant the
+  entitlement, sign the bundle, move the file out of a protected
+  directory).
+
+#### `AlreadyExists`
+
+- **Trigger.** A create-only operation collided with existing state:
+  `Process::install_signal` for a signal that already has an engine-
+  side handler (§4.5 inv #3), `IoToken::take_result` called twice
+  (§5.11 contract on the token), `FileIo::write_atomic` on a path
+  reserved by another aggregate.
+- **Recovery.** Programming error in nearly every case — caller fixes
+  the call site. The platform refuses to chain or replace silently
+  because doing so would mask a duplicate-installation bug.
+- **Severity.** `warn` at the handling boundary (not `error` — the
+  previous installation continues to function), with the duplicated
+  handle / signal name attached. CI promotes this to a build failure
+  in test runs.
+
+#### `Interrupted`
+
+- **Trigger.** OS-level interrupt (EINTR class) reached a syscall the
+  platform has not classified as auto-restartable. Most often hit by
+  `IoToken::take_result` when the wait-for-completion path is
+  cancelled mid-syscall, or by `FileIo::read_all` when a fatal signal
+  handler fires during a long read.
+- **Recovery.** Caller reissues the operation. The platform itself
+  retries POSIX `EINTR` for syscalls inside the I/O thread (a single
+  bounded retry — see §10.3); only interrupts that survive the
+  retry surface as `Interrupted`.
+- **Severity.** `debug`. Routine for any process that traps SIGINT;
+  noisy at higher levels would drown legitimate failures.
+
+#### `Unsupported`
+
+- **Trigger.** An operation valid in shape but not on this OS / this
+  hardware / with these inputs. Examples: `Window` operations from a
+  non-main thread (§4.1 inv #2 in release builds), `LogicalSize` with
+  a zero dimension or `DpiScale <= 0` (§4.1 inv #3), non-canonical
+  path passed to `CanonicalPath::from_absolute`, fullscreen transition
+  on a display that does not advertise it, gamepad rumble on a device
+  without haptics.
+- **Recovery.** Caller validates inputs earlier or routes around the
+  capability gap (e.g. render falls back to a non-fullscreen path).
+  Almost never retryable on the same inputs.
+- **Severity.** `warn` at the handling boundary. The "shape valid,
+  capability missing" framing means this is a configuration /
+  hardware-detection signal, not a bug.
+
+#### `IoFailure { OsCode }`
+
+- **Trigger.** A backend call failed with an OS code that the
+  translation seam (§6.10) recognized as I/O-class but did not promote
+  to a finer arm. Carries `OsCode { value }` where `value` is the
+  underlying `errno` / `NSError.code` / SDL3 numeric tag, *opaque to
+  callers*. Also the carrier for "rare-but-real" recovery situations:
+  `SurfaceLost` (§10.4) and `WatcherUnavailable` (§10.5) both surface
+  as `IoFailure` with a stamped `OsCode` and a thread-local
+  diagnostic prefix.
+- **Recovery.** Driven by the diagnostic prefix the translator stamps
+  (§6.10): "surface-lost" → recreate via `Window::surface()`;
+  "watcher-unavailable" → unwatch + re-watch (or fall back to the
+  polling pseudo-watcher). All other prefixes are caller-domain
+  decisions. The numeric `OsCode` value is for telemetry only; engine
+  code never branches on its integer.
+- **Severity.** `warn` for known recoverable prefixes (surface-lost,
+  watcher-unavailable, EINTR-survivor); `error` for everything else.
+
+#### `OsCode`
+
+- **Trigger.** Backend reported a code with no semantic mapping yet —
+  the catch-all carrier when no translator entry matched and we still
+  want the raw value to survive into telemetry. Used only by the
+  Objective-C bridge fallback path (§10.2.3) and the SDL3 unrecognized-
+  message path (§10.2.2). Engine code never constructs this directly.
+- **Recovery.** Treated as terminal at the call site. Telemetry sinks
+  may decode the value post-hoc; engine code does not branch on it.
+  Recurring `OsCode` appearances in telemetry are a signal that a new
+  semantic arm should be added in the next §4.7 edit (open question
+  in §12).
+- **Severity.** `error`. Always. We refuse to silence what we have not
+  classified.
+
+### 10.2 OS → typed arm translation
+
+The §6.10 seam is the only place raw OS error codes exist. Every public
+boundary surfaces the typed arm, never the integer. Three translators,
+one per backend family.
+
+#### 10.2.1 POSIX `errno` → `platform::Error`
+
+`detail/error/errno_to_error.cpp` maps `errno` families. The mapping is
+table-driven, exhaustive over the families platform actually invokes,
+and explicitly enumerated so audits can verify "no integer leaks":
+
+| `errno` family                               | Typed arm                                                       |
+|----------------------------------------------|-----------------------------------------------------------------|
+| `ENOENT`, `ENOTDIR`, `ESRCH`                 | `NotFound`                                                      |
+| `EACCES`, `EPERM`, `EROFS`                   | `PermissionDenied`                                              |
+| `EEXIST`, `ENOTEMPTY` (on create-only paths) | `AlreadyExists`                                                 |
+| `EINTR` (after one bounded retry)            | `Interrupted`                                                   |
+| `ENOSYS`, `ENOTSUP`, `EOPNOTSUPP`, `EINVAL`  | `Unsupported`                                                   |
+| `EAGAIN`, `EWOULDBLOCK` (on blocking I/O)    | `IoFailure { OsCode { errno } }` with prefix `"again"`          |
+| `EIO`, `ENXIO`, `EBADF`, `ENOSPC`, `EFBIG`   | `IoFailure { OsCode { errno } }` with prefix `"io"`             |
+| `EDQUOT`, `EUSERS`, `ELOOP`, `ENAMETOOLONG`  | `IoFailure { OsCode { errno } }` with prefix `"resource"`       |
+| anything else                                | `OsCode { errno }` with the raw value preserved                 |
+
+Bounded-retry rule: `EINTR` is retried *exactly once* inside the
+syscall wrapper before being surfaced as `Interrupted`. We do not
+loop; doing so would invite tight unbounded retry on a process under
+heavy signal load. One retry catches the common "SIGCHLD landed
+during read" case without hiding a legitimate fatal-signal cancel.
+
+#### 10.2.2 SDL3 → `platform::Error`
+
+`SDL_GetError()` returns a human prose string with no stable code. The
+translator parses the string for known prefixes and falls through:
+
+| `SDL_GetError()` prefix substring   | Typed arm                                                  |
+|-------------------------------------|------------------------------------------------------------|
+| `"Permission denied"`               | `PermissionDenied`                                          |
+| `"No such file"` / `"not found"`    | `NotFound`                                                  |
+| `"already"` / `"exists"`            | `AlreadyExists`                                             |
+| `"not supported"` / `"unsupported"` | `Unsupported`                                               |
+| `"interrupted"`                     | `Interrupted`                                               |
+| anything else, message non-empty    | `IoFailure { OsCode { 0 } }`, message in TLS diagnostic    |
+| message empty / null                | `OsCode { 0 }`, with prefix `"sdl-empty"` in TLS diagnostic |
+
+The full prose lands in a thread-local diagnostic buffer that
+`glibre::log_error` reads and includes in the structured `error.detail`
+field. Engine code never inspects the prose; only the typed arm and
+the optional `OsCode.value` are load-bearing.
+
+SDL3 specific: `"Surface lost"` / `"Could not create CAMetalLayer"` /
+`"Drawable is nil"` map to `IoFailure { OsCode { 0 } }` with prefix
+`"surface-lost"` (see §10.4).
+
+#### 10.2.3 AppKit `NSException` → `platform::Error`
+
+Only the bridge translation unit (`bridge.mm`, §6.2) is allowed to
+catch `NSException`. The bridge converts before returning, never
+re-throws across the C++ boundary:
+
+| `[exception name]` / class       | Typed arm                                                |
+|----------------------------------|----------------------------------------------------------|
+| `NSFileNoSuchFileException`      | `NotFound`                                               |
+| `NSFileLockingException`         | `PermissionDenied`                                       |
+| `NSInvalidArgumentException`     | `Unsupported`                                            |
+| `NSRangeException`               | `Unsupported`                                            |
+| any FSEvents-stream-failed code  | `IoFailure { OsCode { code } }`, prefix `"watcher-unavailable"` |
+| any CALayer/Metal acquire-drawable failure | `IoFailure { OsCode { code } }`, prefix `"surface-lost"` |
+| anything else                    | `OsCode { code }` (raw fallback)                         |
+
+The bridge stamps `error.detail` with the `[exception name]` string
+before returning. As with SDL3, the prose is for telemetry; engine
+code branches on the typed arm only.
+
+### 10.3 Aggregate-by-aggregate failure surface
+
+Each §4 aggregate enumerates: which arms it can return at which entry
+points, and the recovery contract specific to that aggregate. Cross-
+aggregate recovery is forbidden (§4.7 inv #3) — `FileWatcher` does not
+re-translate a `FileIo` error.
+
+#### 10.3.1 `Window` / `Display` (§4.1)
+
+| Entry point             | Returnable arms                                      | Trigger summary                                 |
+|-------------------------|------------------------------------------------------|-------------------------------------------------|
+| `Window::open`          | `Unsupported`, `PermissionDenied`, `IoFailure`       | bad `WindowDesc`, sandbox denial, AppKit refusal |
+| `Window::surface`       | `IoFailure` (prefix `"surface-lost"`)                | drawable / layer creation failed (§10.4)        |
+| `Window::request_resize`| `Unsupported`                                        | non-main-thread call (§4.1 inv #2 release path) |
+| `Window::request_close` | `Unsupported`                                        | non-main-thread call                            |
+| `Window::display`       | `NotFound`                                           | display unplugged, hot-plug not yet drained     |
+
+`PermissionDenied` from `Window::open` is the macOS "Screen Recording"
+or "Accessibility" entitlement absence on a window that asked for
+global capture; recovery is operator-level (grant entitlement and
+relaunch). The §10.4 `SurfaceLost` recovery loop is described below.
+
+#### 10.3.2 `EventQueue<T>` / `Pump` (§4.2)
+
+| Entry point                     | Returnable arms                                  | Trigger summary                                 |
+|---------------------------------|--------------------------------------------------|-------------------------------------------------|
+| `EventQueue::with_capacity`     | `Unsupported`                                    | zero / wildly oversized capacity                |
+| `Pump::create`                  | `IoFailure`                                      | SDL3 init failed                                |
+| `Pump::drain`                   | `IoFailure` (prefix `"queue-full"`), `Unsupported` | queue full at write site (§4.2 inv #3, fatal); off-main-thread call |
+
+Queue-full is fatal by §4.2 inv #3: the platform refuses to drop or
+coalesce. Recovery is *process-level* — log at `error`, set the exit
+code, surface the fatal to the engine's frame loop. The typed arm is
+`IoFailure { OsCode { 0 } }` with prefix `"queue-full"` so telemetry
+keeps the misconfiguration visible.
+
+#### 10.3.3 `FileWatcher` (§4.3)
+
+| Entry point             | Returnable arms                                      | Trigger summary                                 |
+|-------------------------|------------------------------------------------------|-------------------------------------------------|
+| `FileWatcher::create`   | `IoFailure`, `PermissionDenied`                      | FSEvents init failed, sandbox denial            |
+| `FileWatcher::watch`    | `Unsupported`, `NotFound`, `PermissionDenied`, `IoFailure` (prefix `"watcher-unavailable"`) | non-canonical path, missing root, sandbox denial, FSEvents refused stream |
+| `FileWatcher::unwatch`  | `NotFound`                                           | stale `WatchToken`                              |
+| `FileWatcher::take_events` | `NotFound`, `Unsupported`                         | stale token, off-main-thread call               |
+
+`WatcherUnavailable` recovery is described in §10.5.
+
+#### 10.3.4 `Clock` (§4.4)
+
+`Clock::now`, `wall`, `native_tick` are total functions returning plain
+values; they cannot fail. The only failure mode in §4.4 is the
+monotonic-regression abort (`Clock` aborts the process on detected
+non-monotonic behavior), which never returns at all. No `Result<T>`
+crosses this boundary. Listed here for completeness so the audit
+matches §5.
+
+#### 10.3.5 `Process` (§4.5)
+
+| Entry point                       | Returnable arms                              | Trigger summary                                 |
+|-----------------------------------|----------------------------------------------|-------------------------------------------------|
+| `Process::install_signal`         | `AlreadyExists`, `Unsupported`               | duplicate handler (§4.5 inv #3); signal not installable on this OS |
+| `Process::uninstall_signal`       | `NotFound`                                   | no handler currently installed for that signal  |
+
+`argv`, `env`, `cwd`, `executable_path`, `pid`, `set_exit_code` are
+total per §4.5 inv #1 (read-only snapshots) and inv #2 (set-only).
+Second-instance construction of `Process` is a programming error and
+the aggregate refuses to build (§4.5 inv #5) — this is a build-time /
+init-time refusal, not a runtime arm.
+
+#### 10.3.6 `FileIo` / `IoToken` (§4.6)
+
+| Entry point                          | Returnable arms                                                                | Trigger summary                                 |
+|--------------------------------------|--------------------------------------------------------------------------------|-------------------------------------------------|
+| `FileIo::create`                     | `Unsupported`, `IoFailure`                                                     | invalid `FileIoConfig`, thread spawn failure    |
+| `FileIo::read_all`                   | `NotFound`, `PermissionDenied`, `Interrupted`, `IoFailure`, `Unsupported`      | per §10.2.1; off-main-thread assert in debug   |
+| `FileIo::write_atomic`               | `NotFound`, `PermissionDenied`, `AlreadyExists`, `IoFailure`, `Unsupported`    | atomic-rename failed, target reserved           |
+| `FileIo::stat_path`                  | `NotFound`, `PermissionDenied`, `IoFailure`                                    | per §10.2.1                                     |
+| `FileIo::list_dir`                   | `NotFound`, `PermissionDenied`, `Unsupported`, `IoFailure`                     | output span too small → `Unsupported`           |
+| `FileIo::remove`                     | `NotFound`, `PermissionDenied`, `IoFailure`                                    | per §10.2.1                                     |
+| `FileIo::read_async`                 | `NotFound`, `PermissionDenied`, `IoFailure` (prefix `"out-of-budget"`)         | I/O thread pool saturated (§4.6 inv #6)         |
+| `FileIo::write_atomic_async`         | as `read_async`                                                                | as `read_async`                                 |
+| `IoToken::poll`, `wait_for`, `cancel`| total / void; no `Result<T>`                                                   | —                                               |
+| `IoToken::take_result`               | `Interrupted` (called before Ready), `AlreadyExists` (called twice), `IoFailure` | per §5.11 contract                              |
+
+The `out-of-budget` prefix is the dedicated marker for §4.6 inv #6;
+recovery is caller-domain (back off, retry next frame, or batch).
+
+### 10.4 Aggregate-specific recovery: `SurfaceLost` (Window / Surface)
+
+`Window::surface()` may return `IoFailure` with the diagnostic prefix
+`"surface-lost"` even on macOS, where it is rare-but-real. Triggers we
+have observed or expect:
+
+- The owning `CAMetalLayer` was invalidated by a display reconfiguration
+  (external monitor unplug → main, GPU switch on dual-GPU laptops, OS
+  display sleep → wake under aggressive power management).
+- A drawable acquire returned `nil` because the layer was unhooked from
+  its `NSWindow` in the same frame as a fullscreen transition.
+- An OS-level GPU reset (`MTLCommandBuffer` status `Error` with
+  `MTLCommandBufferErrorDeviceRemoved`) bubbled up through the bridge
+  before render had a chance to handle it via its own
+  `render::Error::DeviceLost` arm.
+
+Recovery contract:
+
+1. Caller (render, typically) catches `IoFailure` with prefix
+   `"surface-lost"`.
+2. Caller releases its render-side references to the `Surface` value.
+3. Caller calls `Window::surface()` again on the same `Window`. The
+   aggregate re-acquires the `CAMetalLayer` (the bridge re-binds via
+   the SDL3 metal-view API).
+4. If the second call also returns `surface-lost`, the failure is
+   escalated: caller logs `error`, asks `Window` to recreate via the
+   render context's window-recreation path (re-`Window::open` with the
+   same `WindowDesc`, transferring focus / position from the old
+   handle).
+5. The platform never auto-recreates the `Window`. Doing so would
+   violate "errors are constructed at the site they happen" (§4.7
+   inv #3) and would race with any peer-context state still keyed to
+   the old `WindowId`.
+
+Severity: `warn` for the first occurrence in a session; `error` if it
+recurs within 1 s of a successful recreation (suggests the system is
+in a thrash state and the editor / engine should surface a user-
+visible message).
+
+`SurfaceLost` is not a §4.7 arm today by deliberate Occam's-razor
+choice: only one consumer (render) currently discriminates, and it
+does so on the diagnostic prefix. Promotion to a typed arm is on the
+§12 watch-list and trips when a second consumer needs the
+discrimination.
+
+### 10.5 Aggregate-specific recovery: `WatcherUnavailable` (FileWatcher)
+
+`FileWatcher::watch` may return `IoFailure` with the diagnostic prefix
+`"watcher-unavailable"`. Macros / SDL3 / FSEvents specific triggers:
+
+- The watched root is on a volume that was unmounted or remounted
+  (FSEvents streams die on volume change; the kernel drops the watch
+  silently and the next event delivery surfaces the failure).
+- FSEvents service exhaustion: too many concurrent streams system-
+  wide, or the per-process resource budget hit.
+- The watched root crossed a network-mount / sparse-bundle boundary
+  that FSEvents cannot observe (some SMB / WebDAV / disk-image mounts
+  refuse stream registration).
+- Sandbox / TCC denial mid-stream (rare; usually surfaces as
+  `PermissionDenied` at `watch()` time, but a re-grant flip can drop
+  the stream after the fact).
+
+Recovery contract:
+
+1. Caller catches `IoFailure` with prefix `"watcher-unavailable"`.
+2. Caller calls `FileWatcher::unwatch(token)` to release any partial
+   subscription. (`unwatch` on an already-dead token returns
+   `NotFound` — this is fine; ignore it.)
+3. Caller waits one full pump cycle (lets any in-flight `FileEvent`
+   drain through `EventQueue<FileEvent>`) and calls
+   `FileWatcher::watch(root)` again. This re-arms FSEvents from a
+   fresh state and resolves the volume-change case in the common path.
+4. If re-arm fails twice in a row, the caller falls back to the
+   polling pseudo-watcher: a periodic `FileIo::stat_path` /
+   `FileIo::list_dir` sweep over the previously watched root, with a
+   coarse interval (default 1 s, callable knob in §12). Polling
+   surfaces the same `FileEvent` sum (`Created` / `Modified` /
+   `Deleted` / `Renamed`) so consumers do not branch.
+5. The polling fallback is owned by the *caller*, not the platform:
+   `FileWatcher` is the FSEvents seam; the polling shim lives in the
+   editor / hot-reload coordinator that already holds the long-lived
+   subscription. Building polling into the aggregate would re-merge
+   the responsibilities §4.3 SRP keeps apart.
+
+Severity: `warn` on the first re-arm attempt; `error` when polling
+fallback engages (operator-visible: "live reload is degraded").
+
+`WatcherUnavailable`, like `SurfaceLost`, is not a §4.7 arm today by
+the same Occam's-razor argument: one consumer (hot-reload coordinator)
+discriminates today on the diagnostic prefix. §12 watch-list item.
+
+### 10.6 Logging severity table (consolidated)
+
+The §10.1 per-arm severities, restated as the table the
+`glibre::log_error` helper uses when it formats a `platform::Error`
+into `spdlog`:
+
+| Arm                                    | Default severity | Notes                                            |
+|----------------------------------------|------------------|--------------------------------------------------|
+| `NotFound`                             | `info`           | Caller's domain may escalate                     |
+| `PermissionDenied`                     | `error`          | Almost always operator-actionable                |
+| `AlreadyExists`                        | `warn`           | CI promotes to build failure                     |
+| `Interrupted`                          | `debug`          | Routine on SIGINT                                |
+| `Unsupported`                          | `warn`           | Capability gap signal                            |
+| `IoFailure` prefix `"surface-lost"`    | `warn`           | Escalates to `error` on rapid recurrence (§10.4) |
+| `IoFailure` prefix `"watcher-unavailable"` | `warn`       | Escalates to `error` when polling engages (§10.5) |
+| `IoFailure` prefix `"queue-full"`      | `error`          | §4.2 inv #3 fatal misconfiguration               |
+| `IoFailure` prefix `"out-of-budget"`   | `warn`           | I/O pool saturation; backpressure signal         |
+| `IoFailure` other                      | `error`          | Default for unclassified I/O failure             |
+| `OsCode`                               | `error`          | Always — we refuse to silence the unclassified   |
+
+The platform never logs at the *raise* site; logging is the *handler's*
+responsibility per `reviews/decisions/error-model.md` §"Logging /
+Telemetry" rule 1. The platform's contribution is the typed arm + the
+TLS-buffered diagnostic prefix; the engine-wide log helper does the
+formatting and dispatches to spdlog.
+
+### 10.7 Refusals (out of §10 scope)
+
+- **Render / GPU error model.** `MTL::Device` lost / pipeline compile
+  failure / residency exceeded live in `specs/render/SPEC.md` §10 as
+  `render::Error` arms. Platform's role stops at surfacing the host
+  Window / Surface state through `IoFailure` prefix `"surface-lost"`
+  (§10.4); the render context maps that to its own `DeviceLost` arm
+  at the call site (per error-model composition rule 2).
+- **Hot-reload refusal.** `core::Error::PluginAbiHashMismatch`,
+  `PluginInitFailed`, etc., are owned by `specs/core/SPEC.md`.
+  Platform contributes nothing new here.
+- **Schema / persistence failure.** `data::Error` (Fory schema
+  migration, etc.) is owned by `specs/data/SPEC.md`. Platform paths
+  do not carry persisted state (§7) and therefore do not surface
+  schema errors.
+- **Determinism / replay divergence.** Engine concern, not platform.
+- **Crash dump format.** Owned by the future `obs` (observability)
+  context; platform's contribution stops at `Process::install_signal`
+  and the `WallTime` correlation rule (§4.4 inv #3).
+
+### 10.8 Open questions (carried into §12)
+
+- Promote `"surface-lost"` to a first-class arm (`SurfaceLost`) once a
+  second consumer needs to discriminate. Today only render does; until
+  then the diagnostic prefix is sufficient and the closed sum stays
+  small.
+- Promote `"watcher-unavailable"` to a first-class arm
+  (`WatcherUnavailable`) once polling-fallback ownership moves
+  somewhere that benefits from a typed dispatch (likely when the
+  editor's content-tree hot-reload coordinator lands).
+- `magic_enum` vs hand-written `to_string` for arm names in log
+  output — deferred to `core/error.hpp` per
+  `reviews/decisions/error-model.md` open question 1; platform will
+  follow whatever core picks.
+- Polling-fallback interval default for §10.5 — provisional 1 s;
+  finalize when the editor hot-reload coordinator ships.
 
 ## 11. Acceptance Criteria
 
