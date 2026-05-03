@@ -3749,8 +3749,8 @@ and only it is the §10 contract. The cook-time set surfaces inside
 re-validates the recipe — `PakHeader` validation (`PakFormatHashMismatch`)
 is the runtime gate that proves the recipe is the one cooked against
 the engine's compiled-in `FormatHash` (§4.1.7.1, §4.2 invariant 1).
-Promoting it to a runtime arm is on the §12 watch-list and trips when a
-second consumer (e.g. an editor "validate pak" path) needs the
+Promoting it to a runtime arm is on the §10.8 watch-list and trips
+when a second consumer (e.g. an editor "validate pak" path) needs the
 discrimination.
 
 ### 10.2 Per-arm contract — runtime arms
@@ -4364,24 +4364,48 @@ graduate to a SPEC bump.
   copy lives in `specs/tools/SPEC.md` (editor) and is not part of
   this contract.
 
-### 10.8 Open questions (carried into §12)
+### 10.8 Open questions — resolved
 
-- Promote `BLASRecipeInvalid` to a runtime arm once the editor's
-  "validate pak" path lands. Today only the cooker discriminates;
-  until then the runtime relies on `PakFormatHashMismatch` as the
-  proxy.
-- Promote a hypothetical `GpuBuffersUnavailable` arm if a second
-  caller emerges that wants to discriminate "render allocator
-  pre-busy" from `GpuBufferAllocFailed`. Today the
-  `GpuUploadRefused` / `GpuBufferAllocFailed` pair is sufficient.
-- Crash-dump detail for `DecodePoolOverflow` — should the dev-build
-  crash include a hex dump of the offending Draco payload? Defer
-  until the Draco wrapper module lands.
-- Bounded-retry budget for the residency-downgrade and
-  decode-pool-busy loops is fixed at three frames here. The
-  budget knob may need to be data-driven (per platform / per
-  content tier); resolved when the §9 perf-budget gate sees
-  real traces.
+The four questions originally carried into §12 each resolve to an
+existing external gate or to an answer frozen until a known trigger;
+§12 holds no geometry-owned residue. Each entry below names the gate
+that re-opens it, so a future change does not need to re-derive the
+deferral.
+
+- **Promote `BLASRecipeInvalid` to a runtime arm.** Frozen as
+  cook-time-only until a *second* consumer beyond the cooker needs
+  the discrimination — per principle 10 (Occam's razor), one consumer
+  does not justify a sealed-sum slot, and `PakFormatHashMismatch`
+  already gates the runtime against any recipe not cooked against
+  the engine's compiled-in `FormatHash` (§4.1.7.1, §4.2 invariant 1).
+  Trigger to re-open: the editor's "validate pak" path landing under
+  the tools sub-epic, at which point that second consumer wants the
+  typed arm. The §10.1 watch-list note at line 3752 already records
+  this same gate; no separate spike is owed.
+- **Promote a hypothetical `GpuBuffersUnavailable` arm.** Same shape
+  as the `BLASRecipeInvalid` question: frozen as the
+  `GpuUploadRefused` / `GpuBufferAllocFailed` pair until a second
+  caller needs to discriminate "render allocator pre-busy" from
+  "allocation failure". Trigger to re-open: any new caller (likely
+  the editor's residency probe or a render-domain QA tool) that
+  wants to branch on the distinction without parsing the diagnostic
+  payload. Until then the §4.7-style closed sum stays small.
+- **Crash-dump detail for `DecodePoolOverflow`.** Frozen at the
+  current "fatal log + abort" shape; the dev-build hex dump of the
+  offending Draco payload is owed by the Draco wrapper module
+  (`plugins/geometry/draco/`) when that module lands, since the
+  wrapper owns both the payload buffer and the dev-build crash hook.
+  Re-opened by the Draco wrapper plan; no geometry-side residue
+  beyond the §10.2 row.
+- **Bounded-retry budget for residency-downgrade and decode-pool-
+  busy loops.** Frozen at three frames per the §10.4 recovery
+  ladder; the data-driven knob (per platform / per content tier) is
+  pulled into the macOS 26 / M1 measurement spike that
+  `reviews/decisions/perf-budget.md` Open Q #1 already opens against
+  the first runnable harness. The §9.6.2 cluster-decode latency CI
+  gate is the same gate that observes the real traces, so the same
+  measurement run that informs that decision informs this knob;
+  no geometry follow-up is owed independently.
 
 ## 11. Acceptance Criteria
 
@@ -4452,4 +4476,6 @@ named in §9.6.
 
 ## 12. Open Questions
 
-- Owner / resolution gate.
+None. The four carry-ins in §10.8 each resolved in place against
+existing external gates — see that sub-section for the trigger that
+re-opens each one. Per spike #115.
