@@ -2562,7 +2562,458 @@ produces, everything the recorder produces.
 
 ## 8. Hot-Reload Contract
 
-What survives swap, what `migrate(...)` must do, what triggers refusal.
+This section specialises the engine-wide hot-reload protocol
+(`reviews/decisions/hot-reload-protocol.md` — drain → swap → migrate →
+resume) to the **e2e context**. The specialisation has an unusual
+shape because e2e differs from every other plugin in two structural
+ways: (a) a running `TraceRunner` is **read-only over disk** — the
+`Trace` it parses is immutable post-load (§4.1.1 inv 4) and there is
+no in-memory persistent state with a `.fory` schema in e2e itself
+(§7.4); and (b) e2e's whole reason to exist is to *observe* engine
+behaviour deterministically, so a swap of e2e's own `.dylib`
+mid-replay would corrupt the very evidence the run is trying to
+produce. This section therefore answers four questions: which
+reloads are categorically refused, which are tolerated when the trace
+asserts them, what survives a swap on the surviving paths, and how
+the observer surface synchronises with trace-asserted reload events.
+Engine-wide concerns (per-plugin atomicity, observer bus event
+shapes, error wrapping rules, the `enqueue_hot_reload` E2E hook) are
+not re-stated here — see the protocol record. E2e adds nothing to
+that machinery; it only fills in the four pluggable points the
+protocol leaves to each plugin: drain side-effects, survival
+inventory, migrate body, and register-time rehydration — plus one
+e2e-specific clause covering the trace-asserted-reload semantics that
+no other plugin needs.
+
+### 8.1 Reload point — phase 8 only, e2e-self-swap refused mid-replay
+
+The engine schedule (`reviews/decisions/frame-phases.md`) places the
+hot-reload barrier at phase 8, **after `render-submit` (phase 7) and
+before `present` (phase 9)**. e2e's reload semantics are anchored to
+that one slot and refuse any other.
+
+E2e's reload contract has two distinct halves driven by *whose*
+`.dylib` is being swapped during a replay run:
+
+1. **The e2e plugin itself (`glibre.e2e.dylib`).** A swap of e2e's
+   own `.dylib` while a `TraceRunner` is mid-replay is **categorically
+   refused**, regardless of phase. The `TraceRunner` (§4.1.7) is the
+   process driving the trace; it owns the `ReplayDriver` (§4.1.6),
+   the `(next_op_index, current_frame_index)` cursor, the live
+   `EnvHash` it gated on at run start, and the partial `TraceReport`
+   accumulating across frames. Replacing e2e's code under a live
+   runner would invalidate every byte of that state — the cursor's
+   semantics depend on the parser version, the `EnvHash` recipe is a
+   build-time constant of the e2e plugin, and the in-flight report's
+   `E2eError` arms are the e2e plugin's own enum (§4.1.13). A swap
+   that nominally "preserved" any of those would be silent
+   nondeterminism — exactly what `EnvHash` exists to prevent
+   (§3.2 #3). The refusal is detected at the loader's step-2.2
+   manifest check by virtue of e2e declaring the plugin-self-while-
+   replaying refusal as a manifest invariant: the e2e plugin's
+   manifest names `glibre.e2e.runner_active` as a boolean middleman
+   singleton, and step-2.2 refuses a self-swap whenever that flag is
+   true. Cause arm: `core::Error::HotReloadRefused` with nested
+   `e2e::Error::EnvDrift` (the recipe of `EnvHash` itself drifted —
+   the cleanest fit among the existing arms, and matching the §3.2
+   #3 collapse rule that says any drift in the gating recipe routes
+   through `EnvDrift`).
+2. **Any other plugin (`glibre.render.dylib`, `glibre.physics.dylib`,
+   `glibre.audio.dylib`, …).** Such a swap during replay is
+   permitted **iff the trace recorded an explicit
+   `TraceOp::ExpectReload` op at the current `FrameIndex` naming
+   that plugin** (§8.6). Without the matching trace op, the swap
+   is refused. The rationale is that the `EnvHash` recipe pins
+   `manifest.plugin_abi_hash` (§4.1.3 inv 2); changing any plugin's
+   loaded ABI hash mid-run violates that gate, and e2e's whole
+   contract is "if the env drifts beneath us, we abort with
+   `EnvDrift` rather than producing a misleading green/red"
+   (§4.1.3 inv 1). The `ExpectReload` op is the trace's one mechanism
+   for declaring "yes, I deliberately captured a reload at this
+   frame; the env hash carries forward to the post-reload bytes the
+   way I recorded".
+
+Both halves of the rule consume the loader's standard refusal
+mechanism (protocol §"Refusal Cases"); e2e contributes no new
+umbrella arm. Mid-frame reload (any phase 1-7) is refused identically
+to render's contract (`render` §8.1): the request is queued for the
+next phase 8 entry, never applied mid-frame.
+
+### 8.2 Survival inventory
+
+The engine-wide survival rule is mechanical: **state with a `.fory`
+schema in `glibre-types.dylib` survives across the swap; state
+without one does not** (protocol §"State Survival Rules"; PHILOSOPHY
+collapse: one check, not a per-aggregate manifest). E2e is the
+unusual case where the schema'd state lives on disk only — the
+`.glibre-trace` corpus (§7.1.1), the `GoldenStoreIndex` (§7.1.3),
+and the PNG payloads (§7.1.4) — and every in-memory aggregate the
+runner uses is built freshly from those bytes per run (§7.4). The
+table below classifies every e2e-owned piece of state against the
+rule and adds the e2e-specific reasoning for each survival decision.
+The table only describes the **other-plugin reload** case (§8.1
+half 2); the e2e-self-swap case is refused before any survival
+question arises.
+
+| E2e-owned state                                                         | Persistence path             | Survives swap? | Reasoning                                                                                                                                                                                                                                                                                                                              |
+|-------------------------------------------------------------------------|------------------------------|----------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `TraceFile` on-disk bytes (§7.1.1)                                      | `.fory` schema, on disk only | Yes — never in plugin memory; the file lives under `tests/e2e/<ctx>/` and is read-only on the e2e side (§4.1.2 inv 1). The swap does not touch disk. The bytes survive trivially.                                                                                                                                                              |
+| Parsed `Trace` aggregate (§4.1.1) held by the live `TraceRunner`        | None — built per run         | Yes — but only because the live `TraceRunner` is a piece of *e2e plugin* code, and e2e's own `.dylib` is refused for swap mid-replay (§8.1 half 1). Under the other-plugin reload case, the `Trace` instance is owned by an unaffected plugin's image and persists verbatim across the swap of any non-e2e dylib.                            |
+| `TraceManifest` (§4.1.3) held by the live `TraceRunner`                 | None — built per run         | Yes — same reasoning as the parsed `Trace`. The manifest is the gating preimage; its bytes are immutable post-parse (§4.1.3 inv 4).                                                                                                                                                                                                            |
+| `EnvHash` computed at runner start                                      | None — derived value         | Yes — same reasoning. The hash is recorded once at gate time and held immutably; a non-e2e plugin reload does not perturb it because `manifest.plugin_abi_hash` is **the recorded hash**, not the live hash (§8.4 refusal table covers the live-hash drift case).                                                                            |
+| `ReplayDriver` cursor `(next_op_index, current_frame_index)` (§4.1.6)   | None — in-process            | Yes — owned by e2e plugin code, which is refused for self-swap. Across a non-e2e reload the cursor is not addressed by any other plugin and persists verbatim. The driver holds no wall-clock state (§4.1.6 inv 1) so there is no reload-induced time displacement.                                                                              |
+| `GoldenStoreIndex` (§7.1.3) loaded into the runner                      | `.fory` schema, on disk only | Yes — read-only at run time; the in-memory copy is e2e-owned and persists across non-e2e swaps. The on-disk bytes are unchanged by any plugin reload.                                                                                                                                                                                                |
+| `GoldenImage` PNG payloads (§7.1.4)                                     | Raw PNG, on disk only        | Yes — content-addressed by Blake3 (§7.2.4); a swap touches no PNG byte. The runtime cache, if any, is rebuilt lazily per assert.                                                                                                                                                                                                                  |
+| Captured artefacts (screenshots, snapshot diffs, log slices)            | None — per run, written on fail | Yes — accumulated in the partial `TraceReport`'s arena until the run terminates; e2e plugin code owns the arena, refused for self-swap. Non-e2e reload does not touch it.                                                                                                                                                                              |
+| `TraceReport` partial state                                             | None — per run               | Yes — same reasoning. The report is finalised at run end, not at a frame boundary; a non-e2e plugin reload between asserts does not invalidate the accumulated state.                                                                                                                                                                                |
+| Plugin-private worker thread pools (e.g. screenshot encoder)            | None                         | Yes — survive a non-e2e swap (they are e2e-owned). On the refused e2e-self-swap path they would be drained, but that path is rejected before drain runs.                                                                                                                                                                                                |
+| `OsAutomation` injection-layer kernel-event handles (§4.1.8)            | None                         | Yes — owned by e2e plugin code on the runner side; non-e2e swap does not touch them. They are tied to the OS process, not to any reloaded plugin's image.                                                                                                                                                                                            |
+
+The rule mechanically applied: every row marked "Yes" either has a
+`.fory` schema, lives on disk and is therefore untouched by any
+swap, or is in-process state owned by e2e plugin code (which is
+refused for self-swap). There is **no row marked "No"**: e2e has no
+in-memory state that needs migration on a *non-e2e* reload, and the
+*e2e-self* reload case is refused before survival is asked. This
+matches §7.4's "what is NOT persisted" rule: the runner's runtime
+artefacts are not migration-aware because they are not migrated at
+all.
+
+### 8.3 `migrate(...)` body — N/A for e2e itself
+
+The protocol's `migrate` step (protocol §"Step 3 — Migrate") runs
+*pure* per-row migrate functions for every persistent-component-type
+schema bump on the engine's behalf. **E2e owns zero such bodies for
+in-memory state** because e2e has no in-memory persistent
+component types in the ECS sense — every persistent type e2e owns
+(§7.1.1–§7.1.4) lives on disk only and is consumed read-only by a
+fresh `TraceRunner` per run. The migration discipline that *does*
+apply to those on-disk types is in §7.2 (additive `TraceOp` /
+`AssertOp` payloads, frozen `EnvHash` inputs, content-addressed
+golden refs) and is exercised at parse time, not at hot-reload
+time. Reloads of other plugins do not invoke any e2e migrate
+function.
+
+What this section adds is the **e2e-plugin-specific portion of step
+4 (resume)** — the work the new e2e plugin's
+`glibre_plugin_register` would do *if and only if* e2e's own swap
+were allowed (it is not, mid-replay; §8.1 half 1). The clause is
+documented anyway because the engine startup path (no replay running)
+*does* exercise an e2e self-swap during dev iteration on the e2e
+plugin itself, and that path needs a clean register-time contract.
+
+#### 8.3.1 Re-register `ReplayDriver` factory at the `platform::InputDriver` seam
+
+The new e2e plugin's `glibre_plugin_register`:
+
+1. **Publishes the new `ReplayDriver`-factory pointer** into the
+   `platform::InputDriver` registry's
+   `(InjectionLayer → ReplayDriver factory)` table. The table
+   itself is a middleman type
+   (`glibre::types::e2e::ReplayDriverRegistry`) so its slot
+   identities survive; the values held in the slots are function
+   pointers into the new plugin's image. The fix-up is one atomic
+   store per slot, performed under the loader's exclusive phase-8
+   ownership (no race with phase 1 of frame N+1's input pump,
+   which has not yet begun).
+2. **Re-registers the `TraceRunner` entry-point command** into
+   the engine command registry (`glibre-trace run`). The command
+   registry is keyed by `(command_fqn)` and is idempotent per
+   protocol step 4.1; a re-registration of the same identity is a
+   no-op even if the underlying function pointer is new.
+3. **Does not rebuild any in-flight `TraceRunner`.** No
+   `TraceRunner` is live during an allowed self-swap (the swap is
+   refused if one is). `TraceRunner` instances are per-run and are
+   created at `glibre-trace run` time; the new plugin builds fresh
+   instances at the next invocation.
+4. **Does not rebuild any in-flight `ReplayDriver`.** Same
+   reasoning. The driver is per-run, refused-during-swap by the
+   §8.1 half-1 rule.
+
+The previous e2e plugin's `glibre_plugin_drain` accordingly has
+nothing to flush from the runner side; its work is the worker-pool
+shutdown described in §8.3.2.
+
+#### 8.3.2 Worker pool shutdown / re-spawn
+
+E2e's screenshot-encoder, snapshot-serialiser, and (on
+`OsAutomation` runners only) kernel-event-driver workers are
+plugin-private and have no `.fory` schema, so they do not survive
+a swap by the §8.2 rule. Drain shuts them down; register re-spawns
+them.
+
+1. **`glibre_plugin_drain` joins every e2e worker thread** before
+   returning, releases their per-thread arenas, and clears the
+   pool descriptor. The drain is bounded by the longest in-flight
+   encoder task; on a self-swap that path is irrelevant (refused
+   mid-run) so the bound is "no work in flight" by construction.
+2. **`glibre_plugin_register` re-spawns the pool** at the size
+   declared in `RunnerHost`'s policy (`dev-headless`,
+   `dev-interactive`, `ci-headless`, `ci-isolated` each have their
+   own thread-count default — see §4.1.9). The spawn is
+   deterministic w.r.t. host policy.
+3. **`OsAutomation` kernel handles are re-acquired** by the new
+   plugin via the existing `platform::OsAutomation` seam (refused
+   on developer hosts per §4.1.9 inv 3); the seam itself is
+   `platform`-owned and is not touched by the swap.
+
+The total work in e2e's resume step on an allowed self-swap (no
+runner active) is therefore bounded by **O(1) atomic-store fix-ups +
+O(thread-pool size) spawn calls + zero on-disk I/O**, fitting the
+protocol's budget (`hot-reload-protocol.md` §Consequences) trivially
+because no runner state has to be reconstituted.
+
+### 8.4 Refusal cases (e2e-specific)
+
+E2e contributes no new umbrella refusal arm; every refusal is
+expressed as the engine-wide `core::Error::HotReloadRefused` with a
+nested cause chosen from the protocol's existing arms. E2e does
+introduce three **inner causes** that the loader sees only because
+e2e inspects the new plugin during step 4 (resume) — or in the
+self-swap case, refuses before step 1. They are enumerated here so
+the test matrix (§8.6) and the `TraceReport` diagnostic surface
+(§4.1.12) can name them.
+
+| E2e refusal cause                                                         | Detected by                                                                                                                                                | Inner-error arm                                                                                | What the operator must do                                                                                                                                                                                                                                                          |
+|---------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **E2e self-swap during active replay** (§8.1 half 1)                       | Loader at step 2.2: e2e plugin manifest declares `glibre.e2e.runner_active` as a refusal predicate; the loader reads the live middleman flag set by `TraceRunner`'s constructor (cleared by its destructor) and refuses the swap when true. | `core::Error::HotReloadRefused` with cause `e2e::Error::EnvDrift` (the `EnvHash` recipe itself would drift). | Wait for the live `TraceRunner` to terminate (its `TraceReport` is emitted on shutdown, `qa-ready` flips appropriately), or re-issue the reload at engine startup before `glibre-trace run` is invoked.                                                                            |
+| **Unexpected non-e2e reload mid-replay** (§8.1 half 2)                     | Loader at step 2.1 (existing arm), augmented by an e2e observer subscribed to `HotReloadStarted`. The observer checks the live `TraceRunner`'s next-op cursor; if no `TraceOp::ExpectReload` op is recorded at `current_frame_index` matching the reloading plugin's `fqn`, the observer raises a refusal. | `core::Error::HotReloadRefused` with cause `e2e::Error::EnvDrift` (the trace did not record this reload; the env therefore drifts mid-run). | Either (a) re-record the trace through the editor with the reload captured as an `ExpectReload` op (§8.6), or (b) defer the reload until after the run terminates. The prior plugin remains live; the run continues against the trace's recorded environment.                            |
+| **Trace-recorded reload of an unsupported plugin**                         | E2e at parse time when the trace contains an `ExpectReload` op naming a plugin `fqn` not in the live engine's plugin registry. Detected at trace-parse, not at swap.                                  | `e2e::Error::TraceParse` (this is a parse-time refusal, not a swap-time refusal — listed here for completeness). | Re-record the trace under the current plugin set, or amend the engine build so the plugin is loaded. The trace is rejected at gate time; no frame advances.                                                                                                                                  |
+
+Each refusal is logged exactly once at `warn` level (protocol
+§"Refusal Cases") with the structured fields `plugin_fqn=glibre.e2e`
+(or the offending plugin), `attempted_dylib_path`, `host_abi_hash`,
+`plugin_abi_hash`, `trace_path`, `frame_index`, and the inner cause's
+enumerator name. The `TraceReport`'s `status` flips to
+`Aborted{cause}` (§4.1.12) for the runner-observed cases; the
+self-swap refusal at startup (no live runner) reports through the
+ordinary loader log surface.
+
+### 8.5 Observers — `TraceRunner` synchronises with reload events
+
+The loader publishes `HotReloadStarted` and `HotReloadCompleted`
+events on the engine's observer bus (protocol §"Observer
+Notification"). E2e's `TraceRunner` (§4.1.7) is one of the three
+contexts that legitimately holds a live subscription to that bus
+(alongside the editor and the `tools` profiler), and it is the only
+one whose subscription affects replay correctness. E2e's hot-reload
+contract requires:
+
+1. **`TraceRunner` subscribes at run start**, before the first
+   frame advances, and unsubscribes at run end. The subscription is
+   held for exactly the run's lifetime; no e2e code subscribes
+   outside a runner.
+2. **The subscription serialises trace dispatch against reload
+   completion.** When `HotReloadStarted` fires, the runner records
+   the event in its frame-local accumulator and pauses dispatch
+   of any further `TraceOp`s on the *same frame* (frame N) until
+   `HotReloadCompleted` (or `HotReloadRefused`) fires. The
+   loader's observer-notification atomicity guarantee (protocol
+   §"Observer Notification" — synchronous calls on the loader
+   thread) makes this single-frame pause exact: by the time the
+   bus call returns, the swap is fully committed and the runner
+   may resume. Frame N is therefore the *only* frame that may
+   carry a reload event in the recorded trace, regardless of how
+   many plugins are reloaded that frame.
+3. **The runner cross-checks completion against
+   `TraceOp::ExpectReload`.** For each `HotReloadCompleted` event
+   observed at frame N, the runner verifies (a) an
+   `ExpectReload{plugin_fqn, replacement_dylib_path}` op exists at
+   `FrameIndex == N` matching the completed reload's `plugin_fqn`,
+   and (b) the post-reload `glibre_types_abi_hash` matches the
+   value the `ExpectReload` op recorded in its
+   `expected_post_reload_abi_hash` field. Any mismatch fails the
+   run with `e2e::Error::AssertFailed{op_id: ExpectReload@N}`,
+   carrying both the recorded and the observed values for
+   diagnostic clarity.
+4. **`HotReloadRefused` is itself a trace-level event.** When
+   the loader reports a refusal (e2e-self refusal, capability
+   refusal, schema refusal), the runner finalises the
+   `TraceReport` with status `Aborted{cause: refusal.cause}` —
+   never `Failed`, because the test environment is what drifted,
+   not the assertion. The distinction matters for CI triage: an
+   `Aborted` report routes operators to environment fixes; a
+   `Failed` report routes operators to engine fixes.
+5. **No half-swapped world is ever observed by an `AssertOp`.**
+   The bus's atomicity guarantee combined with rule 2 above means
+   the runner's assertion dispatch sees either a fully-pre-swap
+   state or a fully-post-swap state at any frame; there is no
+   observable intermediate. This is the e2e-side rephrasing of
+   `render` §8.5 invariant 3 and protocol §"Observer
+   Notification".
+
+The observer event types e2e *consumes* are the engine-wide
+`glibre::types::core::HotReloadEvent` arms (already middleman-typed
+per protocol §"Observer Notification"); e2e introduces no new arms.
+The event types e2e *emits* — none. E2e's externally-visible reload
+output is the `TraceReport` itself; the bus is consumer-only on
+the e2e side.
+
+### 8.6 Test hooks — `TraceOp::ExpectReload` and trace-asserted reload semantics
+
+E2e's reload contract is verified end-to-end by trace fixtures that
+exercise the loader's existing `enqueue_hot_reload` E2E entry point
+(protocol §"Test Hooks") *through the trace stream itself*, not
+through ad-hoc fixture code. The mechanism is one new `TraceOp`
+variant that carries the loader call as recorded data.
+
+#### 8.6.1 `TraceOp::ExpectReload` — the recorded loader call
+
+`TraceOp` (§4.1.4) gains an `ExpectReload` variant. Per §7.2.1
+(additive variant rule) this is the additive defaulted-discriminator
+pattern: the variant takes the next free `variant_tag` and a new
+`option<ExpectReloadPayload>` field at a new tag; old `.glibre-trace`
+files decode unchanged.
+
+```fory
+schema glibre.e2e.ExpectReloadPayload {
+  version 1
+  since   "0.2.0"
+
+  field plugin_fqn                     : string tag 1 since 1   // e.g. "glibre.render"
+  field replacement_dylib_path         : string tag 2 since 1   // GoldenStore-relative path under tests/e2e/<ctx>/plugins/
+  field expected_post_reload_abi_hash  : bytes  tag 3 since 1   // 32-byte Blake3-256, must equal glibre_types_abi_hash() after swap
+  field expected_completion_frame      : u64    tag 4 since 1   // FrameIndex at which HotReloadCompleted must fire (== this op's FrameIndex)
+}
+```
+
+**Recorder side (`tools::TraceWriter`).** When the editor's record
+mode observes a `HotReloadCompleted` event during a recording
+session, it appends an `ExpectReload` op at the current
+`FrameIndex` capturing the four fields above. The recorder owns
+this; e2e is the consumer (§3.3).
+
+**Replay side (`TraceRunner`).** When the runner advances to the
+op's `FrameIndex` and dispatches the op, the runner:
+
+1. Calls `glibre::core::test::enqueue_hot_reload(plugin_fqn,
+   replacement_dylib_path)` (the protocol's E2E hook). The call
+   returns a `ReloadRequestId`.
+2. Awaits the matching `HotReloadCompleted` (or
+   `HotReloadRefused`) event via `await_reload(request_id)` —
+   blocks the runner thread by §8.5 rule 2 until the loader's
+   observer-bus call has returned.
+3. Verifies the post-reload `glibre_types_abi_hash` matches
+   `expected_post_reload_abi_hash`. Mismatch =
+   `e2e::Error::AssertFailed{op_id: ExpectReload@N}` per §8.5
+   rule 3.
+4. Verifies `expected_completion_frame == current_frame_index`.
+   The loader guarantees completion before phase 9 of the
+   request's enqueueing frame (protocol §"Step 4 — Resume" sub-step
+   4.4), so a same-frame completion is the only valid recording
+   shape. A future relaxation (multi-frame migration) would change
+   this clause; out of scope in MVP.
+
+If the runner observes a `HotReloadStarted` event at a frame where
+no `ExpectReload` op is recorded, §8.4 row 2 fires
+(`e2e::Error::EnvDrift`).
+
+#### 8.6.2 `assert_state` after reload — the post-reload world is observable
+
+`AssertState` (§4.1.4) and its companions (`AssertScreenshot`,
+`AssertEcsSnapshot`, `AssertLogContains`) are unchanged in shape,
+but the trace recorder may record any of them at the same
+`FrameIndex` as an `ExpectReload`, **after** the `ExpectReload` in
+intra-frame order (§4.1.1 inv 5: intra-frame order preserved). The
+runner dispatches asserts in recorded order, so an `AssertState`
+following an `ExpectReload` runs against the post-reload world.
+This is the recorded mechanism by which a trace verifies that the
+new plugin's behaviour matches the expected post-reload semantics
+(the e2e-context analogue of `render` §8.6's "first post-reload
+frame is byte-equal to the reference trace").
+
+The intra-frame order the recorder produces is therefore
+load-bearing: an assertion captured *before* the reload event in
+the same frame asserts pre-swap state, an assertion captured
+*after* asserts post-swap state. The §4.1.1 inv 5 invariant
+preserves this ordering on parse and the §4.1.6 driver emits the
+ops in cursor order.
+
+#### 8.6.3 Test-fixture matrix
+
+The CI matrix exercises six scenarios under `tests/e2e/hot_reload/`:
+
+1. **Happy-path other-plugin reload.** A trace records one
+   `ExpectReload{plugin_fqn = "glibre.render"}` followed by an
+   `AssertEcsSnapshot` at the same `FrameIndex`. CI asserts the
+   reload completed, the post-reload snapshot is byte-equal to
+   the recorded reference, and the `TraceReport` is `Passed`.
+2. **Refused other-plugin reload — schema migration.** A trace
+   records an `ExpectReload` whose
+   `expected_post_reload_abi_hash` matches the loaded plugin, but
+   CI is run against a build whose schema bump has no migrate
+   function. The loader fires `HotReloadRefused
+   {cause: SchemaMigrationFailed}`; the runner finalises with
+   `TraceReport.status == Aborted{cause: SchemaMigrationFailed}`.
+3. **Unexpected other-plugin reload mid-replay.** The trace
+   records *no* `ExpectReload`, but a CI script enqueues a
+   reload via the E2E hook at a frame the trace dispatches
+   normally. The runner observes the `HotReloadStarted`, finds
+   no matching `ExpectReload`, raises §8.4 row 2 (`EnvDrift`),
+   and finalises with `TraceReport.status == Aborted{cause:
+   EnvDrift}`.
+4. **E2e self-swap refused mid-replay.** The trace runs normally;
+   a CI script attempts to swap `glibre.e2e.dylib` while the
+   `TraceRunner` is live. The loader's step-2.2 manifest check
+   refuses; the run continues unaffected, and CI asserts the
+   refusal log entry appears with cause arm
+   `e2e::Error::EnvDrift`.
+5. **E2e self-swap permitted at engine startup.** No
+   `TraceRunner` is active; an automated script swaps
+   `glibre.e2e.dylib`. The loader accepts the swap, e2e's
+   `glibre_plugin_register` re-registers the `ReplayDriver`
+   factory and the command, and a subsequent `glibre-trace run`
+   loads the new e2e build and produces a `Passed` report on a
+   reference trace.
+6. **`ExpectReload` payload validation.** Three malformed traces
+   (missing `plugin_fqn`, bad `replacement_dylib_path`, mismatched
+   `expected_post_reload_abi_hash`) are rejected at parse with
+   `e2e::Error::TraceParse`; the runner emits a `TraceReport`
+   with `status == Aborted{cause: TraceParse}` before any frame
+   advances.
+
+All six scenarios run inside CI jobs using the in-process trigger
+plus the E2E hook; no filesystem watcher is involved (protocol
+§"Test Hooks"). The Catch2 cases are listed in §11 acceptance
+criteria as `Hot-reload accepts trace-asserted other-plugin reload`,
+`Hot-reload aborts run on schema-migration refusal`, `Hot-reload
+aborts run on unexpected other-plugin reload`, `Hot-reload refuses
+e2e self-swap mid-replay`, `Hot-reload accepts e2e self-swap at
+startup`, and `ExpectReload payload parse-rejects malformed
+records`.
+
+### 8.7 Cross-references
+
+- Engine protocol: `reviews/decisions/hot-reload-protocol.md`
+  (drain → swap → migrate → resume; refusal arms; observer bus;
+  E2E hook `enqueue_hot_reload` / `await_reload`).
+- Frame slot: `reviews/decisions/frame-phases.md` (phase 8 entry /
+  exit guarantees; mid-frame swap forbidden).
+- Pilot specialisation: `specs/render/SPEC.md` §8 (the four-clause
+  shape — drain side-effects, survival inventory, migrate body,
+  register-time rehydration — used here verbatim).
+- Persistence rules invoked: §7.1.1 (`TraceFile`), §7.1.2
+  (`TraceManifest`), §7.1.3 (`GoldenStoreIndex`), §7.1.4
+  (`GoldenImage`), §7.2.1 (additive variant rule, applied to add
+  `ExpectReload`), §7.2.3 (frozen `EnvHash` inputs), §7.3
+  (corpus-invalidation rule on ABI bumps), §7.4 (no in-memory
+  persistence — the key invariant making §8.3 trivial).
+- Aggregates touched: §4.1.1 `Trace` (intra-frame order
+  load-bearing for §8.6.2), §4.1.4 `TraceOp` (gains `ExpectReload`
+  variant), §4.1.6 `ReplayDriver` (factory re-registered on
+  e2e self-swap at startup), §4.1.7 `TraceRunner` (subscribes to
+  the observer bus per §8.5; refused-for-self-swap-while-active
+  per §8.1), §4.1.12 `TraceReport` (gains `Aborted{cause}` finalisation
+  for refusal arms), §4.1.13 `E2eError` (existing `EnvDrift`,
+  `TraceParse`, `AssertFailed` arms cover every refusal cited
+  here — no new arm).
+- Errors used: `e2e::Error::EnvDrift` (self-swap-during-replay
+  refusal, unexpected reload-mid-replay refusal),
+  `e2e::Error::TraceParse` (`ExpectReload` payload validation,
+  unsupported plugin in trace), `e2e::Error::AssertFailed`
+  (post-reload `abi_hash` mismatch, completion-frame mismatch),
+  each wrapped by `core::Error::HotReloadRefused` per protocol
+  §"Refusal Cases" where the loader is the detection site.
 
 ## 9. Performance Budget
 
