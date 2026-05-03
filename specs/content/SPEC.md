@@ -958,11 +958,949 @@ public boundary at the seams between them:
 
 ## 5. Public Interface
 
+The header below is the §5 deliverable: every symbol that crosses the
+content plugin's public boundary, declared in one C++23 header and
+verified compileable with
+`clang++ -std=c++23 -fsyntax-only -Wall -Wextra -Wpedantic` (also
+clean under `-fno-exceptions`, the engine-wide default per
+`reviews/decisions/error-model.md` §Decision #3). Bodies live inside the
+content dylib; this header is the contract every caller (core, render,
+future game-framework, editor / tools) compiles against. The full
+surface is presented as one translation unit so reviewers see the whole
+seam at once; in the real tree it splits across
+`content/include/glibre/content/{error,identity,source,importer,cookkey,cooked,cas,manifest,residency,handle,watch,session}.hpp`
+with section banners matching the `5.1`..`5.12` numbering used inline.
+
+Cross-context invariants enforced by this surface:
+
+- Every fallible operation returns `glibre::Result<T>` =
+  `std::expected<T, glibre::Error>` per
+  `reviews/decisions/error-model.md`. `content::Error` is a `std::variant`
+  over the two closed sums declared in §2 (`ImporterError`,
+  `ResidencyError`); `core` rolls this into the engine-wide
+  `glibre::Error` arm when the content plugin lands.
+- Aggregates listed in §4 (`SourceAsset`, importers, `CAS`, `Manifest`,
+  `ResidencyManager`, `CookSession`) are forward-declared classes whose
+  layout is owned inside the plugin. Callers manipulate them only
+  through the methods exposed below; copy / assign are deleted on
+  every aggregate root, mirroring the `unique`-resource contract used
+  by `render` / `platform` / `data`.
+- Cooked-byte addressing exposes only `ContentHash` (BLAKE3 of the
+  Fory payload) and `AssetId` (stable logical name). No raw paths
+  ever leak to the runtime — `AssetHandle<T>` is opaque
+  (§4.2 cross-aggregate invariant #6).
+- `AssetHandle<T>` is type-keyed per artifact class via the closed
+  `tags::{mesh, texture, font}` set; a wrong-class manifest entry is a
+  typed `MalformedPayload` rather than a runtime branch
+  (§4.1.8 invariant 3).
+- Importer SDK exceptions never escape the public boundary: each
+  importer is the unique `-fexceptions` carve-out per
+  `reviews/decisions/error-model.md`; thrown exceptions translate at
+  first ingress into `ImporterError::*` arms (§4.1.2 invariant 2).
+- The atomic-write / atomic-publish protocol (§4.2 cross-aggregate
+  invariants #2, #3) is enforced inside `CAS::put` and `Manifest`'s
+  internal publish path; callers never see a partial / interleaved
+  snapshot.
+
+The header forward-declares its sibling-context dependencies
+(`glibre::Error`, `glibre::Result<T>`, `glibre::platform::FileEvent`)
+behind feature macros so this stub compiles in isolation; the
+implementation translation units include the real headers.
+
 ```cpp
-// header-only stub goes here
+// SPDX-License-Identifier: Apache-2.0
+// glibre — content plugin public interface (header-only stub).
+//
+// This file is the §5 deliverable of `specs/content/SPEC.md`. It declares
+// every symbol that crosses the content plugin's public boundary. The
+// bodies live inside the content dylib; this header is the contract every
+// caller (core, render, future game-framework, editor / tools) compiles
+// against.
+//
+// Cross-context invariants embedded here:
+//   * Every fallible call returns `glibre::Result<T>` per
+//     `reviews/decisions/error-model.md`. `-fno-exceptions` is enforced
+//     globally; the importer carve-outs translate at first ingress
+//     (§4.1.2 invariant 2).
+//   * Aggregates listed in §4 (`CAS`, `Manifest`, `ResidencyManager`,
+//     `CookSession`, importers) are forward-declared classes whose
+//     layout is owned inside the plugin. Callers manipulate them only
+//     through the methods exposed below.
+//   * Cooked-byte addressing exposes only `ContentHash` (BLAKE3 of the
+//     Fory payload) and `AssetId` (stable logical name). No raw paths
+//     leak to the runtime — `AssetHandle<T>` is opaque (§4.2 invariant 6).
+//   * `AssetHandle<T>` is type-keyed per artifact class (`Mesh`,
+//     `Texture`, `Font`); a wrong-class manifest entry is a typed
+//     `MalformedPayload` rather than a runtime branch (§4.1.8 invariant 3).
+//
+// Verified compileable with
+// `clang++ -std=c++23 -fsyntax-only -Wall -Wextra -Wpedantic`.
+
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <memory>
+#include <span>
+#include <string_view>
+#include <variant>
+
+// -----------------------------------------------------------------------
+// Stand-in declarations from sibling contexts. The real definitions live
+// in `core/include/glibre/error.hpp`,
+// `platform/include/glibre/platform/platform.hpp`, and the Fory-generated
+// headers under `data/schemas/content/`. This header forward-declares
+// them so the stub compiles in isolation; the implementation .cpp files
+// include the real headers, not these stubs.
+// -----------------------------------------------------------------------
+
+#if !defined(GLIBRE_HAVE_CORE_ERROR)
+namespace glibre {
+
+struct ErrorContext {
+    std::string_view file{};
+    int              line{0};
+    std::string_view detail{};
+};
+
+class Error {
+public:
+    using Variant = std::variant<int /* per-context Error enums appended in core */>;
+
+    template <class E>
+    constexpr Error(E e, ErrorContext ctx = {}) noexcept
+        : variant_{static_cast<int>(e)}, ctx_{ctx} {}
+
+    constexpr const Variant&      code()  const noexcept { return variant_; }
+    constexpr const ErrorContext& where() const noexcept { return ctx_; }
+
+private:
+    Variant      variant_;
+    ErrorContext ctx_;
+};
+
+template <class T>
+using Result = std::expected<T, Error>;
+
+}  // namespace glibre
+#endif  // GLIBRE_HAVE_CORE_ERROR
+
+#if !defined(GLIBRE_HAVE_PLATFORM_FILEEVENT)
+namespace glibre::platform {
+
+class CanonicalPath;  // workspace-relative canonical path; owned by platform.
+
+namespace file_event {
+struct Created  { /* opaque */ };
+struct Modified { /* opaque */ };
+struct Deleted  { /* opaque */ };
+struct Renamed  { /* opaque */ };
+}  // namespace file_event
+
+using FileEvent = std::variant<
+    file_event::Created,
+    file_event::Modified,
+    file_event::Deleted,
+    file_event::Renamed>;
+
+}  // namespace glibre::platform
+#endif  // GLIBRE_HAVE_PLATFORM_FILEEVENT
+
+namespace glibre::content {
+
+// -----------------------------------------------------------------------
+// 5.1 Closed sums of typed failures (§4 + §10).
+//
+// `ImporterError` captures every cook-time failure that the per-`SourceKind`
+// importer can raise; `ResidencyError` captures every runtime failure
+// surfaced by `ResidencyManager` and `AssetHandle`. The two are joined
+// into the `content::Error` variant — the single arm contributed by this
+// context to the engine-wide `glibre::Error` per
+// `reviews/decisions/error-model.md` §"Composition Rules" #1.
+// -----------------------------------------------------------------------
+
+enum class ImporterError : std::uint16_t {
+    SourceNotFound,        // §4.1.1 inv #1 — path escapes assets/source/ root.
+    MagicMismatch,         // §4.1.2 inv #2 — SDK reports format prefix mismatch.
+    UnsupportedVersion,    // §4.1.2 inv #2 — format known, version not supported.
+    MalformedPayload,      // §4.1.4 inv #2; §4.1.6 inv #4; §4.1.8 inv #3 — bad bytes / wrong class / cycle.
+    MissingDependency,     // §4.1.6 inv #4 — referenced child asset unresolvable.
+    Cancelled,             // §4.1.2 inv #5 — CookSession cancellation observed.
+};
+
+enum class ResidencyError : std::uint16_t {
+    HashNotInCas,          // §4.1.7 inv #5; §4.1.8 inv #5 — ContentHash absent under cooked/.
+    ManifestStale,         // §4.1.6 inv #2; §4.1.8 inv #4 — handle resolved against superseded snapshot.
+    BudgetExceeded,        // §4.1.7 inv #1 — load deadline elapsed without admission.
+    IoFailure,             // §4.1.7 inv #5 — mmap/open returned an OS error.
+};
+
+// `Error` is the single content-internal sum. Each arm carries one of the
+// two closed enums declared above; `core` rolls this into `glibre::Error`'s
+// variant when the content plugin lands.
+using Error = std::variant<ImporterError, ResidencyError>;
+
+// Convenience: every public fallible function in this surface returns Result<T>.
+template <class T>
+using Result = ::glibre::Result<T>;
+
+// -----------------------------------------------------------------------
+// 5.2 Identity primitives (§2 ubiquitous language; §4.1.1 / §4.1.4 / §4.1.6).
+// -----------------------------------------------------------------------
+
+// 32-byte BLAKE3 digest. The only key under which cooked artifacts are
+// addressed inside the CAS (§4.1.5 inv #1) and the cache key over which
+// the cook pipeline deduplicates (§4.1.3 inv #3).
+struct ContentHash {
+    std::array<std::byte, 32> bytes{};
+    [[nodiscard]] friend constexpr bool operator==(ContentHash, ContentHash) noexcept = default;
+};
+
+// 32-byte BLAKE3 of the canonical concatenation of (source_hash,
+// importer_version, normalize_params, processing_params,
+// downstream_tool_versions). Identical key ⇒ cache hit ⇒ no re-cook.
+// Distinct from `ContentHash` (which addresses cooked bytes); the
+// `Manifest` records both so a future scan can decide cache-hit-vs-recook
+// without re-deriving every ingredient (§4.1.6 composition).
+struct CookKey {
+    std::array<std::byte, 32> bytes{};
+    [[nodiscard]] friend constexpr bool operator==(CookKey, CookKey) noexcept = default;
+};
+
+// Stable logical identity for an asset across versions —
+// `glibre.<ctx>.<slug>` (e.g. `glibre.scene.hangar.mesh.crate-a`).
+// Storage is owned by the manifest's per-asset interning table; the
+// view is borrow-only. A default-constructed `AssetId` is the empty /
+// invalid identity (returned by `AssetHandle{}.asset_id()`).
+class AssetId {
+public:
+    constexpr AssetId() noexcept = default;
+
+    [[nodiscard]] static auto from_string(std::string_view s) noexcept
+        -> Result<AssetId>;
+
+    [[nodiscard]] auto view()    const noexcept -> std::string_view { return view_; }
+    [[nodiscard]] auto is_empty() const noexcept -> bool { return view_.empty(); }
+
+    [[nodiscard]] friend constexpr bool operator==(const AssetId&, const AssetId&) noexcept = default;
+
+private:
+    constexpr explicit AssetId(std::string_view v) noexcept : view_{v} {}
+    std::string_view view_{};
+};
+
+// Compile-time-stable enumeration of the artifact classes content owns
+// (§3.2 collapse #1; §4.1.2). Adding a class is a deliberate central edit.
+enum class SourceKind : std::uint8_t {
+    Mesh,     // FBX (Autodesk FBX SDK)
+    Texture,  // PNG / JPEG / EXR / HDR / TIFF (FreeImage)
+    Font,     // TTF / OTF (FreeType)
+};
+
+// Per-`SourceKind` concrete container/format. Drives importer dispatch;
+// cooked outputs do not retain it (§4.1.1 composition).
+enum class MeshFormat    : std::uint8_t { Fbx };
+enum class TextureFormat : std::uint8_t { Png, Jpeg, Exr, Hdr, Tiff };
+enum class FontFormat    : std::uint8_t { Ttf, Otf };
+
+// -----------------------------------------------------------------------
+// 5.3 SourceAsset — artist-authored input file (§4.1.1).
+//
+// Constructors refuse any path that escapes the workspace `assets/source/`
+// root (no `..`, no absolute paths, no symlink escape) per §4.1.1 inv #1.
+// `source_hash` is BLAKE3 of the byte sequence as read; identical bytes
+// on disk yield identical `source_hash` (§4.1.1 inv #3).
+// -----------------------------------------------------------------------
+
+struct SourceAsset {
+    // Workspace-relative path under `assets/source/...`. Stored as a
+    // borrowed view; backing memory is owned by the cook session arena.
+    std::string_view path{};
+
+    SourceKind       kind{SourceKind::Mesh};
+    // The concrete container/format. Use `mesh_format` / `texture_format` /
+    // `font_format` according to `kind`; the others are unspecified.
+    union FormatTag {
+        MeshFormat    mesh;
+        TextureFormat texture;
+        FontFormat    font;
+        constexpr FormatTag() noexcept : mesh{MeshFormat::Fbx} {}
+    } format{};
+
+    // BLAKE3 of the raw on-disk bytes captured at scan/watcher delivery.
+    std::array<std::byte, 32> source_hash{};
+
+    // Construct from a workspace-relative path. Refuses out-of-root /
+    // unknown-extension inputs with `ImporterError::SourceNotFound` /
+    // `MalformedPayload` lifted into `glibre::Error`.
+    [[nodiscard]] static auto from_path(std::string_view workspace_relative) noexcept
+        -> Result<SourceAsset>;
+};
+
+// -----------------------------------------------------------------------
+// 5.4 Importer trait + closed-sum concrete importers (§4.1.2).
+//
+// `Importer` is a non-virtual base — the closed sum admits exactly one
+// concrete importer per `SourceKind` (`FbxImporter`, `FreeImageImporter`,
+// `FreeTypeImporter`). Dispatch is exhaustive at compile time;
+// `dispatch(...)` returns the bytes of the per-class normalized
+// representation (the cook step's `fory-serialize` stage consumes this
+// to produce `CookedAsset::payload`).
+// SDK exceptions never escape: each importer is the unique
+// `-fexceptions` carve-out per the error-model decision; thrown
+// exceptions are caught at first ingress and translated into
+// `ImporterError::*` (§4.1.2 inv #2).
+// -----------------------------------------------------------------------
+
+// Per-source-kind normalize parameter set. Canonical (sorted-key,
+// length-prefixed) byte serialization participates in `CookKey` (§4.1.3).
+struct NormalizeParams {
+    // Opaque blob; the canonical serialization is computed by the cook
+    // step and fed into `CookKey` directly. Content does not interpret
+    // these fields here — each importer pulls a typed view inside its
+    // own translation unit.
+    std::span<const std::byte> canonical_bytes{};
+};
+
+// Each importer carries an immutable `importer_version` — a BLAKE3 over
+// (SDK version, normalize-params vocabulary, post-process options
+// vocabulary). One ingredient of `CookKey` (§4.1.3 component #2).
+struct ImporterVersion {
+    std::array<std::byte, 32> bytes{};
+    [[nodiscard]] friend constexpr bool operator==(ImporterVersion, ImporterVersion) noexcept = default;
+};
+
+// Per-cook arena owned by the importer. Importer bodies allocate only
+// here; callers see only the resulting normalized byte view.
+class ImporterArena;
+
+// Cancellation token observed by every in-flight import (§4.1.2 inv #5).
+class CancellationToken;
+
+// Base trait — non-virtual; the concrete importers below are the closed
+// sum. The base exists so generic cook-step code can refer to `Importer&`
+// and dispatch through a free function `dispatch_import(...)` that
+// pattern-matches on `kind()`.
+class Importer {
+public:
+    [[nodiscard]] auto kind()    const noexcept -> SourceKind      { return kind_; }
+    [[nodiscard]] auto version() const noexcept -> ImporterVersion { return version_; }
+
+    Importer(const Importer&)            = delete;
+    Importer& operator=(const Importer&) = delete;
+
+protected:
+    constexpr Importer(SourceKind k, ImporterVersion v) noexcept
+        : kind_{k}, version_{v} {}
+    ~Importer() = default;
+
+    SourceKind      kind_;
+    ImporterVersion version_;
+};
+
+// FBX SDK ingress — the only mesh path for MVP (§3.2 collapse #1).
+class FbxImporter final : public Importer {
+public:
+    [[nodiscard]] static auto create() noexcept -> Result<std::unique_ptr<FbxImporter>>;
+
+    // Reads the mesh source asset, normalizes vertex/index streams and
+    // skeleton/scene hierarchy, delegates meshlet / LOD / BLAS work to
+    // `geometry`, and returns the bytes of the
+    // `glibre.content.MeshArtifact` precursor in `out_arena`.
+    [[nodiscard]] auto import_one(const SourceAsset&        src,
+                                  const NormalizeParams&    params,
+                                  ImporterArena&            out_arena,
+                                  const CancellationToken&  cancel) noexcept
+        -> Result<std::span<const std::byte>>;
+
+    ~FbxImporter();
+
+private:
+    FbxImporter() noexcept;
+    struct Impl;
+    Impl* impl_{nullptr};
+};
+
+// FreeImage ingress — every texture format MVP cares about (§3.2 collapse #1).
+class FreeImageImporter final : public Importer {
+public:
+    [[nodiscard]] static auto create() noexcept -> Result<std::unique_ptr<FreeImageImporter>>;
+
+    // Decodes the texture source asset into the engine's canonical pixel
+    // layout plus extracted metadata; returns the bytes of the
+    // `glibre.content.TextureArtifact` precursor in `out_arena`.
+    [[nodiscard]] auto import_one(const SourceAsset&        src,
+                                  const NormalizeParams&    params,
+                                  ImporterArena&            out_arena,
+                                  const CancellationToken&  cancel) noexcept
+        -> Result<std::span<const std::byte>>;
+
+    ~FreeImageImporter();
+
+private:
+    FreeImageImporter() noexcept;
+    struct Impl;
+    Impl* impl_{nullptr};
+};
+
+// FreeType ingress — TTF/OTF glyph metrics + atlas baking (§3.2 collapse #1).
+class FreeTypeImporter final : public Importer {
+public:
+    [[nodiscard]] static auto create() noexcept -> Result<std::unique_ptr<FreeTypeImporter>>;
+
+    // Extracts glyph metrics + a baked SDF/bitmap atlas; returns the bytes
+    // of the `glibre.content.FontArtifact` precursor in `out_arena`.
+    [[nodiscard]] auto import_one(const SourceAsset&        src,
+                                  const NormalizeParams&    params,
+                                  ImporterArena&            out_arena,
+                                  const CancellationToken&  cancel) noexcept
+        -> Result<std::span<const std::byte>>;
+
+    ~FreeTypeImporter();
+
+private:
+    FreeTypeImporter() noexcept;
+    struct Impl;
+    Impl* impl_{nullptr};
+};
+
+// -----------------------------------------------------------------------
+// 5.5 CookKey (§4.1.3) — pure function of declared inputs.
+// -----------------------------------------------------------------------
+
+// Canonical serialization of cook-step processing parameters
+// (e.g. `geometry`'s meshlet/LOD configuration as supplied to the cook).
+struct ProcessingParams {
+    std::span<const std::byte> canonical_bytes{};
+};
+
+// Sorted tuple of (tool_name, tool_version) pairs the cook transitively
+// invokes (§4.1.3 component #5). Canonical sort order is lexicographic
+// over `tool_name`; identical tool_name/tool_version pair occurrences are
+// deduplicated before hashing.
+struct ToolVersionPair {
+    std::string_view tool_name;
+    std::string_view tool_version;
+};
+
+// Construct a `CookKey` from its declared inputs (§4.1.3 inv #1, #2).
+// Length-prefixed concatenation makes the digest unambiguous; the
+// function rejects denormalized representations (e.g. NaN floats inside
+// `params.canonical_bytes`) before hashing rather than producing a
+// distinct key for one logical input.
+[[nodiscard]] auto make_cook_key(const std::array<std::byte, 32>&  source_hash,
+                                 ImporterVersion                    importer_version,
+                                 const NormalizeParams&             normalize_params,
+                                 const ProcessingParams&            processing_params,
+                                 std::span<const ToolVersionPair>   downstream_tool_versions) noexcept
+    -> Result<CookKey>;
+
+// -----------------------------------------------------------------------
+// 5.6 CookedAsset — Fory-serialized artifact (§4.1.4).
+//
+// `payload` conforms to one of the three content-owned schema FQNs at its
+// declared `SchemaVersion`: `glibre.content.MeshArtifact`,
+// `glibre.content.TextureArtifact`, `glibre.content.FontArtifact`.
+// `content_hash = BLAKE3(payload)` is computed exactly once at the
+// cook-step boundary; thereafter the artifact is addressed by it
+// (§4.1.4 inv #1, #3).
+// -----------------------------------------------------------------------
+
+// The Fory FQN of the artifact class. Aliased here for readability;
+// `data` owns the schema-id type per `reviews/decisions/fory-codegen.md`.
+struct ArtifactSchemaId {
+    std::string_view fqn{};   // e.g. "glibre.content.MeshArtifact"
+    std::uint32_t    version{0};
+};
+
+struct CookedAsset {
+    // The Fory-serialized bytes of one of the per-class artifact schemas.
+    // Storage is owned by the cook session's staging arena until the CAS
+    // write commits.
+    std::span<const std::byte> payload{};
+
+    ArtifactSchemaId schema{};
+
+    // BLAKE3(payload). Computed by `seal` (below); never set by callers.
+    ContentHash content_hash{};
+};
+
+// Compute `content_hash`, validate `schema` against the registry, and
+// produce a `CookedAsset` ready for CAS write. Wrong FQN / wrong version
+// is `ImporterError::MalformedPayload` (§4.1.4 inv #2).
+[[nodiscard]] auto seal_cooked_asset(std::span<const std::byte> payload,
+                                     ArtifactSchemaId           schema) noexcept
+    -> Result<CookedAsset>;
+
+// -----------------------------------------------------------------------
+// 5.7 CAS — content-addressable store (§4.1.5).
+//
+// One CAS per workspace. Files at `cooked/<prefix>/<hash>` are written
+// via the atomic temp-then-`rename(2)` protocol (§4.1.5 inv #3),
+// mmap-readable once committed (§4.1.5 inv #5), and append-only at the
+// file layer (§4.1.5 inv #2). Hash collisions at BLAKE3 strength are
+// treated as cryptographically impossible.
+// -----------------------------------------------------------------------
+
+struct CasConfig {
+    // Workspace-rooted absolute path to `cooked/`. Validated at create()
+    // time against `platform::CanonicalPath`.
+    std::string_view cooked_root{};
+};
+
+// Read view of a CAS-resident artifact: an mmap region surfaced as a
+// const byte span. Lifetime is bounded by the residency mapping that
+// produced it (§4.1.7 inv #5).
+struct CasReadView {
+    std::span<const std::byte> bytes{};
+};
+
+class CAS {
+public:
+    [[nodiscard]] static auto create(const CasConfig&) noexcept
+        -> Result<std::unique_ptr<CAS>>;
+
+    // Atomic write: the bytes land at a collision-free temp path, are
+    // fsynced, then `rename(2)`d onto `cooked/<prefix>/<hash>`. Idempotent
+    // if the final path already exists with the same bytes
+    // (deduplication; §4.1.5 inv #4).
+    [[nodiscard]] auto put(const CookedAsset&) noexcept -> Result<void>;
+
+    // Open and mmap the artifact addressed by `hash`. The returned view
+    // is read-only; the underlying mapping is owned by the residency
+    // manager (which is the only mmap-region holder per §4.1.5).
+    [[nodiscard]] auto get(ContentHash hash) noexcept -> Result<CasReadView>;
+
+    // Cheap probe used by the cook session to decide cache-hit-vs-recook
+    // without opening / mmap'ing the file.
+    [[nodiscard]] auto contains(ContentHash hash) const noexcept -> bool;
+
+    ~CAS();
+    CAS(const CAS&)            = delete;
+    CAS& operator=(const CAS&) = delete;
+
+protected:
+    CAS() noexcept;
+};
+
+// -----------------------------------------------------------------------
+// 5.8 Manifest — `AssetId → ContentHash + dependencies` (§4.1.6).
+//
+// Persisted as `cooked/_manifest.fory` (Fory schema
+// `glibre.content.Manifest`); published atomically per `CookSession` via
+// temp-write + `rename(2)` (§4.1.6 inv #2). The runtime resolves
+// `AssetId → ContentHash` only through the active snapshot (§4.1.6 inv #1).
+// -----------------------------------------------------------------------
+
+// One edge in the dependency graph (§2): re-cooking the child invalidates
+// the parent. The closure is computed at publish time (§4.1.6 inv #4).
+struct DependencyEdge {
+    // Canonical form: the parent depends on either another asset
+    // (referenced by its stable `AssetId`) or directly on a source-tree
+    // path (workspace-relative under `assets/source/`).
+    AssetId          parent;
+    AssetId          child_asset_id;        // empty if the child is a source path
+    std::string_view child_source_path;     // empty if the child is an asset
+};
+
+struct ManifestEntry {
+    AssetId                          asset_id;
+    ContentHash                      content_hash{};
+    CookKey                          cook_key{};
+    std::span<const DependencyEdge>  edges{};
+};
+
+class Manifest {
+public:
+    // Open / validate the persistent manifest at workspace root. Missing
+    // file ⇒ empty manifest (first run); malformed payload ⇒
+    // `ImporterError::MalformedPayload`.
+    [[nodiscard]] static auto open(std::string_view workspace_root) noexcept
+        -> Result<std::unique_ptr<Manifest>>;
+
+    // Resolve a logical name to a current cooked content hash.
+    // Stale snapshot (asset_id no longer current) ⇒
+    // `ResidencyError::ManifestStale`.
+    [[nodiscard]] auto resolve(AssetId asset_id) const noexcept
+        -> Result<ContentHash>;
+
+    // Watcher fan-out: every asset whose recook is invalidated by a
+    // change to `asset_id` (transitive through the dependency graph).
+    // Bounded by the manifest's transitive dependents (§4.1.10 inv #4).
+    [[nodiscard]] auto dependents_of(AssetId asset_id) const noexcept
+        -> Result<std::span<const AssetId>>;
+
+    // Lookup the per-entry record (asset_id, hash, key, edges) used by
+    // the editor / cook session. Missing entry ⇒ `ManifestStale`.
+    [[nodiscard]] auto entry(AssetId asset_id) const noexcept
+        -> Result<ManifestEntry>;
+
+    ~Manifest();
+    Manifest(const Manifest&)            = delete;
+    Manifest& operator=(const Manifest&) = delete;
+
+protected:
+    Manifest() noexcept;
+};
+
+// -----------------------------------------------------------------------
+// 5.9 ResidencyManager (§4.1.7).
+//
+// One per process. Owns the in-RAM working set; defends `MemoryBudget`;
+// performs LRU + screen-coverage priority eviction. Mmap regions are the
+// manager's exclusive responsibility — the CAS itself is stateless across
+// reads (§4.1.5 / §4.1.7 inv #5).
+// -----------------------------------------------------------------------
+
+// Configured RAM ceiling the manager defends (§4.1.7 inv #1).
+struct MemoryBudget {
+    std::uint64_t bytes{0};
+};
+
+// Per-handle hint supplied by the consumer (typically `render` from a
+// per-view screen-coverage estimate). Larger ⇒ higher priority ⇒ later
+// eviction. Treated as an opaque non-negative scalar.
+struct ScreenCoverage {
+    float value{0.0f};
+};
+
+// One unit of work consumed by the manager's I/O lane (§2 ubiquitous
+// language). `deadline_ns` is a monotonic-clock deadline; missing it
+// surfaces as `ResidencyError::BudgetExceeded`.
+struct LoadRequest {
+    ContentHash    content_hash{};
+    ScreenCoverage screen_coverage{};
+    std::uint64_t  deadline_ns{0};
+};
+
+// Closed sum of states one residency slot can be in (§4.1.7 inv #2).
+// The state machine is total and only originates inside the manager.
+enum class Residency : std::uint8_t {
+    Unloaded,
+    Pending,
+    Resident,
+    Evicting,
+};
+
+// Generation-tagged residency slot index (§4.1.8 composition). The
+// manager increments `generation` on hot-reload swap so a stale handle's
+// dereference fails with `ResidencyError::ManifestStale` rather than UB.
+struct ResidencySlot {
+    std::uint64_t index{0};
+    std::uint64_t generation{0};
+    [[nodiscard]] friend constexpr bool operator==(ResidencySlot, ResidencySlot) noexcept = default;
+};
+
+class ResidencyManager {
+public:
+    [[nodiscard]] static auto create(const MemoryBudget&, CAS&) noexcept
+        -> Result<std::unique_ptr<ResidencyManager>>;
+
+    // Enqueue an async load. Admission may trigger progressive eviction
+    // before the new mapping is admitted (§4.1.7 inv #1). Failure modes:
+    // `HashNotInCas`, `IoFailure`, `BudgetExceeded`.
+    [[nodiscard]] auto load(const LoadRequest&) noexcept
+        -> Result<ResidencySlot>;
+
+    // Drop a previously-acquired slot. Decrements the residency
+    // ref-count; the slot becomes eviction-eligible when it reaches zero
+    // (§4.1.7 inv #3).
+    void release(ResidencySlot slot) noexcept;
+
+    // Inspect the current residency state for a slot. Total over all
+    // slot indices the manager has ever vended; stale generations
+    // surface as `Unloaded`.
+    [[nodiscard]] auto residency_of(ResidencySlot slot) const noexcept
+        -> Residency;
+
+    // Resolve a Resident slot to its mmap-backed byte view. Called by
+    // `AssetHandle<T>::view()`; non-Resident states surface as the
+    // appropriate `ResidencyError` (§4.1.7 inv #5; §4.1.8 inv #2).
+    [[nodiscard]] auto view_of(ResidencySlot slot) const noexcept
+        -> Result<std::span<const std::byte>>;
+
+    ~ResidencyManager();
+    ResidencyManager(const ResidencyManager&)            = delete;
+    ResidencyManager& operator=(const ResidencyManager&) = delete;
+
+protected:
+    ResidencyManager() noexcept;
+};
+
+// -----------------------------------------------------------------------
+// 5.10 AssetHandle<T> (§4.1.8).
+//
+// Type-keyed per artifact class (`Mesh`, `Texture`, `Font`); a wrong-class
+// manifest entry surfaces as `ImporterError::MalformedPayload` rather
+// than presenting a wrong-class blob (§4.1.8 inv #3). Construction
+// resolves through the active `Manifest` snapshot, increments the
+// residency ref-count via `ResidencyManager`, and stamps the slot
+// generation observed at acquire (§4.1.8 composition). Generation
+// tagging makes use-after-swap a `ResidencyError::ManifestStale`.
+// -----------------------------------------------------------------------
+
+// Closed sum of artifact classes the runtime can hold. One alias per
+// cooked-artifact schema (`glibre.content.MeshArtifact` etc.).
+namespace tags {
+struct mesh    {};
+struct texture {};
+struct font    {};
+}  // namespace tags
+
+template <class Tag>
+class AssetHandle {
+public:
+    constexpr AssetHandle() noexcept = default;
+
+    // Acquire by stable logical name. Walks the active manifest for the
+    // current `ContentHash`, asks the residency manager for a slot, and
+    // bumps the ref-count. Failure modes:
+    // `ResidencyError::ManifestStale` (no entry), `HashNotInCas`,
+    // `BudgetExceeded`, `IoFailure`, `ImporterError::MalformedPayload`
+    // (wrong artifact class for `Tag`).
+    [[nodiscard]] static auto acquire(AssetId          asset_id,
+                                      ScreenCoverage   coverage,
+                                      const Manifest&  manifest,
+                                      ResidencyManager& residency) noexcept
+        -> Result<AssetHandle>;
+
+    // Stable byte view of the current cooked payload while the handle's
+    // ref is non-zero; the slot cannot be evicted (§4.1.7 inv #3 ⇒
+    // §4.1.8 inv #2). Hot-reload swap is observed on the next call once
+    // the new hash is `Resident` (§4.1.8 inv #4).
+    [[nodiscard]] auto view() const noexcept
+        -> Result<std::span<const std::byte>>;
+
+    [[nodiscard]] auto kind()       const noexcept -> SourceKind;
+    [[nodiscard]] auto asset_id()   const noexcept -> AssetId       { return asset_id_; }
+    [[nodiscard]] auto valid()      const noexcept -> bool          { return residency_ != nullptr; }
+
+    // Rule-of-Five: copy / move bump / drop the residency ref-count.
+    AssetHandle(const AssetHandle&) noexcept;
+    AssetHandle& operator=(const AssetHandle&) noexcept;
+    AssetHandle(AssetHandle&&) noexcept;
+    AssetHandle& operator=(AssetHandle&&) noexcept;
+    ~AssetHandle();
+
+    [[nodiscard]] friend constexpr bool operator==(const AssetHandle& a,
+                                                   const AssetHandle& b) noexcept {
+        return a.asset_id_ == b.asset_id_ && a.slot_ == b.slot_;
+    }
+
+    // Hashable: two handles with equal (asset_id, slot) hash equally.
+    [[nodiscard]] auto hash() const noexcept -> std::uint64_t;
+
+private:
+    AssetId           asset_id_{};                  // empty AssetId == default Empty handle.
+    ResidencySlot     slot_{};
+    ContentHash       content_hash_at_acquire_{};
+    ResidencyManager* residency_{nullptr};
+};
+
+using MeshHandle    = AssetHandle<tags::mesh>;
+using TextureHandle = AssetHandle<tags::texture>;
+using FontHandle    = AssetHandle<tags::font>;
+
+// -----------------------------------------------------------------------
+// 5.11 RecookRequest + WatchEdge (§4.1.10).
+//
+// `WatchEdge` is the subscription content registers with `platform`'s
+// file watcher (§3.3); the watcher itself, debounce, and OS event
+// coalescing live in `platform`. A `FileEvent` delivered through the
+// platform watcher is translated by content into one or more
+// `RecookRequest` value objects via the manifest's `DependencyEdge`
+// graph (§4.1.10 inv #2).
+// -----------------------------------------------------------------------
+
+enum class RecookReason : std::uint8_t {
+    SourceChanged,        // a watched source file changed on disk.
+    DependentRecook,      // a parent in the DependencyEdge graph re-cooked.
+    ManualEditorCommand,  // editor-initiated recook of a specific asset.
+};
+
+struct RecookRequest {
+    AssetId      asset_id;
+    RecookReason reason{RecookReason::SourceChanged};
+};
+
+// Content-side debounce / dedup policy paired with each subscription.
+// Pure data — `platform` reads the values verbatim; content does not
+// debounce here (the watcher does, per §3.3).
+struct DebouncePolicy {
+    std::uint32_t coalesce_ms{50};
+    bool          dedup_consecutive_writes{true};
+};
+
+class WatchEdge {
+public:
+    // Register a subscription with `platform`'s file watcher. Duplicate
+    // subscriptions for the same path collapse at registration time
+    // (§4.1.10 inv #1).
+    [[nodiscard]] static auto subscribe(std::string_view source_subtree,
+                                        DebouncePolicy   policy) noexcept
+        -> Result<WatchEdge>;
+
+    [[nodiscard]] auto path()           const noexcept -> std::string_view { return path_; }
+    [[nodiscard]] auto debounce()       const noexcept -> DebouncePolicy   { return policy_; }
+
+    // Translate one platform-delivered `FileEvent` into the set of
+    // `RecookRequest`s implied by the active manifest snapshot.
+    // Pure of source-tree I/O (§4.1.10 inv #3).
+    [[nodiscard]] auto translate(const ::glibre::platform::FileEvent& ev,
+                                 const Manifest&                       manifest,
+                                 std::span<RecookRequest>              out) const noexcept
+        -> Result<std::size_t>;
+
+    WatchEdge(WatchEdge&&) noexcept;
+    WatchEdge& operator=(WatchEdge&&) noexcept;
+    WatchEdge(const WatchEdge&)            = delete;
+    WatchEdge& operator=(const WatchEdge&) = delete;
+    ~WatchEdge();
+
+private:
+    WatchEdge() noexcept = default;
+
+    std::string_view path_{};
+    DebouncePolicy   policy_{};
+    struct Impl;
+    Impl* impl_{nullptr};
+};
+
+// -----------------------------------------------------------------------
+// 5.12 CookSession — bounded run that publishes one manifest update (§4.1.9).
+//
+// Sessions can be triggered by editor command (full / partial cook), by
+// initial workspace scan, or by a `WatchEdge` firing. A session that
+// fails any constituent cook step rolls back its staging table; the
+// active `Manifest` remains the prior snapshot (§4.1.9 inv #1).
+// CAS-write strictly precedes manifest-publish (§4.2 cross-aggregate
+// invariant #2).
+// -----------------------------------------------------------------------
+
+// Outcome of a session's end-of-session publish.
+enum class CookOutcome : std::uint8_t {
+    Published,  // every staged asset committed; new manifest is active.
+    NoChange,   // every request was a cache hit; manifest unchanged.
+    RolledBack, // a cook step failed; prior manifest remains active.
+    Cancelled,  // cancellation observed before publish.
+};
+
+struct CookReport {
+    CookOutcome   outcome{CookOutcome::NoChange};
+    std::uint32_t cooks_executed{0};
+    std::uint32_t cache_hits{0};
+};
+
+class CookSession {
+public:
+    [[nodiscard]] static auto begin(Manifest&         manifest,
+                                    CAS&              cas,
+                                    ResidencyManager& residency) noexcept
+        -> Result<std::unique_ptr<CookSession>>;
+
+    // Enqueue a recook request. Duplicate `AssetId`s within a session
+    // collapse to one cook step (§4.1.9 inv #4).
+    [[nodiscard]] auto enqueue(RecookRequest) noexcept -> Result<void>;
+
+    // Run all queued cooks in dependency order (children before parents),
+    // CAS-write each `CookedAsset`, then atomically publish the new
+    // manifest snapshot. The session is consumed; calling further
+    // methods on it is a defect.
+    [[nodiscard]] auto commit() noexcept -> Result<CookReport>;
+
+    // Cancel an in-flight session. Workers observe the token and return
+    // `ImporterError::Cancelled`; the active manifest is unchanged.
+    void cancel() noexcept;
+
+    ~CookSession();
+    CookSession(const CookSession&)            = delete;
+    CookSession& operator=(const CookSession&) = delete;
+
+protected:
+    CookSession() noexcept;
+};
+
+}  // namespace glibre::content
 ```
 
-Event types, serialized schemas (Fory), error types.
+### 5.1 Event types
+
+Content emits no ECS-bus events at MVP; the in-process event-shaped
+surface it produces is the `CookOutcome` value returned by
+`CookSession::commit()` (success / no-change / rollback / cancelled),
+plus the `ResidencyManager`'s state-machine transitions
+(`Unloaded → Pending → Resident → Evicting → Unloaded`) which are
+internal and are not exported as wire events. The `WatchEdge` does
+not own any event delivery — it consumes
+`glibre::platform::FileEvent` (§4.1.10) and produces
+`RecookRequest` value objects which feed back into a `CookSession`.
+External observers (editor / tooling) read state by querying
+`Manifest::entry(...)` and `Manifest::resolve(...)`; there is no
+publish-subscribe seam at the content boundary.
+
+### 5.2 Serialized schemas (Fory)
+
+Content is a producer of bytes conforming to schemas authored under
+`data/schemas/content/` per `reviews/decisions/fory-codegen.md`; it
+never defines a schema (§3.3). The schemas this surface depends on,
+listed for cross-reference:
+
+- `data/schemas/content/MeshArtifact.fory` — FQN
+  `glibre.content.MeshArtifact`. Cooked output of the mesh path
+  (§4.1.4 composition); consumed by `geometry` for downstream
+  meshlet / LOD / BLAS construction inside the cook step.
+- `data/schemas/content/TextureArtifact.fory` — FQN
+  `glibre.content.TextureArtifact`. Cooked output of the texture
+  path; consumed by `render`'s upload seam (which owns format
+  selection / descriptor binding).
+- `data/schemas/content/FontArtifact.fory` — FQN
+  `glibre.content.FontArtifact`. Cooked output of the font path;
+  consumed by the editor and any future UI plugin.
+- `data/schemas/content/Manifest.fory` — FQN
+  `glibre.content.Manifest`. The persisted `AssetId → ContentHash +
+  CookKey + DependencyEdge*` table written to `cooked/_manifest.fory`
+  via the atomic-publish protocol (§4.1.6 inv #2). Schema authoring
+  and version-N→N+1 migration plumbing live in `data`; the migration
+  *body* is owned here per `reviews/decisions/fory-codegen.md`
+  §"Migration Mechanic". Migration rules are filled in §7 and §8.
+
+The schemas above are referenced through the `ArtifactSchemaId` /
+`Envelope<T>` surface declared in `data`'s §5; this header does not
+re-declare them.
+
+### 5.3 Error types
+
+The closed sum is `glibre::content::Error` declared above —
+`std::variant<ImporterError, ResidencyError>`. Each enumerator maps to
+one §4 invariant:
+
+| Enumerator                          | Raised when                                                    | Origin                          |
+|-------------------------------------|----------------------------------------------------------------|---------------------------------|
+| `ImporterError::SourceNotFound`     | path escapes `assets/source/` root or file is missing          | §4.1.1 inv #1                   |
+| `ImporterError::MagicMismatch`      | importer SDK reports format-prefix mismatch                    | §4.1.2 inv #2                   |
+| `ImporterError::UnsupportedVersion` | format known but file version not supported                    | §4.1.2 inv #2                   |
+| `ImporterError::MalformedPayload`   | bad cook output / wrong artifact class / dependency cycle      | §4.1.4 inv #2; §4.1.6 inv #4    |
+| `ImporterError::MissingDependency`  | child asset referenced by a manifest entry cannot be resolved  | §4.1.6 inv #4                   |
+| `ImporterError::Cancelled`          | `CookSession` cancellation token observed mid-import           | §4.1.2 inv #5; §4.1.9 inv #5    |
+| `ResidencyError::HashNotInCas`      | `ContentHash` referenced by manifest is missing from `cooked/` | §4.1.7 inv #5; §4.1.8 inv #5    |
+| `ResidencyError::ManifestStale`     | handle resolved against superseded manifest snapshot           | §4.1.6 inv #2; §4.1.8 inv #4    |
+| `ResidencyError::BudgetExceeded`    | `LoadRequest` deadline elapsed without admission               | §4.1.7 inv #1                   |
+| `ResidencyError::IoFailure`         | `mmap`/`open` returned an OS error                             | §4.1.7 inv #5                   |
+
+`core` rolls `glibre::content::Error` into the engine-wide
+`glibre::Error` variant when the content plugin lands; that
+registration is a `core` change, not a `content` change. Composition
+across boundaries follows
+`reviews/decisions/error-model.md` §"Composition Rules" #2 — the call
+site that crosses into `content` from a sibling context translates the
+inner enumerator into its own context's enum, never auto-upcasts.
+
+Verification: the stub above compiles cleanly with
+`clang++ -std=c++23 -fsyntax-only -Wall -Wextra -Wpedantic`, also
+under `-fno-exceptions`, on libc++ as shipped with macOS Homebrew
+LLVM (clang version 19+).
 
 ## 6. Internal Architecture
 
