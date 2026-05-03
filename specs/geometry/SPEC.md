@@ -3703,7 +3703,685 @@ had a working window.
 
 ## 10. Failure Modes & Error Model
 
-Typed errors. Recovery.
+Geometry's failure surface is the closed sum `geometry::Error` declared
+in §5 (lines 1242–1297) — the single arm geometry contributes to
+`glibre::Error`'s variant per `reviews/decisions/error-model.md`. Every
+public function in §5 returns `Result<T> = std::expected<T,
+glibre::Error>`; geometry never throws across the plugin boundary
+(`-fno-exceptions` is enforced engine-wide per the error-model
+decision record §"Decision" rule 3). §10 fills four slots that §5 left
+implicit:
+
+1. **Per-arm contract** — for each enumerator: trigger, recovery shape,
+   severity, and the structured observer surface (if any) that fires
+   alongside.
+2. **Aggregate-by-aggregate failure surface** — which §5 entry points
+   return which arms, including the cross-aggregate translations that
+   happen at the boundaries between `PakReader`, `DecodePool`,
+   `GeometryRegistry`, and `GpuMeshBuffers`.
+3. **Recovery shapes** — three named recovery loops (residency
+   downgrade on exhaustion, decode-pool back-pressure retry, hot-reload
+   refusal continuation) referenced by the per-arm rows above.
+4. **Refusals** — what is *out of* §10 scope, with the routing
+   destination. Cooker-side errors live behind the
+   `GLIBRE_GEOMETRY_COOK` macro and exit through `tools/glibre-meshcc`
+   process exit codes; the runtime never observes them and §10 covers
+   only the runtime-reachable subset of `geometry::Error`.
+
+§10 introduces no new public types. The closed sum stays as declared in
+§5; promoting any of the recovery situations called out in §10.4 to a
+new variant requires an ABI bump and the same "deliberate central
+edit" rule that §4.2 invariant 7 ratifies.
+
+### 10.1 Runtime vs cook-time scope
+
+The `geometry::Error` enumerators in §5 split into two disjoint sets by
+process lifetime. Only the runtime set crosses live engine boundaries
+and only it is the §10 contract. The cook-time set surfaces inside
+`tools/glibre-meshcc` and is mapped to process exit codes per §10.7.
+
+| Set        | Enumerators (per §5)                                                                                                                                                                                                                                                                                | Surface                                                                                                                       |
+|------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------|
+| Runtime    | `PakHeaderMagicMismatch`, `PakFormatHashMismatch`, `PakHeaderOffsetOutOfRange`, `PakReaderUnvalidated`, `PakIoFailed`, `PakPageIntegrityFailed`, `DecodePoolUndersized`, `DecodePoolOverflow`, `DecodePoolBusy`, `DracoDecodeFailed`, `MeshHandleStale`, `MeshletGroupHandleStale`, `MeshHandleNotFound`, `MeshAlreadyRegistered`, `ResidencyTransitionIllegal`, `ResidencyHintImmutable`, `PageNotResident`, `GpuUploadRefused`, `GpuBufferAllocFailed` | Returned through `Result<T>` from §5 entry points; consumed by `core`'s log helper and (where named below) the engine observer bus. |
+| Cook-time  | `MeshSourceInvalidTopology`, `AttributeLayoutMismatch`, `MeshSourceEmpty`, `MeshoptStageFailed`, `MeshletOversize`, `MeshletBoundsInvalid`, `ClusterDAGCycle`, `LODBandSseNonMonotonic`, `LOD0CoverIncomplete`, `DracoEncodeFailed`, `DracoProfileUnknown`, `BLASRecipeInvalid`, `PakWriterIoFailed`, `PakPageOversize`, `CookManifestInvalid`, `CookManifestMissingField` | Returned only inside `cook::cook_mesh` / `cook::cook_is_up_to_date` / `cook::inspect_pak`; surfaced by `glibre-meshcc` as a process exit code (§10.7). |
+
+`BLASRecipeInvalid` is cook-time-only in MVP because the runtime never
+re-validates the recipe — `PakHeader` validation (`PakFormatHashMismatch`)
+is the runtime gate that proves the recipe is the one cooked against
+the engine's compiled-in `FormatHash` (§4.1.7.1, §4.2 invariant 1).
+Promoting it to a runtime arm is on the §12 watch-list and trips when a
+second consumer (e.g. an editor "validate pak" path) needs the
+discrimination.
+
+### 10.2 Per-arm contract — runtime arms
+
+For each runtime arm: trigger / recovery / severity / observer event.
+"Recovery" names what the *caller* may do; geometry itself never
+auto-retries across the boundary (error-model decision record
+§"Composition Rules" rule 2). Observer events listed cite the
+engine-wide bus per `reviews/decisions/hot-reload-protocol.md`;
+geometry publishes no events of its own outside §8.5's `MeshReplaced`
+and the `HotReloadRefused` family.
+
+#### `PakHeaderMagicMismatch`
+
+- **Trigger.** `PakReader` construction observed a `PakHeader` whose
+  four-byte magic does not match `glibre.pak.v1` (§7.2.2 reader-side
+  validation order step 1). The mapped bytes are not a glibre meshlet
+  pak — wrong file, wrong format, or truncation that landed inside the
+  magic field.
+- **Recovery.** Refuse load. The registry never issues a `MeshHandle`
+  for the offending bytes; `register_mesh` returns this arm and the
+  caller (`content`) drops the registration request. No retry: the
+  bytes will not become a valid pak by re-trying. If the request
+  originated from `content`'s filesystem watcher, the watcher logs the
+  rejected path and continues observing (per §8.2 refusal continuation).
+- **Severity.** `error`. Always. Magic mismatch is almost always a
+  build-system or asset-pipeline misrouting bug (cooker output landed
+  in the wrong directory, or the runtime mounted the wrong content
+  archive); silencing it would mask deployment failures.
+- **Observer.** None at registration time. If hit during a hot-reload
+  swap (§8.4.1 pre-swap header validation), the engine fires
+  `HotReloadRefused { plugin_fqn: "glibre.geometry", cause:
+  geometry::Error::PakHeaderMagicMismatch }` and the prior pak stays
+  live (§8.5 refusal contract).
+
+#### `PakFormatHashMismatch`
+
+- **Trigger.** `PakHeader.format_hash` differs from the engine's
+  compiled-in `FormatHash` (§4.2 invariant 1, §7.2.2 reader-side
+  validation order step 3, §8.2 sole hot-reload refusal gate). The pak
+  was cooked against a different schema version; no migration path
+  exists by §7.3.2.
+- **Recovery.** Refuse load. There is no in-process fix; the asset must
+  be re-cooked. At first registration, `register_mesh` returns this arm
+  and the caller (`content`) routes to its missing-asset fallback
+  (engine's default placeholder mesh). At hot-reload time, the previous
+  pak stays live and rendering continues against the prior bytes per
+  §8.2.
+- **Severity.** `error` at first-load (the asset is unusable);
+  `warn` at hot-reload (the prior pak still serves; the operator sees
+  an actionable "asset out of date" message in the editor and re-cooks).
+- **Observer.** At hot-reload time: `HotReloadRefused { cause:
+  geometry::Error::PakFormatHashMismatch }`. At first-load time: none —
+  the failure flows up the `Result<T>` chain; the missing-asset
+  fallback is the caller's domain.
+
+#### `PakHeaderOffsetOutOfRange`
+
+- **Trigger.** `PakHeader` declared a page-table or BLAS-recipe offset
+  that overruns the mapped byte span (§7.2.2 reader-side validation
+  order step 5). Either the file is truncated below its header's
+  declared size, or the header was tampered with.
+- **Recovery.** Refuse load. Same shape as `PakHeaderMagicMismatch`.
+  The pak is malformed; re-cook is required.
+- **Severity.** `error`.
+- **Observer.** Same hot-reload refusal arm as the magic case if hit
+  during a swap.
+
+#### `PakReaderUnvalidated`
+
+- **Trigger.** A `PakReader` payload-touching method (`page_bytes`,
+  `page_hint`) was called before construction-time validation
+  succeeded. By construction this is a programming error — §4.1.11
+  invariant 1 forbids it — but the runtime returns this arm rather
+  than aborting so callers retain control of the failure.
+- **Recovery.** Caller fixes the call site. The reader is unusable
+  until reconstructed; there is no "retry validation" entry point.
+  CI's geometry test target promotes this arm to a build failure
+  (per §11 acceptance criteria's contract test).
+- **Severity.** `error`. Always — this is a structural callsite bug.
+- **Observer.** None.
+
+#### `PakIoFailed`
+
+- **Trigger.** A read against the pak's mapped region surfaced a host
+  I/O failure (typically EIO or a disconnected network volume on a dev
+  workstation; not expected on shipping mounts where paks are
+  bundle-resident). Translation from the platform layer's `IoFailure`
+  arm happens at the geometry boundary per error-model composition
+  rule 2; raw `OsCode` never crosses into geometry.
+- **Recovery.** Refuse load (or evict if already loaded). The registry
+  invalidates the affected `MeshHandle` and the caller falls back to
+  the engine's default asset. No retry inside geometry; the storage
+  layer's own retry budget (platform §10.3.6 `read_async`) has already
+  been exhausted by the time we see this arm.
+- **Severity.** `error`. The asset is unreachable; subsequent draws
+  for this `MeshHandle` will fail until re-registered.
+- **Observer.** None at first-load. If hit mid-frame (e.g. an evict /
+  re-load race), the next phase 7 `gpu_buffers(...)` call surfaces
+  `MeshHandleStale` and that arm's recovery owns the downstream cleanup.
+
+#### `PakPageIntegrityFailed`
+
+- **Trigger.** A pak page's content-hash field disagreed with a hash
+  recomputed over the page's raw bytes at decode time (§7.2.1 byte
+  layout integrity check). Bit-rot on disk, partial write that
+  survived rename, or a mid-stream corruption from a network mount.
+- **Recovery.** Refuse decode for the affected page. The residency
+  state machine transitions the page to `NotResident`
+  (`request_eviction` semantics; §10.3 below) and the LOD-band
+  selector falls back to a coarser band whose pages remain intact
+  (§10.4.1 residency-downgrade loop). If every coarser band's pages
+  are also corrupt, the registry surfaces `MeshHandleStale` on the
+  next `gpu_buffers` lookup.
+- **Severity.** `error`. Disk integrity failures escalate to the
+  operator; recurring occurrences within a session imply a hardware
+  or filesystem fault and the editor surfaces an "asset corrupted"
+  banner.
+- **Observer.** None on the first occurrence; the residency-downgrade
+  path is silent. A `MeshReplaced` event fires only if the
+  hot-reload coordinator chooses to re-load the asset from a clean
+  source; that path is `content`'s decision, not geometry's.
+
+#### `DecodePoolUndersized`
+
+- **Trigger.** A `PakHeader`'s declared per-attribute scratch maxima
+  (§4.1.12 sizing rule, §7.2.2 reader-side validation order step 6)
+  exceeded the live `DecodePool`'s capacity. Hit during
+  `DecodePool::accommodate(...)` at `register_mesh` time, or during
+  hot-reload pre-swap header validation (§8.4.1) when a swap-in pak's
+  declared maxima outgrow the pool sized at engine init.
+- **Recovery.** Refuse load (or refuse swap). The registry rejects the
+  `register_mesh` call with this arm; `content` either retries with a
+  pre-validated cookpath that fits the existing pool, or — for the
+  hot-reload case — leaves the prior pak live (§8.4.1 invariants).
+  Pool resizing mid-frame is *not* a supported recovery: §4.1.12
+  invariant 1 fixes the pool sizing for the engine session, and
+  growing it would require draining every in-flight decode and
+  reallocating scratch arenas — explicitly out of scope per
+  PHILOSOPHY §8 (no mid-frame mutation).
+- **Severity.** `error` at engine-init / first-load (the asset cannot
+  be served at all); `warn` at hot-reload (the prior pak still serves).
+- **Observer.** At hot-reload: `HotReloadRefused { cause:
+  geometry::Error::DecodePoolUndersized }`. At first-load: none.
+
+#### `DecodePoolOverflow`
+
+- **Trigger.** `DecodePool::decode(...)` produced a decoded byte count
+  that exceeded the slot's pre-validated capacity. By §4.1.12
+  invariant 1 this cannot happen for paks that passed
+  `accommodate(...)` — `DecodePoolOverflow` is the runtime guard for
+  Draco decoder bugs or memory-corruption scenarios where the
+  decoder writes past its declared bound.
+- **Recovery.** Refuse decode. The `MeshHandle`'s LOD-band selector
+  treats the affected page as `NotResident` and falls through to
+  coarser bands (§10.4.1). The session's geometry plugin marks the
+  affected `DracoQuantisationProfile` as quarantined for the rest of
+  the session — subsequent decodes against the same profile return
+  `DracoDecodeFailed` directly without re-entering the failing path.
+- **Severity.** `error`. Always — this is a structural decoder
+  invariant violation and warrants a crash dump in dev builds (the
+  `glibre-meshcc` cooker is deterministic, so a runtime overflow
+  implies a real decoder bug worth catching loudly).
+- **Observer.** None.
+
+#### `DecodePoolBusy`
+
+- **Trigger.** `DecodePool::decode(...)` could not acquire a free slot
+  inside its bounded-wait window (§4.1.12 invariant 2). Every slot for
+  the requested `AttributeKind` is in flight on a worker thread.
+- **Recovery.** Caller backs off and retries on the next frame. The
+  off-frame decode worker (§6.3.2) drives the retry; the LOD-band
+  selector treats the in-flight page as still `Pending` and either
+  serves the prior frame's resolved `GpuMeshBuffers` (if cached) or
+  falls back to a coarser band whose pages are already resident
+  (§10.4.1). This is the documented "decode-pool back-pressure"
+  recovery shape; it is *bounded* — three consecutive frames of
+  back-pressure on the same `(MeshHandle, page_index, AttributeKind)`
+  triple escalate to `MeshHandleStale` and the registry drops the
+  request, freeing the residency slot for other work (§10.4.2).
+- **Severity.** `debug` for any single occurrence (routine when the
+  decode budget is saturated, e.g. the first frame after a teleport
+  triggers a residency burst); `warn` at the three-frame escalation
+  boundary; `error` only if the escalation itself fails.
+- **Observer.** None for the routine path. The escalation surfaces as
+  `MeshHandleStale` and that arm's rules apply.
+
+#### `DracoDecodeFailed`
+
+- **Trigger.** Draco's library-level decode entry returned a failure
+  status (typically a corrupted compressed payload, a profile
+  mismatch the runtime did not catch at header validation, or a
+  Draco internal-state assertion). Wrapped at the
+  `runtime/decode_pool.cpp` ingress per error-model composition rule
+  3 (third-party throws/asserts converted to `geometry::Error` at
+  the seam).
+- **Recovery.** Same as `PakPageIntegrityFailed`: refuse decode,
+  transition the page to `NotResident`, fall back to a coarser band
+  via the residency-downgrade loop (§10.4.1). The pak is not
+  evicted wholesale — other pages may still be intact.
+- **Severity.** `error`. Decode failures imply either disk corruption
+  not caught by the page-hash check (rare; the hash is over raw
+  bytes, not decoded output) or a decoder bug; both warrant operator
+  visibility.
+- **Observer.** None.
+
+#### `MeshHandleStale`
+
+- **Trigger.** A handle's generation counter does not match the
+  registry's slot generation. The `MeshHandle` was issued, the slot
+  was reused after `unregister_mesh` (or after a hot-reload that
+  invalidated the slot), and the holder kept the old value.
+- **Recovery.** Caller drops the handle and re-resolves. The render
+  proxy update path (§8.5 observer responsibility 1) is the canonical
+  consumer: on `MeshReplaced`, render rebuilds its draw lists keyed
+  on the new handle. Outside hot-reload, callers that observe
+  `MeshHandleStale` on a handle they did not expect to be replaced
+  treat it as a programming error and surface it to the editor.
+- **Severity.** `warn` when accompanied by a `MeshReplaced` event in
+  the same frame (the swap is the explanation); `error` otherwise
+  (an unexpected stale handle is a lifecycle bug).
+- **Observer.** `MeshReplaced` (§8.5) when the staleness was caused by
+  a hot-reload; nothing otherwise.
+
+#### `MeshletGroupHandleStale`
+
+- **Trigger.** A `MeshletGroupHandle` whose generation matches a live
+  `MeshHandle` but whose pak-internal group id no longer resolves —
+  the post-swap pak's `ClusterDAG` reorganised the group set such
+  that the prior handle's id is no longer present (§8.4.3 step 2).
+  The render proxy retained the handle across a hot-reload that
+  changed DAG topology.
+- **Recovery.** Caller drops the per-group draw entry and waits one
+  frame; the next phase 6 cull-extract resolves a fresh
+  `MeshletGroupHandle` from the new pak. Render's contract in
+  §8.5 observer responsibility 1 is precisely this: walk the
+  `RenderProxy` SoA, mark stale groups, rebuild on the next phase 6.
+- **Severity.** `warn`. Always paired with a `MeshReplaced` event;
+  expected in the topology-changed hot-reload path (§8.6 fourth
+  fixture). `error` only if observed without an accompanying
+  `MeshReplaced` in the same frame, which would be a registry
+  consistency bug.
+- **Observer.** `MeshReplaced { groups_stale > 0, ... }` in the same
+  frame (§8.5). The `groups_stale` count names how many handles
+  observers should expect to see this arm on.
+
+#### `MeshHandleNotFound`
+
+- **Trigger.** `register_mesh`-style entry points were called with a
+  handle that was never issued (e.g. a default-constructed
+  `MeshHandle{}` with `valid() == false`, or a handle drawn from a
+  different `GeometryRegistry` instance — disallowed but not
+  prevented at compile time).
+- **Recovery.** Caller fixes the call site. There is no in-process
+  recovery for "wrong registry" or "default handle" — both indicate
+  a structural lifecycle bug.
+- **Severity.** `error`. Always.
+- **Observer.** None.
+
+#### `MeshAlreadyRegistered`
+
+- **Trigger.** `register_mesh` was called with a `pak_path` that the
+  registry already maps to a live `MeshHandle`. By §4.1.14 invariant
+  3 the registry is keyed on canonical pak path; duplicate
+  registration is refused rather than silently merged.
+- **Recovery.** Caller drops the duplicate request. If the existing
+  handle is acceptable (the common case for `content`'s asset
+  manager, which de-duplicates by path), the duplicate registration
+  is logged and the prior handle is returned via a separate
+  `pak_handle_for(pak_path)` lookup. If the caller intended a
+  hot-reload, it must route through `enqueue_pak_reload` instead
+  (§8.6 reload trigger).
+- **Severity.** `warn`. Programming-error-adjacent: usually means two
+  asset-manager paths are racing the same mesh, which is benign but
+  worth surfacing.
+- **Observer.** None.
+
+#### `ResidencyTransitionIllegal`
+
+- **Trigger.** `request_residency` / `request_eviction` /
+  `notify_page_decoded` produced a state transition that violates
+  §4.2 invariant 6's monotonic per-frame rule (e.g. `Resident →
+  Pending`, or two `notify_page_decoded` for the same page in one
+  frame). The registry's compare-and-swap detected the conflict.
+- **Recovery.** Caller fixes the call site. There is no automatic
+  back-off; the residency state machine refuses the illegal
+  transition and the prior state stays in force. `content`'s
+  scheduler is the canonical caller and it serialises requests per
+  page per frame to prevent this; the arm exists as a guard.
+- **Severity.** `error`. Always — concurrent-residency bugs corrupt
+  the per-frame snapshot every other phase 6/7 reader depends on.
+- **Observer.** None.
+
+#### `ResidencyHintImmutable`
+
+- **Trigger.** A caller attempted to write a `ResidencyHint` at
+  runtime. By §4.1.13 invariant 4 the hint is cook-time-baked into
+  `PakHeader` and is read-only; the public API exposes it through
+  `page_hint(...)` only. The arm exists for debug builds where the
+  registry detects an internal write attempt (e.g. a hot-reload
+  migration step that misuses the slot).
+- **Recovery.** Caller fixes the call site; this is always a
+  programming error.
+- **Severity.** `error`.
+- **Observer.** None.
+
+#### `PageNotResident`
+
+- **Trigger.** `gpu_buffers(mesh, band)` was called with a `band`
+  whose pages have not been promoted to `Resident`. The LOD-band
+  selector should have caught this earlier; this arm is the runtime
+  guard for the case where render consumes a band the residency
+  state machine has not finished promoting.
+- **Recovery.** Caller serves the prior frame's `GpuMeshBuffers` (if
+  cached) or falls back to a coarser band whose pages *are*
+  resident. This is the residency-downgrade loop (§10.4.1) entered
+  through a different door.
+- **Severity.** `debug`. Routine on the first frame after a residency
+  request; `warn` only if observed three consecutive frames without
+  promotion progress (the same back-pressure escalation rule as
+  `DecodePoolBusy`).
+- **Observer.** None.
+
+#### `GpuUploadRefused`
+
+- **Trigger.** Render's buffer allocator rejected a `notify_page_decoded`
+  upload request — the scratch upload heap (`render::Error::ResourceResidencyExceeded`
+  at the render boundary) was full. Translated at the geometry
+  boundary per error-model composition rule 2; the underlying
+  `render::Error` does not leak into geometry's enum.
+- **Recovery.** Caller backs off. The decoded buffer's RAII handle
+  returns the slot to the pool (§4.1.12 invariant 2), and the next
+  frame's residency-promotion path retries the upload. Three
+  consecutive frames of refusal escalate to `MeshHandleStale` for
+  the affected mesh and the residency-downgrade loop drops the band
+  (§10.4.1).
+- **Severity.** `warn` for the routine back-pressure case; `error`
+  at escalation.
+- **Observer.** None for the routine path.
+
+#### `GpuBufferAllocFailed`
+
+- **Trigger.** Render's buffer allocator could not service the
+  per-band `GpuMeshBuffers` slot allocation (`render::Error::DeviceLost`
+  or out-of-memory at the render boundary). Same translation seam as
+  `GpuUploadRefused`.
+- **Recovery.** Caller treats the band as unrenderable for the
+  current frame and falls back to a coarser band (§10.4.1). If
+  `render::Error::DeviceLost` was the underlying cause, render's own
+  device-recovery path (peer SPEC `specs/render/SPEC.md` §10) drives
+  the recreation; geometry's `MeshHandle`s survive the device reset
+  per §4.2 invariant 9 (handles are payload-free).
+- **Severity.** `error`. GPU allocation failures are operator-visible
+  and the editor surfaces an "out of GPU memory" banner.
+- **Observer.** Render's `DeviceLost` event (peer SPEC); geometry adds
+  none.
+
+### 10.3 Aggregate-by-aggregate failure surface
+
+Each runtime aggregate from §4 (the §4.1.9–§4.1.15 set) enumerates the
+arms its §5 entry points may return. Cross-aggregate translation
+happens at the boundary as named — geometry never re-translates a
+peer context's `Error` arm; it converts at ingress per error-model
+composition rule 2.
+
+#### 10.3.1 `GeometryRegistry` (§4.1.14)
+
+| Entry point                | Returnable arms                                                                                                                                       | Trigger summary                                                                       |
+|----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------|
+| `instance`                 | (none — total)                                                                                                                                        | Process-singleton accessor.                                                           |
+| `create`                   | `DecodePoolUndersized`                                                                                                                                | Initial pool desc fails its own self-consistency check.                               |
+| `register_mesh`            | `PakHeaderMagicMismatch`, `PakFormatHashMismatch`, `PakHeaderOffsetOutOfRange`, `PakIoFailed`, `PakPageIntegrityFailed`, `DecodePoolUndersized`, `MeshAlreadyRegistered` | Pak header validation chain; pool accommodation; duplicate-by-path refusal.           |
+| `unregister_mesh`          | `MeshHandleStale`, `MeshHandleNotFound`                                                                                                               | Stale or never-issued handle.                                                         |
+| `pak_header`               | `MeshHandleStale`, `MeshHandleNotFound`                                                                                                               | Handle resolution failure.                                                            |
+| `blas_recipe`              | `MeshHandleStale`, `MeshHandleNotFound`                                                                                                               | Handle resolution failure (recipe is always present once registered; cook gates that). |
+| `select_lod_group`         | `MeshHandleStale`, `MeshHandleNotFound`                                                                                                               | Handle resolution failure; LOD selection is total over registered meshes.             |
+| `resolve_group`            | `MeshletGroupHandleStale`, `MeshHandleStale`                                                                                                          | Group handle id no longer present (post-swap topology change).                        |
+| `lod0_groups`              | `MeshHandleStale`, `MeshHandleNotFound`                                                                                                               | Handle resolution failure.                                                            |
+| `gpu_buffers`              | `MeshHandleStale`, `MeshHandleNotFound`, `PageNotResident`, `GpuBufferAllocFailed`                                                                    | Handle resolution; band not yet promoted; render allocator refused.                   |
+| `page_state` / `page_hint` | `MeshHandleStale`, `MeshHandleNotFound`                                                                                                               | Handle resolution failure.                                                            |
+| `request_residency`        | `MeshHandleStale`, `MeshHandleNotFound`, `ResidencyTransitionIllegal`                                                                                 | Handle resolution; concurrent-write conflict.                                         |
+| `request_eviction`         | `MeshHandleStale`, `MeshHandleNotFound`, `ResidencyTransitionIllegal`                                                                                 | Handle resolution; concurrent-write conflict.                                         |
+| `notify_page_decoded`      | `MeshHandleStale`, `MeshHandleNotFound`, `ResidencyTransitionIllegal`, `GpuUploadRefused`                                                             | Handle resolution; per-frame double-decode; render upload refused.                    |
+
+#### 10.3.2 `PakReader` (§4.1.11)
+
+| Entry point  | Returnable arms                                                  | Trigger summary                                                                         |
+|--------------|------------------------------------------------------------------|-----------------------------------------------------------------------------------------|
+| `header`     | `PakReaderUnvalidated`                                           | Called before construction-time validation completed (debug-only — see §10.2 contract). |
+| `page_count` | (none — total)                                                   | Read of validated counter.                                                              |
+| `page_hint`  | `PakReaderUnvalidated`, `PakHeaderOffsetOutOfRange`              | Index out of range against validated table.                                             |
+| `page_bytes` | `PakReaderUnvalidated`, `PakHeaderOffsetOutOfRange`, `PakIoFailed`, `PakPageIntegrityFailed` | Index out of range; mapped read failed; page hash mismatch.                             |
+
+`PakReader` does not own residency state; eviction-driven faults
+surface through `GeometryRegistry::page_state` instead.
+
+#### 10.3.3 `DecodePool` (§4.1.12)
+
+| Entry point   | Returnable arms                                                   | Trigger summary                                                                  |
+|---------------|-------------------------------------------------------------------|----------------------------------------------------------------------------------|
+| `create`      | `DecodePoolUndersized`                                            | `DecodePoolDesc` fails its own self-consistency check.                           |
+| `decode`      | `DecodePoolBusy`, `DecodePoolOverflow`, `DracoDecodeFailed`, `PakReaderUnvalidated` | Slot acquisition timeout; decoder writes past slot; decoder library failure; reader not validated. |
+| `accommodate` | `DecodePoolUndersized`                                            | Pak's per-attribute maxima exceed pool capacity.                                 |
+
+`DecodePool` is the only aggregate that legitimately returns
+`DecodePoolBusy` to callers — the registry never caches it.
+
+#### 10.3.4 `GpuMeshBuffers` (§4.1.15)
+
+`GpuMeshBuffers` is a value-type view (§5 declaration). It carries no
+methods; the only failure surface is `GeometryRegistry::gpu_buffers`
+(§10.3.1). Listed here so the audit matches the §4 aggregate roster.
+
+### 10.4 Recovery shapes
+
+Three named recovery loops are referenced by §10.2's per-arm rows.
+Each is a contract with the *caller* — geometry implements only the
+state-machine transitions; the policy choice (downgrade band, retry,
+escalate) lives in the caller's domain.
+
+#### 10.4.1 Residency-downgrade loop
+
+Called out by `PakPageIntegrityFailed`, `DracoDecodeFailed`,
+`DecodePoolBusy` (escalation), `PageNotResident`, `GpuUploadRefused`
+(escalation), and `GpuBufferAllocFailed`. The loop is the LOD-band
+selector's contract for "asked-for band is unavailable":
+
+1. The selector is given a per-mesh pixel threshold `T` (§4.2 invariant
+   2). It walks the `MeshletGroupView` set from the finest band toward
+   the coarsest, picking the first band whose every group satisfies
+   both `SSE ≤ T` and `fully_resident == true`.
+2. If the finest qualifying band has `fully_resident == false` (some
+   page failed promotion via one of the arms above), the selector
+   falls back to the next coarser band whose `fully_resident == true`.
+   The fallback is *monotonic* — once a band is selected, the selector
+   does not reverse to a finer band within the same frame (§4.2
+   invariant 6 monotonic-per-frame rule).
+3. If no band satisfies `fully_resident == true` (every band has at
+   least one failed page), the selector returns
+   `geometry::Error::PageNotResident` and the caller treats the mesh
+   as unrenderable for this frame. The `MeshHandle` is *not*
+   invalidated; the next frame's residency-promotion path may unblock
+   the asset.
+4. After three consecutive frames of "no qualifying band", the
+   registry escalates: the affected `MeshHandle` is marked stale, the
+   slot's residency entries are reset to `NotResident`, and the next
+   `gpu_buffers` call returns `MeshHandleStale`. This bounds the
+   downgrade loop and frees the residency slot for other work.
+
+The downgrade loop is the LOD spirit's safety valve: an asset with
+unreadable LOD0 pages still renders against the impostor band
+(`AlwaysResident` hint by §4.1.13 §4.1.13) until either re-promotion
+succeeds or the operator re-cooks the asset.
+
+#### 10.4.2 Decode-pool back-pressure retry
+
+Called out by `DecodePoolBusy` and (transitively) `GpuUploadRefused`:
+
+1. The off-frame decode worker (§6.3.2) issues
+   `DecodePool::decode(...)`. On `DecodePoolBusy`, the worker logs
+   at `debug`, leaves the page in `Pending`, and re-queues the
+   decode for the next frame's worker pass.
+2. The retry counter is per-`(MeshHandle, page_index, AttributeKind)`
+   triple, not global. Three consecutive `DecodePoolBusy` returns on
+   the same triple escalate to `MeshHandleStale` for the affected
+   mesh and the registry drops the request.
+3. The escalation is bounded by frame, not wall-clock: a session-long
+   pool starvation across many meshes will surface as a pattern of
+   `MeshHandleStale` events the editor can flag, rather than as a
+   silent lock-up.
+4. The pool itself never grows; resizing is forbidden mid-session
+   (§4.1.12 invariant 1). The bounded escalation is the only
+   recovery; persistent saturation is a content-budget failure
+   surfaced through telemetry (the §9.6.3 residency-churn CI gate
+   catches the steady-state form of this failure pre-merge).
+
+#### 10.4.3 Hot-reload refusal continuation
+
+Called out by `PakHeaderMagicMismatch`, `PakFormatHashMismatch`,
+`PakHeaderOffsetOutOfRange`, `PakIoFailed`, `PakPageIntegrityFailed`,
+and `DecodePoolUndersized` when any of these fire inside the §8.4
+hot-reload migration body:
+
+1. The pre-swap header validation step (§8.4.1) is the gate. If any of
+   the listed arms surfaces there, the migration aborts before any
+   geometry-side mutation happens.
+2. The engine fires `HotReloadRefused { plugin_fqn:
+   "glibre.geometry", cause: <the arm> }` on the standard observer
+   bus (per `reviews/decisions/hot-reload-protocol.md`'s refusal
+   contract). The previous pak stays mapped, the registry's slot
+   continues to point at the prior `PakReader`, and rendering
+   continues without interruption.
+3. No `MeshReplaced` event fires — that arm is reserved for
+   successful swaps (§8.5 refusal contract). Subscribers that
+   listened for `MeshReplaced` see nothing for the failed swap.
+4. The pak-watcher (`content`) sees the refusal via the bus and may
+   surface a "reload skipped — schema mismatch" notification in the
+   editor; outside the editor the refusal is a structured log line
+   only.
+
+This is the only recovery shape in §10 where geometry interacts with
+the engine observer bus directly; the rest of the bus traffic is
+either `MeshReplaced` (success, §8.5) or owned by peer contexts.
+
+### 10.5 Logging severity table (consolidated)
+
+The §10.2 per-arm severities, restated as the table the
+`glibre::log_error` helper (per error-model decision record §"Logging /
+Telemetry") uses when it formats a `geometry::Error` into spdlog.
+Geometry never logs at the *raise* site; the helper at the *handling*
+boundary owns the line. The "context" column is the structured payload
+the helper writes into `error.detail`.
+
+| Arm                            | Default severity | Escalation                                                | Context payload                                                  |
+|--------------------------------|------------------|-----------------------------------------------------------|------------------------------------------------------------------|
+| `PakHeaderMagicMismatch`       | `error`          | None.                                                     | Pak path, observed magic bytes (hex), offset 0.                  |
+| `PakFormatHashMismatch`        | `error` first-load / `warn` hot-reload | None.                                       | Pak path, observed FormatHash, engine FormatHash.                |
+| `PakHeaderOffsetOutOfRange`    | `error`          | None.                                                     | Pak path, declared offset, mapped span size.                     |
+| `PakReaderUnvalidated`         | `error`          | CI promotes to build failure.                             | Pak path, callsite (file/line via `ErrorContext`).               |
+| `PakIoFailed`                  | `error`          | None.                                                     | Pak path, page index, platform `OsCode` from the translation.    |
+| `PakPageIntegrityFailed`       | `error`          | None.                                                     | Pak path, page index, expected hash, observed hash.              |
+| `DecodePoolUndersized`         | `error` first-load / `warn` hot-reload | None.                                       | Pak path, declared maxima per attribute, pool capacity.          |
+| `DecodePoolOverflow`           | `error`          | Crash-dump in dev builds.                                 | Mesh handle, page index, slot capacity, decoded byte count.      |
+| `DecodePoolBusy`               | `debug`          | `warn` at three-frame escalation; `error` if escalation itself fails. | Mesh handle, page index, attribute kind, retry count.            |
+| `DracoDecodeFailed`            | `error`          | None.                                                     | Mesh handle, page index, attribute kind, Draco status code.      |
+| `MeshHandleStale`              | `warn` with paired `MeshReplaced` / `error` otherwise | None.                            | Mesh handle (raw), expected generation, observed generation.     |
+| `MeshletGroupHandleStale`      | `warn`           | `error` if observed without paired `MeshReplaced` in the same frame. | Mesh handle, group handle (raw), groups_stale count from `MeshReplaced`. |
+| `MeshHandleNotFound`           | `error`          | None.                                                     | Mesh handle (raw), registry instance pointer.                    |
+| `MeshAlreadyRegistered`        | `warn`           | None.                                                     | Pak path, prior mesh handle.                                     |
+| `ResidencyTransitionIllegal`   | `error`          | None.                                                     | Mesh handle, page index, prior state, attempted state.           |
+| `ResidencyHintImmutable`       | `error`          | None.                                                     | Mesh handle, page index.                                         |
+| `PageNotResident`              | `debug`          | `warn` at three-frame escalation.                         | Mesh handle, band, page index, current state.                    |
+| `GpuUploadRefused`             | `warn`           | `error` at three-frame escalation.                        | Mesh handle, band, page index, render allocator hint.            |
+| `GpuBufferAllocFailed`         | `error`          | None.                                                     | Mesh handle, band, render allocator hint, peer `render::Error` arm. |
+
+### 10.6 Observer events
+
+Geometry owns exactly two observer events on the engine bus, both
+already declared in §8.5:
+
+1. `MeshReplaced { mesh_handle, old_format_hash, new_format_hash,
+   old_content_hash, new_content_hash, groups_resolved, groups_stale }`
+   — fires on successful hot-reload swap. Carries `groups_stale > 0`
+   precisely when the post-swap pak's DAG topology changes such that
+   `MeshletGroupHandle`s observed pre-swap will return
+   `MeshletGroupHandleStale` post-swap (§8.4.3 step 2).
+2. `HotReloadRefused { plugin_fqn: "glibre.geometry", cause:
+   geometry::Error::* }` — fires when §10.4.3's continuation path
+   engages. Carries the specific `geometry::Error` arm that caused
+   the refusal so subscribers can branch (e.g. the editor's
+   "reload skipped" UX surfaces different copy for `FormatHash`
+   mismatch vs `DecodePoolUndersized`).
+
+No other geometry-specific event arm is permitted (§8.5 closure rule).
+New observability needs flow into either of the existing arms or
+graduate to a SPEC bump.
+
+### 10.7 Refusals (out of §10 scope)
+
+- **Cooker-side errors.** The §5 `cook::*` entry points are guarded
+  by `GLIBRE_GEOMETRY_COOK` and link only into `tools/glibre-meshcc`.
+  The cook-time enumerators listed in §10.1 (`MeshSourceInvalidTopology`
+  through `CookManifestMissingField`) surface to the host shell as
+  process exit codes:
+
+  | Cook arm                                                                                     | `glibre-meshcc` exit code | Meaning                                                                  |
+  |----------------------------------------------------------------------------------------------|---------------------------|--------------------------------------------------------------------------|
+  | (success)                                                                                    | `0`                       | Pak written; manifest written.                                           |
+  | `MeshSourceInvalidTopology`, `AttributeLayoutMismatch`, `MeshSourceEmpty`                    | `10`                      | Source rejected; cooker did not run any meshopt stage.                   |
+  | `MeshoptStageFailed`, `MeshletOversize`, `MeshletBoundsInvalid`, `ClusterDAGCycle`, `LODBandSseNonMonotonic`, `LOD0CoverIncomplete` | `11`                      | meshopt / cluster-build stage rejected the mesh.                         |
+  | `DracoEncodeFailed`, `DracoProfileUnknown`                                                   | `12`                      | Draco encoder refused the input or profile.                              |
+  | `BLASRecipeInvalid`                                                                          | `13`                      | BLAS recipe could not be derived (e.g. zero LOD0 cover).                 |
+  | `PakWriterIoFailed`, `PakPageOversize`                                                       | `20`                      | Pak emission failure (host filesystem or page-size budget).              |
+  | `CookManifestInvalid`, `CookManifestMissingField`                                            | `21`                      | Manifest emission failure.                                               |
+  | (any unmatched `geometry::Error`)                                                            | `64`                      | Unknown failure; reserved for forward compatibility (matches POSIX `EX_USAGE` family). |
+
+  The cooker writes the structured `geometry::Error` arm name and its
+  `ErrorContext` to stderr in the engine's spdlog format before
+  exiting; the host build farm (CI / Bazel / make) branches on the
+  exit code only. The runtime never observes these arms — the
+  `GLIBRE_GEOMETRY_COOK` macro guard enforces that at link time
+  (§5 declaration; §6.2 cook driver is the only translation unit
+  that defines the macro).
+
+- **Render / GPU error model.** `render::Error::DeviceLost`,
+  `PipelineCompileFailed`, `ResourceResidencyExceeded`,
+  `RenderGraphCycle` live in `specs/render/SPEC.md` §10. Geometry's
+  surface stops at `GpuUploadRefused` / `GpuBufferAllocFailed`,
+  which are the typed translations of render's two relevant arms
+  at the geometry boundary (per error-model composition rule 2).
+- **Plugin / hot-reload framework.** `core::Error::PluginAbiHashMismatch`,
+  `PluginInitFailed`, `SchemaMigrationFailed`, `HotReloadRefused`,
+  `FramePhaseMisordered`, `OutOfBudget` are owned by `specs/core/SPEC.md`.
+  Geometry's contribution to the hot-reload contract is the
+  `geometry::Error` arms cited as `cause` inside `HotReloadRefused`
+  per §10.4.3.
+- **Persistence / schema migration.** `data::Error` (Fory-side
+  records) is owned by `specs/data/SPEC.md`. Geometry owns no Fory
+  schemas at runtime (§5, §7.4); the only schema-versioned artefact
+  is `MeshletPak` and its evolution gate is `FormatHash`, surfaced as
+  `geometry::Error::PakFormatHashMismatch`.
+- **Determinism / replay divergence.** Engine concern. Geometry's
+  byte-equal-decode invariant (§4.2 invariant 5) is verified by the
+  `decompresses-byte-equal-on-multiple-hosts` test in §11; replay
+  divergence is observed by the engine harness, not by a
+  `geometry::Error` arm.
+- **Editor UX surfacing.** The "asset out of date" / "reload skipped"
+  / "asset corrupted" banners called out in §10.2 are editor-domain
+  responses to `MeshReplaced` / `HotReloadRefused` / repeated
+  `PakPageIntegrityFailed`. Geometry publishes the typed arm; the
+  copy lives in `specs/tools/SPEC.md` (editor) and is not part of
+  this contract.
+
+### 10.8 Open questions (carried into §12)
+
+- Promote `BLASRecipeInvalid` to a runtime arm once the editor's
+  "validate pak" path lands. Today only the cooker discriminates;
+  until then the runtime relies on `PakFormatHashMismatch` as the
+  proxy.
+- Promote a hypothetical `GpuBuffersUnavailable` arm if a second
+  caller emerges that wants to discriminate "render allocator
+  pre-busy" from `GpuBufferAllocFailed`. Today the
+  `GpuUploadRefused` / `GpuBufferAllocFailed` pair is sufficient.
+- Crash-dump detail for `DecodePoolOverflow` — should the dev-build
+  crash include a hex dump of the offending Draco payload? Defer
+  until the Draco wrapper module lands.
+- Bounded-retry budget for the residency-downgrade and
+  decode-pool-busy loops is fixed at three frames here. The
+  budget knob may need to be data-driven (per platform / per
+  content tier); resolved when the §9 perf-budget gate sees
+  real traces.
 
 ## 11. Acceptance Criteria
 
