@@ -452,11 +452,463 @@ context:
 
 ## 5. Public Interface
 
+The header below is the compileable stub of the `shader` context's public
+boundary. It compiles cleanly with `clang++ -std=c++23 -fsyntax-only`,
+both with `-DGLIBRE_SHIPPING=0` (default; tooling builds) and
+`-DGLIBRE_SHIPPING=1` (the entire `compile()` virtual is `#if`-guarded
+out so shipping plugins never link DXC subprocess code — §4.3 invariant
+3, §4.8 cross-aggregate invariant 3).
+
+The error type follows `reviews/decisions/error-model.md`: a closed
+`enum class shader::Error : std::uint16_t` returned through
+`std::expected<T, shader::Error>` at every boundary. The engine-wide
+`glibre::Error` variant alias will append this enum when the shader
+plugin lands; that registration is a `core` change, not a `shader`
+change.
+
 ```cpp
-// header-only stub goes here
+// shader/include/glibre/shader/shader.hpp
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <filesystem>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#ifndef GLIBRE_SHIPPING
+#define GLIBRE_SHIPPING 0
+#endif
+
+namespace glibre::shader {
+
+// -------- Error closed sum (enumerator list pinned by SPEC §10) ----------
+
+enum class Error : std::uint16_t {
+    SourceNotFound,
+    SourceParseFailed,
+    IncludeEscape,
+    IncludeCycle,
+    EntryPointMissing,
+    EntryPointStageAmbiguous,
+    PermutationKeyMalformed,
+    PermutationKeyOutOfRange,
+    CompilerInvocationFailed,
+    CompilerExitNonZero,
+    CompilerTimedOut,
+    UnsupportedTarget,
+    DxilEmissionFailed,
+    SpirvEmissionFailed,
+    MetalLibLoweringFailed,
+    ReflectionExtractionFailed,
+    DescriptorFrequencyAmbiguous,
+    DescriptorFrequencyMissing,
+    LinkFailed,
+    SpecializationConstantMissing,
+    CacheLookupMiss,
+    CacheCorrupt,
+    CacheIntegrity,
+    CacheReadOnlyViolation,
+    CapabilityNotSupported,
+    ShippingCompilationAttempted,
+};
+
+// -------- Closed enums for the 4-axis permutation key (§4.2) -------------
+
+enum class ShadingModel : std::uint8_t {
+    Standard, Skin, Hair, Cloth, Foliage, Eye, Water, ClearCoat,
+};
+inline constexpr std::size_t kShadingModelCount = 8;
+
+enum class FeatureBit : std::uint8_t {
+    Skinned        = 0,
+    MotionVectors  = 1,
+    AlphaTest      = 2,
+    Decal          = 3,
+    VirtualTexture = 4,
+    RT             = 5,
+};
+inline constexpr std::size_t kFeatureBitCount = 6;
+
+class FeatureSet {
+public:
+    constexpr FeatureSet() noexcept = default;
+    constexpr explicit FeatureSet(std::uint16_t bits) noexcept : bits_{bits} {}
+
+    constexpr bool test(FeatureBit b) const noexcept {
+        return (bits_ & (std::uint16_t{1} << static_cast<std::uint8_t>(b))) != 0;
+    }
+    constexpr void set(FeatureBit b) noexcept {
+        bits_ |= static_cast<std::uint16_t>(std::uint16_t{1} << static_cast<std::uint8_t>(b));
+    }
+    constexpr std::uint16_t bits() const noexcept { return bits_; }
+
+    friend constexpr bool operator==(FeatureSet, FeatureSet) noexcept = default;
+
+private:
+    std::uint16_t bits_{0};
+};
+
+enum class RenderPath : std::uint8_t {
+    Forward, Deferred, DepthOnly, Shadow, Velocity, Probe,
+};
+inline constexpr std::size_t kRenderPathCount = 6;
+
+enum class LODTier : std::uint8_t { Mobile, Switch, Desktop, HighEnd };
+inline constexpr std::size_t kLODTierCount = 4;
+
+// -------- PermutationKey (value object, §4.2) ----------------------------
+
+struct PermutationKey {
+    ShadingModel shading_model{ShadingModel::Standard};
+    FeatureSet   features{};
+    RenderPath   render_path{RenderPath::Forward};
+    LODTier      lod_tier{LODTier::Desktop};
+
+    friend constexpr bool operator==(PermutationKey, PermutationKey) noexcept = default;
+
+    // Total, injective, bit-stable encoding (§4.2 invariant 1).
+    using PackedBytes = std::array<std::byte, 6>;
+    PackedBytes to_bytes() const noexcept;
+    static std::expected<PermutationKey, Error> from_bytes(const PackedBytes&) noexcept;
+
+    bool is_well_formed() const noexcept;
+};
+
+// Dense codegen ordinal across the enumerable cross-product (§4.2).
+struct PermutationIndex {
+    std::uint32_t value{0};
+    friend constexpr bool operator==(PermutationIndex, PermutationIndex) noexcept = default;
+};
+
+// -------- Shader stages, targets, content hash ---------------------------
+
+enum class Stage : std::uint8_t {
+    Vertex, Pixel, Compute, Mesh, Amplification, Library,
+};
+
+enum class CompileTarget : std::uint8_t { DXIL, SPIRV, MetalLib };
+
+// BLAKE3 of (preprocessed source ∪ resolved key ∪ canonical flags ∪ target).
+struct ShaderHash {
+    std::array<std::byte, 32> bytes{};
+    friend constexpr bool operator==(ShaderHash, ShaderHash) noexcept = default;
+};
+
+// -------- ShaderSource (aggregate root, §4.1) ----------------------------
+
+struct SourceId {
+    std::string project_relative_path;
+    friend bool operator==(const SourceId&, const SourceId&) noexcept = default;
+};
+
+struct EntryPoint {
+    std::string name;
+    Stage       stage{Stage::Vertex};
+    friend bool operator==(const EntryPoint&, const EntryPoint&) noexcept = default;
+};
+
+struct IncludeNode {
+    std::string project_relative_path;
+    ShaderHash  content_hash{};
+};
+
+struct PreprocessedSource {
+    std::vector<std::byte>   bytes;            // post-include byte stream
+    std::vector<IncludeNode> include_closure;  // ordered, acyclic, project-rooted
+    ShaderHash               total_hash{};
+};
+
+class ShaderSource {
+public:
+    static std::expected<ShaderSource, Error>
+    open(const std::filesystem::path& project_root,
+         const std::filesystem::path& project_relative);
+
+    const SourceId&             id() const noexcept;
+    std::span<const EntryPoint> entry_points() const noexcept;
+    const PreprocessedSource&   preprocessed() const noexcept;
+
+private:
+    ShaderSource() = default;
+
+    SourceId                id_{};
+    std::vector<EntryPoint> entry_points_{};
+    PreprocessedSource      preprocessed_{};
+};
+
+// -------- ReflectionBlob (value object, §4.4) ----------------------------
+
+enum class DescriptorFrequencyGroup : std::uint8_t {
+    PerFrame, PerPass, PerMaterial, PerDraw,
+};
+
+enum class BindingKind : std::uint8_t {
+    ConstantBuffer,
+    SampledImage,
+    StorageImage,
+    Sampler,
+    StructuredBuffer,
+    RWStructuredBuffer,
+    AccelerationStructure,
+    PushConstant,
+};
+
+struct StageMask {
+    std::uint8_t bits{0};
+    friend constexpr bool operator==(StageMask, StageMask) noexcept = default;
+};
+
+struct BindingSlot {
+    BindingKind              kind{BindingKind::ConstantBuffer};
+    std::uint32_t            register_space{0};
+    std::uint32_t            register_index{0};
+    std::uint32_t            array_size{1};
+    StageMask                stages{};
+    DescriptorFrequencyGroup frequency{DescriptorFrequencyGroup::PerDraw};
+    std::string              name;
+
+    friend bool operator==(const BindingSlot&, const BindingSlot&) noexcept = default;
+};
+
+struct VertexInputElement {
+    std::string   semantic;
+    std::uint32_t semantic_index{0};
+    std::uint32_t location{0};
+    std::uint32_t format_code{0};   // backend-neutral format ordinal
+};
+
+struct VertexIOLayout {
+    std::vector<VertexInputElement> elements;
+};
+
+struct PushConstantRange {
+    std::uint32_t offset{0};
+    std::uint32_t size{0};
+    StageMask     stages{};
+    friend constexpr bool operator==(PushConstantRange, PushConstantRange) noexcept = default;
+};
+
+struct MaterialParameterBlock {
+    std::string              name;
+    std::uint32_t            size_bytes{0};
+    std::vector<BindingSlot> members;  // members reflected as named scalar/vector slots
+};
+
+struct SpecializationConstantSlot {
+    std::string   name;
+    std::uint32_t id{0};
+    std::uint32_t size_bytes{0};
+};
+
+struct ReflectionBlob {
+    std::vector<EntryPoint>                 entry_points;
+    std::vector<BindingSlot>                bindings;        // one frequency tag each
+    VertexIOLayout                          vertex_io;
+    std::vector<PushConstantRange>          push_constants;
+    MaterialParameterBlock                  material_parameters;
+    std::vector<SpecializationConstantSlot> spec_constants;
+    std::uint32_t                           rt_payload_bytes{0};
+};
+
+// -------- DescriptorLayout (value object, §4.5) --------------------------
+
+struct DescriptorTable {
+    // Ordered by (register_space, register_index, stage_mask) — §4.5 inv 3.
+    std::vector<BindingSlot> slots;
+
+    friend bool operator==(const DescriptorTable&, const DescriptorTable&) noexcept = default;
+};
+
+struct StaticSampler {
+    std::uint32_t register_space{0};
+    std::uint32_t register_index{0};
+    std::uint32_t descriptor_code{0};   // backend-neutral sampler descriptor ordinal
+    StageMask     stages{};
+    friend constexpr bool operator==(StaticSampler, StaticSampler) noexcept = default;
+};
+
+struct RootSignatureSchema {
+    DescriptorTable                per_frame;
+    DescriptorTable                per_pass;
+    DescriptorTable                per_material;
+    DescriptorTable                per_draw;
+    std::vector<PushConstantRange> push_constants;
+    std::vector<StaticSampler>     static_samplers;
+
+    friend bool operator==(const RootSignatureSchema&, const RootSignatureSchema&) noexcept = default;
+};
+
+class DescriptorLayout {
+public:
+    static std::expected<DescriptorLayout, Error>
+    derive(const ReflectionBlob&);
+
+    const DescriptorTable&     table(DescriptorFrequencyGroup) const noexcept;
+    const RootSignatureSchema& schema() const noexcept;
+
+    friend bool operator==(const DescriptorLayout&, const DescriptorLayout&) noexcept = default;
+
+private:
+    DescriptorLayout() = default;
+    RootSignatureSchema schema_{};
+};
+
+// -------- Shader artifact + linked module (§4.3 outputs, §4.7 surface) ---
+
+struct ShaderArtifact {
+    PermutationKey         key{};
+    CompileTarget          target{CompileTarget::DXIL};
+    ShaderHash             hash{};
+    std::vector<std::byte> bytecode;
+    ReflectionBlob         reflection;
+    DescriptorLayout       descriptor_layout;
+};
+
+struct LinkedModule {
+    std::vector<std::byte> bytecode;
+    ReflectionBlob         reflection;
+};
+
+// -------- ShaderCache: CAS, lookup-only in shipping (§4.6) ---------------
+
+class ShaderCache {
+public:
+    static std::expected<ShaderCache, Error>
+    open(const std::filesystem::path& cache_root, bool read_only);
+
+    // Non-owning pointer into the cache; nullptr on miss. Sole runtime
+    // read path in shipping (§4.6 invariant 2, §4.8 invariant 3).
+    const ShaderArtifact* get(const ShaderHash&) const noexcept;
+
+    // Idempotent: insert of an existing hash is a no-op (§4.6 invariant 1).
+    std::expected<void, Error> insert(ShaderArtifact);
+
+    // Cooked, read-only shipping handle.
+    class Library;
+    std::expected<Library, Error>
+    cook(std::span<const PermutationKey> enumerated) const;
+
+private:
+    ShaderCache() = default;
+    std::filesystem::path root_{};
+    bool                  read_only_{true};
+};
+
+class ShaderCache::Library {
+public:
+    const ShaderArtifact* get(const ShaderHash&) const noexcept;
+
+private:
+    Library() = default;
+    friend class ShaderCache;
+};
+
+// -------- Capabilities (offline query, §4.7) -----------------------------
+
+struct Capabilities {
+    bool mesh_shaders{false};
+    bool ray_tracing{false};
+    bool work_graphs{false};
+    bool wave_intrinsics{false};
+    bool fp16{false};
+};
+
+// -------- IShaderBackend trait (§4.7) ------------------------------------
+//
+// The four-operation surface through which the engine talks to a shader
+// source-language family. `compile()` is excluded from shipping builds:
+// the shipping `shader` plugin never invokes DXC or metal-shaderconverter
+// (§4.3 invariant 3, §4.8 invariant 3).
+
+class IShaderBackend {
+public:
+    virtual ~IShaderBackend() = default;
+
+#if !GLIBRE_SHIPPING
+    // DXC + metal-shaderconverter subprocess driver. Excluded from shipping.
+    virtual std::expected<ShaderArtifact, Error>
+    compile(const ShaderSource&, const PermutationKey&, CompileTarget) = 0;
+#endif
+
+    virtual std::expected<ReflectionBlob, Error>
+    reflect(const ShaderArtifact&) = 0;
+
+    virtual std::expected<LinkedModule, Error>
+    link(std::span<const ShaderArtifact>) = 0;
+
+    virtual Capabilities capabilities() const noexcept = 0;
+};
+
+// -------- Stable string mapping for structured logs (error-model.md) ----
+
+constexpr std::string_view to_string(Error e) noexcept {
+    switch (e) {
+        case Error::SourceNotFound:                return "SourceNotFound";
+        case Error::SourceParseFailed:             return "SourceParseFailed";
+        case Error::IncludeEscape:                 return "IncludeEscape";
+        case Error::IncludeCycle:                  return "IncludeCycle";
+        case Error::EntryPointMissing:             return "EntryPointMissing";
+        case Error::EntryPointStageAmbiguous:      return "EntryPointStageAmbiguous";
+        case Error::PermutationKeyMalformed:       return "PermutationKeyMalformed";
+        case Error::PermutationKeyOutOfRange:      return "PermutationKeyOutOfRange";
+        case Error::CompilerInvocationFailed:      return "CompilerInvocationFailed";
+        case Error::CompilerExitNonZero:           return "CompilerExitNonZero";
+        case Error::CompilerTimedOut:              return "CompilerTimedOut";
+        case Error::UnsupportedTarget:             return "UnsupportedTarget";
+        case Error::DxilEmissionFailed:            return "DxilEmissionFailed";
+        case Error::SpirvEmissionFailed:           return "SpirvEmissionFailed";
+        case Error::MetalLibLoweringFailed:        return "MetalLibLoweringFailed";
+        case Error::ReflectionExtractionFailed:    return "ReflectionExtractionFailed";
+        case Error::DescriptorFrequencyAmbiguous:  return "DescriptorFrequencyAmbiguous";
+        case Error::DescriptorFrequencyMissing:    return "DescriptorFrequencyMissing";
+        case Error::LinkFailed:                    return "LinkFailed";
+        case Error::SpecializationConstantMissing: return "SpecializationConstantMissing";
+        case Error::CacheLookupMiss:               return "CacheLookupMiss";
+        case Error::CacheCorrupt:                  return "CacheCorrupt";
+        case Error::CacheIntegrity:                return "CacheIntegrity";
+        case Error::CacheReadOnlyViolation:        return "CacheReadOnlyViolation";
+        case Error::CapabilityNotSupported:        return "CapabilityNotSupported";
+        case Error::ShippingCompilationAttempted:  return "ShippingCompilationAttempted";
+    }
+    return "Unknown";
+}
+
+}  // namespace glibre::shader
 ```
 
-Event types, serialized schemas (Fory), error types.
+**Boundary types at a glance.**
+
+| Type / function                     | Aggregate | Role at the boundary                       |
+|-------------------------------------|-----------|--------------------------------------------|
+| `ShaderSource` + `EntryPoint` + `PreprocessedSource` | §4.1 | HLSL translation unit + stage manifest. |
+| `PermutationKey` + `PermutationIndex` + 4 axis enums | §4.2 | The closed 4-tuple cache / codegen key.  |
+| `ShaderArtifact` + `ShaderHash` + `CompileTarget`    | §4.3 | Sealed compile output, content-addressed. |
+| `ReflectionBlob` + `DescriptorFrequencyGroup` + `BindingSlot` + `VertexIOLayout` + `PushConstantRange` + `MaterialParameterBlock` + `SpecializationConstantSlot` | §4.4 | Canonical bytecode metadata. |
+| `DescriptorLayout` + `DescriptorTable` + `RootSignatureSchema` + `StaticSampler` | §4.5 | Backend-neutral descriptor schema, 4 frequency groups. |
+| `ShaderCache` + `ShaderCache::Library`               | §4.6 | CAS-keyed artifact store; lookup-only in shipping. |
+| `IShaderBackend` + `Capabilities` + `LinkedModule`   | §4.7 | Plugin trait; `compile()` `#if`-guarded out of shipping. |
+| `Error` + `to_string(Error)`                         | §10  | Closed enum returned via `std::expected`.  |
+
+**Events.** None at this layer. `shader` is an offline producer; runtime
+events (e.g. `ShaderLibraryLoaded`) belong to `render` when it consumes
+the cooked library.
+
+**Fory schemas.** Defined in §7. The on-disk records that mirror the
+public types above (`ShaderArtifact`, `ReflectionBlob`,
+`DescriptorLayout`, `PermutationKey`) get versioned Fory schemas; the
+in-memory C++ types declared here remain the canonical source of
+truth that those schemas serialize to.
+
+**Compileability.** The block above is verified with
+`clang++ -std=c++23 -fsyntax-only` under both `-DGLIBRE_SHIPPING=0` and
+`-DGLIBRE_SHIPPING=1`. The shipping configuration drops the
+`compile()` virtual from the trait, satisfying the §4.3 / §4.8 invariant
+that shipping plugins never link DXC subprocess code.
 
 ## 6. Internal Architecture
 
