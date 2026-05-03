@@ -3537,7 +3537,272 @@ records`.
 
 ## 9. Performance Budget
 
-Cycles / frame, memory ceiling, allocation rules.
+Quotes the `e2e` row of the engine-wide budget
+(`reviews/decisions/perf-budget.md`) and refines it with the CI-mode
+budgets the runner self-imposes when it is the active driver. The
+engine-wide row is **n/a** by design (per
+`perf-budget.md` §"Per-Context Budget Table" row `e2e`,
+§"Justification Per Cell" row `e2e`, and §"Rationale" bullet
+`e2e excluded`); the CI-mode budgets in this section are the
+**runner's own contract**, not a draw on the 16.67 ms shipping frame.
+
+### 9.1 Engine contract — `e2e` is **n/a** in shipping
+
+| Cell                    | Value      | Source                                                                 |
+|-------------------------|------------|------------------------------------------------------------------------|
+| CPU sim (ms / frame)    | **n/a**    | `perf-budget.md` table row `e2e` ("test-only context").                |
+| CPU submit (ms / frame) | **n/a**    | `perf-budget.md` table row `e2e`.                                      |
+| GPU (ms / frame)        | **n/a**    | `perf-budget.md` table row `e2e`.                                      |
+| Heap ceiling            | **n/a**    | `perf-budget.md` table row `e2e`.                                      |
+| Phase ownership         | **none**   | `frame-phases.md` — e2e owns no frame phase; participates in none.     |
+| Allocator tag           | **none**   | `perf-budget.md` Allocator Rules §1 enumerates nine tags; `e2e` is **not** among them. |
+
+The `e2e` plugin is **opt-in test scaffolding**, not a shipping
+dependency. It is loaded only when:
+
+1. A developer invokes `glibre-trace run` against a dev or CI build
+   (§4.1.7, §6.5), or
+2. CI's e2e workflow launches the binary under test with the
+   e2e plugin present (§3.3 R-X.5.4 isolated-CI lane).
+
+In a shipping build of the engine, the `plugins/e2e/` dylib is
+**not linked** (build-system gating mirrors `tools` and the
+shader-cooker pattern; see `perf-budget.md` row `shader` for the
+analogous "0 ms / frame because excluded from shipping" precedent
+and `core/SPEC.md` §9.1's engine-wide allocation table for the
+nine-tag enumeration). No frame of a shipping process pays any
+e2e cost. The §11 acceptance criteria do **not** include an e2e
+frame-budget benchmark — there is nothing to enforce in the
+shipping cell because the cell is not allocated.
+
+### 9.2 CI-mode runner budgets (e2e self-imposed)
+
+When the runner *is* the driver — i.e. `TraceRunner` is advancing
+the engine frame-by-frame under §6.2's loop — the runner caps its
+own per-frame overhead and per-assert wall so that a 600-frame
+trace on the M1 baseline completes in bounded time and the runner
+itself is not the dominant cost compared to the engine work it is
+exercising. These budgets are the runner's contract on **itself**;
+they apply only in test-mode runs (`InjectionLayer::InProcess`
+unless otherwise noted) and have no shipping analogue.
+
+| Slice                                         | Ceiling        | Notes                                                                                              |
+|-----------------------------------------------|----------------|----------------------------------------------------------------------------------------------------|
+| Replay overhead per frame (TraceOp dispatch + `ReplayDriver::advance`) | **≤ 0.1 ms**   | §6.2 step 1 (`driver.advance(frame)`) + §4.1.6 inv 4 yield + cursor walk. SIMD-bound; arena spans, no allocation (§6.7). |
+| `AssertOp` evaluation, end-of-frame total      | **≤ 1.0 ms**   | §6.2 step 3 worst case (one `AssertScreenshot` is the dominant variant; `AssertState` / `AssertEcsSnapshot` / `AssertLogContains` are <0.1 ms). |
+| Trace + golden-cache resident heap             | **≤ 64 MiB**   | `Trace` arena (§6.7) + `GoldenStore` LRU cache + screenshot diff scratch combined.                 |
+| Wall-clock pacing                              | **non-real-time** | CI mode does **not** target 16.67 ms; the runner is free to spend more wall-clock per frame as long as the engine's own per-context cells (perf-budget.md) still pass. |
+
+The above are the runner's *own* slice. The **engine's** §9 cells
+(core, render, physics, …) continue to apply unchanged inside a CI
+run — `perf-budget.yml` (`perf-budget.md` §"CI Gate Spec" item 2)
+gates engine cells against frame-time totals on the CI sample-scene
+run, and the e2e plugin's overhead does **not** count toward those
+cells (because e2e is not a tagged context). The two budgets are
+disjoint by construction.
+
+### 9.3 CI mode is non-real-time, deterministically frame-stepped
+
+The §6.2 replay loop calls `adapter.advance_frame()` once per
+trace `FrameIndex`. The adapter pumps engine phases 1–9 once per
+call (§5.11) and **does not pace to a 60 fps wall-clock**. CI runs
+therefore execute as fast as the engine and the runner's per-frame
+overhead allow — typically faster than real-time on a healthy build,
+slower under sanitisers or under the `OsAutomation` injection layer's
+window-server round-trip (§4.1.8). The runner is allowed to be slow;
+it is **not** allowed to be non-deterministic.
+
+Two structural properties make this safe:
+
+1. **Frame-locked emission (§6.2 inv 1; §4.1.6 inv 1, 4).** Wall-clock
+   is read once at run start (`wall_duration` is informational only,
+   §4.1.12 inv 3) and never inside the loop. Reordering frames or
+   dropping inputs because the runner ran "too slow" cannot happen —
+   the loop has no time-based fallback path.
+2. **`EnvHash` gate before drive (§4.1.7 inv 1).** Two runs of the
+   same trace under the same `EnvHash` produce byte-equal
+   `TraceReport` outcomes (§4.1.7 inv "Deterministic on equal
+   EnvHash" referenced in §4.1.6 inv 5). Wall-clock variability does
+   not enter the determinism contract.
+
+The `manifest.frame_budget()` field (§4.1.7 inv 6) is a
+**frame-count** safety, not a wall-clock one: a trace that fails
+to reach `End` within `recorded_length × safety_multiplier`
+frames aborts with `E2eError::Timeout`. There is no wall-clock
+deadline on a single frame's work in CI mode.
+
+### 9.4 CIEDE2000 image diff — off-thread or end-of-trace, **not** per-frame
+
+`AssertScreenshot` evaluation (§6.4 `assert/screenshot.cpp`) runs
+the §5.3 CIEDE2000 ΔE comparator over a 1920×1080 BGRA8-sRGB
+swapchain readback against a `GoldenImage`. A naive per-frame
+`assert_pixel_tolerance` call on the driver thread would spike the
+§9.2 1.0 ms end-of-frame ceiling; CIEDE2000 is the dominant
+arithmetic in the §6.4 evaluator chain. The runner therefore:
+
+- **Hands the comparison off to the screenshot encoder thread**
+  (§6.8). The driver thread's end-of-frame work for `AssertScreenshot`
+  is the cheap part: invoke the swapchain readback (`readback.cpp`,
+  ~0.3 ms on M1 for 1920×1080 BGRA8 — adapter-side, charged to the
+  binary under test, not to e2e), `golden/png.cpp` open (cached
+  after first use, ~0.05 ms), and enqueue
+  `(left_bytes, right_bytes, op.tolerance, output_path)` onto the
+  fixed-capacity SPSC ring (§6.8). The driver thread's residual
+  cost per `AssertScreenshot` is therefore dominated by the
+  enqueue, well inside the §9.2 0.1 ms-per-frame replay slice
+  (the readback is not counted against e2e — see §9.2 row 1).
+- **The encoder thread runs CIEDE2000** off the driver. Comparison
+  failure is reported back through a result handle the driver
+  drains at end-of-frame N+k for some bounded k — except the §4.1.7
+  inv 4 fail-fast contract still requires that no frame past the
+  failing one is *observably* advanced after a failed assert. The
+  runner reconciles by:
+  1. **Default — end-of-trace drain.** The driver enqueues every
+     `AssertScreenshot` comparison and continues advancing the
+     engine until `End`. After the loop body exits, the runner
+     joins the encoder thread (§6.8: deterministic join in
+     `~TraceRunner()`) and folds any failed comparisons into the
+     `TraceReport`. Because there is exactly one `End` op per
+     trace (§4.1.4 inv 1), the join point is structural. This is
+     the strict reading of "off-thread or end-of-trace": *the
+     comparator never blocks the driver loop*; failing comparisons
+     surface at the join.
+  2. **Strict-fail-fast mode (opt-in).** When the trace's
+     `AssertScreenshot` op carries `PixelTolerance::strict` (or the
+     runner is launched with `--strict-fail-fast`), the driver
+     drains the encoder ring at end-of-frame N before advancing to
+     frame N+1, blocking up to a bounded budget (~2 ms steady state
+     for one outstanding comparison; see §6.4 step 4 for the diff
+     payload structure). This trades wall-clock latency for the
+     strictest §4.1.7 inv 4 guarantee. Strict mode is **not**
+     default because it would serialise the comparator onto the
+     driver thread and re-introduce the per-frame spike that this
+     section is preventing.
+- **Tolerance is a single-pass linear scan.** The §5.3 ΔE pass +
+  optional region mask is O(width × height) over the readback (~2.07
+  M pixels at 1920×1080); on M1 firestorm with the SIMD CIEDE2000
+  inner loop, end-to-end comparison is empirically ~3–5 ms per pair
+  — fine for off-thread, prohibitive on the driver thread. This
+  is the load-bearing reason the comparator is hoisted off the
+  per-frame critical path.
+
+The default-mode policy means a 600-frame trace with one
+`AssertScreenshot` per frame keeps the encoder thread at ~50–80 %
+utilisation while the driver thread runs at ~0.1 ms / frame
+overhead — exactly the §9.2 ceiling. A trace with hundreds of
+screenshot asserts per frame is rejected at parse time
+(`E2eError::TraceParse`) by the §4.1.4 invariant on per-frame
+op-bucket size; that limit is recorded under §7.1.5 and is not
+re-stated here.
+
+### 9.5 Heap composition inside the 64 MiB CI-mode ceiling
+
+The §9.2 64 MiB cap is a single number that decomposes:
+
+| Pool                                                                | Ceiling   | Notes                                                                                                        |
+|---------------------------------------------------------------------|-----------|--------------------------------------------------------------------------------------------------------------|
+| `Trace` arena (one per loaded trace, §6.7)                          | 16 MiB    | Backs every `InputEvent` decode, every `expected_fory` blob, every `GoldenRef` string for the active trace.  |
+| `GoldenStore` LRU cache (`golden/store.cpp`, §6.7)                  | 24 MiB    | Fixed-capacity, sized at `open()` from `GoldenStoreConfig`. Evicts oldest goldens when an `AssertScreenshot` references one not resident. |
+| Screenshot diff scratch (one buffer, reused per comparison, §6.7)   | 16 MiB    | Member of `assert/screenshot.cpp`'s evaluator; sized to one full 1920×1080 BGRA8 frame plus diff PNG.         |
+| SPSC rings (encoder, RPC reader if PerProcess / OsAutomation, §6.8) | 4 MiB     | Fixed-capacity ring buffers; not heap-backed `std::vector` — see §6.7 last paragraph.                        |
+| `TraceReport` builder + per-run artefact-ref vector                 | 4 MiB     | `runner/report.cpp` reserves capacity at `TraceRunner::create` time from `manifest.golden_refs.size()`.       |
+| **Resident hot-set total**                                          | **64 MiB**| Equals §9.2 row 3.                                                                                            |
+
+The runner enforces this ceiling **only in CI mode** (`GLIBRE_E2E_STRICT=1`,
+the e2e analogue of `GLIBRE_ALLOC_STRICT` from
+`perf-budget.md` Allocator Rules §2). Strict-mode failure returns
+`E2eError::ResourceExhausted{detail="trace-cache"|"golden-cache"|…}`
+and aborts the run with a `TraceReport` of status `Failed`
+(§4.1.7 inv 5). In non-strict dev mode the runner logs a warn and
+continues — the dev-loop-friendly analogue of
+`perf-budget.md` Allocator Rule §3.
+
+The runner's allocations are **not** routed through
+`glibre::PerContextAllocator`. e2e has no `ContextTag` (§9.1
+"Allocator tag — none"). The 64 MiB ceiling above is a runner-side
+self-check against per-arena and per-cache sizes; it does **not**
+participate in the engine's per-context strict-mode allocator.
+This separation is the explicit consequence of e2e being out of
+the engine's nine-tag enumeration.
+
+### 9.6 Reload-frame budget (e2e participation in `core` phase 8)
+
+The hot-reload contract (§8.1, §8.3) refuses self-swap during
+replay (`E2eError::EnvDrift`). When a non-self plugin reloads
+during a trace run that includes `TraceOp::ExpectReload` (§8.6),
+e2e's only phase-8 cost is the runner observing the reload event
+through `core`'s observer registry and translating it into the
+trace's expected reload semantics — a few hundred bytes of cursor
+arithmetic, no allocation, no I/O. This cost is not separately
+budgeted here; it is absorbed inside §9.2's 0.1 ms-per-frame
+replay-overhead slice (the reload-observer callback is a single
+function call from `core`'s reload-completion sequence, on the
+runner's driver thread).
+
+Reload-frame phase 8 work in `core` itself remains bounded by
+`core/SPEC.md` §9 and `perf-budget.md` "Pipelined Frame Timing"
+(reload frame ≤ 0.40 ms in phase 8). e2e does not amend that
+ceiling.
+
+### 9.7 CI gate
+
+There is **no `e2e` row in `perf-budget.yml`**. The gate's
+per-context unit perf tests (`perf-budget.md` §"CI Gate Spec"
+item 1) do not include `tests/e2e/perf/` and the heap-ceiling
+enforcement (item 3) does not check an `e2e` tag because none
+exists. The gates that **do** apply to e2e changes are:
+
+1. **End-to-end frame timing on the engine.** The nightly
+   600-frame e2e run of the S1 sample scene (`perf-budget.md`
+   §"CI Gate Spec" item 2) gates the **engine** cells (core,
+   render, physics, …) against their wall-clock totals; e2e is
+   the harness that produces the run, not a participant in the
+   gate. A regression in engine cells caused by an e2e change
+   (e.g. an injection-layer change that perturbs the input pump)
+   fails on the engine gate, not on an e2e gate.
+2. **Runner self-checks (this section).** A separate Catch2
+   benchmark suite under `tests/e2e/perf/` asserts §9.2 ceilings
+   — replay overhead per frame, end-of-frame assert wall, heap
+   composition — on a fixture trace exercising every `AssertOp`
+   variant. These tests **do not** block PRs against engine
+   contexts; they block PRs that touch `plugins/e2e/**`. CI
+   wires this as a label-scoped path filter, not a gate on every
+   PR.
+3. **Trace-corpus invalidation rule (§7.3).** A PR that bumps
+   the engine's `EnvHash` re-cooks the recorded golden corpus;
+   the runner's wall-clock per recorded trace must not regress
+   beyond a soft "+10 % vs prior corpus" threshold, posted as a
+   PR comment. This is a tripwire, not a hard gate, because
+   corpus rotation legitimately includes added asserts that
+   make a trace longer.
+
+The runner-self-check suite (item 2) is the only frame-budget
+contract e2e holds; it exists so the 0.1 ms / 1.0 ms / 64 MiB
+numbers above do not silently drift. A change that violates it
+fails the e2e plugin's own PR gate without ever touching the
+engine's `perf-budget.yml`.
+
+### 9.8 Cross-references
+
+- Engine-wide budget contract: `reviews/decisions/perf-budget.md`
+  (`e2e` row, "Justification Per Cell", "Rationale" bullet
+  `e2e excluded`).
+- Frame-phase non-ownership: `reviews/decisions/frame-phases.md`
+  (e2e participates in no phase; reload-frame phase 8 cost is
+  `core`'s, observed by e2e per §9.6).
+- Allocator-tag enumeration: `reviews/decisions/perf-budget.md`
+  Allocator Rules §1 (`e2e` absent); engine-side analogue
+  `specs/core/SPEC.md` §9.1.
+- Replay loop body and frame-locked emission (§9.2 row 1, §9.3):
+  §6.2 of this spec.
+- Driver / arena discipline (§9.5 row 1): §6.7 of this spec.
+- Threading topology and SPSC rings (§9.4, §9.5 row 4): §6.8 of
+  this spec.
+- Pixel-comparator details (§9.4): §5.3, §6.4 step 4 of this
+  spec; §4.1.11 invariants for `PixelTolerance`.
+- `EnvHash` determinism (§9.3 inv 2): §4.1.3 invariant 1, §4.1.7
+  invariant 1, §4.1.6 invariant 5.
+- Test-mode-only loading: §1, §3.3 R-X.5.4, §6.5, §6.6.
 
 ## 10. Failure Modes & Error Model
 
