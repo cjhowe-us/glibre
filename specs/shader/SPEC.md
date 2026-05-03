@@ -1790,7 +1790,158 @@ covers the full source-change hot-reload state machine.
 
 ## 9. Performance Budget
 
-Cycles / frame, memory ceiling, allocation rules.
+Quotes the `shader` row of the engine-wide budget
+(`reviews/decisions/perf-budget.md`) verbatim and refines it with the
+per-aggregate breakdown that sums into that row. Frame-phase ownership
+is consistent with `reviews/decisions/frame-phases.md`.
+
+### 9.1 Budget cells (engine contract)
+
+| Cell                | Value          | Source                                                    |
+|---------------------|----------------|-----------------------------------------------------------|
+| CPU sim (ms / frame)    | **0.00**   | `perf-budget.md` table row `shader`                       |
+| CPU submit (ms / frame) | **0.00**   | `perf-budget.md` table row `shader`                       |
+| GPU (ms / frame)        | **n/a**    | `shader` runs no GPU work; `render` owns all GPU cycles   |
+| Heap ceiling            | **32 MiB** | `perf-budget.md` allocator-rules contract for `ContextTag::shader` |
+| Phase ownership         | **none**   | `shader` owns no frame phase (1–9); cooked artifacts only |
+
+The per-frame cost of the `shader` context in shipping builds is
+**zero by construction** (PHILOSOPHY §6 codegen-everywhere; §4.3
+invariant 3 and §4.8 invariant 3 — no compilation, no reflection,
+no descriptor derivation, no hashing per frame). The 32 MiB heap is
+the hot-set ceiling for the resident artifacts the runtime read path
+holds memory-mapped or copied; cook-time arenas do not count against
+it (§9.4).
+
+### 9.2 Cook-time budgets are out of frame-budget scope
+
+`CompilationPipeline` (§4.3) and the cooker (`cache/cooker.cpp`) run
+**only** in the offline build / editor / tests; both are excluded from
+the shipping link (§6.1 build-system gating, §4.3 invariant 3). DXC
+and `metal-shaderconverter` subprocess wall-clock per artifact, total
+cook duration over a full permutation enumeration, parallel cook
+saturation on M1 firestorm/icestorm cores, and editor incremental-cook
+latency are tracked separately under the `shader-cook-time-budget`
+spike — they are **not** an input to the 16.67 ms / 60 fps frame
+contract and may not be conflated with §9.1.
+
+The only cook-related cost that touches a running shipping process is
+the cold-start cache-index load (§9.5), which is a one-time init cost,
+not a per-frame cost.
+
+### 9.3 Runtime per-aggregate breakdown
+
+Each aggregate's per-frame contribution. The sum is the §9.1
+`shader` cell — `0.00 ms` CPU, no GPU work — by construction.
+
+| Aggregate (§4)       | Per-frame CPU work | Hot-path cost            | In-memory hot set | Notes |
+|----------------------|--------------------|--------------------------|-------------------|-------|
+| `ShaderSource` (§4.1)        | none in shipping (frontend excluded by §6.1) | **0.000 ms** | 0 MiB | Editor / tests only. |
+| `PermutationKey` (§4.2)      | codec only when render computes a `ShaderHash`; render holds keys directly | **0.000 ms** | <0.5 MiB | Dense ordinal tables baked at codegen; no allocations on hot path. |
+| `CompilationPipeline` (§4.3) | excluded entirely from shipping (§4.3 inv 3) | **0.000 ms** | 0 MiB | Subprocess driver lives in `tools/shadercc/`. |
+| `ReflectionBlob` (§4.4)      | parsed once at artifact load; immutable thereafter | **0.000 ms on hot path** | 4 MiB | One blob per resident artifact; consumers (`render`) hold const refs and never re-parse. |
+| `DescriptorLayout` (§4.5)    | derived once per `(Backend, PermutationKey)` offline; runtime is table lookup (§4.5 inv 1) | **0.000 ms** | (counted under ReflectionBlob's 4 MiB) | No runtime re-derivation. |
+| `ShaderCache` (§4.6)         | `lookup(ShaderHash) → optional<ShaderArtifact>` queries from `render`'s PSO build / reload paths | **~0.005 ms per lookup; 0 ms on PSOCache hit** | 24 MiB CAS in-memory hot set | Lookups are O(1) on the BLAKE3-keyed index; the 5 µs amortized cost is non-zero only on PSOCache miss and is absorbed by the *render* CPU-submit budget (`render` cell §9), not by `shader`'s 0.00 ms cell. |
+| `IShaderBackend` (§4.7)      | trait surface; shipping has no implementation linked | **0.000 ms** | 0 MiB | Backend impls live behind `#if !GLIBRE_SHIPPING`. |
+| (External) PSO queries        | render-side `PSOCache` keyed by `(shader_hash, state_hash)` (`specs/render/SPEC.md` §4.1.7) | **0 ms on cache hit; O(1) hash-map lookup on miss** | 4 MiB | The PSOCache itself is a `render` aggregate; recorded here only so the `shader` ↔ `render` seam's runtime cost is fully accounted. Any miss-path cost is render's, not shader's. |
+| **Hot-set total**             |                                                      | **0.005 ms / lookup; 0 ms / frame steady-state** | **32 MiB** (24 + 4 + 4) | Equals §9.1 CPU 0.00 + heap 32 MiB. |
+
+The hot-path budget is **0 ms / frame** in steady state because, after
+init, `render`'s `PSOCache` (specs/render/SPEC.md §4.1.7) absorbs every
+PSO request, and the `shader` cache index is not consulted on the per-
+frame draw path. `ShaderCache::lookup` is exercised only on (a) cold
+PSO build during a load / level-stream event, or (b) a dev-build hot-
+reload (§8); neither is a steady-state cost.
+
+### 9.4 Allocator rules (per `reviews/decisions/perf-budget.md`)
+
+The `shader` context tags every allocation with `ContextTag::shader`
+through `glibre::PerContextAllocator` (perf-budget.md "Allocator
+Rules"). The 32 MiB ceiling decomposes:
+
+| Pool                                                   | Ceiling | Class          |
+|--------------------------------------------------------|---------|----------------|
+| `ShaderCache` in-memory hot set (CAS bytes + index)    | 24 MiB  | resident, counted |
+| `ReflectionBlob` records held by resident artifacts     | 4 MiB   | resident, counted |
+| `DescriptorLayout` projections of resident reflections  | (within the 4 MiB above) | resident, counted |
+| Cold-start manifest scratch (decode buffer, drained by phase 9 of the first frame after init) | 4 MiB | transient arena, **not counted** against the ceiling per perf-budget.md Allocator Rule §4 |
+| Cooker / DXC / metal-shaderconverter scratch            | n/a     | shipping-excluded; counted under the editor's tag in dev builds |
+| GPU-side memory                                         | 0       | `shader` allocates no GPU memory; PSO bytecode residency lives under the `render` 512 MiB tag (perf-budget.md Allocator Rule §5) |
+
+Strict-mode (`GLIBRE_ALLOC_STRICT=1`) returns
+`std::unexpected{core::Error::OutOfBudget}` if a `shader`-tagged
+allocation would push live bytes over 32 MiB; shipping mode logs a
+once-per-frame `warn` to `spdlog` (perf-budget.md Allocator Rules §2,
+§3). The transient cold-start arena is exempt provided it drains by
+phase 9 of the first frame after init (Allocator Rule §4); a leak
+past phase 9 is `core::Error::OutOfBudget{detail="leak"}`.
+
+### 9.5 Cold-start cost (one-time, not in frame budget)
+
+Engine init pays a one-shot cost to open the cooked `ShaderLibrary`
+archive and rehydrate the `ShaderCache` hot-set index:
+
+- **`ShaderLibrary` open + manifest decode** ≤ **50 ms** wall-clock on
+  the M1 baseline for an MVP-sized cooked archive (~10 k artifacts
+  resident; manifest is Fory-decoded once per process, §7.1).
+- This cost is paid before frame 1 of the game loop starts driving and
+  is **not** charged against the 16.67 ms / 60 fps frame budget
+  (perf-budget.md "Pipelined Frame Timing" — init work precedes the
+  driver thread's first phase-1 tick).
+- Subsequent `lookup` queries are O(1) against the rehydrated index;
+  there is no second-tier cold path.
+
+The 50 ms ceiling is recorded here as a contract on `shader`'s init
+contribution, not as part of the per-frame cell. A regression that
+exceeds 50 ms is a `shader`-spec violation, surfaced to the
+`task-breakdown-error-perf` spike's startup-time budget rather than
+to `perf-budget.yml`'s frame gate.
+
+### 9.6 CI gate
+
+The `perf-budget.yml` workflow (perf-budget.md "CI Gate Spec") gates
+PRs that touch `plugins/shader/**` on three `shader`-specific
+assertions in addition to the engine-wide gates:
+
+1. **Per-frame `shader` cost = 0.** The S1 sample-scene replay (600
+   frames) must record **0.000 ms** of CPU sim and CPU submit time
+   under `ContextTag::shader`. Any non-zero sample is a violation
+   (Catch2 `BENCHMARK` assertion in `tests/shader/perf/`).
+2. **Heap ceiling.** The same diagnostic-build replay under
+   `GLIBRE_ALLOC_STRICT=1` asserts that `shader`-tagged live bytes
+   never exceed 32 MiB. The transient cold-start arena (§9.4) is
+   exempt only inside frame 0; thereafter the ceiling applies.
+3. **Shader cache hit-rate ≥ 99 %.** Across the S1 replay's
+   `ShaderCache::lookup` calls (driven by `render`'s PSOCache misses
+   plus level-stream events), the hit ratio against the cooked
+   `ShaderLibrary` must be ≥ 99 %. A miss in shipping is
+   `shader::Error::CacheLookupMiss` (§4.6 invariant 2 forbids any
+   compilation fallback); the gate fails on a single miss past the
+   99 % threshold and posts the offending `(ShaderHash, source path)`
+   pairs to the PR. Sub-99 % almost always indicates a stale cooked
+   archive, a missing permutation in the enumeration table (§6),
+   or a `state_hash` change on the render side that left the
+   cooked archive behind.
+
+The 99 % threshold (rather than 100 %) reserves a small budget for
+rare engine-internal events that legitimately ask for a
+not-yet-resident artifact during a level-stream transition. A 100 %
+gate would flag false positives the first time a streaming chunk
+loads a permutation that was correctly enumerated but not yet warmed
+into the hot set.
+
+### 9.7 Cross-references
+
+- Engine-wide budget: `reviews/decisions/perf-budget.md`
+  (`shader` row; Allocator Rules; CI Gate Spec).
+- Frame-phase non-ownership: `reviews/decisions/frame-phases.md`
+  (phases 1–9; `shader` participates in none).
+- Render-side absorption: `specs/render/SPEC.md` §4.1.7
+  (`PSOCache`); the `shader` ↔ `render` cost seam is recorded in
+  §9.3 row "(External) PSO queries" so neither context double-counts.
+- Hot-reload (§8): a dev-build content reload triggers a one-shot
+  `ShaderCache::lookup` storm for the affected permutations; that
+  storm is not steady-state and is excluded from the per-frame gate.
 
 ## 10. Failure Modes & Error Model
 
