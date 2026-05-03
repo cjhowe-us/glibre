@@ -244,8 +244,717 @@ artifact" lives in another plugin.
 
 ## 4. Aggregates & Invariants
 
-- Aggregate / entity / value object.
-- Invariants that must hold at every public API boundary.
+This section enumerates the `content` context's aggregates, entities, and
+value objects together with the invariants every public API boundary must
+hold. Aggregates are listed in pipeline-and-residency order
+(`SourceAsset → Importer → CookKey → CookedAsset → CAS → Manifest →
+ResidencyManager → AssetHandle`); each owns one dimension of "turn
+artist source files into hashed, residency-managed cooked artifacts".
+Per PHILOSOPHY §1 (SRP), an aggregate is admitted to this list only when
+its single reason-to-change does not collapse into another's; where two
+harmonius primitives reduce to one glibre primitive the collapse is
+cited from §3.2. Cross-context concerns — domain semantics of cooked
+bytes, GPU upload, audio decode, schema authoring, shader compilation,
+mesh-internal geometry processing, OS file-watching, networked
+distribution, editor concerns — are explicitly delegated and never
+re-asserted here (§3.3). All fallible operations return
+`std::expected<T, glibre::Error>` per `reviews/decisions/error-model.md`;
+`content::Error` (an arm of the engine-wide tagged union) is the only
+content-internal error surface, populated by the `ImporterError` and
+`ResidencyError` closed sums declared in §2.
+
+### 4.1 Aggregate roster
+
+#### 4.1.1 `SourceAsset` — artist-authored input file (value object)
+
+**Reason to change:** what the cook treats as a legal input on disk —
+the closed `SourceKind` set (FBX / image / font), the source-tree root
+convention, the source-content-hash function. Distinct from any
+importer's normalize behavior (§4.1.2) and from the cook key that keys
+caching (§4.1.3).
+
+**Composition.** A `SourceAsset` is a value object carrying:
+
+- `path` — workspace-relative path under `assets/source/...` produced
+  by the artist or DCC plugin export. The cook never reads files
+  outside this root.
+- `kind` — one of `SourceKind::{Mesh, Texture, Font}`. Resolved by
+  extension at scan time (`.fbx`→`Mesh`; `.png`/`.jpg`/`.jpeg`/`.exr`/
+  `.hdr`/`.tif`/`.tiff`→`Texture`; `.ttf`/`.otf`→`Font`).
+- `format` — the concrete container/format inside that kind (e.g.
+  `TextureFormat::Png`, `MeshFormat::Fbx`, `FontFormat::Ttf`). Drives
+  importer dispatch; cooked outputs do not retain this.
+- `source_hash` — BLAKE3 of the raw source bytes on disk, captured at
+  the moment scan or watcher delivery sealed the file.
+
+The runtime never holds a `SourceAsset`; only the cook does. The
+runtime addresses cooked artifacts by `ContentHash` via `AssetHandle`.
+
+**Identity & lifetime.** Identity is the `path` (workspace-relative)
+plus `source_hash` pair: identical path with different bytes is a new
+revision and produces a fresh `CookKey`. Lifetime is the duration of a
+`CookSession`; `SourceAsset` values are recomputed (or fetched from a
+debounced cache of recent `FileEvent`s) per session — never persisted
+across runs because the source tree is the persistence.
+
+**Public-boundary invariants.**
+
+1. **Path-scoped to `assets/source/`.** Constructors refuse any path
+   that escapes the configured source root (no `..`, no absolute
+   paths, no symlinks that resolve outside the root). Violations
+   return `ImporterError::SourceNotFound` lifted through
+   `core::Error::ContentImport` rather than reading off-tree.
+2. **Closed `SourceKind` × `format` table.** A `SourceAsset` cannot
+   be constructed for any extension outside the table in §2; unknown
+   extensions are rejected at scan time, not by the importer (an
+   importer never sees a wrong-kind input). Adding a format is a
+   deliberate central edit (a new `Importer` per §3.2 collapse #1).
+3. **`source_hash` is BLAKE3 of the byte sequence as read.** No
+   normalization, no metadata stripping; identical bytes on disk
+   yield identical `source_hash`.
+4. **Read-only at the cook seam.** No code path writes back to a
+   `SourceAsset`'s file; the cook is a producer of cooked bytes, not
+   a mutator of artist authoring (§1).
+
+#### 4.1.2 `Importer` — front end per `SourceKind` (entity)
+
+**Reason to change:** the SDK seam for one source-kind family — FBX
+SDK API, FreeImage decoder set, FreeType glyph extraction. Distinct
+from cook-key construction (§4.1.3) and from the persistent CAS layer
+(§4.1.5).
+
+**Composition.** Three closed-sum entities, one per `SourceKind`,
+each wrapping exactly one vendor SDK at its first ingress per
+PHILOSOPHY §3 + the error-model decision's third-party-wrap rule:
+
+- **`FbxImporter`** — wraps the Autodesk FBX SDK; reads `Mesh`
+  source assets into a normalized `MeshArtifact` precursor (vertex
+  /index streams in engine-canonical layouts, skeleton + scene
+  hierarchy nodes). Delegates meshlet partitioning, vertex-cache
+  reorder, LOD chain authoring, BLAS construction, and lightmap UV
+  unwrapping to `geometry` from inside the cook step — never owns
+  those algorithms (§3.3). The only mesh path for MVP; glTF /
+  Alembic / USD re-enter post-MVP behind this same seam.
+- **`ImageImporter`** — wraps FreeImage; decodes `Texture` source
+  assets (PNG / JPEG / EXR / HDR / TIFF) into the engine's canonical
+  pixel layout plus extracted metadata (mip count, color space,
+  usage hint). GPU-format block compression (BC7 / ASTC / ETC2) is
+  out of scope and routed to `render` (§3.3); KTX2 containers
+  re-enter post-MVP behind this seam if needed.
+- **`FontImporter`** — wraps FreeType; extracts `Font` source
+  assets (TTF / OTF) into glyph metrics + a baked SDF or bitmap
+  atlas, packaged as `FontArtifact`.
+
+Each importer carries an immutable `importer_version` (a BLAKE3 of
+its compiled-in identity: SDK version, normalize-params version,
+post-process options vocabulary). This version is one of the
+ingredients of `CookKey` (§4.1.3).
+
+**Identity & lifetime.** Each importer is a stateless engine-singleton
+constructed at cook-session start and destroyed at session end; the
+only state per-cook is a per-importer arena it owns. Identity is the
+`SourceKind` it serves (closed sum: at most one importer per kind).
+
+**Public-boundary invariants.**
+
+1. **One importer per `SourceKind`.** A closed sum admits exactly one
+   `FbxImporter`, one `ImageImporter`, one `FontImporter`; dispatch is
+   exhaustive at compile time. Adding a new asset class re-introduces
+   the registry pattern under explicit central edit (§3.2 collapse #1)
+   — never via runtime registration.
+2. **SDK exceptions never escape.** Each importer is the unique
+   `-fexceptions` carve-out per the error-model decision: thrown
+   exceptions from FBX SDK / FreeImage / FreeType are caught at the
+   importer's first ingress and translated into `ImporterError::*`
+   variants (`SourceNotFound`, `MagicMismatch`, `UnsupportedVersion`,
+   `MalformedPayload`, `MissingDependency`, `Cancelled`). No
+   exception crosses an importer's public boundary.
+3. **Pure of effect outside its arena.** An importer reads the
+   declared `SourceAsset.path`, calls into its SDK, allocates only
+   inside its per-cook arena, and returns either a normalized
+   in-memory representation or an `ImporterError`. No global state,
+   no I/O outside the source path, no allocations on the runtime
+   heap.
+4. **`importer_version` participates in `CookKey`.** Bumping the
+   SDK version or normalize-params vocabulary forces the
+   downstream `CookKey` to change, which forces a re-cook on next
+   touch (§4.1.3). Importers never silently change output for the
+   same input.
+5. **Cancellable.** Any in-flight import respects a `CookSession`
+   cancellation token and returns `ImporterError::Cancelled`
+   promptly; no detached threads or undrainable work.
+
+#### 4.1.3 `CookKey` — cache key over (source + cooker version) (value object)
+
+**Reason to change:** what counts as "the same cook" — the precise
+inputs over which the cache hashes. Distinct from the cooked output
+itself (§4.1.4) and from cooked-content addressing (§4.1.5).
+
+**Composition.** A `CookKey` is a value object: a single 32-byte
+BLAKE3 digest computed over the canonical concatenation of:
+
+1. `source_hash` — BLAKE3 of the source bytes (from §4.1.1).
+2. `importer_version` — BLAKE3 of the dispatched importer's compiled
+   identity (from §4.1.2).
+3. `normalize_params` — BLAKE3 of the canonical (sorted-key,
+   length-prefixed) serialization of the per-source-kind normalize
+   parameter set actually applied (axis convention, color-space
+   hint, glyph-atlas size, …).
+4. `processing_params` — BLAKE3 of the canonical serialization of
+   any cook-step processing parameters (e.g. `geometry`'s meshlet /
+   LOD configuration as supplied to the cook step).
+5. `downstream_tool_versions` — BLAKE3 of the sorted tuple of
+   `(tool_name, tool_version)` pairs for every tool the cook step
+   transitively invokes (`geometry` plugin version, `glibre-foryc`
+   version, `glibre-types` ABI hash from §3.2 collapse #2).
+
+Concatenation is length-prefixed (`u64-le` byte length before each
+component) so no two distinct input tuples can collide via boundary
+ambiguity. The result is the cache key against which the CAS is
+queried.
+
+**Identity & lifetime.** A `CookKey` is an immutable 32-byte value;
+two `CookKey`s with the same digest are interchangeable. Lifetime is
+the duration it is held in a `CookSession`'s job table.
+
+**Public-boundary invariants.**
+
+1. **Pure function of declared inputs.** `CookKey` depends on
+   exactly the five components above and on nothing else. Wall-clock
+   time, machine identity, environment variables, and filesystem
+   ordering may not affect the digest.
+2. **Canonical serialization.** Each component above is fed in its
+   declared canonical byte form; alternate representations of the
+   same logical value (e.g. JSON-with-different-whitespace,
+   floating-point with NaN payload bits) are rejected before
+   hashing rather than allowed to produce two keys for one logical
+   input.
+3. **Identical key ⇒ cache hit (no re-cook).** The `CookSession`
+   path is: compute `CookKey` → ask the `Manifest` if a current
+   cook for the affected `AssetId` already used this key and the
+   resulting `ContentHash` is present in the CAS; if so, skip the
+   cook. Otherwise enqueue the cook. The cache hit is the *only*
+   path that elides a cook — there is no second opt-out.
+4. **Versioning is a key change, not a key annotation.** Bumping
+   any component (SDK, params vocabulary, `geometry` plugin)
+   changes the digest and forces a fresh cook; no migration path
+   on the key itself.
+
+#### 4.1.4 `CookedAsset` — Fory-serialized artifact (value object)
+
+**Reason to change:** the layout of cooked bytes for a given asset
+class — what fields the `MeshArtifact` / `TextureArtifact` /
+`FontArtifact` Fory schemas encode. Distinct from the addressing /
+storage layer (§4.1.5) and from the manifest (§4.1.6).
+
+**Composition.** A `CookedAsset` is the immutable byte payload
+produced at the end of a cook step's `fory-serialize` stage,
+together with its derived `ContentHash`:
+
+- `payload` — the Fory-serialized bytes of one of the per-class
+  artifact schemas authored in `data/` per
+  `reviews/decisions/fory-codegen.md`. Content is a producer of
+  bytes conforming to those schemas, never a definer of them
+  (§3.3): `glibre.content.MeshArtifact`,
+  `glibre.content.TextureArtifact`, `glibre.content.FontArtifact`
+  are the three Fory FQNs; the schemas live under
+  `data/schemas/content/`.
+- `content_hash` — `ContentHash` = BLAKE3(`payload`). Computed
+  exactly once at the moment the bytes leave the cook step;
+  thereafter the artifact is addressed by it.
+
+The `payload`'s envelope (magic, version, content hash, type-of-
+contents tag) is provided by Fory's encoding per §3.2 collapse #2;
+content does not author a bespoke header.
+
+**Identity & lifetime.** Identity is `content_hash`. Lifetime is
+"forever once written" — `CookedAsset`s are immutable, append-only
+in the CAS, and never patched in place; supersession is by writing
+a new hash (a new `CookedAsset`) and re-pointing the `Manifest` at
+it.
+
+**Public-boundary invariants.**
+
+1. **Determinism: identical `(source bytes, cooker version)` →
+   identical `content_hash`.** Two cooks of the same `SourceAsset`
+   with the same `importer_version`, `normalize_params`,
+   `processing_params`, and `downstream_tool_versions` produce
+   byte-equal `payload`, hence byte-equal `content_hash`. This is
+   what makes the `CookKey → ContentHash` map well-defined and the
+   CAS deduplicating. Determinism follows PHILOSOPHY §7 and is
+   enforced by Fory's deterministic encoding (tag-sorted field
+   layout, no platform intrinsics in the cook).
+2. **Schema-conformant.** `payload` is a valid Fory encoding of
+   exactly one of the three content-owned schema FQNs at its
+   declared `SchemaVersion`. Any deviation (wrong FQN, version not
+   present in `glibre-types` registry) is a producer-side defect,
+   not a runtime branch — `CookSession` refuses to publish such an
+   artifact and returns `ImporterError::MalformedPayload`.
+3. **Immutable post-write.** Once `content_hash` is computed, the
+   bytes are sealed; in-place modification is not supported by the
+   cook surface (no API exposes a mutating reference). Re-cook
+   produces a new `CookedAsset`; the prior one remains in the CAS
+   until garbage collection (post-MVP) decides otherwise.
+4. **No GPU resources, no audio decode, no shader bytecode
+   authoring.** A `CookedAsset` carries domain-canonical data
+   (CPU-side normalized pixels, vertex/index streams, glyph
+   metrics + atlas) plus opaque blobs it is asked to ferry (e.g.
+   shader bytecode produced by `shader`); it never authors any of
+   these (§3.3).
+
+#### 4.1.5 `CAS` — content-addressable store (aggregate root)
+
+**Reason to change:** how cooked bytes are stored on disk under
+`cooked/<prefix>/<hash>` — the directory layout, the prefix length,
+the atomic-write protocol, the mmap-read protocol. Distinct from
+the manifest's `AssetId → ContentHash` mapping (§4.1.6) and from
+residency (§4.1.7).
+
+**Composition.** The `CAS` aggregate root owns:
+
+- The configured `cooked/` root directory.
+- The fan-out convention: `cooked/<prefix>/<hash>` where `prefix`
+  is the first 2 hex chars of the BLAKE3 digest (256-way fan-out
+  to keep any one directory under filesystem limits at scale).
+- The atomic-write protocol: cooked bytes land first at
+  `cooked/<prefix>/<hash>.tmp.<pid>.<rand>` (or equivalent
+  collision-free temp name) and are committed via
+  `rename(tmp, final)` once the full payload + fsync are
+  durable. The `rename(2)` is the atomic publication boundary.
+- Read: cooked files are opened read-only and mmap'd; the
+  residency manager (§4.1.7) holds the mappings, not the CAS
+  itself, so the CAS is stateless across reads.
+
+The CAS is the only persistence concern for cooked bytes; the
+metadata DB / import cache / pak archive / CDN staging primitives
+that harmonius split out collapse here per §3.2 collapse #2.
+
+**Identity & lifetime.** One CAS per workspace; identity is the
+`cooked/` root path. Lifetime spans the workspace lifetime and
+survives across cook sessions and runs.
+
+**Public-boundary invariants.**
+
+1. **Address by `ContentHash` only.** Files under `cooked/` are
+   opened, written, and addressed by their BLAKE3 hash; no logical
+   names ever appear at the CAS layer. `AssetId`s live one layer
+   up (in the `Manifest`).
+2. **Append-only at the file layer.** A file at
+   `cooked/<prefix>/<hash>` is never opened for write after its
+   first `rename(2)` commit. Re-cook produces a new hash → a new
+   file; supersession is mediated by the `Manifest`, not by
+   in-place rewriting. Garbage collection of orphaned hashes is
+   post-MVP.
+3. **Atomic write via `rename(2)`.** Concurrent or interrupted
+   writes never expose a partial file under `cooked/<prefix>/<hash>`:
+   the temp file is fsynced, then atomically renamed onto the
+   final path. Reads see either the prior bytes (if any) or the
+   new bytes — never an in-progress prefix. Writes onto an existing
+   final path are no-ops at the byte layer (the hash already
+   matches; rename targets identical bytes), preserving
+   deduplication.
+4. **Deduplicating by construction.** Two callers writing the same
+   `(content_hash, payload)` collapse to one stored file; the
+   second writer's temp file is unlinked after its rename target
+   is observed to already match. Hash collisions across distinct
+   payloads at BLAKE3 strength are treated as cryptographically
+   impossible; the runtime does not branch on them.
+5. **Mmap-readable.** Once committed, a CAS file is safe to mmap
+   read-only and treat as a stable byte view for the lifetime of
+   the residency mapping; the residency manager's mappings are
+   torn down before any (post-MVP) GC reclaim could remove the
+   file.
+6. **Path-scoped.** No path under `cooked/` is ever read or
+   written outside the configured `CAS` root; the aggregate
+   refuses out-of-root paths at its boundary.
+
+#### 4.1.6 `Manifest` — `AssetId → ContentHash + dependencies` (aggregate root)
+
+**Reason to change:** the persistent table that maps stable logical
+identity (`AssetId`) to current cooked content (`ContentHash`) plus
+the dependency edges that drive incremental rebuilds. Distinct from
+the CAS's byte-storage seam (§4.1.5) and from residency (§4.1.7).
+
+**Composition.** The `Manifest` aggregate root owns:
+
+- A persistent mapping `AssetId → (ContentHash, CookKey,
+  Set<DependencyEdge>)`. The `CookKey` is recorded so a future
+  scan can decide cache-hit-vs-recook without re-deriving every
+  ingredient; the `DependencyEdge` set records that re-cooking the
+  child must invalidate the parent (bottom-up incremental
+  rebuilds per §3.1 R-12.3.4).
+- A persistent on-disk encoding: `Manifest` is itself a Fory-
+  serialized artifact under `data/schemas/content/Manifest.fory`
+  per `reviews/decisions/fory-codegen.md`, written next to the
+  CAS root (e.g. `cooked/_manifest.fory`).
+- An atomic-publish protocol: a `CookSession`'s end-of-session
+  publish writes a fresh manifest blob to a temp path, fsyncs it,
+  and `rename(2)`s it onto the canonical manifest path. No
+  partial publish is ever observable.
+- Query API: `resolve(AssetId) → std::expected<ContentHash,
+  ResidencyError::ManifestStale>`, `dependents_of(AssetId) →
+  Set<AssetId>` for the watcher fan-out.
+
+**Identity & lifetime.** One `Manifest` per workspace; identity is
+the `cooked/_manifest.fory` path. Lifetime spans the workspace and
+survives across runs; in-RAM, exactly one manifest snapshot is
+active at a time, swapped atomically per `CookSession` publish.
+
+**Public-boundary invariants.**
+
+1. **Single source of truth.** The runtime resolves `AssetId →
+   ContentHash` only through the active `Manifest` snapshot; no
+   other code path may map `AssetId` to bytes. Editor / cook
+   tools may read previous snapshots for history queries
+   (post-MVP), but the runtime does not.
+2. **Atomic publish via `rename(2)`.** A `CookSession` either
+   publishes its full updated manifest (every recooked
+   `AssetId` re-mapped, every dependency edge updated) or none of
+   it. Concurrent runtime queries see either the prior snapshot
+   or the new snapshot; never an interleaved mixture.
+3. **Manifest snapshot is internally consistent.** Every
+   `ContentHash` referenced by a published manifest must exist in
+   the CAS at the moment of publish (the CAS write happens
+   *before* the manifest publish; ordering is enforced by the
+   `CookSession`). Querying an active manifest can only return
+   `ContentHash`es whose CAS files are durable.
+4. **Bottom-up invalidation correctness.** The `DependencyEdge`
+   set is closed under transitivity at publish time: if `A`
+   depends on `B` and `B` depends on `C`, the manifest records an
+   edge `A→B` and an edge `B→C` so a `FileEvent` on `C` correctly
+   fans out to recook `B` then `A`. Cycles in the dependency
+   graph are rejected at publish with
+   `ImporterError::MalformedPayload` (a content-domain defect).
+5. **`AssetId` namespace-scoped.** Every `AssetId` matches the
+   `glibre.<ctx>.<slug>` convention from §2; collisions across
+   sources are rejected at scan time, not silently merged.
+6. **Schema-conformant.** The on-disk manifest is a valid Fory
+   payload of the `glibre.content.Manifest` schema at its
+   declared `SchemaVersion`. Migrations across versions follow
+   the `reviews/decisions/fory-codegen.md` migration registry;
+   content owns the migration body, `data` owns the dispatcher
+   plumbing (§3.3).
+
+#### 4.1.7 `ResidencyManager` — RAM working set (aggregate root)
+
+**Reason to change:** how cooked artifacts are streamed into RAM,
+prioritized, and evicted under memory pressure. Distinct from the
+CAS's byte-storage seam (§4.1.5), from manifest publishing
+(§4.1.6), and from `AssetHandle` indirection (§4.1.8).
+
+**Composition.** The `ResidencyManager` aggregate root owns:
+
+- A bounded `MemoryBudget` (RAM ceiling) configured from
+  `reviews/decisions/perf-budget.md`'s content-context cell.
+- A residency table per `ContentHash`: `Residency` ∈ `{Unloaded,
+  Pending, Resident, Evicting}`. `Resident` carries the live
+  mmap region + ref-count from outstanding `AssetHandle<T>`
+  instances. State transitions are total and only originate
+  inside the manager.
+- A priority-ordered `LoadRequest` queue consumed by an I/O
+  lane: each request carries `(content_hash, screen_coverage,
+  deadline)`. `ScreenCoverage` is supplied by `render` via
+  the handle-resolve seam; the manager treats it as an opaque
+  scalar weight.
+- An LRU + screen-coverage priority eviction policy: under
+  pressure, the lowest-priority resident artifact (lowest
+  `screen_coverage`, oldest LRU stamp, zero outstanding handle
+  refs) is moved to `Evicting`, its mmap region is unmapped,
+  and the slot returns to `Unloaded`.
+
+The residency manager is the only owner of mmap regions over CAS
+files; the CAS itself is stateless across reads (§4.1.5).
+
+**Identity & lifetime.** One residency manager per process;
+identity is the engine-singleton handle obtained from the
+content plugin's init. Lifetime spans the process; state is
+ephemeral (rebuilt on next run from `Manifest` + CAS lookups).
+
+**Public-boundary invariants.**
+
+1. **`MemoryBudget` is a hard ceiling.** The aggregate
+   resident-artifact bytes never exceed `MemoryBudget`. Any
+   `LoadRequest` that would exceed it triggers progressive
+   eviction in priority order *before* the new mapping is
+   admitted; if no evictable artifact can free enough room, the
+   request transitions to `Pending` and waits, returning
+   `ResidencyError::BudgetExceeded` only when its deadline
+   elapses with no admission. No allocation ever silently
+   overshoots.
+2. **State machine is total and serialised.** Each
+   `ContentHash` is in exactly one residency state at a time;
+   transitions follow the closed graph
+   `Unloaded → Pending → Resident → Evicting → Unloaded` and
+   are arbitrated by the manager. No external code path may
+   construct a residency state.
+3. **Eviction respects outstanding handles.** A `Resident`
+   artifact with a non-zero `AssetHandle` ref-count cannot be
+   evicted; it is excluded from the eviction candidate set
+   regardless of LRU age or screen coverage. This is what
+   makes `AssetHandle::view()` safe (§4.1.8 invariant 2).
+4. **Priority is `(screen_coverage, LRU)`.** Higher
+   screen_coverage stays resident longer; ties are broken by
+   most-recently-used. `screen_coverage` is supplied by the
+   handle's consumer (typically `render`) and is treated as an
+   opaque non-negative scalar.
+5. **CAS reads are mmap-only on the load path.** The manager
+   opens the CAS file at `cooked/<prefix>/<hash>` read-only,
+   mmap's it, populates the `Resident` slot, and never copies
+   the bytes. I/O failure surfaces as `ResidencyError::IoFailure`;
+   missing hash surfaces as `ResidencyError::HashNotInCas`;
+   stale manifest (the `ContentHash` no longer current) surfaces
+   as `ResidencyError::ManifestStale`.
+6. **Hot-reload safe.** When the `Manifest` publishes a new
+   `ContentHash` for an `AssetId` that has resident bytes under
+   the prior hash, the prior `Resident` slot is *not* immediately
+   evicted; it is held until its outstanding handle ref-count
+   reaches zero (each handle resolves through the manager and
+   transparently picks up the new hash on its next access — see
+   §4.1.8). Old residency drains naturally, no mid-frame swap.
+
+#### 4.1.8 `AssetHandle<T>` — opaque, hash-keyed, ref-counted indirection (value object)
+
+**Reason to change:** the runtime-facing handle shape — what
+runtime code holds, how it resolves to bytes, how its ref-count
+governs residency. Distinct from residency policy (§4.1.7) and
+from the manifest's `AssetId → ContentHash` resolution (§4.1.6).
+
+**Composition.** `AssetHandle<T>` is a generic value object
+parameterised by the artifact class `T ∈ {Mesh, Texture, Font}`
+(closed sum at compile time, one alias per cooked artifact
+schema). Internally it carries:
+
+- `asset_id` — the stable logical identity the runtime asked
+  for. Resolved through the active `Manifest` snapshot to a
+  `ContentHash` on access.
+- `slot` — a generation-tagged residency slot index in the
+  `ResidencyManager`'s table; increments on hot-reload swap so
+  stale handle reads cannot accidentally bind to a recycled
+  slot.
+- `ref` — reference-counted membership in the resident set; the
+  count is owned by `ResidencyManager`.
+
+Public surface: `view() -> std::expected<std::span<const
+std::byte>, content::Error>` (returns the cooked bytes), `kind()`,
+explicit copy/move semantics that bump/drop the residency
+ref-count. The handle never exposes a path, never exposes a
+`ContentHash`, and is type-aliased per artifact class so a
+`AssetHandle<Mesh>` cannot accidentally resolve a `Texture` blob.
+
+**Identity & lifetime.** Identity is `(asset_id, slot.generation,
+content_hash_at_acquire)`. Lifetime is governed by the holder;
+construction increments the residency ref-count, destruction
+decrements it. Generation tagging makes use-after-swap a
+`ResidencyError::ManifestStale` rather than UB.
+
+**Public-boundary invariants.**
+
+1. **Opaque to consumers.** Runtime code (render, future
+   game-framework, UI plugins) never observes a path or a raw
+   `ContentHash` through this seam; only `AssetId` (compile-
+   time-known string literal) on construction and the typed
+   byte view on access.
+2. **`view()` returns bytes for a `Resident` slot or an error.**
+   While a handle's `ref` is non-zero, its slot cannot be
+   evicted (§4.1.7 invariant 3); `view()` therefore yields a
+   stable `std::span<const std::byte>` for the lifetime of the
+   handle's outstanding ref. No partial / torn / mid-eviction
+   view is ever exposed.
+3. **Type-keyed.** `AssetHandle<T>::view()` returns bytes
+   conforming to the Fory schema for `T`; resolving an
+   `AssetId` whose manifest entry has the wrong artifact class
+   returns `ImporterError::MalformedPayload` lifted through
+   `core::Error::ContentImport`, rather than presenting a
+   wrong-class blob.
+4. **Hot-reload-transparent.** When `Manifest` publishes a new
+   `ContentHash` for a handle's `asset_id`, subsequent `view()`
+   calls observe the new bytes once the new hash is `Resident`;
+   the prior hash's bytes remain valid only for handles that
+   captured them (no in-place mutation of an outstanding
+   `view()`). Generation tags catch any attempt to dereference
+   a slot that was reused.
+5. **Ref-count discipline.** Copy and move follow Rule-of-Five
+   discipline; ref-count manipulations are atomic at the
+   manager seam; a leaked handle is a defect that pins residency
+   (no silent drop). Default-constructed handles are a distinct
+   `Empty` state with no ref-count contribution; `view()` on
+   `Empty` returns `ResidencyError::HashNotInCas`.
+
+#### 4.1.9 `CookSession` — bounded run that publishes one manifest update (entity)
+
+**Reason to change:** the orchestration policy for a batch of
+cooks — parallelism, deduplication, dependency ordering, the
+end-of-session atomic publish. Distinct from any individual
+importer / cook step (§4.1.2, §4.1.4) and from watcher mechanics
+(§4.1.10).
+
+**Composition.** A `CookSession` aggregate root owns:
+
+- A `Set<RecookRequest>` queue (deduplicated by `AssetId`).
+- A worker pool that runs `CookStep` chains in parallel across
+  CPU cores; each step is a pure function of its input set per
+  §2.
+- A staging table of `(AssetId, CookKey, ContentHash)` triples
+  produced by completed cooks but not yet published.
+- The single end-of-session manifest publish that atomically
+  commits the staging table into the active `Manifest` (§4.1.6
+  invariant 2).
+- A cancellation token observed by every worker.
+
+Sessions can be triggered by editor command (full or partial cook),
+by initial workspace scan, or by a `WatchEdge` (§4.1.10).
+
+**Identity & lifetime.** Identity is the session's start
+timestamp + monotonic counter (debug only; no semantic
+dependence). Lifetime is bounded — every session terminates with
+either a successful publish or a rollback (no partial publish).
+
+**Public-boundary invariants.**
+
+1. **Atomic publish or no publish.** A session that fails any
+   constituent cook step rolls back its staging table and leaves
+   the active `Manifest` unchanged; the prior manifest snapshot
+   remains current. There is no half-published state.
+2. **CAS-write before manifest-publish.** Every `ContentHash` in
+   the staging table has its `payload` written and committed to
+   the CAS (atomic `rename(2)` per §4.1.5 invariant 3) *before*
+   the manifest publish runs. Order is mandatory; the runtime
+   never sees a manifest entry whose CAS file is missing.
+3. **Dependency-ordered cook execution.** Cooks within a session
+   execute in topological order over the `DependencyEdge` graph
+   (children before parents); a `FileEvent` on a leaf source
+   asset fans out to recook that leaf's parents, but the
+   parents are scheduled to start only once their children's
+   cooks have completed. Cycles → reject the session with
+   `ImporterError::MalformedPayload`.
+4. **Deduplicating.** Multiple `RecookRequest`s for the same
+   `AssetId` within a session collapse to one cook step;
+   identical `CookKey` against the prior manifest's recorded
+   key with the same `ContentHash` already in the CAS skips
+   the cook entirely (cache hit).
+5. **Cancellable end-to-end.** Cancelling a session before
+   publish leaves the prior manifest active and the CAS
+   unchanged at the manifest-visible layer; orphaned cooked
+   files (cooked but never referenced) are garbage-collectable
+   post-MVP.
+
+#### 4.1.10 `WatchEdge` / `RecookRequest` — file-watch fan-out (value objects)
+
+**Reason to change:** the seam between `platform`'s file watcher
+and content's recook scheduling. Distinct from `CookSession`
+orchestration (§4.1.9) and from the importer / cook-step path
+(§4.1.2, §4.1.4).
+
+**Composition.** A `WatchEdge` is a value-object subscription
+registered with `platform`'s file watcher (§3.3): a path under
+`assets/source/` plus a debounce / dedup policy. A `FileEvent`
+delivered through the platform watcher is translated by content
+into one or more `RecookRequest` value objects, each carrying an
+`AssetId` to recook plus a reason (`SourceChanged`,
+`DependentRecook`, `ManualEditorCommand`).
+
+Content owns only the translation seam — the fan-out from a path
+event into the affected `AssetId` set via the `Manifest`'s
+`DependencyEdge` graph. `platform` owns the OS-level watcher,
+debounce, and event delivery (§3.3).
+
+**Identity & lifetime.** A `WatchEdge` is identified by its
+`(path, debounce_policy)` pair and lives for the workspace's
+lifetime. A `RecookRequest` is identified by its `AssetId` plus
+session counter; lifetime is one `CookSession`.
+
+**Public-boundary invariants.**
+
+1. **One `WatchEdge` per source-tree subscription.** Duplicate
+   subscriptions for the same path collapse at registration
+   time; `platform` is told once.
+2. **`FileEvent → RecookRequest` is a pure function of the
+   manifest snapshot.** Given the same `FileEvent` and the same
+   active manifest at translation time, the resulting
+   `Set<RecookRequest>` is identical. Determinism (PHILOSOPHY
+   §7) holds at the watcher seam.
+3. **No FS operations on the translation path.** The translator
+   reads only the manifest's in-RAM `DependencyEdge` graph and
+   does not stat / read / write the source tree; the `FileEvent`
+   already carries the changed path. Source-byte reads happen
+   in the importer (§4.1.2), not here.
+4. **Bounded fan-out.** A `FileEvent` on a single source asset
+   produces a `RecookRequest` set whose size is bounded by the
+   manifest's transitive dependents of that asset. No fan-out
+   amplification beyond the dependency graph is possible;
+   pathological dependency graphs (which would manifest as
+   high-degree `DependencyEdge` sets) are flagged at manifest
+   publish time, not at watcher firing.
+
+### 4.2 Cross-aggregate invariants
+
+Invariants that span more than one aggregate and must hold at every
+public boundary at the seams between them:
+
+1. **Determinism: `(source_bytes, cooker_version) → content_hash` is a
+   total function.** Two cooks of the same `SourceAsset` with the
+   same `importer_version`, `normalize_params`, `processing_params`,
+   and `downstream_tool_versions` produce byte-equal `CookedAsset`
+   payloads, hence byte-equal `ContentHash`. This is what makes the
+   `CookKey → ContentHash` map well-defined, the CAS deduplicating,
+   and the `Manifest` snapshots reproducible across hosts and runs
+   (PHILOSOPHY §7).
+2. **CAS-write atomicity precedes manifest-publish atomicity.** The
+   ordering inside a `CookSession` is rigid: every staged
+   `ContentHash`'s bytes are committed to the CAS via the
+   `rename(2)` protocol of §4.1.5 invariant 3 *before* the manifest
+   publish runs (§4.1.6 invariant 2). The runtime never observes a
+   `Manifest` entry pointing at a missing or partial CAS file.
+3. **Manifest publication is atomic.** A `CookSession` either
+   publishes its full updated `Manifest` (every recooked `AssetId`
+   re-mapped, every `DependencyEdge` updated) or none of it.
+   Concurrent runtime queries see exactly one of the two snapshots.
+   Combined with invariant 2, this gives transactional
+   "(CAS-write-set, manifest-publish)" semantics without any
+   bespoke transaction manager.
+4. **Residency never exceeds `MemoryBudget`.** The aggregate
+   resident-artifact bytes held by `ResidencyManager` never exceed
+   the configured ceiling; pressure triggers progressive eviction
+   in `(screen_coverage, LRU)` order before any new mapping is
+   admitted (§4.1.7 invariant 1). No `LoadRequest` or
+   `AssetHandle::view()` path silently overshoots the budget.
+5. **Hot-reload = re-cook + atomic `Manifest` swap.** Content's
+   single hot-reload mechanism per §3.2 collapse #3: a `WatchEdge`
+   delivers a `FileEvent`, the translator emits a
+   `Set<RecookRequest>` (§4.1.10), a `CookSession` runs them in
+   dependency order producing new `CookedAsset`s in the CAS
+   (§4.1.4, §4.1.5), and a single atomic `Manifest` publish
+   (§4.1.6) commits the new `AssetId → ContentHash` mapping.
+   `AssetHandle` consumers transparently observe the new bytes on
+   their next `view()` once the new hash is `Resident` (§4.1.8
+   invariant 4); domain semantics of swap (descriptor-heap
+   updates, PSO swap, logic-graph state preservation, UI tree
+   preservation) are routed to the owning context (§3.3) and are
+   not content's concern.
+6. **`AssetId` is the only stable identity the runtime sees.** No
+   aggregate above exposes a `path` or a raw `ContentHash` to the
+   runtime; runtime code names assets by `AssetId`, holds opaque
+   `AssetHandle<T>` values, and resolves through the
+   `ResidencyManager` to a typed `std::span<const std::byte>`. The
+   manifest is the single resolution point; the CAS is the single
+   byte-storage point; residency is the single in-RAM-mapping
+   point.
+7. **Per-context error model honoured.** Every aggregate's public
+   fallible operation returns `std::expected<T, glibre::Error>`
+   per `reviews/decisions/error-model.md`; content's enumerators
+   live in the `content::Error` arm via the closed sums
+   `ImporterError` and `ResidencyError` declared in §2. No
+   exception crosses any content public boundary; the importer
+   carve-outs of §4.1.2 invariant 2 are the only `-fexceptions`
+   sites and they translate at first ingress.
+8. **Frame-phase ownership.** `ResidencyManager`'s I/O lane and
+   eviction policy run on background threads scheduled by `core`;
+   the `AssetHandle::view()` seam is callable from any frame phase
+   `core` permits content access in (typically pre-render extract).
+   `CookSession` work runs entirely off the frame loop; the only
+   on-frame artifact is the in-RAM manifest swap, which is a
+   pointer-flip aligned with `core`'s frame-boundary barrier per
+   PHILOSOPHY §8. No aggregate above mutates state mid-frame.
 
 ## 5. Public Interface
 
