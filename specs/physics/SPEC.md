@@ -4337,27 +4337,43 @@ spdlog.
   PHILOSOPHY §9 — refuse-on-hash-mismatch rule that
   `JoltMiddlemanHashMismatch` enforces.
 
-### 10.7 Open questions (carried into §12)
+### 10.7 Open questions — resolved
 
-- Add `QueryFilterInvalid`, `NumericalInstabilityDetected`, and
-  `DeterminismCheckFailed` as enumerator rows in the §5
-  `physics::Error` enum (currently documented in §10.1 as added
-  by §10). Each addition is an ABI bump and triggers a
-  `JoltMiddleman` hash bump (§4.1.13 invariant 1, PHILOSOPHY §9);
-  scheduled for the implementation plan that introduces
-  `physics/include/glibre/physics/error.hpp`.
-- The `PhysicsConfig.determinism_gate` knob (`Hard` / `SoftWarn`)
-  needs a §4.1.2 invariant row + a §7.1.1 schema field. Both
-  edits are in the same implementation plan; they are listed here
-  so the determinism-gate split in §10.3 is testable end-to-end.
-- `ErrorContext` payload shape — physics arms attach `BodyId`,
-  `JointId`, `frame_tick`, `world_tick`, `physics_config_hash`
-  via the `ErrorContext.detail` field; whether `ErrorContext`
-  grows a structured payload struct (instead of the prose `detail`
-  string) is `error-model.md` open question 3 + `core/error.hpp`'s
-  call. Physics will follow whatever core picks.
-- `magic_enum` vs hand-written `to_string` for arm names in log
-  output — same deferral as platform §10.8.
+The four questions originally carried into §12 each resolve to an
+existing external gate or to an answer frozen until a known trigger;
+§12 holds no physics-owned residue. Each entry below names the gate
+that re-opens it, so a future change does not need to re-derive the
+deferral.
+
+- **Add `QueryFilterInvalid`, `NumericalInstabilityDetected`, and
+  `DeterminismCheckFailed` to the §5 `physics::Error` enum.** Frozen
+  until the implementation plan that introduces
+  `physics/include/glibre/physics/error.hpp` lands; that plan is the
+  only place an enumerator-row addition is permitted, because each
+  one is an ABI bump and triggers a `JoltMiddleman` hash bump
+  (§4.1.13 invariant 1; PHILOSOPHY §9). The §10.1 rows already name
+  these arms as "added by §10" so consumers compile against the
+  documented surface; the gate to flip from documented to enumerated
+  is the same implementation plan and nothing else.
+- **`PhysicsConfig.determinism_gate` knob (`Hard` / `SoftWarn`).**
+  Frozen at the documented two-value shape; the §4.1.2 invariant row
+  and §7.1.1 schema field land together with the
+  `physics/include/glibre/physics/error.hpp` plan above (same gate),
+  so the §10.3 determinism-gate split becomes testable end-to-end in
+  one ABI bump rather than two. No physics-side residue independent
+  of that plan.
+- **`ErrorContext` payload shape — structured struct vs prose
+  `detail` string.** Owned by `reviews/decisions/error-model.md`
+  Open Q #3 + `core/error.hpp`. Physics arms attach `BodyId`,
+  `JointId`, `frame_tick`, `world_tick`, `physics_config_hash` via
+  the `ErrorContext.detail` field today; if core promotes `detail`
+  to a typed payload, physics migrates each attachment site as a
+  mechanical edit gated by the same ABI bump as the
+  `error.hpp` plan above. No physics-side residue.
+- **`magic_enum` vs hand-written `to_string` for arm names in log
+  output.** Same deferral as platform §10.8: owned by
+  `core/error.hpp` per `reviews/decisions/error-model.md` Open Q #1;
+  physics follows whatever core picks. No physics-side residue.
 
 ## 11. Acceptance Criteria
 
@@ -4388,4 +4404,6 @@ Each must have a Catch2 test by name.
 
 ## 12. Open Questions
 
-- Owner / resolution gate.
+None. The four carry-ins originally listed in §10.7 each resolved in
+place against existing external gates — see that sub-section for the
+trigger that re-opens each one. Per spike #132.
