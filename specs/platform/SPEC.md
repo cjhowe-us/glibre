@@ -2213,19 +2213,28 @@ platform context without bisecting the full engine.
   Rule #6). Platform contributes the `FileWatcher` event that
   triggers it; the migration itself is core's responsibility.
 
-### 9.6 Open questions deferred to §12
+### 9.6 Open questions — resolved
 
-- Whether `Clock`'s 0.001 / 0.001 split is measurably distinct from
-  the noise floor on macOS 26 / M1 — open question for the
-  measurement spike that `perf-budget.md` Open Q #1 already opens.
-  If `Clock::now()` rounds to the noise floor, the §9.1 row stays
-  correct (the value is an upper bound) and the reserved tail
-  absorbs the difference.
-- Whether the `FileWatcher` 4 MiB sub-arena is correctly sized for
-  the editor's worst-case "watch the entire content tree" use case;
-  deferred to the editor / content seam spike. Provisional answer:
-  4 MiB holds ~32k watched paths at average path length, which
-  exceeds the MVP content tree ceiling.
+Both questions originally carried into §12 resolved in place against
+already-opened external gates; §12 holds no platform-owned residue.
+
+- **`Clock` 0.001 / 0.001 vs noise floor** (M1 / macOS 26). Resolved
+  by reading the §9.1 cell as an *upper bound*: `mach_absolute_time`
+  is O(1), and any actual value below the gate's measurable precision
+  is absorbed by the 0.099 / 0.049 reserved tail in the same row, so
+  the cell stays honest under either reading. The empirical
+  distinction is pulled into the macOS 26 / M1 thermal-throttling
+  measurement spike that `reviews/decisions/perf-budget.md` Open Q
+  #1 already opens against the first runnable harness; no platform
+  follow-up is owed independently.
+- **`FileWatcher` 4 MiB sub-arena sizing.** Resolved provisionally
+  at 4 MiB: holds ~32k watched canonical paths at the MVP content
+  tree's average path length, which exceeds the MVP ceiling captured
+  in §4.3 / §6.4. The editor / content seam spike re-derives this
+  number when the editor's "watch the entire content tree" use case
+  lands; until that spike opens, the provisional ceiling is frozen
+  and any growth attempt is a §4.3 invariant amendment, not a silent
+  reallocation.
 
 ## 10. Failure Modes & Error Model
 
@@ -2250,9 +2259,9 @@ implicit:
 `WatcherUnavailable` are documented *recovery situations*, not new
 variants — both surface as `Error::IoFailure { OsCode }` with a known
 diagnostic prefix that the §6.10 translation seam stamps. Adding either
-as a first-class arm is deferred to §12; doing so before two callers
-need to discriminate would violate the "closed sum, deliberate central
-edit" rule of §4.7 inv #1.
+as a first-class arm is gated by the second-consumer trigger recorded
+in §10.8; doing so before two callers need to discriminate would
+violate the "closed sum, deliberate central edit" rule of §4.7 inv #1.
 
 ### 10.1 Per-arm contract
 
@@ -2365,8 +2374,10 @@ across the boundary (§4.7 inv #2).
 - **Recovery.** Treated as terminal at the call site. Telemetry sinks
   may decode the value post-hoc; engine code does not branch on it.
   Recurring `OsCode` appearances in telemetry are a signal that a new
-  semantic arm should be added in the next §4.7 edit (open question
-  in §12).
+  semantic arm should be added in the next §4.7 edit; this is the
+  same promotion gate as the `SurfaceLost` / `WatcherUnavailable`
+  entries in §10.8 — triggered by a second consumer or repeated
+  unmapped telemetry, not by speculation.
 - **Severity.** `error`. Always. We refuse to silence what we have not
   classified.
 
@@ -2606,7 +2617,8 @@ Recovery contract:
 4. If re-arm fails twice in a row, the caller falls back to the
    polling pseudo-watcher: a periodic `FileIo::stat_path` /
    `FileIo::list_dir` sweep over the previously watched root, with a
-   coarse interval (default 1 s, callable knob in §12). Polling
+   coarse interval (default 1 s, callable knob; re-opened by the
+   editor hot-reload coordinator spike per §10.8). Polling
    surfaces the same `FileEvent` sum (`Created` / `Modified` /
    `Deleted` / `Renamed`) so consumers do not branch.
 5. The polling fallback is owned by the *caller*, not the platform:
@@ -2668,22 +2680,35 @@ formatting and dispatches to spdlog.
   context; platform's contribution stops at `Process::install_signal`
   and the `WallTime` correlation rule (§4.4 inv #3).
 
-### 10.8 Open questions (carried into §12)
+### 10.8 Open questions — resolved
 
-- Promote `"surface-lost"` to a first-class arm (`SurfaceLost`) once a
-  second consumer needs to discriminate. Today only render does; until
-  then the diagnostic prefix is sufficient and the closed sum stays
-  small.
-- Promote `"watcher-unavailable"` to a first-class arm
-  (`WatcherUnavailable`) once polling-fallback ownership moves
-  somewhere that benefits from a typed dispatch (likely when the
-  editor's content-tree hot-reload coordinator lands).
-- `magic_enum` vs hand-written `to_string` for arm names in log
-  output — deferred to `core/error.hpp` per
-  `reviews/decisions/error-model.md` open question 1; platform will
-  follow whatever core picks.
-- Polling-fallback interval default for §10.5 — provisional 1 s;
-  finalize when the editor hot-reload coordinator ships.
+The four questions originally carried into §12 each resolve to an
+existing external gate or to an answer frozen until a known trigger;
+§12 holds no platform-owned residue. Each entry below names the gate
+that re-opens it, so a future change does not need to re-derive the
+deferral.
+
+- **Promote `"surface-lost"` to a first-class `SurfaceLost` arm.**
+  Frozen as the diagnostic prefix until a *second* consumer beyond
+  render needs to discriminate; per principle 10 (Occam's razor), one
+  consumer does not justify a sealed-sum slot. Trigger to re-open:
+  any new domain that wants to branch on surface loss without parsing
+  the prefix string. Until then the §4.7 closed sum stays small.
+- **Promote `"watcher-unavailable"` to a first-class
+  `WatcherUnavailable` arm.** Same shape as the `SurfaceLost`
+  question: frozen as the diagnostic prefix until polling-fallback
+  ownership moves to a consumer that benefits from typed dispatch.
+  Expected trigger is the editor's content-tree hot-reload coordinator
+  landing, at which point the editor / content seam spike that re-
+  derives §10.5's polling discipline also evaluates the promotion.
+- **`magic_enum` vs hand-written `to_string` for arm names.** Owned
+  by `core/error.hpp` per `reviews/decisions/error-model.md` Open Q
+  #1; platform follows whatever core picks. No platform-side residue.
+- **Polling-fallback interval default for §10.5.** Frozen at the
+  provisional 1 s. Re-opened by the editor hot-reload coordinator
+  spike (same gate as the `WatcherUnavailable` promotion above), so
+  both questions resolve together when that work lands rather than
+  drifting independently.
 
 ## 11. Acceptance Criteria
 
@@ -2715,4 +2740,6 @@ PASS recorded as a comment; both gates required for close.
 
 ## 12. Open Questions
 
-- Owner / resolution gate.
+None. The two carry-ins in §9.6 and the four carry-ins in §10.8 each
+resolved in place against existing external gates — see those sub-
+sections for the trigger that re-opens each one. Per spike #47.
