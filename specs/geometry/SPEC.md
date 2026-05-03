@@ -1841,7 +1841,348 @@ bump per `reviews/decisions/error-model.md`.
 
 ## 6. Internal Architecture
 
-Non-binding sketch for implementers.
+Non-binding sketch for implementers. The aggregates of §4 and the public
+header of §5 are binding; the directory layout, host-tool topology, and
+per-stage invocation order below are illustrative and exist so the
+plan-leaf author has one obvious place to start. Reviewers should reject
+deviations only when they violate §4 invariants, the §5 header, the
+on-disk format locked in §7.2, or the hot-reload contract of §8.
+
+### 6.1 Module layout
+
+Geometry compiles to **two distinct artefacts** from the same source tree
+— a runtime plugin `.dylib` shipped to end users and a host-only cook
+driver `.bin` shipped only inside the editor / build farm. Both link the
+same §5 public header; the cook side adds `-DGLIBRE_GEOMETRY_COOK` and
+pulls in meshoptimizer + Draco encoders, neither of which the runtime
+ever links (§5 cook-time guard, §6.5).
+
+Source is split by SRP — one directory per "reason to change". Public
+headers (the §5 deliverable + the cook-time entry points behind
+`GLIBRE_GEOMETRY_COOK`) live under `geometry/include/glibre/geometry/`;
+implementation under `geometry/src/`.
+
+```
+geometry/
+  include/glibre/geometry/             # §5 surface (compiles standalone).
+    geometry.hpp                       # The single header from §5.
+    handle.hpp                         # Generational `Handle<Tag>` template.
+    bounds.hpp                         # `BoundingSphere` / `BoundingCone`.
+    residency.hpp                      # `ResidencyState` / `ResidencyHint`.
+  src/
+    pak/                               # Aggregate §4.1.7 — on-disk container.
+                                       # SHIPPED (runtime + cook both link).
+      header.{hpp,cpp}                 # `PakHeader` layout + magic / version.
+      reader.{hpp,cpp}                 # `PakReader` — mmap, validate, iterate.
+      writer.{hpp,cpp}                 # `PakWriter` — deterministic byte order.
+      page_table.{hpp,cpp}             # Page index → byte-offset table.
+      crc.{hpp,cpp}                    # Per-page CRC32 (§4.1.6 invariant 3).
+      blas_recipe.{hpp,cpp}            # `BLASRecipe` blob layout (§4.1.7.2).
+      format_hash.{hpp,cpp}            # `FormatHash` constant + schema sig.
+    cook/                              # Aggregates §4.1.1 .. §4.1.8.
+                                       # COOK-ONLY (excluded from runtime dylib).
+      mesh_source.{hpp,cpp}            # `MeshSource` value type + topology check.
+      meshopt_stage.{hpp,cpp}          # `OptimisedMesh` — meshoptimizer driver.
+      meshlet_build.{hpp,cpp}          # `meshopt_buildMeshlets` + bounds + cone.
+      cluster_dag.{hpp,cpp}            # `ClusterDAG` + LOD-band simplify chain.
+      draco_encode.{hpp,cpp}           # Per-stream Draco encode + profile bind.
+      blas_recipe_build.{hpp,cpp}      # Emit `BLASRecipe` from LOD0 cover.
+      pak_emit.{hpp,cpp}               # Drive `pak/writer.cpp` from cooked state.
+      cook_manifest.{hpp,cpp}          # `CookManifest` read / write / hash gate.
+      cook_driver.{hpp,cpp}            # `cook_mesh` orchestrator (§5 entry).
+    runtime/                           # Aggregates §4.1.9 .. §4.1.15.
+                                       # SHIPPED (runtime dylib only).
+      registry.{hpp,cpp}               # `GeometryRegistry` aggregate root.
+      handle_table.{hpp,cpp}           # `MeshHandle` slot + generation array.
+      decode_pool.{hpp,cpp}            # `DecodePool` scratch arena + workers.
+      decode_worker.{hpp,cpp}          # Per-thread Draco decode loop body.
+      residency_state.{hpp,cpp}        # `ResidencyState` table (lock-free).
+      gpu_mesh_buffers.{hpp,cpp}       # `GpuMeshBuffers` lookup + render hook.
+      page_loader.{hpp,cpp}            # Glue from `content` page-decoded → decode pool.
+    plugin.{hpp,cpp}                   # Plugin entry: init / tick / migrate / shutdown.
+tools/
+  glibre-meshcc/                       # Host cook driver (§6.2). NOT shipped.
+    main.cpp                           # CLI; loads importer; calls cook::cook_mesh.
+    importer.{hpp,cpp}                 # FBX / glTF / OBJ → `MeshSource` adapter.
+    cli.{hpp,cpp}                      # Arg parsing, manifest path resolution.
+```
+
+The split is the §4 aggregate roster lifted directly into directories
+keyed by lifecycle: `pak/` is the on-disk seam shared between cook and
+runtime, `cook/` owns every cook-time-only aggregate (§4.1.1–§4.1.8),
+and `runtime/` owns every runtime-only aggregate (§4.1.9–§4.1.15). Each
+directory owns one reason to change. Adding a new cook stage adds one
+file under `cook/`; adding a new runtime resource role touches
+`runtime/`; bumping the on-disk schema touches `pak/format_hash.cpp` and
+nothing else.
+
+### 6.2 Cook pipeline — `tools/glibre-meshcc`
+
+Geometry's cook driver is a host-only executable, not a runtime plugin.
+It links `geometry/src/cook/` + `geometry/src/pak/` + the third-party
+encoders (meshoptimizer, Draco) and produces one `.glibre-pak` file plus
+its sidecar `<pak>.manifest` (§4.1.8) per authored static mesh. The
+runtime dylib never links any of these stages or their dependencies
+(§6.5 shipping cuts).
+
+Stage order — sequential, deterministic, single-threaded per mesh
+(parallelism is across meshes, not within one):
+
+1. **Import.** `tools/glibre-meshcc/importer.cpp` reads FBX / glTF / OBJ
+   from the `content` cache and produces a `MeshSource` value
+   (§4.1.1). Manifold-topology and stable-attribute-set checks
+   (§4.1.1 invariants 2–3) run here; failures refuse cook with
+   `geometry::Error::MeshSourceInvalidTopology` /
+   `AttributeLayoutMismatch`.
+
+2. **Meshopt stage.** `cook/meshopt_stage.cpp` runs the canonical
+   meshoptimizer pass trio in fixed order — `meshopt_optimizeVertexCache`
+   → `meshopt_optimizeOverdraw` → `meshopt_optimizeVertexFetch` — then
+   produces the LOD-simplification chain via `meshopt_simplify` (and
+   `meshopt_simplifySloppy` for the coarsest tail) per the
+   `MeshoptOptions` baked into `CookOptions`. Output is `OptimisedMesh`
+   (§4.1.2). Reproducible-flag path is mandatory; no randomised
+   tie-breaking (§4.1.2 invariant 1, PHILOSOPHY §7).
+
+3. **Meshlet build.** `cook/meshlet_build.cpp` calls
+   `meshopt_buildMeshlets` against each LOD level's index stream with
+   the §4.1.3 hard caps (`max_vertices ≤ 64`,
+   `max_triangles ≤ 124`). Per-meshlet `BoundingSphere` and
+   `BoundingCone` come from `meshopt_computeMeshletBounds`; per-meshlet
+   `ScreenSpaceError` comes from a fixed pixel-projection formula at
+   the cook-time reference distance (`MeshletBuildOptions
+   .screen_space_reference_distance`). Output is the per-LOD `Meshlet`
+   array.
+
+4. **Cluster DAG.** `cook/cluster_dag.cpp` builds the cross-LOD
+   `MeshletGroup` topology (§4.1.4 / §4.1.5) — groups partition each
+   LOD level's meshlets, parent links connect a finer group to its
+   coarser successor across band boundaries. The DAG-acyclicity,
+   single-LOD0-cover, watertight-cut, and SSE-monotonicity invariants
+   (§4.1.4–§4.1.5) are validated at this stage; violation refuses
+   cook with the matching enum arm. The driver assembles the
+   `ClusterDAG` aggregate root (§4.1.5).
+
+5. **Draco encode.** `cook/draco_encode.cpp` walks each `MeshletGroup`
+   and emits one `DracoStream` per attribute kind (positions, indices,
+   normals, tangents, UVs, colours) using the `DracoQuantisationProfile`
+   chosen in `DracoEncodeOptions`. The encoded bytes per group are
+   buffered into a `PakPage` builder.
+
+6. **BLAS recipe.** `cook/blas_recipe_build.cpp` walks the LOD0 cover
+   and emits the declarative `BLASRecipe` blob (§4.1.7.2) — geometry
+   descriptors, primitive ranges, BLAS build flags. Geometry never
+   issues GPU calls; the recipe is the single seam where render reads
+   and builds the actual acceleration structure (§4.2 invariant 10).
+
+7. **Pak write.** `cook/pak_emit.cpp` drives `pak/writer.cpp` to
+   serialise `PakHeader` + cluster-DAG bytes + `BLASRecipe` blob +
+   `PakPage` array + page table into one `.glibre-pak` file with the
+   §7.2 byte layout. `PakWriter` is byte-deterministic (PHILOSOPHY §7,
+   §4.1.7 invariant 2). Per-page CRC32 trailers are emitted here
+   (§4.1.6 invariant 3).
+
+8. **Manifest write.** `cook/cook_manifest.cpp` writes the sidecar
+   `<pak>.manifest` carrying source-asset path, output pak path, the
+   `FormatHash` the cooker compiled against, the `CookOptions` in
+   effect, and the source content hash (§4.1.8). The next cook reads
+   this back and compares against the source's current content hash
+   for incremental skip (§4.1.8 invariant 1).
+
+The driver itself (`cook/cook_driver.cpp`) wires steps 1–8 behind the
+public `cook::cook_mesh(...)` entry point declared in §5; the host CLI
+in `tools/glibre-meshcc/main.cpp` is a thin argv → `CookOptions` shim.
+Per-mesh cook is single-threaded; the build farm spawns one driver
+process per worker and parallelism is at the mesh granularity. There is
+no shared mutable state between concurrently-cooking meshes.
+
+### 6.3 Runtime path — load, decode, residency
+
+The runtime side is plugin-internal: `runtime/registry.cpp` is the
+aggregate root every other plugin calls into via the §5 header, and
+every other `runtime/` file is owned by it.
+
+#### 6.3.1 Pak load (`register_mesh`)
+
+`GeometryRegistry::register_mesh(pak_path)` is the single entry point
+that turns a cooked `.glibre-pak` file into a live `MeshHandle`:
+
+1. **mmap.** `pak/reader.cpp` opens the file read-only and maps it.
+   The mapping is read-only for the life of the registration; geometry
+   never writes back (§4.1.11 invariant 2).
+2. **Header validation.** `pak/header.cpp` validates magic + version +
+   `FormatHash` against the engine's compiled-in value (§4.1.7.1
+   invariant 1, §4.1.7 invariant 1). Mismatch refuses with
+   `PakHeaderMagicMismatch` / `PakFormatHashMismatch`. In-range checks
+   on every offset in the header (page-table offset, `BLASRecipe`
+   offset+length) gate further reads (`PakHeaderOffsetOutOfRange`).
+3. **Page table read.** `pak/page_table.cpp` builds the
+   `(page_index → byte_offset)` lookup from the validated header.
+   The page table is part of the immutable mapping — no copy.
+4. **Handle issuance.** `runtime/handle_table.cpp` allocates a slot,
+   bumps generation, and returns a `MeshHandle` (§4.1.9). The slot
+   record holds the owning `PakReader` and the residency-table base
+   for this mesh.
+5. **Residency seed.** `runtime/residency_state.cpp` initialises every
+   page's `ResidencyState` to `NotResident` and copies the per-page
+   `ResidencyHint` byte from `PakHeader` into the residency table for
+   the scheduler's later weighting reads (§4.1.13 invariants 1, 4).
+6. **DecodePool sizing check.** `runtime/decode_pool.cpp` consults the
+   `PakHeader`'s per-attribute scratch maxima and refuses registration
+   if the pool is too small (`DecodePoolUndersized`, §4.1.12 invariant
+   1). The pool is sized at engine init; this check is read-only.
+
+The `MeshHandle` is now stable until `unregister_mesh`. No payload bytes
+have been touched.
+
+#### 6.3.2 On-demand cluster decode (`DecodePool` worker path)
+
+When `content`'s scheduler decides a `(MeshHandle, page_index)` should
+become resident, it calls `GeometryRegistry::request_residency(mesh,
+page)`. The flow:
+
+1. **Transition `NotResident → Pending`.** The registry CASes the
+   residency entry; on success it enqueues a decode job onto the
+   `DecodePool`'s pending queue (§4.1.13 invariant 1, §4.1.12).
+2. **Worker picks up.** A `DecodePool` worker thread (one of a small
+   bounded pool, §6.4) acquires a per-attribute scratch slot. If no
+   slot is free, it returns the job with `DecodePoolBusy` so the
+   scheduler can re-issue (§4.1.12 invariant 2). No worker spins or
+   allocates around contention.
+3. **Page read.** The worker resolves the page byte range via the
+   `PakReader`'s page table; reads the `PakPage` header, validates the
+   per-page CRC32 (§4.1.6 invariant 3), and refuses on mismatch with
+   `PakPageIntegrityFailed`.
+4. **Per-stream decode.** For each `DracoStream` in the page, the
+   worker decodes into the matching attribute's scratch slot using the
+   `DracoQuantisationProfile` carried in the stream header. Decoded
+   bytes are byte-equal across hosts (§4.1.6.1 invariant 1, §4.1.12
+   invariant 3).
+5. **GPU upload.** `runtime/gpu_mesh_buffers.cpp` hands the decoded
+   spans to render's vended buffer allocator via the platform-native
+   upload path; render returns one `GpuBufferHandle` per attribute
+   stream + indices for this `(MeshHandle, LODBand)` band (§4.1.15).
+   Geometry stores only the handles — no `MTLBuffer*` ever lives in
+   geometry memory.
+6. **Slot return.** `DecodedBuffer` destruction returns the scratch
+   slot to the pool (§4.1.12 invariant 2). Worker is free to pick the
+   next job.
+7. **Transition `Pending → Resident`.** The registry, inside its
+   phase-7 mutation point, CASes the residency entry and notifies
+   `content` via `notify_page_decoded` so the scheduler can update its
+   bookkeeping (§4.1.13 invariant 3, §4.2 invariant 6).
+
+Eviction is the dual: `request_eviction` transitions `Resident →
+Evicting` at the phase-7 mutation point, decrements the
+`GpuMeshBuffers` band refcount, releases the buffer handles back to
+render's allocator when the band's last page departs (§4.1.15
+invariant 4), and finally CASes to `NotResident`.
+
+#### 6.3.3 Render handoff (LOD-band selector hot path)
+
+Phase 6's `cull-extract` (in render) reads `ResidencyState` per
+`MeshletGroupHandle` to pick the coarsest band whose every constituent
+group is `Resident`. Phase 7 then resolves each surviving handle to its
+`GpuMeshBuffers` slice for bindless binding. Both reads are lock-free
+atomics on the immutable registry tables (§4.1.13 invariant 2, §4.1.14
+invariant 3) — no mutex acquisition on the render side.
+
+### 6.4 Concurrency model
+
+Geometry has two independent concurrency contexts; they do not share
+threads.
+
+- **Cook side (offline, host-only).** The cook driver is single-threaded
+  per mesh; the build farm parallelises across meshes by spawning one
+  `glibre-meshcc` process per worker. There is no shared mutable state
+  between processes; output paths are per-mesh. meshoptimizer and Draco
+  are called synchronously inside the driver. No fibers, no thread
+  pool inside one cook job.
+
+- **Runtime side (in-engine).** The decode pool owns a small bounded
+  worker thread pool — sized at engine init from
+  `reviews/decisions/perf-budget.md` (default = `min(4, hwconcurrency
+  - render_threads - sim_threads)`; hard cap at 4 workers in MVP).
+  Workers pull jobs off the residency-pending queue and decode into
+  pre-allocated scratch slots; there is no work-stealing across pools
+  and no recursive parallelism inside one decode job. Worker count
+  never changes mid-frame (§4.1.12 invariant 1).
+
+  Public-API reads (`page_state`, `resolve_group`, `gpu_buffers`) are
+  lock-free atomics on the residency / handle tables; concurrent
+  readers from render's phase 6 and content's scheduler observe atomic
+  snapshots (§4.1.13 invariant 2, §4.1.14 invariant 3). Writes
+  (residency transitions, handle issuance, `GpuMeshBuffers`
+  materialisation) serialise through `GeometryRegistry`'s phase-7
+  mutation point — exactly one writer thread, no contention with
+  readers, and the post-write state is visible to the next frame's
+  phase-6 cull-extract (§4.1.14 invariant 3, §4.2 invariant 8).
+
+  No mutex is acquired on the render hot path. The decode-pool job
+  queue is the only place where worker threads contend, and contention
+  there is bounded by the small pool size.
+
+### 6.5 Shipping cuts — what links into what
+
+| Artefact                              | Links `pak/` | Links `runtime/` | Links `cook/` | Links meshoptimizer / Draco encoder | Links Draco decoder |
+|---------------------------------------|:------------:|:----------------:|:-------------:|:-----------------------------------:|:-------------------:|
+| Shipping runtime dylib (`geometry`)   | yes          | yes              | **no**        | **no**                              | yes                 |
+| Editor build of the runtime dylib     | yes          | yes              | **no**        | **no**                              | yes                 |
+| `tools/glibre-meshcc` host driver     | yes          | **no**           | yes           | yes                                 | **no**              |
+| `tools/glibre-pakdump` (debug viewer) | yes          | **no**           | **no**        | **no**                              | yes (optional)      |
+
+The cuts are enforced two ways. First, by directory: `cook/` is excluded
+from the runtime dylib's CMake target. Second, by the `GLIBRE_GEOMETRY_COOK`
+guard in §5 — every cook-time entry point in the public header is behind
+that macro, so a runtime translation unit cannot call into `cook::*`
+even if a stray include happens. This keeps the runtime dylib's link set
+free of the meshoptimizer + Draco encoder symbols (the encoder side; the
+decoder is needed at runtime and ships).
+
+A consequence: a malformed pak whose header is fine but whose payload
+needs encoder support to validate cannot be re-encoded inside the
+runtime — the runtime refuses load and the editor's cook driver must
+re-emit. This is intentional. Re-cook is the only path; runtime never
+mutates a pak.
+
+### 6.6 Cross-context handoffs
+
+Geometry's seams to the rest of the engine, by responsibility:
+
+- **`content` (asset scheduler).** Owns the residency budget and the
+  load / evict decisions. Calls `GeometryRegistry::request_residency`
+  / `request_eviction`; observes residency through `page_state` reads
+  and `notify_page_decoded` callbacks. Geometry never adjudicates
+  budget (§4.1.13 invariant 4).
+
+- **`render`.** Owns GPU memory and BLAS construction. Vends a buffer
+  allocator that geometry calls during decode upload (§4.1.15
+  invariant 1). Reads `BLASRecipe` blobs from mapped paks during BLAS
+  build (§4.2 invariant 10) — geometry never enqueues GPU work. Reads
+  `MeshletGroupHandle` / `BoundingSphere` / `BoundingCone` /
+  `ResidencyState` per-frame from the registry's lock-free surface;
+  there is no per-frame mutex with render.
+
+- **`core`.** Owns the plugin lifecycle (init, tick, migrate,
+  shutdown), the `Result<T>` / `Error` plumbing, and the frame-phase
+  ordering. `runtime/plugin.cpp` is the entry point; it constructs
+  `GeometryRegistry` at init and registers the geometry phase-7
+  mutation point (§4.2 invariant 8, `reviews/decisions/frame-phases.md`).
+
+- **`animation` (post-MVP).** Reads per-vertex skinning attributes
+  (`AttributeKind::JointIndices` / `JointWeights`) through `DecodedBuffer`
+  views; geometry never inspects their semantics (§3.3 routing).
+  Geometry's static-mesh path is unaffected by animation's presence.
+
+- **Editor / debug.** `tools/glibre-pakdump` (post-MVP) reads paks via
+  `pak/reader.cpp` and dumps human-readable summaries. It links the
+  same `pak/` directory as the runtime, so any header-format drift it
+  flags is also visible to the engine.
+
+No cross-context abstraction is invented before two concrete users
+exist (PHILOSOPHY anti-pattern). The above seams are the only ones
+geometry exposes; everything else routes through `GeometryRegistry`'s
+public surface declared in §5.
 
 ## 7. Persistence & Schemas
 
