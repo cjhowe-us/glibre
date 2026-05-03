@@ -249,8 +249,449 @@ graph, one Metal 4 device" lives in another plugin.
 
 ## 4. Aggregates & Invariants
 
-- Aggregate / entity / value object.
-- Invariants that must hold at every public API boundary.
+This section enumerates render's aggregates, value objects, and the
+invariants every public boundary must hold. Aggregates are listed in
+data-flow order (extract → graph → execute → present). Each aggregate
+owns one dimension of "turn a `RenderFrame` into a presented Metal 4
+frame"; per PHILOSOPHY §1 (SRP), an aggregate is admitted to this list
+only when its single reason-to-change does not collapse into another's.
+Where two harmonius primitives reduce to one glibre primitive, the
+collapse is cited from §3.2. Cross-context concerns (shaders, materials,
+geometry, hot-reload, frame schedule) are explicitly delegated and never
+re-asserted here (§3.3).
+
+### 4.1 Aggregate roster
+
+#### 4.1.1 `RenderFrame` — immutable per-frame extract (entity)
+
+**Reason to change:** what crosses the ECS↔GPU seam (one structure,
+not many; §3.2 collapse #4).
+
+**Composition.** Owns the full immutable input that phase 7 consumes:
+the active `View` list, per-view culled `RenderProxy` SoA spans, the
+linearised `DrawCmd` array bucketed by phase (opaque / alpha-tested /
+translucent / shadow / 2D / capture), the packed `SortKey` column, the
+per-view `RenderLayer` mask, the active light list, the per-view
+`RenderSettings` snapshot, the camera + jitter + interp-α, and the frame
+counter `N`. No GPU handles inside `RenderFrame` itself — the proxy SoA
+references opaque mesh / material / BLAS handles by index; phase 7
+resolves residency.
+
+**Identity & lifetime.** One snapshot per `(World, FrameCounter)` pair;
+allocated in render's per-frame arena at phase 6 entry, destroyed at
+phase 7 exit. Never persists across frames. Triple-buffered behind a
+generational handle so frame N+1's extract may begin while frame N's
+record is still in flight on the GPU.
+
+**Public-boundary invariants.**
+
+1. **Immutable post-build.** After phase 6's `cull-extract` returns,
+   no field of `RenderFrame` may be written. Phase 7 takes a
+   `const RenderFrame&`; any attempt to mutate is a compile error.
+2. **Self-contained.** Phase 7 never reads back into the ECS for
+   draw data. Every byte phase 7 needs is reachable from the
+   `RenderFrame` root pointer.
+3. **Bounded.** Visible-set size is capped by `RenderSettings`'s
+   per-view draw budget; over-budget proxies are budget-culled in
+   phase 6 (cost-aware, `PassPriority`-respecting) before snapshot
+   build, never silently dropped during phase 7.
+4. **Stable under one-frame pipelining.** If phase 6 of frame N+1
+   begins while phase 7 of frame N is still recording, the two
+   `RenderFrame` instances live in distinct triple-buffer slots; no
+   field aliases.
+
+#### 4.1.2 `RenderGraph` — DAG of `Pass` nodes built each frame (aggregate root)
+
+**Reason to change:** graph topology — adding / removing / reordering
+passes for a `View`. Distinct from "what a single pass body does"
+(§4.1.3) and from "how a resource is allocated" (§4.1.4).
+
+**Composition.** Holds the in-construction node list (each node a
+`Pass`), the explicit edge set produced by `GraphBuilder`'s
+read/write resource declarations, the per-`View` instantiation
+cursor (multi-view fan-out reuses the same builder code per §3.2
+collapse #7), and a back-pointer to the originating `RenderFrame`.
+Built once per `View` per frame in ordinary C++ — never serialised
+(PHILOSOPHY anti-pattern). Compilation produces an
+`ExecutionPlan` (§4.1.5).
+
+**Identity & lifetime.** One graph per `(View, FrameCounter)` pair;
+the graph object is destroyed once its `ExecutionPlan` has been
+recorded into a Metal command buffer. The plan is cached across
+frames keyed by the structural hash of pass-set + capability set;
+the graph object itself is not.
+
+**Public-boundary invariants.**
+
+1. **Acyclic.** The compile step performs a topological sort; any
+   cycle returns `render::Error::RenderGraphCycle` (per
+   `reviews/decisions/error-model.md`) and refuses to produce a
+   plan. No partial plan is exposed.
+2. **Closed access set.** Every `Pass` declared on the graph
+   declares its complete read and write resource set up-front; the
+   compiler refuses (rejects with
+   `render::Error::PassUnsupportedConfig`) any pass whose
+   `execute()` lambda touches a resource not in its declaration.
+3. **Capability-gated.** Passes guarded by a `QualityTier` /
+   `RenderSettings` predicate that evaluates false at build time
+   are absent from the node list (no runtime branch in shaders;
+   PHILOSOPHY §6).
+4. **Build-once-per-frame.** No path mutates an in-flight graph
+   after `compile()` returns; reconfiguration produces a new graph
+   instance.
+
+#### 4.1.3 `Pass` — typed read/write declaration + execute lambda (entity)
+
+**Reason to change:** a single pass's body or its access set —
+e.g. swapping the gbuffer write list, replacing the deferred
+lighting body, adding a denoiser. Bounded.
+
+**Composition.** A name (debug-only string view), a
+`Queue` affinity (Graphics / Compute / Copy), a `PassPriority`,
+a typed list of `(VirtualResource, AccessKind)` reads, the same
+for writes, an optional capability predicate, and the
+`execute(MetalCommandBuffer&, const Bindings&)` lambda the
+compiler will invoke during recording. Bindings are produced
+from the alias plan and the argument-buffer frequency-group
+binder (§3.2 collapse #8); the lambda never sees raw heap
+addresses or implicit globals.
+
+**Identity & lifetime.** Same as the owning `RenderGraph`. The
+lambda captures only POD or `std::span` slices into the
+`RenderFrame`; no owning heap allocations.
+
+**Public-boundary invariants.**
+
+1. **Declared = used.** A pass body must touch every declared
+   read/write at least once and must not touch any undeclared
+   resource. Violations are caught by a debug-build
+   instrumentation hook on `MetalCommandBuffer` (no runtime cost
+   in shipping builds).
+2. **Queue-pure.** A pass declared on `Queue::Compute` may not
+   record graphics encoders; a `Queue::Graphics` pass may not
+   record blit encoders. Cross-queue ordering is mediated by the
+   compiler-emitted fence set, not by intra-pass code.
+3. **Atomic side-effect set.** A single pass either writes its
+   full declared output set or none of it (recovered on error
+   via Metal command-buffer abandonment). For the gbuffer pass
+   specifically, the visibilityID, motion-vector, and gbuffer
+   MRT writes happen inside a single mesh-shader dispatch
+   declared as one `Pass` with one barrier-emit point — see
+   §4.2 invariant 5.
+4. **No allocations on the hot path.** `execute()` lambdas may
+   not allocate; ring-buffer slices and transient placements
+   come pre-resolved from the bindings struct.
+
+#### 4.1.4 `Resource` — virtual + physical; transient / persistent / imported
+
+**Reason to change:** how a resource is laid out in memory or how
+its lifetime is computed. Distinct from graph topology.
+
+**Composition.** `VirtualResource` is a value object (format,
+extent, sample count, usage mask, frame-of-birth, frame-of-last-use,
+optional debug name). `PhysicalAllocation` is an entity owning a
+heap range or a Metal `MTLTexture`/`MTLBuffer` placed on a shared
+`MTLHeap`. Three resource roles compose with `VirtualResource`:
+
+- **Transient.** Materialised by the alias planner from the
+  `TransientPool`'s shared heaps; one frame's lifetime; aliases
+  freely with any non-overlapping transient.
+- **Persistent.** Outlives a single frame (HZB last-frame mip
+  pyramid, history color for TAA, motion accumulator,
+  `ShadowAtlas`, ring-buffered constant heaps). Owned by render's
+  long-lived allocator; not eligible for aliasing inside
+  `AliasPlan`.
+- **Imported.** Externally owned (Metal-vended `MTLDrawable`
+  swapchain texture, `geometry`-vended BLAS, `vfx`-vended particle
+  buffers, `shader`-vended PSO blobs). The graph reads/writes via
+  a borrow that does not transfer ownership; lifetime is enforced
+  by the importer, not render.
+
+**Identity & lifetime.** `VirtualResource` IDs are stable inside
+a single graph compilation; `PhysicalAllocation`s persist across
+frames inside the `TransientPool` heap pool but their occupants
+rotate per `AliasPlan`.
+
+**Public-boundary invariants.**
+
+1. **Transient never outlives a frame.** No `VirtualResource`
+   marked transient may be referenced after phase 7 exit of the
+   frame that declared it. The graph compiler refuses any pass
+   whose declared-use frame index does not equal the current
+   `FrameCounter`.
+2. **Lifetime-disjoint aliasing only.** The `AliasPlan` is the
+   minimum-VRAM colouring of the interference graph computed
+   from declared first-write / last-read frames per
+   `VirtualResource`; two virtual resources share a
+   `PhysicalAllocation` only when their lifetimes are proven
+   disjoint at compile time.
+3. **Imported resources are read-borrows by default.** A pass may
+   write to an imported resource only when the importer publishes
+   write capability (e.g. the swapchain target inside the
+   `present` pass); render never co-owns externally vended state.
+4. **Persistent budget bounded.** The aggregate persistent
+   footprint is declared at init time against the per-context
+   memory cell from `reviews/decisions/perf-budget.md`; exceeding
+   it returns `render::Error::ResourceResidencyExceeded` rather
+   than silently degrading.
+
+#### 4.1.5 `ExecutionPlan` — compiled graph output (value object)
+
+**Reason to change:** how a graph compiles — barrier algorithm,
+topological-sort policy, queue-assignment heuristic. Decoupled
+from any single `Pass` body.
+
+**Composition.** An ordered pass list (post-topological-sort), a
+`Barrier` set per inter-pass edge (memory + execution + queue
+fences, computed split where Metal 4 supports it), the alias plan
+mapping each `VirtualResource` to a `PhysicalAllocation` slot in
+the `TransientPool`, the queue assignment per pass, and the
+binding tables (per-frame / per-pass / per-material / per-draw
+argument-buffer offsets). Plans are cached by the structural hash
+of the source graph; cache hit = re-bind only, no recompile.
+
+**Public-boundary invariants.**
+
+1. **Barrier-minimal.** The barrier set emitted for a plan is the
+   minimum split-aware set sufficient to honour every declared
+   read-after-write and write-after-read in declaration order.
+   Adding a redundant barrier is a regression caught by the
+   barrier-count golden test.
+2. **Alias-correct.** No two passes that race for a
+   `PhysicalAllocation` may overlap in the queue-merged
+   execution timeline.
+3. **Plan = pure function of (pass set, capability set, view
+   topology).** Two graphs producing the same triple compile to
+   byte-equal plans; this is what makes the cache hash sound.
+
+#### 4.1.6 `MetalDevice` / `MetalQueue` / `MetalCommandBuffer` — metal-cpp wrappers
+
+**Reason to change:** Metal 4 evolves (single seam, per §3.2
+collapse #1).
+
+**Composition.** Thin RAII wrappers over `metal-cpp`
+(`MTL::Device`, `MTL::CommandQueue`, `MTL::CommandBuffer`)
+exposing only the surface render needs: queue acquisition,
+command-buffer commit, fence signal/wait, residency-set
+attachment, debug-marker push/pop. No vendor branching, no second
+backend.
+
+- **`MetalDevice`** — engine-singleton; owns the heap allocator,
+  the residency set, the PSO cache (§4.1.7), and provides the
+  three queue handles.
+- **`MetalQueue`** — one per role (`Graphics`, `Compute`, `Copy`);
+  holds a per-queue submission counter for fence ordering.
+- **`MetalCommandBuffer`** — frame-scoped; carries a back-pointer
+  to its owning `Queue`, the active encoder, and the
+  argument-buffer binding cursor; fed to each `Pass::execute()`.
+
+**Public-boundary invariants.**
+
+1. **Single device per process.** Constructed once during
+   `core`'s init phase; every render allocation routes through it.
+2. **No exception path.** Wrapper methods that can fail return
+   `glibre::Result<T>` per `reviews/decisions/error-model.md`;
+   exceptions never cross the boundary.
+3. **Encoder discipline.** A `MetalCommandBuffer` may have at most
+   one open encoder at a time; switching encoders implicitly
+   ends the previous and emits any plan-required barrier — the
+   wrapper enforces this in debug builds and assumes it in
+   shipping.
+4. **Queue purity.** Cross-queue commands route via fences only;
+   a buffer recorded on `Graphics` may not be committed to
+   `Compute`.
+
+#### 4.1.7 `PSOCache` — pipeline-state-object residency cache (entity)
+
+**Reason to change:** how compiled pipelines are looked up,
+warmed, and evicted on the device.
+
+**Composition.** A hash table keyed by `PSOKey =
+(shader_hash, state_hash)` mapping to a resident
+`MTL::RenderPipelineState` / `MTL::ComputePipelineState`. The
+`shader_hash` is the cook-time hash of the AIR/metallib produced
+by `shader`; the `state_hash` is render's own deterministic hash
+of the non-shader state half (vertex layout, blend, depth, MRT
+formats, sample count, raster state). PSOs are populated lazily
+at first use, with a warmer that pre-faults the MVP set during
+init from a manifest emitted by `shader`'s cook.
+
+**Public-boundary invariants.**
+
+1. **Key = `(shader_hash, state_hash)`.** Both halves are required
+   and sufficient; identical keys must map to byte-equal pipeline
+   bytecode. A miss creates exactly one PSO, never two.
+2. **Render owns residency, not authoring.** The cache never
+   compiles HLSL or transcodes AIR; that is `shader`'s job
+   (§3.3). A miss whose `shader_hash` is unknown returns
+   `render::Error::PipelineCompileFailed` rather than invoking
+   a compiler.
+3. **Eviction is bounded.** The cache size cap comes from
+   `RenderSettings`; eviction is LRU and reports back via
+   `DiagnosticOverlay`. A pass that requests an evicted PSO
+   re-promotes it before recording.
+4. **Hot-reload-safe.** When `shader` swaps a metallib, the
+   cache is invalidated by `shader_hash` change rather than by
+   pointer fixup; old entries linger only until their last
+   in-flight frame retires, then drop.
+
+#### 4.1.8 `RTAccelStructures` — BLAS/TLAS lifecycle (entity)
+
+**Reason to change:** how acceleration structures are refit
+and rebuilt for ray-traced shadows / AO / reflections.
+
+**Composition.** A registry of currently-resident BLAS handles
+imported from `geometry` (one per cooked mesh; render does
+**not** build BLAS — that is `geometry`'s cook job per §3.3); a
+single TLAS per `View` rebuilt or refit each frame from the
+visible-set extracted into `RenderFrame`; per-instance
+transform + material-index buffers feeding the TLAS; and the
+fence indicating BLAS-refit completion that the TLAS-build pass
+waits on.
+
+**Public-boundary invariants.**
+
+1. **BLAS-refit before TLAS-build, every frame.** When a BLAS
+   has dynamic vertex data (skinned mesh, deformable),
+   render's `BLASRefitPass` records its refit on
+   `Queue::Compute` and the `TLASBuildPass` declares an explicit
+   read-after-write on the same resource; the compiler emits
+   the cross-queue fence. No TLAS may be consumed by an RT
+   pass without that fence retired.
+2. **TLAS rebuilt-or-refit per frame.** The choice between
+   refit (visible-set membership stable, only transforms
+   changed) and full rebuild (membership churn beyond a
+   threshold) is a compile-time decision based on
+   `RenderFrame` deltas; either path completes inside phase 7
+   before the first RT trace pass.
+3. **BLAS imports are read-only.** Render never mutates BLAS
+   storage; refit kernels write to a render-owned scratch
+   buffer plus the BLAS's update slot per the Metal 4 RT API,
+   not to BLAS-static memory.
+4. **TLAS lifetime = persistent, contents = transient.** The
+   TLAS buffer is a persistent `Resource`; its contents are
+   regenerated each frame and never read across the frame
+   boundary.
+
+#### 4.1.9 `HZB` — hierarchical Z-buffer for two-phase occlusion (entity)
+
+**Reason to change:** the occlusion algorithm used by phase-6
+culling. Bounded; doesn't drag in lighting or RT changes.
+
+**Composition.** A persistent depth pyramid sized to the active
+view's render extent (mip-chain min/max); two backing
+allocations triple-buffered so frame N's HZB-build (writing
+the post-mesh-shader depth) does not race frame N+1's
+HZB-read (the cull-extract phase consuming it). Owned by the
+render plugin; produced by the post-gbuffer `HZBBuildPass`,
+consumed by the next frame's `OcclusionCullPass`.
+
+**Public-boundary invariants.**
+
+1. **Two-phase symmetry.** The HZB is read in phase 6 (cull
+   against last frame's HZB), then written at end of phase 7
+   (after the mesh-shader gbuffer pass) for next frame's
+   consumption. Phase ordering — never reversed.
+2. **Persistent across frames, transient across views.** Each
+   `View` has its own HZB pyramid; reflection-probe and shadow
+   views own theirs; no cross-view aliasing.
+3. **Reverse-Z respected.** All HZB ops use the same reverse-Z
+   convention as the gbuffer pass; the convention lives in one
+   header (no per-pass override), consistent with the §3.1
+   core-raster derivation.
+
+#### 4.1.10 `ClusterCullState` — persistent-thread clustered-light cull state (entity)
+
+**Reason to change:** the clustered-light-culling algorithm —
+froxel layout, persistent-thread kernel, atomic-list compaction.
+
+**Composition.** The persistent-thread compute kernel handle
+(via `PSOCache`), the per-view froxel grid descriptor (cluster
+count XYZ, near/far slicing policy from `RenderSettings`),
+the persistent scratch buffers (per-cluster light index list
+heads, atomic counters, compacted indices) sized at init time
+from `QualityTier`, and the dispatch parameters consumed by
+the `ClusterCullPass`. Outputs the `LightCluster` resource
+declared as a `VirtualResource` in the graph and consumed by
+the deferred-lighting pass and the transparent-forward pass
+(§3.2 collapse #3).
+
+**Public-boundary invariants.**
+
+1. **One state per `View`.** Multi-view (split-screen, VR,
+   reflection probes) instantiates one `ClusterCullState`
+   per `View`; cull state never aliases across views even
+   when extents match.
+2. **Persistent-thread invariants.** Workgroup count and
+   per-thread workload are fixed at init from `QualityTier`;
+   shaders never branch on tier in the hot path
+   (PHILOSOPHY §6).
+3. **Atomic compaction is the only mutation point.**
+   `ClusterCullPass` writes the compacted index buffer with a
+   single atomic-counter pass; deferred and forward consumers
+   read-only.
+4. **State outlives any one frame, output does not.** The
+   scratch buffers are persistent; the `LightCluster` virtual
+   resource feeding lighting is transient and aliases per
+   `AliasPlan`.
+
+### 4.2 Cross-aggregate invariants
+
+Invariants that span more than one aggregate and must hold at every
+public boundary at the seams between them:
+
+1. **Graph compile is total.** `RenderGraph::compile()` either
+   returns a fully-formed `ExecutionPlan` honouring barrier-
+   minimality, alias-correctness, and acyclicity, or returns a
+   typed `render::Error` (`RenderGraphCycle`,
+   `PassUnsupportedConfig`, `ResourceResidencyExceeded`). No
+   partial plan is observable outside the compiler.
+2. **Transient resources never outlive a frame.** Transient
+   `VirtualResource`s declared during graph build of frame N are
+   destroyed (their `PhysicalAllocation` recycled into the
+   `TransientPool`) at the moment phase 7 of frame N exits.
+   Persistent resources never enter the alias plan.
+3. **`PSOKey` is `(shader_hash, state_hash)`.** Both halves are
+   required; both halves participate in the cache lookup; an
+   identical key must map to byte-equal pipeline bytecode.
+   Render never compiles shaders, never invents a state hash
+   that does not include all PSO-relevant Metal pipeline
+   descriptor fields.
+4. **BLAS-refit precedes TLAS-build, every frame.** Any RT pass
+   reading the TLAS sees a TLAS whose constituent BLAS
+   resources have been refit (or rebuilt at cook time and not
+   yet invalidated) and whose refit fence is retired. Violation
+   is a compile-time error in `RenderGraph`; runtime ordering
+   is enforced by Metal 4 fences emitted by the plan compiler.
+5. **Mesh-shader gbuffer pass writes gbuffer + velocity +
+   visibilityID atomically.** The single mesh-shader dispatch
+   that produces opaque coverage writes all four MRT targets
+   (albedo+metallic, normal+roughness, motion / velocity, the
+   visibilityID buffer) plus depth in one declared `Pass` with
+   one barrier-emit point. Splitting these writes across
+   passes is rejected by the compiler so downstream consumers
+   (HZB-build, deferred-lighting, RT shadow primary-ray fallback)
+   never observe a half-written gbuffer.
+6. **`RenderFrame` is the only ECS↔GPU seam.** No aggregate
+   outside `RenderFrame` may hold a pointer to ECS storage; no
+   aggregate inside phase 7 may call back into ECS systems.
+7. **Per-context error model honoured.** Every aggregate's
+   public fallible operation returns
+   `glibre::Result<T, glibre::Error>` per
+   `reviews/decisions/error-model.md`; render's enum lives in
+   the `render::Error` arm cited there and is the only
+   render-internal error surface.
+8. **Frame-phase ownership.** The aggregates above are
+   instantiated and destroyed inside the phases declared by
+   `reviews/decisions/frame-phases.md`: `RenderFrame` is built
+   in phase 6 and read in phase 7; `RenderGraph`,
+   `ExecutionPlan`, `Pass`, transient `Resource`,
+   `MetalCommandBuffer`, `RTAccelStructures` updates,
+   `ClusterCullState` dispatch, and `HZB` write live inside
+   phase 7; `MetalDevice`, persistent `Resource`, `PSOCache`,
+   `HZB` storage, and `ClusterCullState` storage live across
+   frames but are mutated only inside phase 7. No aggregate is
+   mutated inside phases 1–5 or phase 9.
 
 ## 5. Public Interface
 
