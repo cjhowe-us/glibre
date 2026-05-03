@@ -4123,9 +4123,34 @@ arms:
 
 GitHub `type:user-story` issues this spec closes:
 
-- #TBD — `<title>`
+- #455 — e2e: trace record + save (`.glibre-trace` via
+  `tools::TraceWriter`)
+- #456 — e2e: replay determinism — frame-locked, byte-identical
+  across hosts
+- #457 — e2e: `AssertScreenshot` CIEDE2000 + `PixelTolerance` tier
+- #458 — e2e: `AssertEcsSnapshot` byte-equal Fory match
+- #459 — e2e: `AssertLogContains` substring/regex on structured
+  log channel
+- #460 — e2e: `AssertState` (component-path predicate) byte-equal
+  Fory
+- #461 — e2e: `EnvHash` gates replay before any `TraceOp` runs
+- #462 — e2e: three sealed `InjectionLayer`s gated by `RunnerHost`
+  policy table
+- #463 — e2e: `InProcess` injection (default for headless / CI)
+- #464 — e2e: `PerProcess` injection (non-disruptive editor
+  traces)
+- #465 — e2e: `OsAutomation` refused outside `ci-isolated` (no
+  override)
+- #466 — e2e: `golden-update` workflow (one-PR, reviewer-signed)
+- #467 — e2e: `ClosureGate` flips `qa-ready` only when all cited
+  traces pass
+- #468 — e2e: `DivergenceReport` via `--compare` for
+  determinism-regression hunts
 
-Each must have a Catch2 test by name.
+Each must have a Catch2 test by name (the unit-level coverage of
+the assertion vocabulary, parser, gate, runner construction; the
+end-to-end coverage of each story comes from the
+`.glibre-trace` files cited in the story bodies).
 
 ## 12. Open Questions
 
