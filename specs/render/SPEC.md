@@ -1722,7 +1722,345 @@ byte payloads.
 
 ## 8. Hot-Reload Contract
 
-What survives swap, what `migrate(...)` must do, what triggers refusal.
+This section specialises the engine-wide hot-reload protocol
+(`reviews/decisions/hot-reload-protocol.md` — drain → swap → migrate →
+resume) to the **render plugin**. It defines exactly which render-owned
+state survives a swap, what `migrate(...)` must do for the render-graph
+builder and the PSO-cache, and which conditions cause render's reload
+attempt to be refused with the engine's standard `core::Error::HotReloadRefused`
+arm. Engine-wide concerns (per-plugin atomicity, observer bus event
+shapes, error wrapping rules, the `enqueue_hot_reload` E2E hook) are not
+re-stated here — see the protocol record. Render adds nothing to that
+machinery; it only fills in the four pluggable points the protocol
+leaves to each plugin: drain side-effects, survival inventory, migrate
+body, and register-time rehydration.
+
+### 8.1 Reload point — phase 8, never mid-frame
+
+The engine schedule (`reviews/decisions/frame-phases.md`) places the
+hot-reload barrier at phase 8, **after `render-submit` (phase 7) and
+before `present` (phase 9)**. Render's reload protocol is anchored to
+that one slot and refuses any other.
+
+At phase 8 entry, render's in-flight state is:
+
+1. **No command buffer is being recorded.** Phase 7 already returned
+   for frame N; every render system has finished writing its
+   `MetalCommandBuffer`. Recording is therefore not interrupted by the
+   swap (cf. §4.1.1 invariant 1: `RenderFrame` is immutable post-build,
+   so nothing in the recording path can race the swap).
+2. **The submit-fence for frame N is already signaled on the CPU
+   side.** Phase 7's exit guarantee (frame-phases table row 7) is
+   "command buffer for frame N is enqueued to the GPU"; the
+   `MetalQueue::submit` call returns only after the queue's CPU-visible
+   submit fence is signaled (i.e. the GPU has accepted the workload
+   into its queue). The GPU itself may still be executing frame N —
+   that is irrelevant to render's reload, because the swap touches
+   only host code (vtables, builder pointers, cache pointers), never
+   GPU resource bytes (see §8.2). The next presentation of frame N
+   in phase 9 reads exclusively from already-submitted command-buffer
+   contents.
+3. **`RenderFrame` for frame N is destroyed.** Per §4.1.1, the
+   per-frame extract is destroyed at phase 7 exit; phase 8 sees no
+   live snapshot. (Triple-buffered slots for frame N+1 may have been
+   pre-populated by an early phase-6 if pipelining is enabled; those
+   slots survive the swap because their byte layout is owned by
+   `glibre-types` middleman types, not by render-plugin code.)
+
+These three conditions are the render-half of the protocol's "drain"
+postcondition (protocol §"Step 1 — Drain"). Render's
+`glibre_plugin_drain` body therefore has nothing to flush from the
+recording side; its work is the GPU-resource release described in §8.3.
+
+**Mid-frame reload is refused.** Any reload request that arrives during
+phases 1–7 is queued, never applied; the loader's `pending_reloads`
+counter is consumed only at phase 8 entry per protocol step 1. Inside
+phase 8, render does not yield to recording or submission — the loader
+holds exclusive ownership for the duration of drain → swap → migrate →
+resume per protocol §"Decision". A request that would force any of
+phases 1–7 to observe a partially-swapped vtable is treated as a
+contract violation by the loader, not a refusal — render's spec
+contributes no new refusal arm here, but states the invariant
+explicitly so consumers cannot expect mid-frame swap semantics.
+
+### 8.2 Survival inventory
+
+The engine-wide survival rule is mechanical: **state with a
+`.fory` schema in `glibre-types.dylib` survives across the swap;
+state without one does not** (protocol §"State Survival Rules";
+PHILOSOPHY collapse: one check, not a per-aggregate manifest). Render
+owns three persistent fory-schema'd types (§7.1.1–§7.1.3) and a
+collection of host- and device-side runtime state. The table below
+classifies every render aggregate against that rule and adds the
+render-specific reasoning for each survival decision.
+
+| Render-owned state                                                       | Persistence path             | Survives swap? | Reasoning                                                                                                                                                                                                                                                                                                                                  |
+|--------------------------------------------------------------------------|------------------------------|----------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `RenderSettings` (§7.1.1)                                                | `.fory` schema, middleman    | Yes — bytes are owned by `glibre-types`; render only reads them. Per §7.2.1 a schema bump on `RenderSettings` flows through the engine's standard additive-defaulted-field migration. Render's `migrate(...)` does not touch these bytes. |
+| `CapabilityMask` (§7.1.3)                                                | `.fory` schema, middleman    | Yes — capability bits do not depend on the render plugin; the mask is probed once per `(host_id, gpu_id, metal_feature_set, os_build_hash)` tuple by `platform`. The reload **must not** revalidate or re-probe; per §8.4 a reload that disagrees with the surviving mask is refused, not silently re-probed. |
+| `PSOCacheRecord` (§7.1.2) — on-disk archive                              | `.fory` schema, middleman    | Conditional. The disk archive survives the swap as bytes (it is owned by `glibre-types`), but the runtime `PSOCache` invalidates the entire archive directory when the loaded record's `glibre_types_abi_hash` differs from the live middleman's hash (§7.2.2 — "invalidate, never migrate"). Render's `migrate(...)` honours this rule by calling the existing warmer, which performs the hash check. |
+| Persistent `Resource`s — texture handles, persistent buffers, BLAS imports (§4.1.4, §4.1.8 invariant 3) | None (in-process)             | Yes, **unless their schema changed**. Texture / buffer / BLAS bytes are GPU-side allocations imported from `geometry` and `content`; their identity is a stable `glibre.types.render.GpuId`. The swap preserves the handle table because the table's keys are middleman types. If the new plugin manifest declares a `(fqn, schema_version)` for a persistent-resource component that does not match the surviving storage's version, the protocol treats this as the §7.2 invalidation case (refusal, not silent loss). |
+| Runtime `PSOCache` — in-memory hash map keyed by `PSOKey = (shader_hash, state_hash)` (§4.1.7) | None (in-process)             | Yes, **key-stable across reload**. Both halves of `PSOKey` are content hashes (cooked metallib + render's deterministic state hash); identical `(shader_hash, state_hash)` pairs in the new plugin map to the same residency entries. Render's `migrate(...)` rebinds the cache pointer in the new builder rather than rebuilding entries (§8.3). The cache is invalidated only when (a) `shader` swaps a metallib, which changes `shader_hash` (§4.1.7 invariant 4), or (b) the on-disk archive's hash check fails (above). |
+| `RTAccelStructures` — TLAS scratch, BLAS instance buffers (§4.1.8)        | None (in-process)             | Yes for BLAS imports (read-only by render); TLAS contents are transient and rebuilt every frame, so "survival" is a no-op. |
+| `HZB` pyramid (§4.1.9), `ClusterCullState` scratch (§4.1.10)             | None (in-process)             | Yes — both are persistent `Resource`s sized at init from `RenderSettings` / `QualityTier`; their backing GPU allocations and dispatch parameters survive. The next frame's two-phase symmetry (§4.1.9 invariant 1) is preserved because no in-flight read or write straddles the swap (§8.1). |
+| `MetalDevice`, `MetalQueue` instances                                     | None                          | Yes. The Metal device handle is owned by `platform` (§3.3 cited refusal) and exposed to render via `MetalDevice::create`. Render's reload does not call `create` again; the new plugin acquires the existing device via the engine's `Registry`. |
+| `TransientPool` heaps (§4.1.4)                                            | None                          | Yes. The placement heaps are sized from `RenderSettings`; their bytes are render-internal but survive because the loader holds exclusive ownership during phase 8 and no transient resource lives across the phase 7→9 boundary (§4.2 cross-aggregate invariant). The `AliasPlan` cache is dropped on the swap and rebuilt by the new plugin's first compile (§4.1.5). |
+| `RenderGraph`, `Pass`, `RenderFrame` (§4.1.1–§4.1.3)                      | None — never serialised       | N/A — destroyed at phase 7 exit; phase 8 sees no instance. The new plugin builds fresh graphs at the next frame's phase 6. |
+| `DiagnosticOverlay`, GPU timestamp ring (§7.3)                            | None — debug-gated            | Reset on swap. Per `frame-phases.md` §Notes, profiler traces persist phase IDs only; render's debug surfaces are not contractual. |
+| `ExecutionPlan` structural-hash cache (§4.1.5)                            | None — in-memory              | Dropped on swap. The cache is keyed by pass-set hash; the new plugin's first phase-6 reconstructs it. The cache miss is bounded (one extra compile per `View`) and is the dev-time cost of a reload, not a determinism issue (frame N's plan is already submitted; frame N+1 builds anew). |
+| Per-plugin worker thread pools, internal RT-denoiser caches               | None                          | No — destroyed by render's `glibre_plugin_drain`, re-spawned by the new plugin's `glibre_plugin_register`. |
+
+The rule mechanically applied: every row marked "Yes" has either a
+`.fory` schema or is owned by `core` / `platform` / `geometry` /
+`content` / `shader`; every "No" row is private to render with no
+on-disk format and no migration contract — exactly what
+PHILOSOPHY §3 + protocol §"State Survival Rules" require.
+
+### 8.3 `migrate(...)` body — render's responsibilities
+
+The protocol's `migrate` step (protocol §"Step 3 — Migrate") runs
+*pure* per-row migrate functions for every persistent-component-type
+schema bump on the engine's behalf. Render owns three of those bodies
+(§7.2.1 `RenderSettings`, §7.2.3 `CapabilityMask` — both additive in
+MVP; the `PSOCacheRecord` case explicitly forbids a body per §7.2.2).
+Those functions are the standard pure migrate signature; nothing here
+changes them.
+
+What this section adds is the **render-plugin-specific portion of step
+4 (resume)** — the work the new plugin's `glibre_plugin_register`
+must do to repoint render-graph builders and PSO-cache references at
+the new code while reusing surviving bytes. Two pointer fix-ups
+matter:
+
+#### 8.3.1 Swap the render-graph builder
+
+The new plugin exports a fresh `glibre_plugin_register` that:
+
+1. **Publishes the new `GraphBuilder`-factory pointer** into the
+   render registry's `(View → GraphBuilder factory)` table. The table
+   is itself a middleman type
+   (`glibre::types::render::GraphBuilderRegistry`) so its slot
+   identities survive; the values held in the slots are function
+   pointers into the new plugin's image. The fix-up is a single
+   atomic store per slot, performed under the loader's exclusive
+   phase-8 ownership (no race with phase 6 of frame N+1, which has
+   not yet begun).
+2. **Re-registers each pass class** (`gbuffer`, `deferred-lighting`,
+   `cluster-cull`, `hzb-build`, `tlas-build`, `present`, …) into the
+   pass class registry. Class identity is the
+   `(phase, system_fqn)` pair, idempotent per protocol step 4.1; a
+   re-registration of the same identity is a no-op even if the
+   underlying function pointer is new (the new pointer overwrites
+   the old slot).
+3. **Does not rebuild any `RenderGraph` or `ExecutionPlan`.** Both
+   are per-frame and are produced by the next frame's phase 6 from
+   the new builder. Pre-building inside `register` would violate
+   the protocol's "no system bodies run in phase 8" rule (protocol
+   §"Decision").
+
+The previous plugin's `glibre_plugin_drain` need do nothing for
+graphs or plans — they are gone before phase 8 begins.
+
+#### 8.3.2 Restore PSO-cache pointers from the new plugin's tables
+
+Render's `PSOCache` (§4.1.7) is a single `MetalDevice`-owned hash
+map; the cache instance is owned by `MetalDevice::pso_cache()`,
+**not by the render plugin's image**. The cache survives the swap
+verbatim (table above). What does *not* survive is the new plugin's
+**static dispatch table** of `(pass_class → PSOKey)` lookups; that
+table lives in plugin code (its function pointers point at lambdas
+in the dylib).
+
+Render's `glibre_plugin_register` therefore:
+
+1. Walks the new plugin's static `(pass_class, PSOKey)` table and
+   calls `PSOCache::pin(PSOKey)` for every entry to obtain the
+   resident pipeline-state handle. Pinning is read-only against the
+   cache; it returns the existing entry on hit and triggers a
+   bounded compile on miss (rate-limited by the warmer's per-tick
+   budget, set in `RenderSettings`). The handles returned populate
+   the new plugin's per-pass binding tables.
+2. **Honours `glibre_types_abi_hash` matches.** If the protocol's
+   step 2 already accepted the swap, the abi hash of every
+   `glibre.types.render.*` type is by construction equal across old
+   and new plugin (protocol §"Step 2 — Swap"). The PSOCache's key
+   stability invariant (§4.1.7 invariant 1: identical keys must map
+   to byte-equal pipeline bytecode) is therefore preserved — the
+   new plugin requesting `(shader_hash_X, state_hash_Y)` gets back
+   the same pipeline the old plugin would have seen.
+3. **Does not re-warm the on-disk archive.** The archive is
+   loaded once at process start (§7.1.2 invariant 4); a hot-reload
+   inherits the warmed cache and adds at most a small set of
+   newly-introduced PSOKeys (corresponding to new passes the new
+   plugin added). Removing pipelines for passes the new plugin
+   dropped is left to the next eviction sweep — passes that no
+   longer exist no longer pin their PSOs, so LRU drains them
+   naturally.
+
+The total work in render's resume step is therefore bounded by
+**O(passes) atomic-store fix-ups + O(distinct PSOKeys) cache-pin
+calls + zero GPU-resource churn**, fitting the protocol's
+"reload path bounded by drain + swap + Σ migrate + register"
+budget (`hot-reload-protocol.md` §Consequences).
+
+### 8.4 Refusal cases (render-specific)
+
+Render contributes no new umbrella refusal arm; every refusal is
+expressed as the engine-wide `core::Error::HotReloadRefused` with
+a nested cause chosen from the protocol's existing arms. Render does
+introduce four **inner causes** that loader sees only because render
+inspects the new plugin during step 4 (resume); they are enumerated
+here so the test matrix and the diagnostic surface (§4.1.7
+`DiagnosticOverlay`) can name them. All four roll up to
+`core::Error::PluginInitFailed` per protocol §"Refusal Cases" item 3.
+
+| Render refusal cause                                  | Detected by                                                                                                       | Inner-error arm                                | What the operator must do                                                                                  |
+|-------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|------------------------------------------------|------------------------------------------------------------------------------------------------------------|
+| Mid-frame reload requested                            | Loader (not render). Listed for completeness because render's contract forbids it.                                 | `core::Error::HotReloadRefused` direct (no inner — never reaches render); the request is queued until phase 8. The "refusal" is a deferral, not an error. | None — the request will be honoured at the next phase 8.                                                   |
+| New plugin's `Capability` requirement set is **broader** than the surviving `CapabilityMask`     | Render's `glibre_plugin_register` reads the live `CapabilityMask` (§7.1.3) and compares against each declared pass's capability predicate. | `render::Error::CapabilityNotSupported` wrapped under `core::Error::PluginInitFailed`. | Either rebuild the plugin against the host's capabilities, or re-probe the host (which only `platform` may do) and restart the process. The reload is refused; the prior plugin remains live. |
+| New plugin declares a pipeline whose `state_hash` collides with the surviving cache but whose pass declarations differ in shader bytecode hash | Render walks the new plugin's `(pass_class, PSOKey)` table during register and calls `PSOCache::pin`; a hit whose stored `shader_hash` does not match the requested key violates §4.1.7 invariant 1. | `render::Error::PipelineCompileFailed` wrapped under `core::Error::PluginInitFailed`.  | Inspect the cooked metallib manifest (`shader`'s cook output) and the new plugin's expected `shader_hash`; the mismatch indicates a stale archive. Resolution path: `rmtree(<pso-archive-dir>)` per §7.2.2 and rebuild. The reload is refused. |
+| Surviving persistent GPU resource's component schema differs from the new plugin's manifest declaration | The protocol's step 2.2 detects this as a manifest-subset failure and refuses before render's register runs. Listed here so the resource-schema invariant in §8.2 is testable.            | `core::Error::HotReloadRefused` with cause `core::Error::SchemaMigrationFailed`. | Author the missing migrate function for the persistent-resource type, or accept a fresh world (post-MVP). |
+
+Each refusal is logged exactly once at `warn` level (protocol
+§"Refusal Cases") with the structured fields `plugin_fqn=glibre.render`,
+`attempted_dylib_path`, `host_abi_hash`, `plugin_abi_hash`, and the
+inner cause's enumerator name. The `DiagnosticOverlay` mirrors the
+`HotReloadRefused` event payload (§8.5) for in-game diagnosis.
+
+### 8.5 Observers — external systems holding `RenderFrame`
+
+`RenderFrame` is the only ECS↔GPU seam render exposes (§4.2 invariant
+6); the only contexts that legitimately hold a non-owning reference to
+one are:
+
+- The editor (post-MVP), via the live diagnostics overlay.
+- The `e2e` harness, via its trace-replay capture (§8.6).
+- The `tools` profiler, when a frame is paused for inspection.
+
+By §4.1.1 invariant ("destroyed at phase 7 exit"), no `RenderFrame`
+reference is live at phase 8 entry under normal frame execution. The
+three observers above can extend a `RenderFrame`'s lifetime by pinning
+it (the §5 public API exposes `RenderFrame::pin() noexcept` returning
+an RAII guard). Render's hot-reload contract requires:
+
+1. **Pinned `RenderFrame`s prevent reload acceptance — by deferral,
+   not refusal.** When the loader enqueues a reload at any phase
+   between 1 and 7 of frame N, render checks the pin count. A
+   non-zero count causes the reload to *defer* to the next phase 8
+   at which the pin count is zero. This is not a refusal; the
+   request stays in the queue, and the operator sees a `progress`
+   line in the diagnostic overlay rather than a `warn`. (Rationale:
+   editor / e2e are dev workflows; a one-frame stall behind a paused
+   inspection is acceptable, an unexplained refusal is not.)
+2. **Drop notification.** When an active reload is about to
+   commence at phase 8, render publishes a render-specific
+   `RenderFrameDropPending { frame_counter }` event on the engine's
+   observer bus (the same bus that carries `HotReloadStarted` per
+   protocol §"Observer Notification") **before** invoking the
+   protocol's drain step. Observers must drop their reference
+   synchronously (the bus call returns; the loader proceeds). An
+   observer that does not drop within the synchronous callback is
+   reported via `render::Error::ResourceImportRefused` wrapping
+   `core::Error::PluginInitFailed`; the swap proceeds, but the
+   observer's pin is invalidated by the destructor of the frame at
+   the next phase 8 exit. (This is loud-failure-by-design;
+   silently corrupting an observer is rejected by §4.1.1
+   immutability.)
+3. **No half-swapped `RenderFrame` is ever observable.** The
+   observer bus's atomicity guarantee (protocol §"Observer
+   Notification") means subscribers see either a
+   pre-swap-fully-completed-frame or no frame at all. A
+   `RenderFrame` from frame N (built by the old plugin) cannot be
+   observed concurrently with the new plugin's frame N+1; the
+   triple-buffer slot is unique to its frame counter.
+
+The observer event types added by render — exactly two —
+piggyback on the engine bus and are middleman-typed
+(`glibre::types::render::HotReloadEvent`, with arms
+`RenderFrameDropPending`, `RenderHotReloadCompleted` — the latter is
+emitted alongside the engine's `HotReloadCompleted` and carries the
+counts of (passes re-registered, PSOKeys re-pinned, capability bits
+unchanged) for the e2e harness to assert against). No third event is
+permitted; new observability needs flow into existing arms or graduate
+to a SPEC bump.
+
+### 8.6 Test hooks — trace-replay verification
+
+Render's reload contract is verified end-to-end by a single test
+fixture under `tests/render/hot_reload/` that uses the loader's
+existing `enqueue_hot_reload` E2E entry point (protocol §"Test Hooks").
+The fixture has three layers:
+
+1. **Trace capture.** A fixture plugin `tests/e2e/plugins/render-v1/`
+   runs the engine for `K = 8` frames against a deterministic scene
+   (cornell-box-with-1-mesh, fixed PRNG seed); during phase 7 the
+   harness records a structured trace per frame containing:
+   `(frame_counter, RenderFrame proxy hashes, pass list, PSOKey
+   list, command-buffer encoder ops bucketed by phase, swapchain
+   drawable ID)`. The trace is canonical-ordered (`reviews/decisions/
+   determinism-canonical-iteration.md`) and stored under
+   `tests/data/traces/render/cornell-vN.bin`.
+2. **Reload trigger.** At frame `K/2`, the harness calls
+   `enqueue_hot_reload("glibre.render",
+   tests/e2e/plugins/render-v2.dylib)`. The `v2` plugin is
+   byte-identical to `v1` for our test (same shaders, same passes,
+   same `state_hash` algorithm) but has a different `__file__`
+   timestamp embedded so the loader treats it as a real swap. This
+   tests the **happy-path identity** case: a swap that should be
+   semantically a no-op.
+3. **Post-reload assertion.** The harness records a second trace
+   for frames `K/2 .. K-1` under the new plugin and asserts:
+   - frame `K/2`'s recorded command buffer (already submitted before
+     phase 8) is byte-equal to the reference trace at the same
+     index (cf. §8.1.1: phase 7 already returned);
+   - frame `K/2 + 1`'s command buffer is byte-equal to the
+     reference trace; this is the **first post-reload frame**, the
+     one that exercises the new plugin's freshly-rebuilt graph and
+     repointed PSO bindings;
+   - the `HotReloadCompleted` event was fired exactly once with
+     `migrated_types = []` (no schema change in this scenario);
+   - the `RenderHotReloadCompleted` event reports `passes_reregistered
+     == reference_pass_count`, `psokeys_repinned == reference_psokey_count`,
+     `capability_bits_unchanged == true`;
+   - no observer ever called the bus's "I cannot drop" path.
+
+A second fixture pair (`render-v1` → `render-v1-add-pass`) exercises
+the new-pass path: the new plugin adds one debug pass guarded by
+`Capability::TimestampQueries`. The post-reload trace asserts the
+extra pass appears starting at frame `K/2 + 1` and that the pass's
+PSOKey was a fresh entry in the cache (cache-miss counter incremented
+exactly once). A third fixture (`render-v1` → `render-v2-bad-cap`)
+declares an unsupported capability and asserts
+`HotReloadRefused { cause: PluginInitFailed { inner:
+CapabilityNotSupported } }` with the prior plugin still ticking
+(frames `K/2 + 1 .. K-1` byte-equal to the original trace).
+
+All three scenarios run inside a single CI job using the in-process
+trigger; no filesystem watcher is involved (protocol §"Test Hooks").
+The Catch2 cases are listed in §11 acceptance criteria as
+`Hot-reload preserves frame trace`, `Hot-reload accepts pass
+addition`, `Hot-reload refuses capability widening`.
+
+### 8.7 Cross-references
+
+- Engine protocol: `reviews/decisions/hot-reload-protocol.md`
+  (drain → swap → migrate → resume; refusal arms; observer bus;
+  E2E hook).
+- Frame slot: `reviews/decisions/frame-phases.md` (phase 8 entry /
+  exit guarantees; one-frame pipeline preserved).
+- Persistence rules invoked: §7.1.1 / §7.2.1 (`RenderSettings`),
+  §7.1.2 / §7.2.2 (`PSOCacheRecord` invalidation), §7.1.3 / §7.2.3
+  (`CapabilityMask` additive bits).
+- Aggregates touched: §4.1.1 `RenderFrame` (pin-and-drop),
+  §4.1.2 `RenderGraph` (per-frame, no survival), §4.1.5
+  `ExecutionPlan` (cache dropped on swap), §4.1.7 `PSOCache` (key-
+  stable survival), §4.1.8 `RTAccelStructures` (BLAS imports
+  read-only), §4.2 invariant 6 (`RenderFrame` is the only ECS↔GPU
+  seam).
+- Errors used: `render::Error::CapabilityNotSupported`,
+  `render::Error::PipelineCompileFailed`,
+  `render::Error::ResourceImportRefused` (§5 enum), each wrapped
+  by `core::Error::PluginInitFailed` per protocol §"Refusal Cases".
 
 ## 9. Performance Budget
 
