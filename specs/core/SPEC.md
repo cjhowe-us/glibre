@@ -2759,9 +2759,28 @@ The table is grouped by the §4 aggregate that emits each arm. The
 
 ## 11. Acceptance Criteria
 
-GitHub `type:user-story` issues this spec closes:
+GitHub `type:user-story` issues this spec closes (parented to sub-epic
+#19; drafted under spike #29; each carries a Catch2 test name plus the
+story-required E2E `.glibre-trace`):
 
-- #TBD — `<title>`
+- #320 — `[STORY] spawn-despawn-entity-lifecycle` — pts:3
+- #322 — `[STORY] archetype-soa-chunked-storage` — pts:5
+- #324 — `[STORY] component-add-remove-archetype-migration` — pts:3
+- #326 — `[STORY] queries-with-without-changed` — pts:5
+- #328 — `[STORY] command-buffer-deferred-mutation` — pts:5
+- #329 — `[STORY] component-lifecycle-hooks` — pts:3
+- #331 — `[STORY] schedule-access-set-dag` — pts:5
+- #333 — `[STORY] frame-loop-nine-phase-ordering` — pts:3
+- #335 — `[STORY] typed-singleton-resources` — pts:3
+- #337 — `[STORY] changetick-monotonic-clock` — pts:2
+- #338 — `[STORY] childof-relationship-forest` — pts:3
+- #340 — `[STORY] plugin-load-manifest-validation` — pts:3
+- #343 — `[STORY] plugin-abi-hash-gate` — pts:3
+- #344 — `[STORY] plugin-dependency-topological-order` — pts:3
+- #345 — `[STORY] hot-reload-frame-boundary-barrier` — pts:5
+- #346 — `[STORY] hot-reload-refusal-rollback` — pts:5
+- #347 — `[STORY] type-registry-immutable-after-init` — pts:3
+- #348 — `[STORY] asset-handle-generational-table` — pts:2
 
 Each must have a Catch2 test by name.
 
