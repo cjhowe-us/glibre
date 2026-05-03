@@ -2041,7 +2041,191 @@ literal across test files.
 
 ## 9. Performance Budget
 
-Cycles / frame, memory ceiling, allocation rules.
+Frozen per-context cell (from `reviews/decisions/perf-budget.md`):
+
+| Context  | CPU ms (sim) | CPU ms (submit) | GPU ms | Heap ceiling |
+|----------|--------------|-----------------|--------|--------------|
+| platform | 0.20         | 0.05            | n/a    | 16 MiB       |
+
+Phase ownership (from `reviews/research/frame-phases.md`): **owns
+phase 1 (input)** and **phase 9 (present)**. No participation in
+phases 2-8 on the game-loop driver thread; off-thread work
+(`FileWatcher`, `FileIo` worker) is not on the hot path and does
+not draw against the cell.
+
+This section quotes the row verbatim, decomposes the 0.20 ms sim +
+0.05 ms submit + 16 MiB heap across the seven §4 aggregates, and
+specifies the CI gate fixture and the per-aggregate sub-arena
+discipline that core's `PerContextAllocator` enforces. The spike
+that produced this section did not amend the locked cell; it
+allocated within it.
+
+### 9.1 Per-aggregate cycle budget
+
+Steady-state cost on the game-loop driver thread under the S1
+sample scene (1 character + 200 props + 8 dynamic lights at
+1920x1080; see `reviews/decisions/perf-budget.md`). All times are
+M1 firestorm at 3.2 GHz; cells sum to the row's totals with no
+hidden slack.
+
+| Aggregate      | Phase | CPU ms (sim) | CPU ms (submit) | Notes                                                         |
+|----------------|-------|--------------|-----------------|---------------------------------------------------------------|
+| `Window` / `Surface` (§4.1) | idle  | 0.000        | 0.000           | No per-frame work in steady state. Resize / DPI events are bounded by human input rate and arrive through the `Pump`; the aggregate's per-frame cost is **0**. |
+| `EventQueue<T>` / `Pump` (§4.2) | 1     | 0.100        | 0.000           | One `SDL_PumpEvents` + drain loop dispatching to the two SPSC ring buffers. Dozens of events / frame max under S1, S2, S3; SIMD-bounded copy + tag dispatch. |
+| `FileWatcher` (§4.3)        | -     | 0.000        | 0.000           | Runs off-main-thread (FSEvents callback). Hot-path cost on the driver thread is **0**; the engine drains via `take_events()` from the `core` hot-reload phase 8 (which is core's budget, not platform's). |
+| `Clock` (§4.4)              | 1, 9  | 0.001        | 0.001           | `mach_absolute_time()` is O(1); read at frame start (sim) and at present (submit). Two reads / frame; <0.001 ms each. Listed as 0.001/0.001 to keep the cell sum honest at the precision the gate measures. |
+| `Process` (§4.5)            | idle  | 0.000        | 0.000           | argv / env are read once at boot; signal handlers are async-only. **0** per-frame cost. |
+| `FileIo` (§4.6)             | -     | 0.000        | 0.000           | Async path runs on a dedicated worker thread; the driver-thread cost of `IoToken::poll()` is a single non-blocking SPSC dequeue (~0.001 ms) **only on frames that have a pending I/O completion**, and is amortized into the unallocated remainder of the cell. The synchronous `read_all` (§6.9) is reserved for boot / tools and is not budgeted on the hot path; calling it from a steady-state frame is a SPEC violation. |
+| Reserved       | 1, 9  | 0.099        | 0.049           | Unallocated remainder inside the cell. Absorbs `FileIo` poll spikes, SDL3 internal jitter (event-loop wakeups, drawable-acquire callbacks), and growth (e.g. additional `EventQueue<T>` families). **Not** the 1.5 ms global headroom in `perf-budget.md`; this is platform's local margin within its 0.20 + 0.05 cell. |
+| **Total**      |       | **0.200**    | **0.050**       | Matches the row exactly.                                      |
+
+The asymmetry is intentional: under S1 / S2 / S3, the only
+aggregates that do non-trivial per-frame work on the driver thread
+are the `Pump` (phase 1) and `Clock` (phases 1 + 9). Everything
+else is either idle, off-thread, or one-shot at boot. Budgeting
+zeros for them is honest; a future SPEC change that adds per-frame
+driver-thread work to e.g. `Process` or `FileIo` is a perf-budget
+amendment, not a silent reallocation.
+
+Phase 9 (present) on the platform cell is **0.05 ms** wall-clock —
+the drawable-acquire wait does not count against CPU because it
+overlaps GPU execution of the prior frame (per `perf-budget.md` and
+`frame-phases.md`); the 0.05 ms covers the SDL3 → CAMetalLayer
+present call, the `CAMetalDisplayLink` callback trampoline, and
+the second `Clock::wall()` read.
+
+The hot-reload frame (S2) is allowed up to 0.40 ms in phase 8 (core's
+migration budget). Platform contributes **0** to that overage:
+phase 8 reads `FileWatcher::take_events()` if any reload was
+triggered, which is already accounted for above as off-thread.
+
+### 9.2 Per-aggregate heap ceiling
+
+The 16 MiB cell is partitioned into **per-aggregate sub-arenas**
+under the `platform` `ContextTag` (per `perf-budget.md` Allocator
+Rule #1). Sub-arenas are constructed at boot, sized at the values
+below, and never grow at runtime: an allocation that would push a
+sub-arena past its size returns
+`std::unexpected{platform::Error::OutOfBudget}` in strict-mode
+builds (Allocator Rule #2) and logs a `warn` once-per-tag-per-frame
+in shipping builds (Rule #3).
+
+| Aggregate      | Sub-arena | Contents                                                                                  |
+|----------------|-----------|-------------------------------------------------------------------------------------------|
+| `Window` / `Surface` (§4.1) | 1 MiB     | `Window`, `Display` table, `Surface` handle, SDL3 window-state singleton. No per-frame growth. |
+| `EventQueue<T>` / `Pump` (§4.2) | 2 MiB     | Two SPSC ring buffers — `EventQueue<InputEvent>` (1 MiB, ~32k slots @ 32 B) + `EventQueue<WindowEvent>` (1 MiB, ~16k slots @ 64 B). Sized for the largest observed burst (drag-resize spam, focus-change storms) without dropping events. |
+| `FileWatcher` (§4.3)        | 4 MiB     | FSEvents callback ring + `CanonicalPath` interner + pending-event SPSC. Off-main-thread allocator hangs off the same sub-arena; the writer is the FSEvents thread, the reader is the engine's hot-reload phase 8 consumer. |
+| `Clock` (§4.4)              | 4 KiB     | One `mach_timebase_info_data_t` cache. Effectively zero; bucketed into the reserved tail.  |
+| `Process` (§4.5)            | 256 KiB   | argv copy + env snapshot taken at boot. Frozen after `Process::init()` returns.            |
+| `FileIo` (§4.6)             | 8 MiB     | SPSC request/response rings (1 MiB each) + worker-thread scratch + `read_all` per-call arena (5 MiB ceiling, recycled per call per §6.9). The largest sub-arena because async I/O carries the most state. |
+| Reserved       | ~750 KiB  | Slack inside the 16 MiB cell. Absorbs `Clock`'s rounding plus growth headroom for sub-arenas that approach their cap. |
+| **Total**      | **16 MiB**| Matches the row exactly.                                                                   |
+
+All sub-arenas are tagged `platform::ContextTag` and registered
+with `core::PerContextAllocator` at boot. Cross-aggregate borrowing
+is forbidden: `FileIo`'s sub-arena cannot service a `Window`
+allocation, even transiently. Violations are caught in
+strict-mode builds by a tag mismatch in the allocator handle.
+
+`FileWatcher` and `FileIo`'s worker-thread allocators draw from
+their own sub-arenas (above) — **not** from a separate worker-thread
+budget — because a single 16 MiB ceiling per `ContextTag` is the
+discipline `perf-budget.md` Rule #1 imposes, and threading topology
+does not split the tag.
+
+### 9.3 Allocation discipline (cross-reference)
+
+Per §6.9, after construction the platform aggregates do not
+allocate. §9 makes that rule a budget contract: the steady-state
+allocation rate from the platform context on the driver thread is
+**zero bytes per frame**. The only per-frame allocations come from
+the `FileWatcher` FSEvents thread and the `FileIo` worker thread,
+both of which write into their sub-arenas' free-list and are
+SPSC-bounded by the corresponding ring buffer. `read_all`'s
+synchronous arena is recycled per call (§6.9) and is reserved for
+boot / tools, not the hot path.
+
+The transient-arena exemption (`perf-budget.md` Allocator Rule #4)
+is **not used** by platform: every per-aggregate sub-arena above is
+counted against the 16 MiB ceiling. Drain-by-phase-9 is enforced
+trivially by "no transient arena exists" — there is nothing to drain.
+
+### 9.4 CI gate fixture
+
+The platform cell is exercised by a Catch2 `BENCHMARK` block under
+`platform/test/perf/` (the implementation plan files this as part
+of the `task-breakdown-error-perf` follow-on per `perf-budget.md`
+Consequences). Two assertions:
+
+1. **SDL3 event-pump fixture.** A test driver synthesizes the S1
+   event stream — keyboard / mouse / window-focus / DPI-change /
+   display-hot-plug — at the densities observed in the sample scene
+   replay (≤128 events / frame; matches the SPSC ring's worst-case
+   sustained throughput). The fixture runs `Pump::drain()` for 600
+   frames and asserts:
+   - p50 driver-thread `Pump::drain()` time ≤ **0.10 ms** (matches
+     the §9.1 cell for the `Pump`),
+   - p99 ≤ **0.18 ms** (within the 0.099 ms reserved tail),
+   - **zero** dropped events (the SPSC ring never overflows under
+     fixture load),
+   - **zero** allocations on the driver thread between
+     `Pump::init()` and `Pump::shutdown()` (verified by tagged-
+     allocator counter in strict mode).
+2. **Idle frame budget assert.** With no events injected, the
+   fixture runs a 600-frame loop calling `Clock::now()`,
+   `Pump::drain()`, `Clock::wall()` (and nothing else from
+   platform). Asserts:
+   - p99 driver-thread platform CPU ≤ **0.005 ms** per frame (the
+     idle floor: 2x `Clock` + empty `Pump::drain` short-circuit).
+   - p99 platform-tagged resident heap ≤ **16 MiB**, with each
+     sub-arena under its §9.2 size; verified by querying
+     `core::PerContextAllocator::resident_bytes(ContextTag::Platform)`
+     and the per-sub-arena introspection hook.
+
+Both fixtures are runnable on the macOS / M1 baseline only (the
+SDL3 event source and the `mach_absolute_time` clock are
+host-platform-specific); the gate runs them on `macos-26-m1` CI
+runners. A future Linux / Windows port reseats the fixture, not the
+budget — the cell numbers are platform-agnostic.
+
+The S1 / S2 / S3 fixtures live under `e2e/perf/` per the global
+gate spec; the platform-local micro-benchmark fixture lives under
+`platform/test/perf/` and stubs out everything outside the
+platform aggregates so a regression can be localized to the
+platform context without bisecting the full engine.
+
+### 9.5 Refusals (out of platform's §9 scope)
+
+- **Render / GPU costs.** GPU memory and GPU time on the platform
+  surface are **render's** budget (`perf-budget.md` Allocator Rule
+  #5; the row's `GPU ms = n/a`). Platform owns the
+  `CAMetalLayer*` lifetime, not its content.
+- **Asset import / streaming costs.** Drag-drop import (S3) is
+  content's budget. Platform's role is the file-system event that
+  notifies the import worker; the worker's CPU time is `content`'s
+  cell, not platform's.
+- **Editor / tools costs.** ImGui draws, gizmo updates, inspector
+  refresh are `tools`'s 0.80 / 0.20 / 0.5 cell. Platform does not
+  carry editor cost even when the editor is the only consumer of
+  an event.
+- **Hot-reload migration cost.** Phase 8's drain → swap → migrate
+  arena is core's 16 MiB sub-budget (`perf-budget.md` Allocator
+  Rule #6). Platform contributes the `FileWatcher` event that
+  triggers it; the migration itself is core's responsibility.
+
+### 9.6 Open questions deferred to §12
+
+- Whether `Clock`'s 0.001 / 0.001 split is measurably distinct from
+  the noise floor on macOS 26 / M1 — open question for the
+  measurement spike that `perf-budget.md` Open Q #1 already opens.
+  If `Clock::now()` rounds to the noise floor, the §9.1 row stays
+  correct (the value is an upper bound) and the reserved tail
+  absorbs the difference.
+- Whether the `FileWatcher` 4 MiB sub-arena is correctly sized for
+  the editor's worst-case "watch the entire content tree" use case;
+  deferred to the editor / content seam spike. Provisional answer:
+  4 MiB holds ~32k watched paths at average path length, which
+  exceeds the MVP content tree ceiling.
 
 ## 10. Failure Modes & Error Model
 
