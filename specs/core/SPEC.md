@@ -2356,7 +2356,222 @@ in-process path covers the loader's own state machine.
 
 ## 9. Performance Budget
 
-Cycles / frame, memory ceiling, allocation rules.
+### 9.1 Engine-Wide Allocation (Citation)
+
+`reviews/decisions/perf-budget.md` Per-Context Budget Table assigns
+`core` the cell **0.40 ms CPU sim + 0.05 ms CPU submit + n/a GPU + 64
+MiB heap**, with phase ownership "owns 5 (transform), 8 (hot-reload);
+systems in 1, 9". The 16.67 ms / 60 fps wall-clock target is met with
+≥1.5 ms reserved headroom (`perf-budget.md` §"Decision"); core's row
+is part of the **8.05 ms CPU steady-state** that constitutes the
+sim-plus-submit half of every frame on the game-loop driver thread.
+This SPEC §9 is the per-aggregate refinement of that cell — it MUST
+sum into the cited row and MUST NOT silently expand it. Any cell-level
+amendment requires a perf-budget amendment spike per
+`perf-budget.md` §"Consequences".
+
+### 9.2 Cell Summary
+
+The core context's full cell, quoted verbatim from the engine-wide
+table:
+
+| Axis              | Budget       | Source                                      |
+|-------------------|--------------|---------------------------------------------|
+| CPU (sim)         | 0.40 ms      | `perf-budget.md` Per-Context Budget Table   |
+| CPU (submit)      | 0.05 ms      | `perf-budget.md` Per-Context Budget Table   |
+| CPU (combined)    | **0.45 ms**  | sum, used as the §9.3 sub-budget ceiling    |
+| GPU               | n/a          | core owns no rendering work (PHILOSOPHY #3) |
+| Heap ceiling      | **64 MiB**   | `perf-budget.md` Per-Context Budget Table   |
+| Phase ownership   | 5, 8         | full ownership (transform; hot-reload)      |
+| Phase systems     | 1, 9         | tick advance; frame-stat counter writes     |
+
+Combined-CPU is the figure the §9.3 per-aggregate rows sum into. The
+sim/submit split is enforced at the cell boundary, not per-aggregate;
+each aggregate is annotated in §9.3 with which half it belongs to so
+the totals reconcile against `perf-budget.md` §"Pipelined Frame
+Timing" line-by-line.
+
+### 9.3 Per-Aggregate Sub-Budgets
+
+Sub-budgets refine the §9.2 cell across the seven `core`-owned
+aggregates from §4. Each row lists CPU ms (sim or submit half), heap
+allocation under the 64 MiB ceiling, and the dominant operation that
+the budget pays for. The CI gate (§9.5) attaches one
+`BENCHMARK_CELL(...)` block per aggregate that asserts steady-state
+CPU time is `<= cpu_ms` under the S1 fixture defined in
+`perf-budget.md` §"Justification Per Cell".
+
+| Aggregate (§4 ref)       | CPU ms  | Half   | Heap     | Dominant operation                                                        |
+|--------------------------|---------|--------|----------|---------------------------------------------------------------------------|
+| `World` (§4.1)           | ~0.20   | sim    | 24 MiB   | archetype iteration + change-tick scan over packed component storages     |
+| `Schedule` (§4.4)        | ~0.10   | sim    | 4 MiB    | phase ordering hot loop dispatching the nine-phase `switch` (§6.5)        |
+| `FrameLoop` (§4.4)       | ~0.05   | sim    | 4 MiB    | dispatch overhead: phase switch + frame-stat counter writes               |
+| `PluginLoader` (§4.5)    | 0       | submit | 4 MiB    | idle steady-state; load/unload work happens off the per-frame critical path |
+| `HotReloadBarrier` (§4.6)| 0       | (n/a)  | 16 MiB   | scratch arena reserved; idle when no reload pending (relaxed atomic only) |
+| `AssetHandle` table (§4.7)| ~0.05  | sim    | 8 MiB    | O(1) handle resolution + generation-tag check on lookup                   |
+| `CommandBuffer` pool (§4.8)| ~0.10 | submit | 4 MiB    | per-system arena drain at the end of each system's apply phase            |
+| **per-aggregate total**  | **~0.50**| —     | **64 MiB**| sums against §9.2 combined-CPU 0.45 ms (rounding margin within headroom)  |
+
+Notes per row, indexed by aggregate:
+
+- **`World` (~0.20 ms / 24 MiB).** Phase 5 transform propagation +
+  phase-1 / 9 system dispatch reads dominate. `core`'s 0.40 ms sim
+  in `perf-budget.md` §"Justification" calls out the ~2k entity
+  dirty-set sweep at <0.3 ms; ~0.20 ms is the steady-state for the
+  archetype iteration plus change-tick comparison loop. 24 MiB holds
+  the archetype tables (estimated 8–16 KiB × ~256 archetypes max +
+  handle tables) per the §6.2 `Chunk` layout and `perf-budget.md`
+  Allocator Rules tagging.
+- **`Schedule` (~0.10 ms / 4 MiB).** The phase ordering hot loop
+  (§6.4 DAG dispatch) iterates the precomputed system order produced
+  at registration time. No per-frame DAG recompute; the cost is the
+  function-pointer indirection per system plus the small amount of
+  bookkeeping to advance the phase cursor. 4 MiB stores the
+  precomputed order arrays + access-set bitmasks.
+- **`FrameLoop` (~0.05 ms / 4 MiB).** The §6.5 nine-phase `switch`
+  dispatch plus tick advance and frame-stat counter writes. This is
+  the `core`'s 0.05 ms submit half from the engine table. 4 MiB
+  reserves the per-frame stats ring buffer and the phase-cursor
+  state.
+- **`PluginLoader` (0 / 4 MiB).** Idle on the per-frame critical path
+  in shipping builds: no per-frame work outside hot-reload windows.
+  Load and unload (§6.6) are one-shot operations triggered out-of-band
+  and budgeted under `perf-budget.md` §"Hot-reload frame budget"
+  rather than every-frame. 4 MiB holds the registry-of-registries
+  bookkeeping (`LoadedPlugin` records, owned-type/system index maps).
+- **`HotReloadBarrier` (0 / 16 MiB).** The `step()` body is a single
+  relaxed atomic load on `pending_` when no reload is queued (§6.7);
+  steady-state cost is therefore zero, well inside the per-frame
+  budget. The 16 MiB is the **migration scratch arena** cited in
+  `perf-budget.md` Allocator Rule #6 and §6.7 — drained between
+  migration rows, never resident across frames, and accounted under
+  `core`'s 64 MiB ceiling so a runaway migration cannot push other
+  aggregates' allocations off-budget. Reload-frame cost is permitted
+  up to 0.40 ms one-shot per `perf-budget.md` §"Pipelined Frame
+  Timing" and is **excluded from the steady-state CPU sub-budget**.
+- **`AssetHandle` table (~0.05 ms / 8 MiB).** O(1) handle ops:
+  resolve, refcount inc/dec, generation-tag check (§4.7). The 0.05 ms
+  is for the per-frame residency tickle + sanity sweep that runs in
+  phase 1 / 9 systems; the table is not walked exhaustively per
+  frame. 8 MiB holds the dense slot array + free-list (generation-
+  tagged) for the MVP asset count ceiling.
+- **`CommandBuffer` pool (~0.10 ms / 4 MiB).** Per-system arena drain
+  at apply time (§4.8). Each system's `CommandBuffer` is a stack
+  arena that is replayed and reset at the end of its execution slot;
+  the 0.10 ms covers the aggregate replay cost across all systems
+  registered in one frame. 4 MiB is the union of per-system arena
+  caps; arenas reset to zero each frame so this is a residency
+  ceiling, not steady-state usage.
+
+The per-aggregate CPU total (~0.50 ms) exceeds the §9.2 combined-CPU
+0.45 ms by ~0.05 ms; that ~0.05 ms slack is **inside the engine
+headroom row**, not stolen from another context. The slack exists so
+benchmark-asserted ceilings can be set at the per-aggregate row
+without immediately tripping when one aggregate runs at the high end
+of its variance. The headroom regression alarm (`perf-budget.md` §"CI
+Gate Spec" rule 5) catches sustained drift.
+
+### 9.4 Allocator Rules
+
+`core` enforces its 64 MiB ceiling — and the per-aggregate sub-shares
+in §9.3 — through `glibre::PerContextAllocator`, the allocator
+declared in `perf-budget.md` §"Allocator Rules" and implemented under
+plan #238. The contract `core` SPEC §9 imposes:
+
+1. **Per-context tag (`ContextTag::core`).** Every allocation made by
+   any module under `core/src/**` is stamped with `ContextTag::core`
+   at the allocator-handle level (`perf-budget.md` Allocator Rule
+   #1). The tag is supplied by the allocator handle that core's
+   modules obtain at startup; module call sites are tag-free,
+   eliminating the class of "forgot to tag" drift bugs.
+2. **Hard ceiling in diagnostic / debug builds.** When
+   `GLIBRE_ALLOC_STRICT=1` (debug + diagnostic presets), an
+   allocation that would push live `ContextTag::core` bytes above 64
+   MiB returns `std::unexpected{core::Error::OutOfBudget}`
+   (`perf-budget.md` Allocator Rule #2). Every core call site that
+   allocates uses the `Result<T>` form (§5) and propagates the error;
+   a missing handler aborts with the diagnostic dump documented in
+   plan #238.
+3. **Soft warning in shipping builds.** Shipping builds log a `warn`
+   once per-tag-per-frame to `spdlog` and increment a frame-stat
+   counter on overshoot (`perf-budget.md` Allocator Rule #3). The
+   editor's perf HUD surfaces the counter (cross-context plumbing in
+   `tools`).
+4. **Per-aggregate sub-shares are advisory at the allocator level.**
+   `PerContextAllocator` enforces the 64 MiB cell ceiling, not the
+   §9.3 per-aggregate row ceilings; per-aggregate enforcement is via
+   the `BENCHMARK_CELL` heap-residency assertions (§9.5) which
+   exercise the S1 fixture and record the resident bytes at frame
+   end. This split keeps the runtime allocator path branch-free per
+   aggregate while still catching drift on a CI cadence.
+5. **Migration arena exemption pattern (§6.7).** The 16 MiB migration
+   arena under `HotReloadBarrier` is allocated through the same
+   `PerContextAllocator` handle and counts against `core`'s 64 MiB.
+   It is not a transient-arena exemption (`perf-budget.md` Allocator
+   Rule #4) — those are per-frame and drain at phase 9; the migration
+   arena is per-reload-row and drains between rows. The accounting
+   model documents the arena explicitly so it is not double-budgeted.
+6. **No raw `new` / `malloc` in `core/`.** Per the
+   `-Wglibre-no-raw-alloc` clang custom-warning-as-error documented
+   in `perf-budget.md` Allocator Rules header, all dynamic allocations
+   in `core/src/**` MUST go through `PerContextAllocator`. The build
+   rejects raw `new` / `malloc`. Standard-library containers use
+   `std::pmr::*` with `core`'s `PerContextAllocator`-backed
+   `memory_resource` (§6 module layout).
+
+### 9.5 CI Gate — `BENCHMARK_CELL` Per Aggregate
+
+The per-context CI gate (`perf-budget.yml`, scoped under the
+`task-breakdown-error-perf` follow-up spike) requires each per-context
+SPEC §9 to declare at least one `BENCHMARK_CELL(...)` block per
+aggregate (`perf-budget.md` §"CI Gate Spec" rule 1). The macro
+expands to a Catch2 `BENCHMARK` body that:
+
+1. constructs the §9.3 row's S1-derived fixture for the aggregate,
+2. measures wall-clock time over a steady-state sample,
+3. asserts `time <= cell_budget_ms` (the row's CPU ms cell),
+4. records resident-byte usage for the aggregate's `ContextTag::core`
+   sub-share and asserts `<= heap_budget_mib` (the row's heap cell).
+
+Mandated `BENCHMARK_CELL` blocks for `core` (one per aggregate; PR
+fails if any assert fails — `perf-budget.md` §"CI Gate Spec" rule 1):
+
+| Aggregate            | `BENCHMARK_CELL` test name                          | CPU ceiling | Heap ceiling |
+|----------------------|-----------------------------------------------------|-------------|--------------|
+| `World`              | `core/world: archetype_iteration_change_tick_scan`  | 0.20 ms     | 24 MiB       |
+| `Schedule`           | `core/schedule: phase_ordering_hot_loop`            | 0.10 ms     | 4 MiB        |
+| `FrameLoop`          | `core/frame: dispatch_overhead`                     | 0.05 ms     | 4 MiB        |
+| `PluginLoader`       | `core/plugin: idle_steady_state`                    | 0 ms        | 4 MiB        |
+| `HotReloadBarrier`   | `core/hot-reload: idle_relaxed_atomic_only`         | 0 ms        | 16 MiB       |
+| `AssetHandle` table  | `core/asset: handle_o1_resolve_refcount`            | 0.05 ms     | 8 MiB        |
+| `CommandBuffer` pool | `core/command-buffer: per_system_arena_drain`       | 0.10 ms     | 4 MiB        |
+
+Reload-frame variance (`HotReloadBarrier` one-shot up to 0.40 ms) is
+exercised by the separate **hot-reload frame budget** gate
+(`perf-budget.md` §"CI Gate Spec" rule 4) which scripts an S2 reload
+and asserts phase 8 cost ≤ 0.40 ms; the `core/hot-reload:
+idle_relaxed_atomic_only` row covers steady-state only.
+
+End-to-end thresholds (`perf-budget.md` §"CI Gate Spec" rule 2) do
+not bind individual aggregates; they bind the engine-wide
+`cpu_sim+cpu_submit` per-frame totals. `core`'s contribution to those
+is the §9.2 cell, and the `BENCHMARK_CELL` micro-asserts above are
+the only enforcement `core` SPEC §9 imposes per-aggregate.
+
+### 9.6 References
+
+- `reviews/decisions/perf-budget.md` — engine-wide allocation cited
+  in §9.1, allocator rules cited in §9.4, CI gate spec cited in §9.5.
+- `reviews/decisions/frame-phases.md` — phase-ownership table
+  referenced by §9.2 (phases 5, 8 owned by `core`; phases 1, 9
+  systems registered by `core`).
+- `specs/core/SPEC.md` §6.2 (`world/`), §6.4 (`schedule/`), §6.5
+  (`frame/`), §6.6 (`plugin/`), §6.7 (`hot-reload/`), §6.8 (`asset/`),
+  §6.3 (`CommandBuffer` arena) — the implementation surfaces whose
+  steady-state cost the §9.3 rows budget against.
+- Plan #238 — `glibre::PerContextAllocator` implementation
+  (per-tag heap ceiling enforcement; Allocator Rules #1–#3 from
+  `perf-budget.md`).
 
 ## 10. Failure Modes & Error Model
 
