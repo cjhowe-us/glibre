@@ -2641,7 +2641,447 @@ the e2e spec.
 
 ## 8. Hot-Reload Contract
 
-What survives swap, what `migrate(...)` must do, what triggers refusal.
+This section specialises the engine-wide hot-reload protocol
+(`reviews/decisions/hot-reload-protocol.md` — drain → swap → migrate →
+resume) to the **tools plugin**. It defines exactly which tools-owned
+state survives a swap, what `migrate(...)` must do, and which conditions
+cause tools' reload attempt to be refused with the engine's standard
+`core::Error::HotReloadRefused` arm. Engine-wide concerns (per-plugin
+atomicity, the four-step state machine, observer-bus event shapes, the
+three umbrella refusal arms, the `enqueue_hot_reload` E2E hook) are not
+re-stated here — see the protocol record. Tools fills only the four
+pluggable points the protocol leaves to each plugin: drain side-effects,
+survival inventory, migrate body, and register-time rehydration.
+
+Tools is unusual among glibre plugins because it observes **two**
+hot-reload trigger classes that demand different responses:
+
+1. **Tools-plugin self-reload** — the editor `.dylib` itself swaps at
+   phase 8. **Rare in practice** (the running editor ordinarily restarts
+   when its own image changes), but the protocol still covers it for
+   determinism and for in-process E2E swaps. The tools shell's panel
+   draw closures, gizmo body, inspector form code, and trace recorder
+   wire-format reside in the tools dylib; the swap repoints those
+   without losing user state.
+2. **Game-plugin reload** (e.g. `render`, `physics`, gameplay-framework
+   plugins) — **the more common case** in dev workflows. The tools
+   image is unchanged, but the type registry, asset graph, and entity
+   identities the editor inspects shift underneath it. Tools must
+   *reseat its handles* across the swap rather than swap its own code.
+
+Both cases run inside the same protocol; what differs is which of the
+four steps does meaningful work for tools and which is a no-op. The
+sub-sections below state both responsibilities side-by-side.
+
+### 8.1 Reload point — phase 8, never mid-frame
+
+The engine schedule (`reviews/decisions/frame-phases.md`) places the
+hot-reload barrier at phase 8, **after `render-submit` (phase 7) and
+before `present` (phase 9)**. Tools' reload protocol is anchored to
+that one slot and refuses any other.
+
+At phase 8 entry, tools' in-flight state is:
+
+1. **No Dear ImGui draw list is being recorded.** Phase 6 of the
+   current frame already extracted tools' draw lists into `render`'s
+   `RenderFrame` slot (§4.1 inv. 4 / §4.10 inv. 7); phase 7 already
+   submitted. No panel `draw()` callback is on any thread — tools'
+   work for frame N is done.
+2. **No `EditCommand` is mid-apply.** `CommandStack::apply` /
+   `undo` runs only inside the `EditorWorld`'s phase 5 (§4.7 inv. 4
+   single-writer); that phase has retired for the editor world's
+   frame N before phase 8 begins. The stack's invariants 1–7 hold at
+   the barrier.
+3. **No `Transaction` is open.** The protocol refuses to begin
+   drain while any `Transaction` (§4.7) is in flight; the loader's
+   pending-reload counter is consumed only when the editor world's
+   transaction depth is zero. (In normal frame execution the depth
+   resets to zero at every phase 5 exit; an open transaction at
+   phase 8 entry is a contract violation, not a refusal.)
+4. **No `Selection` mutation is in flight.** Selection mutates
+   only through `CommandStack` apply/undo or through scene-tree
+   click handlers in the editor world's phase 1 input pump (§4.3
+   inv. 1); both have retired before phase 8.
+
+These conditions are tools' half of the protocol's "drain"
+postcondition (protocol §"Step 1 — Drain"). Tools'
+`glibre_plugin_drain` body therefore has nothing to flush from the
+draw / apply paths; its work is the journal-snapshot + observer
+notification described in §8.3.
+
+**Mid-frame reload is refused.** Any reload request that arrives during
+phases 1–7 (of either the editor world or the game world) is queued,
+never applied; the loader's `pending_reloads` counter is consumed only
+at phase 8 entry per protocol step 1. The editor world's frame loop
+yields exclusive ownership to the loader during phase 8; no panel
+`draw()`, no `EditCommand::apply`, and no `Selection` mutation runs
+while drain → swap → migrate → resume executes.
+
+### 8.2 Survival inventory
+
+The engine-wide survival rule is mechanical: **state with a `.fory`
+schema in `glibre-types.dylib` survives across the swap; state without
+one does not** (protocol §"State Survival Rules"; PHILOSOPHY collapse:
+one check, not a per-aggregate manifest). Tools owns four persistent
+fory-schema'd types (§7.1.1 `LayoutProfile`, §7.1.2 `Scene`, §7.1.3
+`CommandJournal`, §7.1.4 `Shortcuts`) and a collection of in-memory
+runtime state. The table below classifies every tools-owned aggregate
+against that rule and adds the tools-specific reasoning per-row.
+
+| Tools-owned state                                                                  | Persistence path             | Survives swap? | Reasoning                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+|------------------------------------------------------------------------------------|------------------------------|----------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `LayoutProfile` slot map (§4.2 / §7.1.1)                                           | `.fory` schema, middleman    | Yes — bytes are owned by `glibre-types`; tools only reads them. The active profile name + the on-disk profiles persist; the live `Layout` value object is destroyed in drain and rebuilt in resume by re-loading from the surviving `LayoutProfile` (§8.3.1).                                                                                                                                                                                                  |
+| `Selection` resource (§4.3)                                                        | None — runtime resource over middleman ids | Yes for the *id set*; live indices are re-resolved on resume. `Selection::entities` is a `list<u64>` of `Entity::bits` values that live in `glibre-types.core` and are stable across plugin reloads (§4.3 inv. 1). After a game-plugin reload, ids that no longer resolve in the new game world are scrubbed and `EditorEvent::SelectionRevalidated` is emitted (§8.3.2 / §8.5).                                                                                |
+| `CommandStack` undo + redo arrays (§4.7)                                           | `.fory` schema via §7.1.3 envelope | Yes via journal snapshot. The live `EditCommand` array is serialised through `CommandJournal` (§7.1.3 inv. 7) into a loader-owned arena at drain entry; resume rebuilds the array from the snapshot. **Closed-sum `kind` invariant guarantees replayability**: §7.1.3 inv. 1 / §7.2.3 require the variant set to be **strictly additive** — old commands serialised before the swap remain decodable by every future tools image.                                |
+| `Transaction` in-flight buffer                                                     | None                         | N/A — no active transaction permitted at phase 8 entry (§8.1 condition 3). The buffer is empty by construction.                                                                                                                                                                                                                                                                                                                                              |
+| `Shortcuts` keymap (§4.8 / §7.1.4)                                                 | `.fory` schema, middleman    | Yes — bytes owned by `glibre-types`; the live keymap is rebuilt in resume from the surviving record.                                                                                                                                                                                                                                                                                                                                                          |
+| `Scene` reference document (§7.1.2)                                                | `.fory` schema, middleman    | Yes — owned by `glibre-types`; tools only reads / writes through the schema. The on-disk doc is unaffected by either reload class.                                                                                                                                                                                                                                                                                                                            |
+| `EditorMode` resource                                                              | None                         | Yes — value preserved across both reload classes; the mode value is a u8 enum mirrored into `glibre-types.tools` (§4.10 inv. 2). Tools-plugin self-reload while in `Recording` mode is **refused** under §8.4 (a recording is "user state in flight"); other modes survive verbatim.                                                                                                                                                                            |
+| `TraceRecorder` live state (§4.9)                                                  | None                         | Yes for the *recording cursor*; **paused across the reload window** per §8.6. The recorder's `op_count` and current file handle are mirrored into a middleman-typed `TraceRecorderResume` value at drain; resume re-opens the file in append mode and resumes capture at frame N+1. The reload window emits no `TraceOp`s (§4.9 inv. 1 non-perturbing — the swap is not an editor action).                                                                       |
+| Floating `PanelHost` instances (§4.2)                                              | None                         | **No** for tools-plugin self-reload — dropped in drain, re-created in resume from the active `LayoutProfile`. Yes for game-plugin reload — panel registrations belong to tools' image, which is unchanged.                                                                                                                                                                                                                                                       |
+| `Panel` registrations from tools' own image                                        | None                         | No for tools-plugin self-reload (registry slots cleared in drain, re-populated in resume); yes for game-plugin reload.                                                                                                                                                                                                                                                                                                                                          |
+| `Panel` registrations from *other* plugins (e.g. a future game-framework's debug panel) | None                    | Yes for tools-plugin self-reload (the registering plugin's image is unchanged; tools' resume re-applies the layout against the surviving registration list); transparently re-registered by the reloading plugin's own resume for game-plugin reload.                                                                                                                                                                                                          |
+| `Inspector` `InspectorView` cache + `ReflectedField` closures (§4.4)               | None                         | **No** for both reload classes — every view holds closures over the type registry's Fory descriptors; those descriptors are owned by `data` middleman but the *closure code* lives in tools' image (self-reload) or in the reloaded plugin's image (game-plugin reload, since field descriptors come from per-context schemas). Resume invalidates the cache and rebuilds lazily on next `Selection` read (§8.3.3).                                            |
+| `Gizmo` configuration (`GizmoFrame`, `GizmoConstraint`, `Snap`)                    | None — middleman value types | Yes — values mirrored into `glibre-types.tools.GizmoConfig`; the tab values survive both reload classes. The drag-state ephemeral data (current axis-hover, drag origin) is dropped on swap and reset to neutral on resume.                                                                                                                                                                                                                                       |
+| `AssetThumbnail` LRU cache (§4.6)                                                  | None                         | No for both reload classes — display cache only (§7 non-persistent table). Resume rebuilds on demand from `content` and `render`.                                                                                                                                                                                                                                                                                                                              |
+| `EditorEvent` republish queue                                                      | None                         | Drained before phase 8 (synchronous bus); phase 8 publishes `LayoutChanged` and `SelectionRevalidated` (§8.5) atomically.                                                                                                                                                                                                                                                                                                                                       |
+| Per-plugin worker thread pools (e.g. asset thumbnail decoder)                      | None                         | No for tools-plugin self-reload — destroyed by tools' `glibre_plugin_drain`, re-spawned by the new image's `glibre_plugin_register`. Yes for game-plugin reload (tools' threads are unaffected).                                                                                                                                                                                                                                                              |
+| Profiler / Console rolling buffers                                                 | None — debug-gated           | Reset on tools-plugin self-reload; preserved on game-plugin reload. Per `frame-phases.md` §Notes, debug surfaces are not contractual.                                                                                                                                                                                                                                                                                                                          |
+
+The rule mechanically applied: every "Yes" row has a `.fory` schema or
+references middleman-typed bytes; every "No" row is private to the
+reloading plugin's image. The split between **tools-plugin self-reload**
+and **game-plugin reload** is decided per-row by which image owns the
+underlying code, not by per-aggregate opt-in.
+
+### 8.3 `migrate(...)` body — tools' responsibilities
+
+The protocol's `migrate` step (protocol §"Step 3 — Migrate") runs *pure*
+per-row migrate functions for every persistent-component-type schema
+bump. Tools owns four such bodies (§7.2.1 `LayoutProfile`, §7.2.2
+`Scene`, §7.2.3 `CommandJournal`, §7.2.4 `Shortcuts` — all additive in
+MVP). Those functions are the standard pure migrate signature; nothing
+here changes them.
+
+What this section adds is the **tools-plugin-specific portion of step
+4 (resume)** — the work the new image's `glibre_plugin_register` must
+do to repoint live runtime state at the new code while reusing the
+surviving bytes. Three pointer fix-ups matter; which run depends on
+the reload class.
+
+#### 8.3.1 Tools-plugin self-reload — drop floating PanelHosts; re-create from LayoutProfile
+
+Runs only when **tools' own image** is the swapping plugin.
+
+The drain step (§"Step 1") releases:
+
+1. Every floating `PanelHost` window (the OS-window children of the
+   shell that hold tear-off panels). Their byte representations live
+   in tools' image; their position / size are already mirrored into
+   the active `LayoutProfile`'s `floats` field (§7.1.1) — losing the
+   live host objects loses no user state.
+2. Every panel `draw()` closure pointer in the panel registry.
+3. The thumbnail-decoder thread pool (§4.6).
+4. The `InspectorView` cache (its closures point at tools-image lambdas).
+
+The resume step (§"Step 4") rebuilds:
+
+1. Re-registers tools' default `Panel` set (Scene, Inspector,
+   Assets, Console, Profiler, Viewport, Toolbar) into the host's
+   panel registry. Re-registration of the same `panel_id` is
+   idempotent per protocol step 4.1.
+2. Re-loads the active `LayoutProfile` from the surviving slot map
+   (§7.1.1) and re-applies it: every `DockSplit` leaf, every
+   `FloatingPanel` (recreating one OS-window child per entry), and
+   every `ActiveTab` is materialised against the freshly-registered
+   panel ids. Failure of this re-apply is the §8.4 unsaved-edits
+   refusal: any panel id that no longer resolves drops to the
+   protocol's standard `core::Error::HotReloadRefused` with cause
+   `tools::Error::LayoutLoadFailed` (§4.2 inv. 1).
+3. Spins the thumbnail-decoder thread pool back up.
+4. The `InspectorView` cache stays empty; views rebuild lazily on
+   the next `Selection` read.
+
+`EditorEvent::LayoutChanged` (§8.5) fires exactly once at the end of
+this fix-up sequence, before the protocol's `HotReloadCompleted`
+event, so observers see a fully-laid-out shell.
+
+#### 8.3.2 Game-plugin reload — invalidate Inspector views; refresh Selection target ids
+
+Runs when **any plugin other than tools** swaps. Tools' image is
+unchanged; the engine's protocol calls tools' (already-loaded)
+post-swap callback to reseat handles.
+
+Tools registers a `core::HotReloadObserver` callback (the engine
+exposes the same observer bus that emits `HotReloadStarted` /
+`HotReloadCompleted`, see protocol §"Observer Notification") that:
+
+1. **Invalidates the `InspectorView` cache** for every cached view
+   whose component type's schema FQN is owned by the reloading
+   plugin. The cache is keyed by `(Entity, ComponentType)`; the
+   invalidation walks the cache once and drops matching entries.
+   The next `Inspector` draw pass rebuilds them lazily against the
+   reloaded plugin's new `ReflectionBlob` descriptors.
+2. **Re-resolves `Selection` target ids.** Every `Entity::bits` in
+   `Selection::entities` is queried against the post-reload game
+   world's entity allocator (the allocator survives the reload —
+   middleman-typed; the entries inside it may have been migrated
+   per the reloaded plugin's persistent-component schema bump).
+   Stale ids — entities the reload's own migrate functions may have
+   despawned — are scrubbed; survivors are kept in their original
+   deterministic order (§4.3 inv. 2). If any id was scrubbed,
+   `SelectionRevalidated` (§8.5) is emitted exactly once, carrying
+   the pre / post selection hashes and the count of scrubbed ids.
+3. **Refreshes any cached `ReflectionBlob` views** held by open
+   panels (Inspector, Console with object-pretty-print). The blobs
+   themselves come from `data`'s middleman registry; what tools
+   caches is the per-component pointer. Pointers from the reloaded
+   plugin's image are repointed; pointers from un-affected plugins
+   are untouched.
+4. **Does not touch `CommandStack`**. Past commands are replayable
+   by construction (§8.2 row: closed-sum `kind`, additive variant
+   set). `payload_bytes` are decoded by the receiving context at
+   `apply()` time, so a reload that bumps a payload schema's
+   version is handled by the *data* middleman's migration table,
+   not by tools — tools sees no difference. (A payload schema bump
+   without a migrate function would surface as
+   `tools::Error::CommandConflict` per §7.1.3 inv. 2 *only when the
+   user actually tries to undo across the bump*; the swap itself
+   does not validate every payload.)
+
+This callback runs synchronously on the loader thread, between
+protocol steps 4.2 and 4.3 (so subscribers see fully-resolved
+selection state at `HotReloadCompleted` time). Total work is
+**O(distinct cached `InspectorView`s) + O(|Selection|) + O(open
+inspector panel rows)** — well inside the protocol's one-frame
+stall budget (`hot-reload-protocol.md` §Consequences).
+
+#### 8.3.3 Inspector lazy rebuild — common to both reload classes
+
+The `InspectorView` cache rebuilds on demand from the post-reload
+type registry the next time the Inspector panel draws. The first
+`Inspector::draw` after a swap walks the current `Selection`,
+queries `data`'s `ReflectionBlob` for each `(Entity, ComponentType)`
+pair, and constructs a fresh `InspectorView`. Cache misses are
+bounded by `|Selection| × distinct ComponentType count`; for the
+MVP `≤ 64` selected entities and `≤ 32` component types per entity
+target, the rebuild fits in a single editor frame. Rebuild failures
+(unknown component type) emit `tools::Error::InspectorUnknownType`
+per §4.4 inv. 5 and the row is omitted; the error is *not*
+escalated to a hot-reload refusal (§8.4 — refusal cases are
+narrowly scoped).
+
+The total work in tools' resume step is therefore bounded by:
+
+- Self-reload: **O(panels in active LayoutProfile) panel
+  re-registrations + O(thread pool size) thread spawns + zero
+  `EditCommand` re-applies** (the journal snapshot is restored as
+  bytes, not replayed).
+- Game-plugin reload: **O(cached InspectorViews) invalidations +
+  O(|Selection|) id queries + zero panel churn**.
+
+Both stay inside the protocol's "reload path bounded by drain +
+swap + Σ migrate + register" budget.
+
+### 8.4 Refusal cases (tools-specific)
+
+Tools contributes no new umbrella refusal arm; every refusal is
+expressed as the engine-wide `core::Error::HotReloadRefused` with a
+nested cause chosen from the protocol's existing arms. Tools introduces
+two **inner causes** that the loader sees only because tools is the
+plugin being reloaded (self-reload case) or because tools' observer
+callback raises them (game-plugin reload case). Both roll up to
+`core::Error::PluginInitFailed` per protocol §"Refusal Cases" item 3
+unless noted otherwise.
+
+| Tools refusal cause                                            | Reload class triggering it       | Detected by                                                                                                              | Inner-error arm                                                | What the operator must do                                                                                                                                                                                                                                                                |
+|----------------------------------------------------------------|----------------------------------|--------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Unsaved edits in flight at swap entry**                      | Tools-plugin self-reload only.   | Tools' `glibre_plugin_drain` reads the `CommandStack`'s undo-depth and the active-recording flag (`TraceRecorder::is_recording()`). Either non-zero → refusal. | `tools::Error::Refused` wrapped under `core::Error::HotReloadRefused` (direct, not under `PluginInitFailed` — refusal happens before swap). | Operator-facing prompt: "Save / discard / continue editing." Saving routes through the normal `Scene` write path; discarding clears the `CommandStack`; continuing leaves the request queued for the next phase 8 at which both flags are zero. The prior tools image keeps running unmodified. |
+| **Active `Transaction` open at phase 8 entry**                 | Both classes (loader-detected, listed for completeness). | Loader (not tools). Tools' contract refuses to begin drain while transaction depth > 0; the loader treats this as a queued request, never an error. | Deferred — the request will be honoured at the next phase 8 with depth zero (typically the next frame's phase 8 since transactions span ≤ one editor frame per §4.7 inv. 3). | None — the request will be honoured automatically.                                                                                                                                                                                                                                       |
+| **Layout re-apply fails after self-reload**                    | Tools-plugin self-reload only.   | Tools' `glibre_plugin_register` calls `LayoutProfile::activate` on the surviving active-profile name; an unknown panel id (e.g. a panel from an extension that *also* swapped and dropped a registration) raises `tools::Error::LayoutLoadFailed`. | `tools::Error::LayoutLoadFailed` wrapped under `core::Error::PluginInitFailed`. | Inspect which `panel_id` is missing in the active `LayoutProfile`; either restore the dropping plugin or switch to the `default` `LayoutProfile`. The reload is refused; the prior tools image keeps running.                                                                              |
+| **Closed-sum `kind` violation in surviving CommandJournal**    | Tools-plugin self-reload only.   | Tools' `glibre_plugin_register` decodes the loader's `CommandJournal` snapshot; a `kind` value outside the §7.1.3 closed sum surfaces from the data middleman. By construction (§7.2.3 — variant set is strictly additive across MVP), this only fires on a downgrade or on a corrupted snapshot. | `tools::Error::CommandConflict` wrapped under `core::Error::PluginInitFailed`. | Either upgrade the tools image to a version that recognises the journal's variant set, or accept the loss by discarding the snapshot (the default behaviour is to refuse, preserving user history).                                                                                       |
+
+Each refusal is logged exactly once at `warn` level (protocol §"Refusal
+Cases") with structured fields: `plugin_fqn=glibre.tools`,
+`attempted_dylib_path`, `host_abi_hash`, `plugin_abi_hash`, and the
+inner cause's enumerator name. The unsaved-edits case additionally
+surfaces an operator-facing prompt in the editor shell — the only path
+in §8 that touches the user directly.
+
+**Important non-refusal:** a game-plugin reload that scrubs entries
+from `Selection` (§8.3.2) is **not** a refusal. The id-revalidation
+behaviour is part of the contract; the editor surfaces the change as a
+`SelectionRevalidated` event (§8.5), and the user observes the
+selection set shrink. Refusing the swap because some selected entity
+no longer exists would block legitimate dev workflows where iterating
+on game logic regularly despawns and respawns entities.
+
+### 8.5 Observers — `LayoutChanged`, `SelectionRevalidated`
+
+The closed `EditorEvent` sum (§5.13) gains exactly two arms the
+hot-reload contract introduces. They piggyback on `core`'s typed event
+bus per §3.2 collapse #9 — tools never owns a second bus.
+
+```
+events::LayoutChanged          { LayoutProfileName active{}; std::uint32_t panels_re_registered{0}; };
+events::SelectionRevalidated   { std::uint64_t pre_hash{0}; std::uint64_t post_hash{0}; std::uint32_t scrubbed_count{0}; };
+```
+
+Both are middleman-typed (`glibre.types.tools.HotReloadEvent` with
+arms `LayoutChanged`, `SelectionRevalidated`) so their wire layouts
+survive any tools-plugin reload. Their wire schemas live alongside
+§7.1's persistent types and follow the same additive-variant rule
+(§7.2.3); a fifth arm or new field requires a coordinated `EditorEvent`
+codegen bump.
+
+**Emission rules:**
+
+1. **`LayoutChanged`** fires exactly once **per tools-plugin
+   self-reload**, at the end of §8.3.1's resume sequence (after every
+   panel is re-registered and the active layout has materialised),
+   *before* the protocol's `HotReloadCompleted` event. It does **not**
+   fire on game-plugin reload (no layout work happens). It also fires
+   on user-driven `LayoutProfile` switches per §4.2 — the reload event
+   is one source among others; subscribers cannot distinguish
+   "user switched layout" from "tools just self-reloaded" except by
+   observing whether `HotReloadCompleted` follows.
+2. **`SelectionRevalidated`** fires exactly once **per game-plugin
+   reload** that scrubs at least one id, at the end of §8.3.2's
+   target-id refresh, before the protocol's `HotReloadCompleted`
+   event. It does **not** fire on tools-plugin self-reload (selection
+   bytes survive verbatim). `pre_hash` is the §4.3-inv-2 hash of
+   `Selection` before re-resolution; `post_hash` is the hash after.
+   `scrubbed_count == 0` cases are silenced (no event emitted) so
+   subscribers can use the event's mere arrival as a signal that
+   their cached selection-derived state is stale.
+
+**Observer atomicity** is the protocol's §"Observer Notification"
+guarantee: subscribers are called synchronously on the loader thread,
+between protocol steps 4.2 and 4.3 of *the swapping plugin's*
+transaction. Subscribers see a fully-swapped, fully-migrated world
+when they receive these events; they never observe a half-swapped
+state. This is the contract that lets the editor's diagnostic
+overlay update without races and lets the e2e harness capture
+deterministic post-reload assertions (§8.6).
+
+The two new arms are the *only* tools-side observability additions
+across the hot-reload boundary. New observability needs flow into
+existing `EditorEvent` arms or graduate to a SPEC bump per §3.2
+collapse #9.
+
+### 8.6 Test hooks — trace recorder paused during reload window
+
+Tools' reload contract is verified via the loader's existing
+`enqueue_hot_reload` E2E entry point (protocol §"Test Hooks"). Tools
+adds **one test-hook discipline** that no other plugin needs: the
+trace recorder is paused for the duration of the reload window and
+resumes capture at the next frame.
+
+**Pause / resume rule.** When a hot-reload request is enqueued for any
+plugin (including tools itself) and the editor is in `Recording` mode
+(§4.9 inv. 1), the `TraceRecorder` writes one `TraceOp` of kind
+`HotReloadBoundary { plugin_fqn, frame_counter }` and **stops capture
+immediately**. Capture resumes at frame N+1's phase 1 input pump entry,
+*after* the protocol's `HotReloadCompleted` (or `HotReloadRefused`)
+event has been published. The pause covers the entire phase 8 window:
+no `TraceOp` is recorded for events that originate inside drain, swap,
+migrate, or resume; the only record of the window is the single
+boundary op. (Rationale: the swap is not an editor action; recording
+its internals would couple the trace format to the loader's internal
+event vocabulary, violating §4.9 inv. 1's "non-perturbing" rule and
+§4.10 inv. 5.)
+
+If the reload is refused, the next captured `TraceOp` (frame N+1's
+input op) is unaffected by the refusal — the recorder treats the
+boundary op as a marker, not a transaction. If the reload succeeds, the
+post-reload frame's first ops are captured against the new plugin
+image; replay against a recording that crossed a reload window must
+re-trigger the same reload at the same frame (`enqueue_hot_reload`
+called in trace replay against the same `plugin_fqn` at the recorded
+`frame_counter`) for the trace to remain deterministic. This is the
+e2e-context contract surfaced here only as a tools-side requirement;
+the replay machinery lives in `specs/e2e/SPEC.md`.
+
+**Test scenarios.** The CI matrix (Catch2 cases listed in §11)
+exercises three end-to-end fixtures running inside a single
+deterministic frame loop using the in-process `enqueue_hot_reload`
+trigger:
+
+1. **Tools-plugin self-reload — happy path.** A fixture pair
+   `tools-v1` → `tools-v1-rebuilt` (byte-identical except for the
+   embedded build timestamp) runs the editor for `K = 16` editor
+   frames, triggers a self-reload at frame 8 with no unsaved edits
+   and no active recording, and asserts:
+   - the active `LayoutProfile` is byte-equal pre / post;
+   - every panel from frame 7 still resolves at frame 9;
+   - `Selection`, `CommandStack`, `Gizmo` configuration, and
+     `Shortcuts` are byte-equal pre / post;
+   - `EditorEvent::LayoutChanged` fires exactly once at frame 8;
+   - `SelectionRevalidated` does *not* fire;
+   - `HotReloadCompleted` fires exactly once with
+     `migrated_types = []`.
+2. **Tools-plugin self-reload — refusal on unsaved edits.** Same
+   fixture pair, but with the `CommandStack` carrying one undone
+   `EditCommand` at frame 8. Asserts `HotReloadRefused { cause:
+   tools::Error::Refused }` fires; the prior tools image keeps
+   ticking through frame 16; `LayoutChanged` does *not* fire.
+3. **Game-plugin reload — selection revalidation.** A fixture pair
+   `game-v1` → `game-v2-despawn-half` (the v2 plugin's migrate
+   function despawns every odd-indexed entity) runs the editor with
+   `Selection` populated by 8 entities at frame 8. The reload
+   triggers tools' game-plugin observer; the trace asserts:
+   - `Selection` shrinks from 8 ids to 4 (the even ones);
+   - `SelectionRevalidated` fires exactly once with
+     `scrubbed_count == 4` and `pre_hash != post_hash`;
+   - The Inspector panel's view cache is invalidated for every
+     scrubbed entity; the panel re-draws cleanly at frame 9 against
+     the survivors;
+   - `LayoutChanged` does *not* fire (no layout work);
+   - `HotReloadCompleted` fires exactly once with the v2 plugin's
+     migrated types;
+   - The `TraceRecorder`, if in `Recording` mode, captures one
+     `HotReloadBoundary` op at frame 8 and resumes normal capture
+     at frame 9.
+
+All three scenarios run inside a single CI job using the in-process
+trigger; no filesystem watcher is involved (protocol §"Test Hooks").
+The Catch2 cases are listed in §11 acceptance criteria as
+`Tools self-reload preserves user state`, `Tools self-reload refuses
+unsaved edits`, `Game-plugin reload revalidates Selection`.
+
+### 8.7 Cross-references
+
+- Engine protocol: `reviews/decisions/hot-reload-protocol.md`
+  (drain → swap → migrate → resume; refusal arms; observer bus;
+  E2E hook). Tools adds nothing to that machinery.
+- Frame slot: `reviews/decisions/frame-phases.md` (phase 8 entry /
+  exit guarantees; one-frame pipeline preserved).
+- Render pilot pattern: `specs/render/SPEC.md` §8 (parallel
+  structure: reload point, survival inventory, migrate body,
+  refusal cases, observers, test hooks).
+- Persistence rules invoked: §7.1.1 / §7.2.1 (`LayoutProfile`
+  additive), §7.1.2 / §7.2.2 (`Scene` additive), §7.1.3 / §7.2.3
+  (`CommandJournal` closed-sum `kind` strictly additive — the
+  property that makes old commands replayable across every future
+  tools image), §7.1.4 / §7.2.4 (`Shortcuts` additive).
+- Aggregates touched: §4.1 `EditorHost` (drain / resume orchestration),
+  §4.2 `Layout` / `LayoutProfile` / `Panel` (re-apply on self-reload),
+  §4.3 `SceneTree` / `Selection` (re-resolve on game-plugin reload),
+  §4.4 `Inspector` / `InspectorView` (cache invalidation on both
+  classes), §4.7 `EditCommand` / `CommandStack` (journal snapshot
+  survival; closed-sum replayability), §4.9 `TraceRecorder`
+  (paused during reload window), §4.10 inv. 9 (this section's
+  body), §4.10 inv. 10 (frame-phase ownership preserved).
+- Errors used: `tools::Error::Refused` (unsaved-edits refusal),
+  `tools::Error::LayoutLoadFailed` (layout re-apply failure),
+  `tools::Error::CommandConflict` (closed-sum `kind` violation in
+  surviving journal), each wrapped by either
+  `core::Error::HotReloadRefused` (drain-time refusal) or
+  `core::Error::PluginInitFailed` (resume-time refusal) per protocol
+  §"Refusal Cases".
+- New `EditorEvent` arms: `LayoutChanged`, `SelectionRevalidated`
+  (§8.5 — middleman-typed; §5.13 closed sum widened by these two arms
+  only).
 
 ## 9. Performance Budget
 
