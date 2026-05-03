@@ -1,0 +1,6 @@
+[submodule "vendor/vcpkg"]
+	path = vendor/vcpkg
+	url = https://github.com/microsoft/vcpkg
+[submodule "vendor/metal-cpp"]
+	path = vendor/metal-cpp
+	url = https://github.com/bkaradzic/metal-cpp
