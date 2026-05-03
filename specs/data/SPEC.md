@@ -2317,8 +2317,10 @@ once that is full, an amendment to this section and to the engine
 decision record is required before extending into headroom. The 4 MiB
 of heap that the shipping build does not spend on `ReflectionBlob` is
 not slack to be silently consumed; it is reserved against future
-growth of `Envelope` scratch or a still-undecided lazy-migration cache
-(see §12 open question).
+growth of `Envelope` scratch. A lazy-migration cache is not part of
+the MVP — per PHILOSOPHY's "two concrete users" rule, that abstraction
+is deferred until two callers demand it; introducing one will require
+a fresh sub-epic that re-amends this section and `perf-budget.md`.
 
 ## 10. Failure Modes & Error Model
 
@@ -2566,4 +2568,10 @@ Each must have a Catch2 test by name.
 
 ## 12. Open Questions
 
-- Owner / resolution gate.
+None. All MVP-blocking questions are resolved in §1–§11 of this spec
+or in the decision records cited there
+(`reviews/decisions/{fory-codegen,plugin-abi,perf-budget,hot-reload-protocol,frame-phases,error-model}.md`).
+Forward-looking, post-MVP design questions (e.g. a `data`-side
+lazy-migration cache) are deferred per PHILOSOPHY's
+"two concrete users" rule and will be reopened only via a fresh
+sub-epic that re-amends the affected section.
