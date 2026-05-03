@@ -227,8 +227,434 @@ requests adding them to `core` should be rejected.
 
 ## 4. Aggregates & Invariants
 
-- Aggregate / entity / value object.
-- Invariants that must hold at every public API boundary.
+This section enumerates the aggregates, entities, and value objects the
+`core` context owns, the invariants that must hold at every public API
+boundary, and the SRP justification for each aggregate (the single
+reason it would change). The set is closed: nothing else is owned by
+`core`, per §1 and the refusals in §3.3.
+
+The DDD aggregate boundaries below correspond to the bounded-context
+seams discussed in §3.2. Each aggregate is the smallest unit that
+preserves an invariant cluster atomically; every public API call enters
+and exits with all invariants holding. Failures are signalled through
+`std::expected<T, glibre::Error>` per the engine-wide error-model
+decision record; the relevant `core::Error` arms are noted alongside
+each invariant cluster.
+
+### 4.1 `World` (aggregate root)
+
+**Identity:** one `World` instance per ECS universe. MVP runs exactly
+one (multi-world is deferred per §3.3, R-1.1.35–R-1.1.36). Composes:
+`Archetype` storage table, `Entity` allocator, `Resource` map (typed
+singletons), `ChangeTick` clock, codegen-emitted column descriptors
+keyed by `TypeId`, parent/child relationship index, and the ABI seam
+to the `TypeRegistry` and `AssetHandle` table.
+
+**Owned entities / value objects:** `Archetype` (entity), `Entity`
+(value object — opaque generational ID), `ChangeTick` (value object),
+`Resource` slot map (entity collection).
+
+**Invariants (must hold on every public boundary entry/exit):**
+
+1. **Entity-handle validity.** Every `Entity` returned by the public
+   API resolves through the generational allocator: its index is in
+   range and its generation equals the slot's current generation. A
+   stale handle is rejected with `core::Error::EntityStale`. No public
+   API ever dereferences a handle whose generation does not match.
+2. **Archetype graph acyclic for parent/child relationships.** The
+   `ChildOf` relationship between entities forms a forest (each entity
+   has at most one parent; cycles are refused with
+   `core::Error::HierarchyCycle`). Phase 5 (`transform`, see
+   `reviews/decisions/frame-phases.md`) relies on this for
+   single-pass `LocalTransform → GlobalTransform` propagation.
+3. **`TypeId` registered before storage allocation.** A component type
+   may have a column allocated only if its `TypeId` is present in the
+   `TypeRegistry` at world-creation time. Adding a type post-init is
+   refused with `core::Error::TypeUnregistered` (PHILOSOPHY §6 — no
+   runtime registration in shipping builds).
+4. **`ChangeTick` monotonicity.** `ChangeTick` is a `u64` advanced
+   exclusively at the phase-9 boundary (`present`) and on each mutable
+   `Query` access; it never decreases within a process lifetime.
+   `Changed<T>` filters compare ticks under this invariant.
+5. **Single-writer per chunk.** While a phase is in flight, at most
+   one system holds a write reference to any given `(Archetype, Chunk,
+   Column)` triple. Enforced by the `Schedule`'s access-set DAG (§4.4).
+6. **Resource map type-safety.** A typed singleton `Resource<T>` is
+   accessed only through its `TypeId`-keyed slot. Concurrent
+   read/write access to one resource within a phase is refused.
+7. **Lifecycle hook firing order.** When a component is added, removed,
+   or set, the corresponding `OnAdd` / `OnRemove` / `OnSet` observer
+   fires exactly once per mutation, in deterministic insertion order,
+   before the mutation becomes visible to subsequent queries within
+   the same phase. (The lifecycle hook *shape* is core's; multi-term
+   query observers are not — see §3.3, R-1.1.31–R-1.1.32.)
+
+**SRP justification — single reason to change:** the rules of the ECS
+world's storage and addressing. If archetype-row addressing, generation
+counting, or change-tick semantics change, `World` changes. Anything
+else (scene hierarchy data model, GPU resource lifetime, networking,
+asset resolution) is owned by another context and would not move
+`World`.
+
+### 4.2 `Archetype` (entity within `World`)
+
+**Identity:** the unordered set of `TypeId`s defining one storage
+table; equal sets share one `Archetype`. Composes a list of `Chunk`s
+holding cache-aligned, fixed-size SoA columns (one column per
+component type in the set, plus an entity-id column).
+
+**Invariants:**
+
+1. **Component-set immutability.** An `Archetype`'s component set is
+   fixed at creation. Adding or removing a component on an entity
+   moves the row to a different `Archetype`; the set itself never
+   mutates.
+2. **Chunk capacity bound.** Every `Chunk` holds at most
+   `Chunk::CAPACITY` rows (codegen-emitted constant). Inserting into
+   a full chunk allocates a new chunk; rows are never split across
+   chunks.
+3. **SoA column alignment.** Each column is `alignof(T)`-aligned and
+   contiguous. Codegen asserts at build time that the per-type
+   `(size, align)` recorded in the `TypeRegistry` matches the column's
+   offset arithmetic; mismatch fails the build.
+4. **Row density.** When a row is removed, the last row in its chunk
+   swaps into the freed slot (swap-remove); chunks contain no holes.
+   Iteration order within a chunk is therefore stable only within one
+   `Schedule` invocation, not across frames — but iteration order
+   across all chunks of an `Archetype` is deterministic by chunk
+   insertion order (PHILOSOPHY §7).
+5. **Entity-row address validity.** The reverse map `Entity → (Archetype,
+   Chunk, Row)` agrees with the forward map at every public boundary;
+   swap-removes update both maps atomically within the same critical
+   section.
+
+**SRP justification:** the rules of chunked SoA storage layout. If the
+chunk size, column-alignment, or swap-remove discipline changes,
+`Archetype` changes. Schedule-time read/write authority lives in
+`Schedule`, not here.
+
+### 4.3 `Entity` (value object)
+
+**Identity:** an opaque 64-bit handle: 32-bit slot index plus 32-bit
+generation. Allocated by `World`'s entity allocator; only stable
+cross-frame reference into a `World`'s rows.
+
+**Invariants:**
+
+1. **Generation-counted reuse.** When an entity is despawned its slot's
+   generation increments before reuse; any prior `Entity` value for
+   that slot now resolves to `core::Error::EntityStale`.
+2. **Opacity.** Public APIs treat `Entity` as opaque; no public method
+   exposes the (index, generation) split as load-bearing fields.
+   Internal codegen may unpack for storage addressing only.
+3. **No cross-`World` portability.** An `Entity` from one `World`
+   passed to another `World`'s API yields
+   `core::Error::EntityForeignWorld` (relevant once multi-world lands
+   post-MVP; refusal contract is reserved now to keep MVP code paths
+   honest).
+
+**SRP justification:** the encoding rules of the cross-frame entity
+reference. Format changes (e.g. moving to a 48-bit index for >4 M
+entities) move `Entity`; nothing else does.
+
+### 4.4 `System` / `Schedule` / `Phase` / `FrameLoop` (aggregate)
+
+**Identity:** the engine's deterministic ordering machinery. One
+`FrameLoop` per `World`, owning a `Schedule` per phase, each compiled
+once into a `CompiledFrame` whose form is a DAG over `System`
+nodes keyed by access sets. `Phase` is a numbered enum (1..=9) with
+ordering frozen by `reviews/decisions/frame-phases.md`. A `System` is
+a function with a declared read/write access set over `(TypeId,
+ResourceId)`.
+
+**Invariants:**
+
+1. **Phase numeric order.** Phase N completes before phase N+1 begins
+   within one frame. No phase observes writes from a later phase of
+   the same frame. Violation is a build-time refusal — phases are not
+   re-orderable at runtime — and a runtime debug-build assertion
+   `core::Error::FramePhaseMisordered`.
+2. **Read/write access sets non-overlapping within a phase.** Within
+   one phase's `Schedule`, no two systems running concurrently have
+   overlapping write sets, and no system has read access to a
+   component another running system writes. The DAG compiler enforces
+   this at schedule-build time; mismatch refuses compilation with
+   `core::Error::ScheduleAccessConflict`.
+3. **Compile-once.** A `Schedule` compiles to a `CompiledFrame` once
+   per (set of registered systems × set of registered components);
+   re-registration that changes the set invalidates and recompiles.
+   The compiled frame is reused across every frame until invalidated.
+4. **System purity at the access-set boundary.** A `System` may only
+   read/write the components and resources it declared. Declared-set
+   violation is undefined behaviour by ABI; debug builds detect via a
+   per-thread access-token check and abort.
+5. **Deterministic system ordering.** When two systems' access sets
+   permit either ordering, the tiebreaker is the lexicographic order
+   of their compile-time fully-qualified names (PHILOSOPHY §7 — fixed
+   container iteration order).
+6. **Phase ownership.** Each phase has exactly one owning context (per
+   the frame-phases decision record); only that context may register
+   the phase's body-level systems. Other contexts may register
+   *systems* that run *inside* a phase but cannot redefine the phase
+   itself. `core` owns phases 5 (`transform`) and 8 (`hot-reload`);
+   ownership of other phases is delegated to other contexts via the
+   plugin loader.
+7. **No exclusive systems in MVP.** Per §3.2 collapse #2, run-criteria
+   and exclusive-world systems are out of scope; the schedule is a
+   pure access-set DAG.
+
+**SRP justification:** the rules of frame-deterministic system
+ordering. Changes to how access sets are checked, how phase boundaries
+are gated, or how the DAG is compiled move `Schedule` / `FrameLoop`.
+Conditional execution belongs to gameplay/scripting plugins; scene
+graph order belongs to scene; render queue belongs to render.
+
+### 4.5 `Plugin` / `PluginLoader` / `Manifest` / `AbiHash` (aggregate)
+
+**Identity:** the aggregate that admits a `.dylib` to the engine. The
+`PluginLoader` is the core service; each `Plugin` is a discovered
+dylib with its `Manifest` (filename, declared dependencies, embedded
+`AbiHash`, embedded schema-version table). `AbiHash` is a value
+object: a blake3 hash over the concatenated, sorted schema-source
+hashes of the middleman dylib (per `reviews/decisions/fory-codegen.md`).
+
+**Invariants:**
+
+1. **ABI-hash equality before register call.** A plugin's compiled-in
+   `glibre_types_abi_hash()` must equal the host's
+   `glibre_types_abi_hash()` before *any* call into the plugin's
+   `glibre_plugin_register(World&, Registry&)` entry point. Mismatch
+   refuses load with `core::Error::PluginAbiHashMismatch`; the dylib
+   handle is dropped and no register call is issued. (PHILOSOPHY §9.)
+2. **Manifest structural validity.** The `Manifest` must declare a
+   plugin name, a set of required dependency names, and the embedded
+   ABI hash. Missing or malformed fields refuse load with
+   `core::Error::PluginManifestInvalid`.
+3. **Topological dependency ordering.** Plugins load in topological
+   order over the manifest's `requires` graph; cycles refuse load with
+   `core::Error::PluginDependencyCycle`. A plugin cannot register
+   components, systems, or resources before all its declared
+   dependencies have completed `glibre_plugin_register`.
+4. **Single registration window.** Plugin `glibre_plugin_register`
+   runs exactly once per load, on the loader thread, before the first
+   frame in which the plugin's systems may execute. Re-registration is
+   refused; the plugin must be unloaded and reloaded through the
+   `HotReloadBarrier` (§4.6).
+5. **No plugin link to Fory.** Plugins link only `glibre-types.dylib`;
+   linking Fory directly is refused at build time by the dependency
+   graph (per the codegen decision record). This invariant is
+   build-system-enforced, not runtime-checked, but it backs invariant
+   #1 above.
+6. **Capability brokering refused.** Plugin groups (R-1.6.2) and
+   capability advertisement (R-1.6.8) are not part of `Manifest`;
+   manifests carrying such fields are rejected as malformed.
+
+**SRP justification:** the rules of admitting a plugin dylib across
+the ABI seam. If the ABI-hash algorithm, the manifest schema, or the
+load-order discipline change, `PluginLoader` changes. The contents of
+what plugins do once loaded is owned by the plugin's context, not core.
+
+### 4.6 `HotReloadBarrier` (aggregate, owned by `core`)
+
+**Identity:** the frame-boundary gate at phase 8 that drains, swaps,
+migrates, and resumes plugins. State machine: Idle → Drain → Swap →
+Migrate → Resume → Idle. Composes a pending-reload request queue, a
+snapshot of in-flight component storages, and the migration dispatch
+table populated by `glibre-types.dylib` (per the codegen decision
+record).
+
+**Invariants:**
+
+1. **Fires only at frame phase 8.** No reload state transition occurs
+   outside phase 8. A reload requested mid-frame is queued and
+   processed at the next phase-8 entry. (PHILOSOPHY §8; frame-phases
+   decision record.)
+2. **Drain completeness.** Before swap, every in-flight `CommandBuffer`
+   has applied; every pending observer hook has fired; the world is
+   quiescent (no system holds a borrow). Failure to drain within a
+   bounded budget refuses the reload with
+   `core::Error::HotReloadDrainTimeout` and leaves the prior plugin
+   live.
+3. **ABI hash recheck before swap.** Even if a plugin previously loaded
+   successfully, the candidate replacement dylib's `AbiHash` is
+   compared again before swap. Mismatch refuses the swap with
+   `core::Error::HotReloadAbiHashMismatch`; previous plugin remains
+   loaded.
+4. **Migration atomicity.** Component-storage migration runs to
+   completion or rolls back to the pre-swap snapshot; partial
+   migration state is never observable. Failure refuses the swap with
+   `core::Error::SchemaMigrationFailed` (per the error-model decision
+   record); previous plugin remains loaded.
+5. **No mid-frame command buffers survive a swap.** All `CommandBuffer`s
+   produced by the outgoing plugin are applied or discarded before
+   swap; none persist into the new plugin's first frame.
+6. **Single-position barrier.** There is exactly one barrier per frame,
+   at phase 8. No second hot-reload position exists; the schedule
+   refuses to register one.
+7. **Refusal preserves prior state.** Any refusal case (#2–#5 above)
+   returns the world to its pre-barrier state byte-for-byte; the
+   refused reload is logged at `warn` level (per the error-model
+   decision record's logging rules) and the frame proceeds to phase 9.
+
+**SRP justification:** the rules of frame-boundary plugin swap. If the
+drain protocol, the migration runner, or the refusal-rollback
+discipline change, `HotReloadBarrier` changes. The actual schema
+migration *bodies* are owned by each migrating type's originating
+context, not by core.
+
+### 4.7 `AssetHandle` and the asset handle table (value object + entity)
+
+**Identity:** the `AssetHandle` is an opaque generational handle into
+the engine-wide asset table; the table itself is an entity owned by
+`core`. Resolution semantics (what bytes / GPU resource a handle
+denotes) are plugin-defined; the table only stores the handle slot,
+its generation, and an opaque payload pointer maintained by the
+resolving plugin.
+
+**Invariants:**
+
+1. **Generation-counted reuse.** Identical to `Entity` (§4.3): a freed
+   slot's generation increments before reuse; stale handles resolve
+   to `core::Error::AssetStale`.
+2. **Opacity at the ABI seam.** Plugins receive `AssetHandle` as an
+   opaque 64-bit value; only the resolving plugin interprets the
+   payload pointer. Other plugins never dereference the payload.
+3. **Handle-table singleton per process.** Exactly one asset handle
+   table lives per process (not per `World`); handles are valid
+   across worlds when multi-world lands. This is a deliberate seam
+   different from `Entity`'s per-world scoping (per §3.2 collapse #6).
+4. **No I/O at the table.** The table records handles and payloads;
+   it never opens files, sockets, or GPU resources. I/O is the
+   `platform` context's; resolution to bytes/GPU is the resolving
+   plugin's. (PHILOSOPHY §1 — `core` refuses I/O.)
+
+**SRP justification:** the rules of opaque cross-plugin resource
+identity. If the handle encoding or generation discipline change,
+`AssetHandle` changes. The meaning of the bytes a handle resolves to
+is owned by whichever plugin resolves it.
+
+### 4.8 `CommandBuffer` (value object, owned per-system)
+
+**Identity:** a per-system deferred-mutation log. Records intended
+component adds/removes/sets and entity spawns/despawns; replayed at a
+sync point in deterministic order.
+
+**Invariants:**
+
+1. **Append-only during phase execution.** A `CommandBuffer` is
+   append-only while its owning system runs; mutations recorded are
+   not visible until the sync point.
+2. **Deterministic replay order.** At the sync point all command
+   buffers replay in lexicographic order of their owning system's
+   fully-qualified name; within one buffer, in insertion order
+   (PHILOSOPHY §7).
+3. **No reads of own deferred writes.** A system that writes via its
+   `CommandBuffer` does not see its own deferred mutations within the
+   same phase; they become visible only at the next phase boundary.
+4. **Bounded per-frame allocation.** Each `CommandBuffer` allocates
+   into a per-frame arena; spillover beyond the arena cap refuses
+   further appends with `core::Error::CommandBufferOverflow` (the
+   precise budget figure is set by §9 once allocation cells are
+   declared).
+5. **Sync-point well-definedness.** The sync points are the phase
+   boundaries enumerated in the frame-phases decision record; no other
+   sync points exist. Reactive-query subscriptions and cross-world
+   bridges are deferred (§3.3).
+
+**SRP justification:** the rules of the smallest deterministic
+deferred-mutation primitive. If the ordering rule or the
+sync-point-set change, `CommandBuffer` changes. Richer event routing
+(typed channels, capture/bubble propagation, cross-world bridges) is
+explicitly the `events` plugin's, not core (§3.3, R-1.5.* refusals).
+
+### 4.9 `TypeRegistry` (immutable-after-init lookup, owned by `core`)
+
+**Identity:** a lock-free, init-time-immutable map from `TypeId` to a
+type descriptor: `{ size, align, drop, layout }`. Populated at static
+init from `glibre-types.dylib`'s codegen output.
+
+**Invariants:**
+
+1. **Immutable after init.** No entries may be added, removed, or
+   mutated after `World` construction completes. Attempted mutation
+   is refused with `core::Error::TypeRegistryClosed`.
+2. **`TypeId` uniqueness.** Each registered `TypeId` corresponds to
+   exactly one descriptor. Codegen asserts uniqueness at build time;
+   collisions fail the build, never reach runtime.
+3. **Size/align consistency.** The `(size, align)` recorded for a type
+   matches its codegen-emitted column layout in every `Archetype` that
+   references it (cross-checked by §4.2 invariant #3).
+4. **No reflective fields.** Descriptors carry only `{ size, align,
+   drop, layout }`. Path-based property access, `DynamicValue`, and
+   the reflect trait are deliberately absent (per §3.2 collapse #4).
+
+**SRP justification:** the rules of cross-ABI type identity and
+storage layout descriptors. If the descriptor schema changes,
+`TypeRegistry` changes. Reflective surfaces beyond size/align/drop/
+layout belong to `editor` and `data`, not core (§3.3).
+
+### 4.10 Aggregate Composition Map
+
+```text
+World (root)
+├── Archetype[] (entities; chunked SoA storage)
+│   └── Chunk[] (value objects; fixed-capacity SoA slabs)
+├── Entity allocator (slot-map; generational)
+├── Resource map (TypeId → typed singleton)
+├── ChangeTick clock (value object)
+├── ChildOf relationship index (forest, acyclic)
+└── ABI seam to:
+    ├── TypeRegistry          (process-wide, immutable-after-init)
+    └── AssetHandle table     (process-wide, generational)
+
+FrameLoop (per-World driver)
+└── Schedule (per-Phase, compiled to CompiledFrame DAG)
+    └── System[] (access-set-typed function nodes)
+
+PluginLoader (process-wide service)
+├── Plugin[] (dylib + Manifest + AbiHash)
+└── HotReloadBarrier (frame-8 state machine)
+
+CommandBuffer (per-system, per-frame, deferred-mutation log)
+```
+
+Aggregates do not nest each other across context seams: the
+`PluginLoader` references `World` only through public APIs, never by
+reaching into archetype storage. The `HotReloadBarrier` likewise
+interacts with `World` only through the public boundary so its
+drain/migrate state machine is a peer aggregate, not a sub-component.
+
+### 4.11 Cross-Aggregate Invariants
+
+These hold at the seams between aggregates and are enforced at the
+public API boundary:
+
+1. **Entity referenced from a `CommandBuffer` resolves in the post-
+   replay world.** If an entity is despawned by buffer A and
+   referenced by buffer B in the same sync point, deterministic replay
+   order decides; B's reference resolves to
+   `core::Error::EntityStale`, never to a misaddressed row.
+2. **System access set ⊆ registered components ∪ registered
+   resources.** A system referencing an unregistered `TypeId` refuses
+   to compile into the `Schedule`.
+3. **Hot-reload preserves entity identity for migrated components.**
+   Across the §4.6 swap, `Entity` handles remain valid for any
+   component type whose schema migration succeeded; handles for types
+   whose migration was refused are unaffected (the type was rolled
+   back to its prior state).
+4. **`AssetHandle` payloads survive plugin reload only when the
+   resolving plugin's schema migration succeeds.** A reload that
+   refuses migration leaves the payload pointer intact (rollback);
+   one that succeeds with a payload-shape change must register a
+   migration that runs at phase 8 alongside the component-storage
+   migrations.
+5. **Hot-reload may not run during phase 8 itself if the migration is
+   for a component type owned by a system the loader is about to
+   swap.** This is a self-reference refusal: the loader detects the
+   case at request time and refuses the reload with
+   `core::Error::HotReloadSelfReference`. (Open question: whether
+   `core`-owned types can be migrated at all during a reload is
+   deferred to §12.)
 
 ## 5. Public Interface
 
