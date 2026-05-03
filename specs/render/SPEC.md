@@ -2373,7 +2373,326 @@ addition`, `Hot-reload refuses capability widening`.
 
 ## 9. Performance Budget
 
-Cycles / frame, memory ceiling, allocation rules.
+This section quotes render's row from the engine-wide budget table
+(`reviews/decisions/perf-budget.md`), breaks it down per render-owned
+phase (6 and 7 per `reviews/decisions/frame-phases.md`), itemises the
+per-pass GPU cost that sums into the cell, fixes the heap composition
+inside the 512 MiB ceiling, restates the allocator rules render
+plugs into, and lists the CI gate hooks render owns. Every number in
+this section is a **contractual ceiling**, not a steady-state
+expectation — the budget gate fails on any frame that exceeds the cell
+or any pass slice (§9.6). The §11 acceptance criteria name the Catch2
+benchmarks that enforce these ceilings.
+
+### 9.1 Cell — render row
+
+Render's cell from `reviews/decisions/perf-budget.md` §"Per-Context
+Budget Table", restated verbatim with one MVP refinement: the issue
+brief for spike #95 collapses the 0.10 ms CPU-sim slot and the 1.40 ms
+CPU-submit slot into a single **1.5 ms CPU ceiling** so render's two
+phases each carry a clean per-phase budget without cross-half
+arithmetic at the gate level. The decision record's split is preserved
+internally (sim 0.10 + submit 1.40 = 1.50) and feeds the budget
+record's pipelined-frame timing model unchanged.
+
+| Slot                               | Ceiling   | Notes                                                                                     |
+|------------------------------------|-----------|-------------------------------------------------------------------------------------------|
+| CPU per frame (phases 6 + 7)       | **1.5 ms**| Quotes `perf-budget.md` row "render": 0.10 ms sim + 1.40 ms submit. See §9.2 / §9.3.      |
+| GPU per frame (phase 7 output)     | **8.0 ms**| Concurrent with frame N+1 sim per frame-phases "one-frame pipeline". Breakdown in §9.4.   |
+| Heap ceiling                       | **512 MiB**| MTLHeap residency + CPU-side staging shadows tagged `ContextTag::render`. See §9.5.      |
+| Phase ownership                    | 6, 7      | Per `frame-phases.md` table. Geometry / tools register systems inside these phases (§9.2).|
+
+The cell is sized against **(S1)** = 1 character + 200 props + 8
+dynamic lights at 1920x1080 on M1 8-core GPU baseline. Justification
+for each slot lives in `perf-budget.md` §"Justification Per Cell"
+(render row) and is not re-derived here. Render's SPEC §9 only
+**refines** the cell into its sub-budgets; it does not amend the cell.
+Any future amendment is a perf-budget spike per
+`perf-budget.md` §Consequences.
+
+### 9.2 Phase 6 — `cull-extract` CPU breakdown
+
+Phase 6 owns 0.5 ms of render's 1.5 ms CPU ceiling (the legacy
+"sim-side" 0.10 ms slot in `perf-budget.md` plus the 0.4 ms of the
+1.40 ms submit slot that funds CPU cull/extract work; the rest of
+the submit slot is phase 7 below). Frustum + occlusion cull against
+the HZB and meshlet selection are the dominant costs and the only
+ones gated at this slice.
+
+| Step (file, §6.2.1 reference)                    | Ceiling   | Cost model                                                                                                       |
+|--------------------------------------------------|-----------|------------------------------------------------------------------------------------------------------------------|
+| `cull/extract.cpp` — open `RenderFrame` slot     | 0.02 ms   | Triple-buffer slot acquire + `(World, FrameCounter)` pin (§4.1.1 invariant 4). One bounded atomic + arena reset. |
+| `cull/meshlet_cull.cpp` — frustum + HZB cull     | 0.20 ms   | ~3.2k meshlet bounds (200 props × ~16 meshlets) tested against frustum planes + reverse-Z HZB sample. SIMD-bound. |
+| `cull/budget.cpp` — `PassPriority` cost cull     | 0.05 ms   | Cost-aware survivor trim against per-view draw budget (§4.1.1 invariant 3). Linear over survivor set, ~3k entries. |
+| `cull/sort.cpp` — packed `SortKey` radix         | 0.10 ms   | Single-pass radix on 64-bit `SortKey` column over survivor set; one allocation from transient arena.             |
+| `RenderFrame` finalise (lights, camera, settings) | 0.03 ms   | Fixed-cost copy: ≤8 dynamic lights (S1), `RenderSettings` snapshot, `View` camera + jitter.                       |
+| Geometry meshlet-selection systems (registered in phase 6) | 0.10 ms (geometry's slice) | Per `geometry`'s SPEC §9; **not** counted in render's 0.5 ms — listed only so reviewers see the full phase cost. |
+| **Render subtotal**                              | **0.40 ms**| Render-owned work in phase 6.                                                                                     |
+| Reserve inside phase 6                           | 0.10 ms   | Absorbs the cost-aware budget culler's worst-case re-sort and one-shot warm starts on first frame.                |
+
+**Cap:** 0.5 ms render CPU in phase 6, including reserve. Geometry's
+phase-6 systems carry their own ceiling against `geometry`'s row;
+render's gate does not double-count them. Tools' phase-6 work is
+gated against `tools`'s row.
+
+Exit guarantee (frame-phases row 6): a finalised `RenderFrame` exists
+and no further ECS reads are required by render this frame. The
+budget gate asserts the CPU timestamp delta between phase 6 entry and
+exit on the driver thread is ≤ 0.5 ms (S1 fixture, p99). See §9.6.
+
+### 9.3 Phase 7 — `render-submit` CPU breakdown
+
+Phase 7 owns 1.0 ms of render's 1.5 ms CPU ceiling — the CPU side
+that records command buffers from the immutable `RenderFrame`. The
+work splits across the three thread-roles defined in §6.3 (graph
+builder, per-pass encoders, render driver); the 1.0 ms ceiling
+applies to the **driver-thread wall clock** for phase 7, i.e. the
+time from phase 7 entry to the submit-fence signal that wakes phase 9.
+
+| Step (file, §6.2.2 reference)                                  | Driver-thread cost | Cost model                                                                                                           |
+|----------------------------------------------------------------|--------------------|----------------------------------------------------------------------------------------------------------------------|
+| `graph/builder.cpp` — register per-`View` passes               | 0.10 ms            | Fixed sequence (§6.2.2 step 1) instantiated once per `View`; one `View` in S1, ≤4 in MVP ceiling.                    |
+| `graph/compile.cpp` — topo / colour / barrier / queue / bind   | 0.20 ms            | Cache hit path is one structural-hash lookup + rebind (`§4.1.5`); cache-miss path (rare) trades against the reserve. |
+| Per-pass `execute()` recording (driver-side dispatch)          | 0.50 ms            | Three encoder workers wake up; driver waits on the slowest queue. Bounded by ~3k `IndirectDraw` record cost on M1.    |
+| `metal/queue.cpp` — submit + `PresentFence` signal             | 0.05 ms            | One `commit()` per queue (Graphics + Compute + Copy = 3); fence emit.                                                |
+| `RenderFrame` retire + transient pool recycle                  | 0.05 ms            | §4.1.4 cleanup (alias plan free-list, virtual-resource drop) + `RenderFrame` slot mark-retired.                       |
+| Geometry BLAS-refit submit (registered in phase 7)             | (geometry's slice) | Per `geometry`'s SPEC §9; not in render's 1.0 ms. GPU-side cost folded into `shadow-rt` slice (§9.4).                |
+| Tools ImGui-Metal-4 record (registered in phase 7)             | (tools's slice)    | Per `tools`'s SPEC §9; not in render's 1.0 ms.                                                                        |
+| **Render subtotal**                                            | **0.90 ms**        | Render-owned driver-thread work in phase 7.                                                                            |
+| Reserve inside phase 7                                         | 0.10 ms            | Absorbs cache-miss compile (≤1 per `View` per frame) and Metal driver tail jitter on submit.                          |
+
+**Cap:** 1.0 ms render CPU in phase 7, including reserve, on the
+driver thread. The per-pass encoder workers' CPU time is overlapped
+with the driver and does not enter this column unless the driver
+blocks on the slowest worker — which the budget admits via the 0.50
+ms "per-pass record" line. The budget gate asserts the CPU timestamp
+delta between phase 7 entry and submit-fence signal is ≤ 1.0 ms
+(S1, p99).
+
+Phase 6 (0.5) + phase 7 (1.0) = **1.5 ms** = render's CPU cell.
+
+### 9.4 Phase 7 — GPU breakdown per pass
+
+The 8.0 ms GPU ceiling decomposes across the §6.2.2 pass list. Each
+slice is the **wall-clock** cost on the M1 8-core GPU baseline,
+measured pass-end-minus-pass-start via `MTLCounterSampleBuffer`
+timestamps inserted at every `Pass`'s encoder boundary (the
+mechanism is decided in §9.6 below; the ring storage is the §7.3
+debug-gated GPU-timestamp ring).
+
+| Pass (file, §6.2.2 reference)         | Queue     | GPU ms   | Notes                                                                                                                   |
+|---------------------------------------|-----------|----------|-------------------------------------------------------------------------------------------------------------------------|
+| `passes/cluster_cull.cpp` (meshlet-cull) | Compute  | **0.5**  | Persistent-thread cluster cull build of `LightCluster` (froxel grid) + meshlet-cull GPU-side amplification (§6.5).      |
+| `passes/gbuffer.cpp` (gbuffer-mesh)   | Graphics  | **2.5**  | Mesh-shader dispatch writing gbuffer MRT + visibilityID + velocity in one declared `Pass` (§4.2 invariant 5).            |
+| `passes/shadow_rt.cpp` (shadow-rt)    | Compute   | **1.5**  | Hybrid-RT shadow trace + denoise hook. **BLAS refit (~0.3 ms, §6.2.2 step 1.1) is included in this slice** per §9.4.1.   |
+| `passes/lighting.cpp` (lighting-deferred) | Compute | **1.5** | Deferred lighting compute reading gbuffer + `LightCluster` + RT shadow / AO; ray query inline (§6.4 step 3).             |
+| `passes/transparent_forward.cpp` (transparent-forward) | Graphics | **0.5** | Forward translucent reading the same `LightCluster` (§3.2 collapse #3).                                          |
+| `passes/post.cpp` (post)              | Graphics  | **1.0**  | Bloom / DOF / motion / tonemap chain ordered per `RenderSettings`; AA / upscale variant absorbed into this slice in MVP.|
+| `passes/present.cpp` (present)        | Graphics  | **0.5**  | Drawable acquire + swapchain blit + `PresentFence` signal.                                                                |
+| HZB build, TLAS rebuild-or-refit, AO  | Compute   | (folded) | `passes/hzb_build.cpp`, `passes/tlas_build.cpp`, `passes/ao_rt.cpp` overlap on the compute queue with the slices above; their wall-clock is hidden under the dominant compute slice (`shadow_rt` + `lighting`) and does not add to the total. |
+| **GPU subtotal**                      |           | **8.0**  | Sum of the seven measurable slices above.                                                                                |
+
+The pass-list order is fixed (§6.2.2 step 1); the queue assignment is
+fixed (declared per pass); the compile cache (§4.1.5) keeps the
+plan-shape stable frame-to-frame so GPU slice variances are workload-
+driven, not graph-shape-driven. Compute / Graphics queue overlap is
+the reason the per-slice numbers can sum to 8.0 ms while the
+wall-clock GPU ceiling is also 8.0 ms — Apple's published Metal 4
+mesh-shader benchmark behaviour on M1 keeps the graphics queue near
+saturation across `gbuffer` + `transparent_forward` + `post` +
+`present` (5.0 ms), and the compute queue near saturation across
+`cluster_cull` + `shadow_rt` + `lighting` (3.5 ms) — the compute
+half completes inside the graphics half's wall-clock, so the
+critical-path total is the graphics queue's ~5.0 ms plus the
+graphics-queue tail beyond the compute queue (~3.0 ms attributable
+to lighting waiting on gbuffer's gbuffer + visID writes via the
+plan's read-after-write fence). The 8.0 ms ceiling is the sum's
+upper bound; the gate measures it as wall-clock (§9.6).
+
+#### 9.4.1 BLAS refit accounted inside `shadow-rt`
+
+`passes/blas_refit.cpp` (§6.2.2 step 1.1; §6.4 step 1) records on
+`Queue::Compute` and emits a Metal 4 `accelerationStructure` refit
+for each visible-LOD0 dynamic-cluster set (skinned / deformable
+meshes; static-mesh BLAS are cooked by `geometry` and never refit
+per §6.4). The refit's GPU cost on M1 for S1 (1 character with ~6k
+deformable verts + a small handful of dynamic rigid bodies) is
+**~0.3 ms**, which is **funded inside the 1.5 ms `shadow-rt` slice**:
+the TLAS rebuild-or-refit (`passes/tlas_build.cpp`) declares an
+explicit read-after-write on the BLAS refit outputs (§4.2 invariant
+4), so on the compute queue the refit precedes the TLAS update and
+both precede the shadow trace; the three together are accounted as
+`shadow-rt`. This collapses one budget row: the perf-budget gate
+exposes `shadow-rt` GPU as a single number, with refit + TLAS hidden
+under it. If a future scene drives BLAS refit above 0.3 ms, the
+amendment goes to `shadow-rt` (or to a dedicated `blas-refit` row),
+not to `geometry`'s row — GPU memory is render-owned per
+`perf-budget.md` Allocator Rule 5.
+
+The 0.3 ms refit number is the working assumption for the gate; the
+S1 fixture under §9.6 will measure it and feed the next perf-budget
+amendment if it diverges. Static BLAS imports (read-only by render
+per §4.1.8 invariant 3) cost zero per frame.
+
+### 9.5 Heap composition inside the 512 MiB ceiling
+
+The 512 MiB ceiling is GPU-side residency (MTLHeap bytes attached to
+render's residency set per §4.1.6) **plus** the CPU-side staging
+shadows tagged `ContextTag::render`. Per `perf-budget.md` Allocator
+Rule 5, all GPU allocations carry the `render` tag regardless of
+the requesting context (geometry's vertex/index/meshlet streams,
+tools' ImGui textures); CPU-side staging is tagged by the requester.
+Render's heap composition pre-allocates the persistent half at init
+and reserves the rest as a transient pool drained per frame.
+
+| Sub-budget                                | Ceiling   | Aggregate / source                                                                                                  |
+|-------------------------------------------|-----------|---------------------------------------------------------------------------------------------------------------------|
+| **PSO cache** (`§4.1.7`)                  | **64 MiB**| `PSOCache` LRU + on-disk archive page-cache + per-pass binding-table prebuilds. Sized for the MVP material set.     |
+| **GPU resource handles**                  | **16 MiB**| `Handle<Tag>` tables + `glibre.types.render.GpuId` keying tables + residency-set membership bitset (§4.1.6).        |
+| **Transient pool** (`§4.1.4`)             | **256 MiB**| Per-frame placement heap drained per recompile. Hosts virtual resources whose lifetime is bounded by one frame: gbuffer MRT (4 attachments @ 1080p ≈ 64 MiB), HZB pyramid scratch, RT shadow / AO trace targets, history-color rings, RT scratch. The §4.2 invariant ("no transient resource lives across the phase 7→9 boundary") makes this drain-or-leak. |
+| **Persistent textures + buffers**         | **128 MiB**| Long-lived `Resource`s: shadow atlases, BLAS imports (geometry-cooked, read-only by render per §4.1.8), persistent buffers (lighting LUTs, IBL probes, gbuffer-history for TAA), font / overlay atlases. |
+| **RT acceleration structures** (`§4.1.8`) | **48 MiB**| TLAS + BLAS instance buffers + RT scratch. BLAS storage itself is tagged `ContextTag::geometry` for CPU shadows but its GPU bytes are render-tagged per Allocator Rule 5; this row is the GPU-side residency of TLAS + scratch + the active BLAS refit slot. |
+| **Subtotal**                              | **512 MiB**| Sum of the five rows = render's cell ceiling exactly.                                                                |
+
+The five rows are exhaustive and additive; render does not maintain a
+sixth catch-all bucket. Any new GPU resource type at MVP must dock
+under one of these five rows, or amend `perf-budget.md`. The
+transient pool's 256 MiB is the largest row by design — alias-planner
+colouring (`§4.1.5` invariant 2) recovers ≥40% of its naive footprint
+on the S1 workload, so the 256 MiB cap is a real headroom for
+post-MVP passes (visibility-buffer deferred path, RT reflections)
+without a budget amendment per `perf-budget.md` §Consequences.
+
+#### 9.5.1 Allocator rules render plugs into
+
+`perf-budget.md` §"Allocator Rules" defines `glibre::PerContextAllocator`
+and the `ContextTag` mechanism. Render plugs into it as follows;
+nothing here amends the engine-wide rules:
+
+1. **Tag stamp at register.** Render's `glibre_plugin_register`
+   receives the allocator handle, which is pre-stamped with
+   `ContextTag::render`. All call sites inside the render dylib are
+   tag-free per Allocator Rule 1.
+2. **Strict-mode enforcement.** Diagnostic / debug builds run with
+   `GLIBRE_ALLOC_STRICT=1`; an allocation that would push render's
+   live bytes above 512 MiB returns
+   `std::unexpected{core::Error::OutOfBudget}` per Allocator Rule 2.
+   Render maps that to `render::Error::ResourceResidencyExceeded`
+   (§4.1.4 invariant 4) at the call site that requested the
+   `Resource`, preserving the typed-error contract of §5.
+3. **Soft warning in shipping.** Shipping builds log `warn` once
+   per-frame on overshoot per Allocator Rule 3 and increment the
+   frame-stat counter; the editor's perf HUD surfaces it. Render
+   does not down-grade quality silently.
+4. **Transient arena exemption.** The 256 MiB transient pool is
+   render's per-frame transient arena (§4.1.4); it drains at phase 9
+   per Allocator Rule 4. A virtual resource that survives phase 9 is
+   a leak: the alias planner emits a debug-build assertion in
+   `resources/transient_pool.cpp`. CI runs the diagnostic build
+   under `GLIBRE_ALLOC_STRICT=1` (§9.6) so leaks fail loudly.
+5. **GPU-memory-is-render-owned.** Per Allocator Rule 5, geometry's
+   vertex / index / meshlet streams and tools' ImGui textures are
+   GPU-allocated under the `render` tag; their CPU shadows are
+   geometry- / tools-tagged. Render's 512 MiB therefore covers the
+   **GPU footprint** of those non-render contexts, and §9.5's
+   "persistent textures + buffers" row is sized with that in mind.
+
+### 9.6 CI gate hooks render owns
+
+`perf-budget.md` §"CI Gate Spec" defines `perf-budget.yml` (authored
+under the `task-breakdown-error-perf` spike) and the five gate items.
+Render owns the per-context portions of items 1, 2, and 3 — i.e. the
+micro-benchmarks that prove its row, the e2e frame-time slice
+attributable to render, and the heap ceiling enforcement on
+`ContextTag::render`. The §11 acceptance criteria name the Catch2
+benchmarks; this section fixes the **measurement mechanism** so the
+gate authors and benchmark authors agree on what is counted.
+
+#### 9.6.1 GPU timestamp queries per pass
+
+Every `Pass`'s `execute()` lambda inserts a paired GPU timestamp at
+encoder begin and end via `MTLCounterSampleBuffer` (Metal 4's
+`MTLCommonCounterTimestamp` set, sampled at
+`MTLCounterSamplingPointAtStageBoundary`). The timestamps land in
+the §7.3 debug-gated GPU-timestamp ring; the e2e harness reads the
+ring at frame N+2 (one frame after the GPU has signalled completion,
+so the timestamps are resolved on host) and computes per-pass
+wall-clock. The seven measurable slices of §9.4 are the gate's named
+slots:
+
+| Gate slot               | Computed as                                                  | Ceiling   |
+|-------------------------|--------------------------------------------------------------|-----------|
+| `meshlet-cull`          | end(`cluster_cull`) − begin(`cluster_cull`)                  | 0.5 ms    |
+| `gbuffer-mesh`          | end(`gbuffer`) − begin(`gbuffer`)                            | 2.5 ms    |
+| `shadow-rt`             | end(`shadow_rt`) − begin(`blas_refit`) (covers refit + TLAS) | 1.5 ms    |
+| `lighting-deferred`     | end(`lighting`) − begin(`lighting`)                          | 1.5 ms    |
+| `transparent-forward`   | end(`transparent_forward`) − begin(`transparent_forward`)    | 0.5 ms    |
+| `post`                  | end(`post`) − begin(`post`) (includes AA / upscale variant)  | 1.0 ms    |
+| `present`               | end(`present`) − begin(`present`)                            | 0.5 ms    |
+| **GPU total**           | end(`present`) − begin(first compute pass) on graphics queue | **8.0 ms**|
+
+`MTLCounterSampleBuffer` use is gated to `Capability::TimestampQueries`
+(§5 enum); on hosts where the capability is absent, the per-pass
+slots are not enforced and the gate falls back to per-frame total
+(item 2 of `perf-budget.md` §"CI Gate Spec"). The MVP host baseline
+(M1 / macOS 26) carries the capability per `platform`'s probe table
+(§7.1.3 `CapabilityMask`).
+
+#### 9.6.2 CPU phase 6 + 7 budget asserts
+
+Render's two phase ceilings are asserted as Catch2 `BENCHMARK` blocks
+under `tests/render/perf/`. Each block runs the S1 fixture (one
+character, 200 props, 8 lights, 1920×1080) as set up by the engine's
+shared perf fixture (`e2e/perf/`). The assertion is the
+`time <= cell_budget_ms` form of `perf-budget.md` §"CI Gate Spec"
+item 1.
+
+| Catch2 benchmark name (under `tests/render/perf/`)        | Measures                                                        | Asserts            |
+|-----------------------------------------------------------|-----------------------------------------------------------------|--------------------|
+| `BENCHMARK("phase-6 cull-extract S1, p99")`               | CPU wall-clock between phase 6 entry and `RenderFrame` finalise | ≤ 0.5 ms           |
+| `BENCHMARK("phase-7 render-submit driver, S1, p99")`      | CPU wall-clock between phase 7 entry and `PresentFence` signal  | ≤ 1.0 ms           |
+| `BENCHMARK("phase-6 + phase-7 CPU total, S1, p99")`       | Sum of the two above                                            | ≤ 1.5 ms           |
+| `BENCHMARK("render heap ceiling, S1, strict-mode")`       | Live bytes on `ContextTag::render` after phase 7 retire         | ≤ 512 MiB          |
+| `BENCHMARK("transient-pool drained at phase 9, strict")`  | Live bytes in render's transient arena at phase 9 entry         | == 0 (leak guard)  |
+
+The benchmarks are authored by the `task-breakdown-error-perf` spike
+per `perf-budget.md` §Consequences; this SPEC §9 names them so
+reviewers can map cell numbers to test artifacts. The S1 fixture and
+the e2e perf harness live under `e2e/perf/` and are versioned
+alongside the gate.
+
+#### 9.6.3 Headroom-low tripwire
+
+Per `perf-budget.md` §"CI Gate Spec" item 5, if p50 CPU or p50 GPU
+sit within 0.5 ms of the ceiling for two consecutive nightlies, the
+gate posts a warning comment on the next PR and labels it
+`perf:headroom-low`. Render-specific thresholds: ≥ 1.0 ms p50 CPU
+(out of 1.5 ms cell) or ≥ 7.5 ms p50 GPU (out of 8.0 ms) for two
+consecutive nightlies trip the alarm. The tripwire does not block
+merge; it requests a perf-budget amendment spike before the budget
+is broken. This is the only place in §9 where the cell may be
+informally elastic — by the time a hard ceiling fails, the
+amendment-or-fix decision has already had a working window.
+
+### 9.7 Cross-references
+
+- Engine budget record: `reviews/decisions/perf-budget.md` (per-context
+  table, allocator rules, CI gate spec, pipelined-frame timing model).
+- Frame slot ownership: `reviews/decisions/frame-phases.md` rows 6 and 7
+  (entry / exit guarantees consumed in §9.2 / §9.3).
+- Aggregates touched: §4.1.1 `RenderFrame` (phase 6 output), §4.1.2
+  `RenderGraph` + §4.1.5 `ExecutionPlan` (phase 7 build / compile),
+  §4.1.4 `Resource` + transient pool (§9.5 transient row), §4.1.6
+  `MetalDevice` + queues (§9.4 queue assignment), §4.1.7 `PSOCache`
+  (§9.5 PSO row), §4.1.8 `RTAccelStructures` (§9.4.1 BLAS refit),
+  §4.1.9 `HZB` (§9.2 cull input), §4.1.10 `ClusterCullState` (§9.4
+  meshlet-cull slice), §7.3 GPU-timestamp ring (§9.6.1 measurement).
+- Errors used: `render::Error::ResourceResidencyExceeded`
+  (over-budget heap; §4.1.4 invariant 4); `core::Error::OutOfBudget`
+  (allocator-side, mapped to the render arm at the call site per §9.5.1).
+- §11 acceptance criteria: see `Phase 6 cull-extract within 0.5 ms`,
+  `Phase 7 render-submit within 1.0 ms`, `GPU passes within slice`,
+  `Render heap within 512 MiB`, `Transient pool drains by phase 9`.
 
 ## 10. Failure Modes & Error Model
 
