@@ -1855,7 +1855,412 @@ step, shadowed sleep override).
 
 ## 6. Internal Architecture
 
-Non-binding sketch for implementers.
+Non-binding sketch for implementers. The §4 aggregates and the §5
+public header are binding; this section sketches the *how* — the
+module split inside the physics dylib, the frame-phase-3 owner that
+threads them together, the ECS↔Jolt mirror data flow per substep, the
+determinism guards that make the §4.2 invariants compile down to
+byte-equal snapshots, and the cross-context handoffs (render BLAS
+lifecycle, query span ownership, snapshot bus). Reviewers should
+reject deviations only when they violate §4 invariants, the §5
+header, or the per-phase ownership locked in
+`reviews/decisions/frame-phases.md`.
+
+The split is the §4 aggregate roster lifted directly into directories.
+SRP rule (PHILOSOPHY §1): each module has one reason to change — its
+owned aggregate's invariants. Cross-module reach-throughs are
+forbidden; modules communicate either through the §5 facade or
+through the world-internal seams enumerated in §6.2.
+
+### 6.1 Module layout
+
+The physics plugin compiles to a single `physics.dylib` (PHILOSOPHY
+§3 — every domain is a plugin). Inside, source is split by SRP — one
+directory per "reason to change". Public headers (the §5 deliverable)
+live under `physics/include/glibre/physics/`; implementation under
+`physics/src/`. The seven sub-modules below own one §4 aggregate
+cluster each, plus a tiny `plugin.{hpp,cpp}` entry point for
+`glibre_plugin_register` / `glibre_plugin_drain` (per
+`reviews/decisions/plugin-abi.md`).
+
+```
+physics/
+  include/glibre/physics/      # §5 surface (compiles standalone).
+    physics.hpp                # The single header from §5.
+  src/
+    world/                     # Aggregates §4.1.1 + §4.1.2 + §4.1.3.
+      physics_world.{hpp,cpp}  # PhysicsWorld root; owns Jolt PhysicsSystem.
+      physics_config.{hpp,cpp} # Frozen config view; content_hash compute.
+      accumulator.{hpp,cpp}    # Fixed-dt clock; phase-3 entry/exit.
+      phase3_driver.{hpp,cpp}  # The phase-3 body — see §6.2.
+    shapes/                    # Aggregate §4.1.6 + §4.1.11.
+      shape_table.{hpp,cpp}    # Hash-keyed ShapeBlob table; refcount mgmt.
+      shape_blob.{hpp,cpp}     # Immutable blob payload; content-hash key.
+      broadphase_layer.{hpp,cpp} # Layer mapping table; world-init only.
+    bodies/                    # Aggregates §4.1.5 + §4.1.5b + §4.1.14 + §4.1.15.
+      rigid_body.{hpp,cpp}     # ECS↔Jolt body mirror.
+      body_id_allocator.{hpp,cpp} # Deterministic 32-bit allocator.
+      sleeping.{hpp,cpp}       # Sleep marker + island read-back.
+      ccd.{hpp,cpp}            # Per-body swept narrowphase opt-in.
+    joints/                    # Aggregate §4.1.7.
+      joint.{hpp,cpp}          # Joint variant dispatch; constraint build.
+      joint_kinds/             # One file per JointKind variant.
+        point.cpp              # Point constraint body.
+        hinge.cpp              # Hinge constraint body.
+        slider.cpp             # Slider constraint body.
+        cone.cpp               # Cone constraint body.
+        distance.cpp           # Distance constraint body.
+        swing_twist.cpp        # SwingTwist constraint body.
+      joint_break.{hpp,cpp}    # Break-threshold check + entity despawn.
+    queries/                   # Aggregate §4.1.10.
+      physics_queries.{hpp,cpp} # Synchronous query surface.
+      query_filter.{hpp,cpp}   # CollisionLayer mask + callback predicate.
+      query_hit.{hpp,cpp}      # Plain-data result row layout.
+    middleman/                 # Aggregate §4.1.13.
+      jolt_middleman.{hpp,cpp} # The ONLY TU including <Jolt/...> headers.
+      contact_listener.{hpp,cpp} # ContactListener adapter; emits events.
+      exception_wrapper.{hpp,cpp} # -fexceptions ingress; translates throws.
+    snapshot/                  # Aggregate §4.1.12 + §7.1.4.
+      physics_snapshot.{hpp,cpp} # Serialise/deserialise; phase-8 carrier.
+      snapshot_restore.{hpp,cpp} # add_body / add_joint replay loop.
+    contact/                   # Aggregates §4.1.8 + §4.1.9.
+      contact_manifold.{hpp,cpp} # Per-pair manifold layout.
+      contact_event.{hpp,cpp}    # CollisionStarted/Persisted/Ended drain.
+      trigger_event.{hpp,cpp}    # TriggerEnter/Stay/Exit drain.
+    plugin.{hpp,cpp}           # Plugin entry: register / drain / migrate.
+```
+
+Module-level rules (build-system enforced):
+
+1. **Single Jolt seam.** `<Jolt/...>` headers may be reached by
+   exactly **one** translation unit: `middleman/jolt_middleman.cpp`
+   (§4.1.13 invariant 1). A pre-build CMake check rejects any other
+   `.cpp` whose preprocessor output contains a Jolt include path.
+   The §5 header pulls in zero Jolt headers and sports the
+   `#error "Jolt headers must not cross the physics plugin ABI"`
+   guard already specified in §5; that guard is the symmetric
+   refusal for the consumer side.
+2. **Single `-fexceptions` TU.** Per
+   `reviews/decisions/error-model.md`, the entire physics dylib
+   compiles with `-fno-exceptions` except `middleman/jolt_middleman.cpp`
+   and `middleman/exception_wrapper.cpp`, which are compiled with
+   `-fexceptions` and translate any `JPH::*` throw into a closed
+   `physics::Error` arm before returning across the module boundary
+   (§4.1.13 invariant 3). No other physics source is permitted to
+   include `<exception>` or use `try` / `throw`.
+3. **No cross-module direct includes.** A module's `.cpp` may
+   include its own `.hpp`s and the §5 facade only. Cross-module
+   reach-throughs (e.g. `bodies/` including `shapes/shape_table.hpp`
+   directly) are forbidden; the seam is `world/physics_world.hpp`,
+   which owns references to all sibling tables and brokers access.
+   This makes `world/` the single dependency hub and matches §4.1.1's
+   "owns the broadphase + narrowphase + constraint set + the shape
+   table + the joint registry + contact-event drain" composition.
+4. **Plugin entry symbols only at `plugin.cpp`.** The four
+   `glibre_plugin_*` extern-C entry points required by
+   `reviews/decisions/plugin-abi.md` (`glibre_plugin_abi_hash`,
+   `glibre_plugin_manifest`, `glibre_plugin_manifest_size`,
+   `glibre_plugin_register`) plus `glibre_plugin_drain` (per protocol
+   §Step 1) are defined in `plugin.cpp` only. No other `.cpp`
+   exports an extern-C symbol; the dylib's symbol-visibility default
+   is `hidden` with `__attribute__((visibility("default")))` applied
+   only to those five.
+
+### 6.2 Frame integration — phase 3 ownership
+
+Physics owns exactly one phase per `reviews/decisions/frame-phases.md`:
+**phase 3 — `physics-fixed`**. The phase body is implemented by
+`world/phase3_driver.cpp` and is the single entry point for every
+byte of stepping work in the plugin (§4.2 invariant 1).
+
+Phase 3 entry receives the `World&` + `PhysicsWorld&` pair from
+`core`'s `FrameLoop` (`specs/core/SPEC.md` §6.5). The driver is a
+synchronous body on the game-loop driver thread; it does not yield,
+does not poll for hot-reload, and does not call into any sibling
+context's APIs (only `core::ecs` storage reads / writes through the
+mirror seams below). Steps in order:
+
+1. **Drive the `Accumulator`.** `accumulator.cpp` reads the frame
+   `dt` from `core`'s `FrameClock` snapshot and increments the
+   carry: `acc += core_dt`. The substep loop runs while
+   `acc >= cfg.dt && substeps_done < SUBSTEP_CAP_4` (§4.1.3
+   invariant 2). Each iteration calls `step_one(world, substep)`;
+   the loop terminates on either condition. A clamp event
+   (`AccumulatorClamped` warning, §4.1.3 invariant 2) is logged
+   when the cap is hit; the residual carry is reset to zero per the
+   bounded-catch-up rule.
+2. **Per substep — commit ECS → Jolt (entry barrier).** The driver
+   walks the middleman-typed `RigidBody` archetype in `BodyId`
+   ascending order (§4.1.5b invariant 1) and, for each body:
+   - drains `ExternalForce` + `ExternalTorque` into the Jolt body
+     via `JoltMiddleman::add_force(...)` / `add_torque(...)`, then
+     zeros the components (§4.1.4 invariant 3),
+   - applies kinematic transform overrides into the Jolt body via
+     `JoltMiddleman::set_position(...)` / `set_rotation(...)` for
+     `MotionType::Kinematic` rows,
+   - applies joint motor targets by walking the `Joint` archetype
+     in `JointId` ascending order and calling
+     `JoltMiddleman::set_motor_target(...)` per active motor.
+   This is the ECS-side commit barrier (§4.2 invariant 2 first
+   half). It is the only legal point at which ECS state crosses
+   into Jolt during phase 3.
+3. **Per substep — Jolt step.** The driver calls
+   `JoltMiddleman::step(physics_system, cfg.dt, cfg.velocity_iters,
+   cfg.position_iters, &temp_alloc, job_system)` exactly once per
+   substep (§4.1.4 invariant 1). Jolt runs broadphase, narrowphase,
+   constraint solve, contact resolution, and integration in one
+   call. The driver does not pre-empt; the call returns when the
+   substep's solver work is complete.
+4. **Per substep — commit Jolt → ECS (exit barrier).** Symmetric to
+   step 2: the driver walks the same `RigidBody` archetype in the
+   same `BodyId` ascending order and writes back:
+   - `Velocity` + `AngularVelocity` from
+     `JoltMiddleman::get_linear_velocity(...)` /
+     `get_angular_velocity(...)`,
+   - position / rotation into the body's `RigidBody` row (which
+     `core`'s phase-5 transform-propagation will lift into the
+     `GlobalTransform`),
+   - sleep state into the `Sleeping` marker per
+     `JoltMiddleman::is_sleeping(...)` (§4.1.14 invariant 1).
+   Then the driver drains Jolt's `ContactListener` adapter
+   (`middleman/contact_listener.cpp`) into the per-frame ECS event
+   buffers — `CollisionStarted` / `CollisionPersisted` /
+   `CollisionEnded` / `TriggerEnter` / `TriggerStay` / `TriggerExit`
+   — sorted by `(BodyId-low, BodyId-high)` so the order is fixed
+   by entity identity, not by Jolt's internal pair-list order
+   (§4.1.8 invariant 1, §4.2 invariant 8). `JointBrokenEvent`
+   emission and the joint entity's despawn are handled by
+   `joints/joint_break.cpp` reading break thresholds against
+   accumulated solver impulses (§4.1.7 invariant 4). This is the
+   Jolt-side commit barrier (§4.2 invariant 2 second half).
+5. **Substep accounting.** `acc -= cfg.dt`; `substeps_done += 1`;
+   `world_tick += 1`. The substep loop returns to step 1's
+   condition check.
+
+After the substep loop exits, phase 3 returns. The accumulator's
+residual carry, the updated `world_tick`, and every middleman-typed
+ECS row are now consistent with one logical post-step state (§4.2
+invariant 3). Phase 4 (animation) is empty in MVP; phase 5 reads the
+post-step transforms; phase 6 culls; phase 7 submits; phase 8 may
+swap the physics dylib (§8). No physics work runs outside phase 3
+(§4.1.1 invariant 1, §4.2 invariant 1).
+
+### 6.3 ECS↔Jolt mirror — one-way per substep
+
+The mirror seam between core's archetype storage and Jolt's body
+table is implemented in `bodies/rigid_body.cpp` and called only by
+`world/phase3_driver.cpp`. Two directions, two barriers, one
+substep boundary — §4.2 invariant 2 made mechanical.
+
+**ECS → Jolt** (substep entry, before `JoltMiddleman::step`):
+
+```text
+For body in RigidBody archetype, sorted ascending by BodyId:
+  ExternalForce.value     -> JoltMiddleman::add_force(BodyId, Vec3)
+  ExternalTorque.value    -> JoltMiddleman::add_torque(BodyId, Vec3)
+  ExternalForce.value      = 0  (drain — §4.1.4 inv 3)
+  ExternalTorque.value     = 0
+  if MotionType::Kinematic:
+    GlobalTransform.position -> JoltMiddleman::set_position(BodyId)
+    GlobalTransform.rotation -> JoltMiddleman::set_rotation(BodyId)
+For joint in Joint archetype, sorted ascending by JointId:
+  if JointMotor present:
+    JointMotor.target_velocity -> JoltMiddleman::set_motor_target(JointId)
+```
+
+**Jolt → ECS** (substep exit, after `JoltMiddleman::step`):
+
+```text
+For body in RigidBody archetype, sorted ascending by BodyId:
+  JoltMiddleman::get_linear_velocity(BodyId)  -> Velocity.value
+  JoltMiddleman::get_angular_velocity(BodyId) -> AngularVelocity.value
+  JoltMiddleman::get_position(BodyId)         -> RigidBody.position
+  JoltMiddleman::get_rotation(BodyId)         -> RigidBody.rotation
+  JoltMiddleman::is_sleeping(BodyId)          -> Sleeping marker (add/remove)
+For pair in JoltMiddleman::drain_contact_pairs():
+  emit CollisionStarted | CollisionPersisted | CollisionEnded
+  (sorted by (BodyId-low, BodyId-high) — §4.2 invariant 8 ordering)
+For pair in JoltMiddleman::drain_trigger_pairs():
+  emit TriggerEnter | TriggerStay | TriggerExit
+For joint in JointBreakThreshold archetype:
+  if JoltMiddleman::accumulated_impulse_exceeds(JointId, threshold):
+    emit JointBrokenEvent; despawn joint entity
+```
+
+Three properties this seam guarantees:
+
+1. **No mid-substep cross-traffic.** The two barriers above are the
+   only legal transit points; a debug-build assertion fires if any
+   ECS read or write happens between them (§4.1.4 invariant 2).
+   This is what "one-way per substep" means: ECS produces inputs
+   into Jolt at entry, Jolt produces outputs into ECS at exit, no
+   loop in between.
+2. **Iteration order is `BodyId` / `JointId` ascending.** Not
+   archetype-chunk order, not Jolt's internal pair-list order, not
+   wall-clock contact-listener fire order. The handle is the
+   determinism key (§4.1.5b invariant 1 + §4.2 invariant 8); a host
+   that re-orders the walk reproduces the same snapshot bytes only
+   by accident.
+3. **Drain is total.** `ExternalForce` / `ExternalTorque` reset to
+   zero at substep entry (§4.1.4 invariant 3); the contact /
+   trigger pair lists drain into the per-frame event buffer at
+   substep exit and Jolt's listener queue is emptied. Phase 3's
+   final state at exit has zero queued physics work.
+
+### 6.4 Determinism guards
+
+The §4.2 invariant 3 promise — byte-equal snapshots across hosts and
+runs — is upheld by four mechanical rules each enforced at one site
+in the codebase. They are not aspirational; they are how the snapshot
+round-trip in §8.6 passes.
+
+1. **Deterministic Jolt config.** `JoltMiddleman::create_world(cfg)`
+   constructs the Jolt `PhysicsSystem` with the determinism-relevant
+   knobs pinned from `PhysicsConfig` (§4.1.2): integer iteration
+   counts (`velocity_iters`, `position_iters`); `warm_start_factor`;
+   linear / angular sleep thresholds; layer-pair interaction matrix;
+   maximum-bodies / shapes / contacts / constraints budgets. The
+   middleman additionally calls
+   `JPH::PhysicsSystem::SetDeterministicSimulation(true)` and
+   `JPH::JobSystemSingleThreaded` (or a deterministically-seeded
+   `JobSystemThreadPool` whose dispatch order is content-of-config
+   keyed) so Jolt's internal scheduling does not depend on host
+   thread-count. Any future Jolt config knob whose default differs
+   between Jolt versions is forced to a glibre-pinned value here;
+   this is the "single source of truth for deterministic Jolt
+   config" SRP cell.
+2. **Fixed iteration order.** Every loop that walks an ECS
+   archetype in phase 3 sorts by `BodyId` or `JointId` ascending
+   before walking. This includes the entry-barrier walk (§6.3),
+   the exit-barrier walk (§6.3), the snapshot-capture walk
+   (§7.1.4 invariant 5), the snapshot-restore walk (§8.3.2 step 4),
+   the BLAS-invalidation walk during `PhysicsWorldReplaced` (§8.5),
+   the `joints/joint_break.cpp` impulse-threshold walk, and the
+   `queries/physics_queries.cpp` overlap-result append. The sort is
+   a `std::ranges::sort` over a `std::span<BodyId>` materialised
+   into a phase-3-arena scratch buffer; the arena resets at
+   substep entry. Hash-table iteration order, archetype-chunk
+   order, and Jolt's internal pair list never reach an output that
+   crosses the substep barrier or the snapshot.
+3. **No host float intrinsics.** Per PHILOSOPHY §6 + §7, no
+   physics source includes `<immintrin.h>`, `<arm_neon.h>`, or any
+   target-specific intrinsic header. The integration math (the
+   substep math that runs outside Jolt — accumulator carry,
+   external-force drain summation, sleep-frame counter increment)
+   uses only `<cmath>` IEEE-754 operations. A pre-build check
+   rejects any physics `.cpp` whose preprocessor output references
+   intrinsic headers; the only TU exempt is
+   `middleman/jolt_middleman.cpp`, which is forbidden by Jolt's
+   own determinism contract from emitting non-deterministic
+   intrinsics (Jolt's `cross_platform_deterministic` mode disables
+   FMA, fast-math, and SIMD reduction-order tricks). The
+   `-fno-fast-math -ffp-contract=off -fno-finite-math-only` compile
+   flags are pinned engine-wide and re-asserted in physics's
+   `CMakeLists.txt`.
+4. **IEEE-754 bit-equal storage.** Every `f32` / `f64` field that
+   crosses the snapshot or the per-substep barriers is stored
+   without rounding, canonicalisation, or denormal-flush. The
+   snapshot's serialiser uses `std::bit_cast<std::uint32_t>(x)` /
+   `std::bit_cast<std::uint64_t>(x)` per the §7's "determinism
+   contract" preamble; the in-memory ECS components carry the
+   same bit pattern Jolt produced. NaN payloads round-trip
+   unchanged. The runtime never produces a NaN (§4.1.4 invariant
+   4); the codec preserves whatever pattern arrives. This is the
+   bit that makes "two hosts running the same trace produce
+   byte-equal snapshots" a compile-time consequence of the
+   serialiser's contract rather than a runtime property to be
+   tested at every field.
+
+These four rules together are the §4.2 invariant 3 implementation;
+the §11 acceptance test "byte-equal snapshot at tick 1000 across
+macOS-arm64 and macOS-x64" passes only if all four hold. A failure
+at any of them is caught by the determinism gate (the §8.6 round-
+trip test) before it reaches the snapshot bus.
+
+### 6.5 Cross-context handoffs
+
+Physics is one of seven plugins; the four cross-context seams it
+honours are pinned here so reviewers can see the seam shape without
+chasing through the §5 surface and the §3.3 refusals.
+
+1. **Render reads body transforms via `core`'s ECS components — not
+   physics's API.** Phase 5 (`core` transform propagation) lifts the
+   `RigidBody` row's position / rotation into the entity's
+   `GlobalTransform` (§4.1.5 composition); phase 6 (`render`
+   `cull-extract`) reads `GlobalTransform` + `PreviousGlobalTransform`
+   like any other entity's transform (`specs/render/SPEC.md` §6.2.1
+   step 2.i). Render does not call into `physics::*` to fetch a body
+   transform; the seam is core's component, not physics's surface.
+   This is the §3.3 refusal "render does not consume physics's API
+   for transform read-back" made mechanical.
+2. **Queries return spans into caller arenas.** `PhysicsQueries::
+   ray_cast(...)`, `shape_cast(...)`, `overlap(...)`, and
+   `closest_point(...)` accept a caller-supplied
+   `std::span<QueryHit>` output buffer and write **at most**
+   `out.size()` rows, returning the actual count (§4.1.10
+   invariant 2 — plain-data results, no Jolt internals). Callers
+   are expected to source the buffer from a per-context arena
+   (e.g. render's per-frame arena, gameplay's per-system command
+   buffer); physics never allocates query memory. The returned
+   span is keyed by the caller's arena lifetime; the rows
+   themselves are POD, copyable, and stable across reload (the
+   `BodyId` field re-resolves under §4.2 invariant 5). A query
+   issued during phase 3 returns `physics::Error::QueryDuringStep`
+   without writing to the buffer (§4.1.10 invariant 4); a query
+   issued in phase 1 reflects the prior frame's terminal state;
+   queries in phases 5+ reflect the current frame's post-step
+   state.
+3. **Static BLAS lifecycle is handed off to `render`.** Cooked
+   static-mesh collision shapes (§4.1.6: heightfields, baked
+   triangle meshes) and their visual-mesh BLAS counterparts share
+   a content-hash through `geometry`'s asset bundle (§3.3); render
+   imports per-body BLAS handles via `RTAccelStructures`
+   (`specs/render/SPEC.md` §4.1.8). Physics's job in this
+   handoff is two-fold: (a) at body create-time, physics resolves
+   the `ShapeBlob` content hash so render's BLAS importer keys on
+   the same hash; (b) on hot-reload, physics emits the
+   `PhysicsWorldReplaced` event (§8.5) carrying the surviving
+   `BodyId` set so render's subscriber can compare each body's
+   post-reload position / rotation against its recorded BLAS
+   transform and rebuild any whose transform changed (`specs/
+   render/SPEC.md` §4.1.8 invariant 3). Physics does not own the
+   BLAS bytes, does not call the BLAS builder, and does not
+   participate in the rebuild scheduling — render owns those.
+4. **Snapshot is the single carrier across the swap.** Hot-reload
+   (§8) keys the entire physics-side handoff on `PhysicsSnapshot`
+   (§4.1.12 / §7.1.4): the outgoing plugin captures one snapshot
+   in `glibre_plugin_drain` (§8.3.1), the loader keeps the bytes
+   in its phase-8 migration arena (§8.2 row "PhysicsSnapshot"),
+   and the incoming plugin restores them in `glibre_plugin_register`
+   (§8.3.2). No second on-the-wire format is introduced for
+   reload; no per-aggregate carrier exists alongside the snapshot
+   (§3.2 collapse #9). The snapshot's bus subscribers (render's
+   BLAS invalidator, the e2e harness's golden-trace anchor —
+   §8.5) read the same bytes the §11 acceptance tests check.
+
+### 6.6 Concurrency
+
+Phase 3 runs entirely on the game-loop driver thread. Jolt's
+internal `JobSystem` is configured per §6.4 rule 1 to be either
+single-threaded or deterministically-seeded; either way, the public-
+visible behaviour is "synchronous body, returns when stepping is
+done". No physics worker thread outlives a phase-3 invocation
+window; the worker pool is owned by `PhysicsWorld` (§4.1.1
+composition) and torn down by `glibre_plugin_drain` (§8.2 row
+"Per-plugin worker thread pool").
+
+Plugins outside physics never touch a Jolt worker; the only
+cross-thread synchronisation physics participates in is the
+single barrier at the end of phase 3, which is the same barrier
+core's `FrameLoop` (`specs/core/SPEC.md` §6.5) uses between every
+phase. Per-system parallelism inside phase 3 (e.g. parallel
+gather of `ExternalForce` writes) is post-MVP and would land
+through the §6.4 rule 2 fixed-iteration-order seam — the sort key
+remains `BodyId` ascending; only the per-row body of the loop
+parallelises. The schedule-side machinery (`specs/core/SPEC.md`
+§6.4) already collects the read/write sets needed to make that
+seam safe; physics will register its phase-3 systems with those
+declarations when the parallel-dispatch wrapper lands.
 
 ## 7. Persistence & Schemas
 
