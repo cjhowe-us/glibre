@@ -3328,7 +3328,339 @@ The Catch2 cases are listed in §11 acceptance criteria as
 
 ## 9. Performance Budget
 
-Cycles / frame, memory ceiling, allocation rules.
+This section quotes physics's row from the engine-wide budget locked
+in `reviews/decisions/perf-budget.md`, decomposes the **2.00 ms CPU
+sim** budget across the three phase-3 stages (Jolt step,
+ECS↔Jolt mirror, queries), composes the **128 MiB heap** ceiling
+across the five resident pools physics keeps, books the
+determinism-cost premium that the §6.4 fixed-iteration-order rule
+imposes, and lists the CI gate hooks physics owns. Every number is
+a **contractual ceiling**, not a steady-state expectation — the
+budget gate fails on any frame that exceeds the cell, any phase-3
+stage slice (§9.3), or any heap pool sub-share (§9.4). The §11
+acceptance criteria name the Catch2 benchmarks that enforce these
+ceilings.
+
+### 9.1 Cell — physics row
+
+Physics's cell from `reviews/decisions/perf-budget.md` §"Per-Context
+Budget Table", restated verbatim:
+
+| Axis              | Budget       | Source                                                    |
+|-------------------|--------------|-----------------------------------------------------------|
+| CPU (sim)         | **2.00 ms**  | `perf-budget.md` Per-Context Budget Table — physics row   |
+| CPU (submit)      | 0.00 ms      | physics records no GPU work; submit half is empty         |
+| GPU               | n/a          | physics owns no Metal heaps or encoders (§3.3)            |
+| Heap ceiling      | **128 MiB**  | `perf-budget.md` Per-Context Budget Table — physics row   |
+| Phase ownership   | **3**        | `frame-phases.md` — `physics-fixed`; sole owner           |
+| Phase systems     | none         | physics registers no systems into other phases            |
+
+Physics is unique among MVP contexts in owning **exactly one phase
+in full** (§4.1.1 invariant 1; §6.2). The 2.00 ms cell is the
+entirety of physics's per-frame CPU draw on the game-loop driver
+thread; no slice runs in phases 1, 2, 4, 5, 6, 7, 8, or 9. Submit
+is 0.00 ms because phase 3 finishes before phase 6's `RenderFrame`
+extract begins, and physics writes no GPU resources of its own —
+render reads body transforms from the post-phase-5
+`GlobalTransform` ECS column (§6.5 seam #1), not from a
+physics-side encoder. The 128 MiB heap row is the resident
+allocation under `ContextTag::physics`; it does not include
+transient phase-3 arena usage, which drains by phase-9 per
+`perf-budget.md` Allocator Rule #4.
+
+The 2.00 ms cell carries headroom for one **sub-stepped frame**
+(`Accumulator` ran two substeps because the prior frame slipped
+~17 ms, §4.1.3 invariant 2). Steady-state at 60 Hz is one
+substep/frame for ~1.0 ms; the cell budgets two substeps/frame
+because the substep cap is four (§4.1.3 invariant 2) and a
+two-substep frame is the realistic upper bound under the S1
+fixture. Three- or four-substep frames are clamp-event territory
+(§4.1.3) and the gate flags them via the
+`physics::Warning::AccumulatorClamped` log line, not via the
+budget; surviving the cell ceiling under clamp is intentional —
+clamp drops residual carry rather than blowing the deadline.
+
+### 9.2 Per-stage sub-budget (CPU sim)
+
+Sub-budgets refine the 2.00 ms cell across the three phase-3
+stages that the §6.2 `world/phase3_driver.cpp` body runs. Each row
+lists CPU ms (within the 2.00 ms ceiling), the §4 aggregate(s) the
+row covers, and the §6.2 driver step the budget pays for.
+Steady-state numbers assume the S1 fixture from `perf-budget.md`
+§"Justification Per Cell" (1 character + 200 props + 8 dynamic
+lights at 1920x1080); the M1 firestorm-at-3.2-GHz Jolt 2025
+benchmark cited in `perf-budget.md` ("0.5–1.2 ms per substep")
+is the floor that the row totals sum against.
+
+| Stage                                         | §6.2 step | §4 aggregates                                                            | CPU ms  | Dominant operation                                                                            |
+|-----------------------------------------------|-----------|--------------------------------------------------------------------------|---------|-----------------------------------------------------------------------------------------------|
+| **Jolt step** (broadphase + solve + contacts) | 3         | §4.1.1 `PhysicsWorld`, §4.1.4 `Substep`, §4.1.13 `JoltMiddleman`         | **1.50**| One `JoltMiddleman::step(...)` call per substep — broadphase, narrowphase, constraint solve, contact resolution, integration; budgets two substeps/frame at the upper bound. |
+| **ECS↔Jolt mirror** (entry + exit barriers)   | 2, 4      | §4.1.5 `RigidBody`, §4.1.5b `BodyId`, §4.1.7 `Joint`, §4.1.14 `Sleeping` | **0.30**| `BodyId`-sorted walk over the `RigidBody` archetype: ECS→Jolt commit (force/torque drain, kinematic overrides, motor targets) and Jolt→ECS commit (velocity/position/sleep/contact-event drain) per substep. |
+| **Queries** (raycast / sweep / overlap)       | n/a       | §4.1.10 `PhysicsQueries`, §4.1.11 `BroadphaseLayer`                      | **0.20**| Reserve for `ray_cast` / `shape_cast` / `overlap` / `closest_point` issued from phase 1 (pre-step) and phases 5+ (post-step). Calls during phase 3 are refused (§4.1.10 invariant 4) and pay zero. |
+| **Subtotal**                                  |           |                                                                          | **2.00**|                                                                                               |
+
+Notes per row:
+
+- **Jolt step (1.50 ms).** Two substeps × ~0.75 ms each at the upper
+  bound; one substep at steady-state. Jolt's own broadphase quality
+  determines this number more than any glibre-side code; the
+  middleman's only knob inside this slice is the deterministic
+  `JobSystemSingleThreaded` configuration (§6.4 rule 1) which is
+  the determinism cost folded into the 1.50 ms — see §9.5.
+- **ECS↔Jolt mirror (0.30 ms).** Two substeps × two barriers ×
+  ~0.075 ms each. The barrier cost is dominated by the
+  `std::ranges::sort` over the per-substep `BodyId` scratch span
+  (§6.4 rule 2) for ~30 active bodies + 1 character at S1; SIMD
+  scalar copies into the Jolt body table; the contact-listener
+  drain into the per-frame ECS event buffers sorted by
+  `(BodyId-low, BodyId-high)` (§4.1.8 invariant 1). The 200 props
+  are mostly sleeping (§4.1.14) and skipped by the active-set
+  walk; only the active set crosses the barrier.
+- **Queries (0.20 ms).** Reserve. The S1 fixture has no specific
+  query workload; gameplay raycasts / character-controller sweeps
+  / pickup-overlap probes from the post-MVP scripting / animation
+  contexts dock here. A query that would exceed 0.20 ms in one
+  frame is a perf-budget amendment (e.g. spatial-AI bulk overlap),
+  not a silent expansion of physics's cell. Calls during phase 3
+  pay zero — they are refused with `physics::Error::QueryDuringStep`
+  (§4.1.10 invariant 4) and never enter this row.
+
+The §6.2 driver loop's per-substep accounting (`acc -= cfg.dt;
+substeps_done += 1; world_tick += 1`) is below the precision floor
+the gate measures and is not a separate row.
+
+### 9.3 Heap composition inside the 128 MiB ceiling
+
+The 128 MiB ceiling decomposes across the five resident pools
+physics keeps. Sub-shares are advisory at the allocator level
+(`PerContextAllocator` enforces the 128 MiB cell, not per-pool
+caps; same model as `core` SPEC §9.4 rule 4) and contractual at
+the gate level (§9.6 declares one heap-residency assertion per
+pool). Numbers are sized against the MVP ceiling of ~1k bodies
+from `perf-budget.md` physics-row justification.
+
+| Pool                                | Sub-share  | §4 aggregates / §6.1 module                                | What it holds                                                                              |
+|-------------------------------------|------------|------------------------------------------------------------|--------------------------------------------------------------------------------------------|
+| **Jolt body + constraint pools**    | **64 MiB** | §4.1.1 `PhysicsWorld` (Jolt-internal), §4.1.7 `Joint`      | Jolt's `BodyManager`, `ContactConstraintManager`, broadphase grid, island graph, contact cache, joint-constraint pool. Sized for ~1k bodies + ~256 constraints (`PhysicsConfig` budgets, §4.1.2 composition). |
+| **`ShapeBlob` hash table**          | **32 MiB** | §4.1.6 `ShapeBlob` / `ShapeHandle`; `shapes/shape_table.cpp` | Content-hash-keyed immutable shape blobs (heightfields, baked triangle meshes, primitives + compound shape graphs). Refcount metadata; the resident set covers the loaded scene. |
+| **Snapshot scratch arena**          | **16 MiB** | §4.1.12 `PhysicsSnapshot`; `snapshot/`                     | Fory codec scratch + the carry buffer used by `PhysicsWorld::snapshot()` and the `glibre_plugin_drain` capture (§8.3.1). Drains between snapshot calls; sized for the MVP body cap. |
+| **Query result buffers**            | **8 MiB**  | §4.1.10 `PhysicsQueries` (caller-arena fallback)           | Reserved fall-through for callers that omit a per-context arena and rely on physics's pool. Per §6.5 seam #2 callers SHOULD bring their own arena; this row is the safety pool for plugins still being ported. |
+| **Contact event ring**              | **8 MiB**  | §4.1.8 `ContactManifold` / `ContactEvent`, §4.1.9 `Trigger` | Per-frame `CollisionStarted` / `CollisionPersisted` / `CollisionEnded` / `TriggerEnter` / `TriggerStay` / `TriggerExit` event buffers drained at substep exit (§6.2 step 4). Ring sized so the MVP ceiling of ~1k bodies cannot wrap. |
+| **Subtotal**                        | **128 MiB**|                                                            |                                                                                            |
+
+Pool composition rationale:
+
+- **Jolt body + constraint pools = half the cell.** Jolt's resident
+  data structures dominate physics memory; the 64 MiB allocation is
+  the floor at which Jolt's `MaxBodies = 1024` + `MaxBodyPairs =
+  4096` + `MaxContactConstraints = 4096` run without overflow on
+  the M1 baseline (Jolt 2025 sizing guide).
+- **`ShapeBlob` hash table = quarter cell.** Content-hashed
+  immutability (§4.1.6 invariant 2) means the table grows once per
+  unique shape and is shared across all bodies referencing the
+  same hash; 32 MiB carries the MVP shape inventory (estimated
+  ~256 unique shapes × ~128 KiB average meshlet storage).
+- **Snapshot scratch is per-call, not per-frame.** The 16 MiB
+  arena is sized so a snapshot can be captured mid-frame
+  (debug-tools / e2e-harness use case) without going through the
+  transient-arena exemption — snapshots are not a
+  per-frame-deterministic cost and the budget treats them as
+  resident.
+- **Query result buffers = 8 MiB safety pool.** Callers per §6.5
+  seam #2 are expected to provide their own arena; this pool
+  exists so a plugin under porting (e.g. early gameplay scripts
+  before they adopt the per-system command-buffer pattern) does
+  not bust the cell. The pool is sized at 8 MiB so the gate
+  surfaces over-reliance — if a plugin is consuming this pool
+  routinely, the porting effort is incomplete.
+- **Contact event ring = 8 MiB.** Ring buffer sized so the MVP
+  ceiling of ~1k bodies cannot wrap within a single frame (worst
+  case: 1k bodies × 6 event types × ~16 B per event ≈ 96 KiB; the
+  remaining ~8 MiB headroom is post-MVP slack for higher contact
+  densities under stacking scenarios that the §11 acceptance
+  tests will measure). Drain timing is enforced by §6.2 step 4 and
+  the §4.1.8 invariant 1 sort key.
+
+Transient phase-3 arena usage (the `BodyId` scratch span behind
+§6.4 rule 2; the per-substep contact-event marshalling buffer)
+does **not** count against the 128 MiB ceiling — it is the
+per-frame transient arena exemption from `perf-budget.md`
+Allocator Rule #4, drained by phase 9. The arena is sized at 4
+MiB and lives under `ContextTag::physics` for tracking purposes
+only.
+
+### 9.4 Allocator rules
+
+Physics enforces its 128 MiB ceiling — and the per-pool sub-shares
+in §9.3 — through `glibre::PerContextAllocator`, the allocator
+declared in `perf-budget.md` §"Allocator Rules" and implemented
+under the `core` allocator plan. The contract physics SPEC §9
+imposes:
+
+1. **Per-context tag (`ContextTag::physics`).** Every allocation
+   made by any module under `physics/src/**` is stamped with
+   `ContextTag::physics` at the allocator-handle level
+   (`perf-budget.md` Allocator Rule #1). The tag is supplied by the
+   handle physics's `glibre_plugin_register` (§8.3.2) obtains from
+   `core`'s plugin loader; module call sites are tag-free.
+2. **Hard ceiling in diagnostic / debug builds.** When
+   `GLIBRE_ALLOC_STRICT=1`, an allocation that would push live
+   `ContextTag::physics` bytes above 128 MiB returns
+   `std::unexpected{core::Error::OutOfBudget}` (`perf-budget.md`
+   Allocator Rule #2). Physics's call sites use the `Result<T>`
+   form (§4.1.1 invariant 3) and propagate the error; failure to
+   handle aborts with the diagnostic dump.
+3. **Soft warning in shipping builds.** Shipping builds log a
+   `warn` once per-tag-per-frame to `spdlog` and increment the
+   frame-stat counter on overshoot (`perf-budget.md` Allocator
+   Rule #3). The editor's perf HUD (tools context) surfaces the
+   counter.
+4. **Per-pool sub-shares are gate-enforced, not allocator-enforced.**
+   `PerContextAllocator` enforces the 128 MiB cell ceiling, not the
+   §9.3 per-pool ceilings; per-pool enforcement is via the
+   `BENCHMARK_CELL` heap-residency assertions (§9.6) which exercise
+   the S1 fixture and record the resident bytes per pool at frame
+   end. This split keeps the runtime allocator path branch-free per
+   pool while still catching drift on a CI cadence.
+5. **Jolt's allocator is wrapped, not bypassed.** Jolt 2025 ships
+   with an injectable `JPH::Allocate` / `JPH::Free` hook;
+   `middleman/jolt_middleman.cpp` (§4.1.13, the only TU that
+   includes Jolt headers) installs hooks that route every Jolt
+   allocation through `PerContextAllocator` under
+   `ContextTag::physics`. No raw `new` / `malloc` reaches the
+   process allocator from inside Jolt's code. The
+   `-Wglibre-no-raw-alloc` engine-wide compile flag covers
+   physics's own sources; the Jolt hook covers the third-party
+   half.
+6. **Phase-3 transient arena drains by phase 9.** The per-substep
+   `BodyId` scratch span (§6.4 rule 2) and the contact-event
+   marshalling buffer use a transient arena allocated from
+   `core`'s phase-3-driver-owned arena pool, exempt from the 128
+   MiB cell per `perf-budget.md` Allocator Rule #4. Drain failure
+   (allocations leaking past phase 9) is a `core::Error::OutOfBudget`
+   "leak" arm with a debug-build assertion.
+
+### 9.5 Determinism cost — fixed iteration order premium
+
+Physics deliberately spends a measurable fraction of its 2.00 ms
+cell on the §6.4 rule 2 fixed-iteration-order guarantee. The
+mechanical cost is the per-substep `std::ranges::sort` over the
+`BodyId` (or `JointId`) scratch span before each ECS-archetype
+walk in phase 3 (entry barrier, exit barrier, snapshot capture,
+joint-break impulse threshold, query overlap append).
+
+Estimated determinism premium under S1, in steady-state:
+
+| Source                                                                               | CPU ms (sim) |
+|--------------------------------------------------------------------------------------|--------------|
+| `BodyId` / `JointId` ascending sort vs. archetype-chunk-natural order                | ~0.05        |
+| Single-threaded `JobSystemSingleThreaded` vs. multi-threaded Jolt step               | ~0.05        |
+| **Total premium**                                                                    | **~0.10**    |
+
+This **~0.10 ms premium is accepted** per PHILOSOPHY §7
+("Determinism by default. Physics + ECS world snapshots byte-equal
+across hosts and runs"). It is folded into the §9.2 sub-budget
+totals — it is not a separate row eating into headroom.
+Specifically: the 1.50 ms Jolt-step row absorbs the ~0.05 ms
+single-threaded premium (Jolt's deterministic mode disables FMA,
+SIMD reduction-order tricks, and parallel constraint partitioning
+per §6.4 rule 1); the 0.30 ms mirror row absorbs the ~0.05 ms
+sort premium (sort cost is `O(n log n)` over ~30 active bodies +
+1 character at S1, ~0.025 ms per barrier × two substeps × two
+barriers = 0.10 ms upper bound, with the remainder masked by L1
+cached scratch reuse across the four barriers).
+
+A future spike that proposes parallel-dispatch Jolt for higher
+body counts must amend §6.4 rule 1, not §9 — the determinism
+premium is a §6.4 contract that §9 budgets against, not a §9
+ceiling. Lifting the premium would mean breaking PHILOSOPHY §7,
+which is out of scope for this record.
+
+### 9.6 CI gate hooks physics owns
+
+The per-context CI gate (`perf-budget.yml`, scoped under the
+`task-breakdown-error-perf` follow-up spike) requires each
+per-context SPEC §9 to declare benchmarks that exercise the row
+(`perf-budget.md` §"CI Gate Spec" rule 1). Physics owns the
+following hooks:
+
+#### 9.6.1 Per-stage `BENCHMARK_CELL` blocks
+
+One per §9.2 row (PR fails on any breach):
+
+| Stage                | `BENCHMARK_CELL` test name                            | CPU ceiling | Source aggregate(s)                          |
+|----------------------|-------------------------------------------------------|-------------|----------------------------------------------|
+| Jolt step            | `physics/world: jolt_step_two_substep_upper_bound`    | 1.50 ms     | §4.1.1, §4.1.4, §4.1.13                      |
+| ECS↔Jolt mirror      | `physics/bodies: ecs_jolt_mirror_two_substep`         | 0.30 ms     | §4.1.5, §4.1.5b, §4.1.7, §4.1.14             |
+| Queries              | `physics/queries: raycast_sweep_overlap_reserve`      | 0.20 ms     | §4.1.10, §4.1.11                             |
+| Cell total           | `physics/world: phase3_total_two_substep`             | 2.00 ms     | composite — all of §4.1                      |
+
+Each block constructs the S1 fixture, drives phase 3 for a
+steady-state sample, and asserts wall-clock time `<= cell_budget_ms`.
+The composite `physics/world: phase3_total_two_substep` row exists
+so a regression that rebalances time *between* stages without
+changing the total is still caught at the cell ceiling.
+
+#### 9.6.2 Per-pool heap-residency assertions
+
+One per §9.3 row, recording resident `ContextTag::physics` bytes
+attributed to that pool at the end of frame 600 of the S1 sample
+run (`perf-budget.md` §"CI Gate Spec" rule 3):
+
+| Pool                       | Heap-residency test name                           | Ceiling   |
+|----------------------------|----------------------------------------------------|-----------|
+| Jolt body + constraint     | `physics/world: heap_jolt_pools`                   | 64 MiB    |
+| `ShapeBlob` hash table     | `physics/shapes: heap_shape_table`                 | 32 MiB    |
+| Snapshot scratch arena     | `physics/snapshot: heap_scratch_arena`             | 16 MiB    |
+| Query result buffers       | `physics/queries: heap_safety_pool`                |  8 MiB    |
+| Contact event ring         | `physics/contact: heap_event_ring`                 |  8 MiB    |
+| Cell total                 | `physics/world: heap_context_tag_total`            | 128 MiB   |
+
+#### 9.6.3 60 fps sample-scene fixture (frame-time bench)
+
+The end-to-end physics step-time bench runs the **S1 sample scene
+fixture** (`perf-budget.md` §"Justification Per Cell" definition:
+1 character + 200 props + 8 dynamic lights at 1920x1080) at the
+target **60 fps** for 600 frames and records per-frame phase-3
+wall-clock time via `MTLCounterSampleBuffer`-equivalent CPU
+markers around the `world/phase3_driver.cpp` entry / exit. Gate
+thresholds (PR fails on any breach):
+
+- p50 phase-3 time `<= 1.20 ms` (steady-state, one substep / frame),
+- p99 phase-3 time `<= 2.00 ms` (cell ceiling under the
+  realistic two-substep upper bound),
+- any single frame `> 2.00 ms` is a fail (no excursions tolerated;
+  clamp events §4.1.3 invariant 2 are logged, not budgeted).
+
+The fixture lives under `e2e/perf/physics/s1_sample_scene/` and is
+versioned alongside the gate; a fixture change requires a
+perf-budget amendment spike per `perf-budget.md` §"CI Gate Spec".
+
+#### 9.6.4 Determinism gate is a §11 row, not a §9 row
+
+The byte-equal snapshot round-trip across hosts (§6.4 rules 1–4;
+§8.6 round-trip test) is measured by the determinism gate, **not**
+by the perf-budget gate; a snapshot mismatch is a §11 acceptance
+failure, not a §9 ceiling breach. The two gates are independent —
+a frame can be deterministic and over-budget, or in-budget and
+non-deterministic; both must pass for a PR to merge.
+
+### 9.7 Cross-references
+
+- `reviews/decisions/perf-budget.md` — engine-wide allocation
+  cited in §9.1; allocator rules cited in §9.4; CI gate spec cited
+  in §9.6.
+- `reviews/decisions/frame-phases.md` — phase-3 sole ownership
+  cited in §9.1 and §9.2.
+- `specs/physics/SPEC.md` §4.1 (aggregate roster), §4.2 (cross-
+  aggregate invariants), §6.1 (module layout), §6.2 (phase-3
+  driver), §6.3 (mirror seam), §6.4 (determinism guards), §6.5
+  (cross-context handoffs) — the implementation surfaces whose
+  steady-state cost the §9.2 / §9.3 rows budget against.
+- `specs/core/SPEC.md` §9 — the engine-wide allocator and
+  per-context CI-gate plumbing physics plugs into.
+- PHILOSOPHY §7 — determinism contract that §9.5's ~0.10 ms
+  premium is the price of.
 
 ## 10. Failure Modes & Error Model
 
