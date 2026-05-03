@@ -2896,11 +2896,59 @@ is *restarted*, not patched in place.
 
 ## 11. Acceptance Criteria
 
-GitHub `type:user-story` issues this spec closes:
+GitHub `type:user-story` issues this spec closes (24 stories,
+total 76 pts; parent sub-epic #87, parent epic #83):
 
-- #TBD — `<title>`
+| #    | Title                                                                            | Pts |
+|------|----------------------------------------------------------------------------------|-----|
+| #379 | render: RenderFrame extract is immutable, triple-buffered                         | 3   |
+| #380 | render: declarative C++ render graph build per View                               | 3   |
+| #381 | render: capability-gated pass elision at build time                               | 2   |
+| #382 | render: transient resource alias planner with ≥40% recovery                       | 5   |
+| #383 | render: minimum split-aware Metal 4 barrier emission                              | 3   |
+| #384 | render: ExecutionPlan structural-hash cache hit path                              | 3   |
+| #385 | render: Graphics/Compute/Copy queue assignment with auto-fences                   | 3   |
+| #386 | render: mesh-shader gbuffer writes 4 MRTs + visID + depth atomically              | 5   |
+| #387 | render: vertex+amplification fallback when MeshShaders missing                    | 3   |
+| #388 | render: two-phase HZB occlusion cull (read N-1, write N)                          | 3   |
+| #389 | render: persistent-thread cluster cull + deferred lighting parity                 | 5   |
+| #390 | render: hybrid-RT shadow trace with PCSS fallback                                 | 5   |
+| #391 | render: BLAS refit precedes TLAS build every frame                                | 3   |
+| #392 | render: HardwareRayTrace capability-fallback to GTAO/PCSS                         | 3   |
+| #393 | render: PSO cache lookup with PsoCompileFailed lower-tier path                    | 2   |
+| #394 | render: PSO cache pre-faulted at init from shader manifest                        | 2   |
+| #395 | render: PSO cache invalidation by shader_hash on hot-reload                       | 2   |
+| #396 | render: present pass acquires drawable and signals PresentFence                   | 2   |
+| #397 | render: PresentTimeout (>2× budget) triggers abort-frame                          | 2   |
+| #398 | render: GpuFault triggers hot-reload-restart with diag capture                    | 5   |
+| #399 | render: diagnostic overlay (DAG + per-pass GPU timing)                            | 3   |
+| #400 | render: cost-aware budget culling under load (PassPriority)                       | 3   |
+| #401 | render: multi-view fan-out from one RenderFrame extract                           | 3   |
+| #402 | render: ResourceResidencyExceeded triggers lower-tier recovery                    | 3   |
 
-Each must have a Catch2 test by name.
+Coverage map (target topics from spike #97 brief):
+
+- **Render graph build** — #380, #381, #383, #384, #385.
+- **Mesh-shader gbuffer** — #386, #387.
+- **Deferred lighting** — #389.
+- **Hybrid-RT shadow** — #390, #392.
+- **BLAS lifecycle** — #391, #392.
+- **HZB cull** — #388.
+- **Transient resource alias** — #382, #402.
+- **PSO cache hit / lifecycle** — #393, #394, #395.
+- **Present timing** — #396, #397.
+- **GPU fault recovery** — #398.
+- **Capability fallback** — #381, #387, #392.
+- **Cross-cutting (extract, multi-view, budget, overlay)** — #379, #399,
+  #400, #401.
+
+Each story's E2E `.glibre-trace` lives under `tests/e2e/render/`; each
+acceptance criterion has at minimum one Catch2 fixture under
+`tests/render/` (named in the story's E2E plan). Aggregate roll-up:
+24 stories × pts → 76 pts. The §10 closed-sum failure-mode coverage is
+asserted by the per-variant test fixtures cited in §10.3 (recovery
+ladder + capability-fallback paths exercised across stories #381,
+#387, #392, #393, #397, #398, #402).
 
 ## 12. Open Questions
 
