@@ -658,11 +658,472 @@ public API boundary:
 
 ## 5. Public Interface
 
+The header-only stub below freezes the `core` ABI shape. It compiles
+standalone under `clang++ -std=c++23 -fsyntax-only -Wall -Wextra
+-Werror`. Every public function returns `glibre::Result<T>` (=
+`std::expected<T, glibre::Error>`) per `reviews/decisions/error-model.md`;
+no exceptions cross any boundary; runtime reflection is absent
+(PHILOSOPHY §6). Aggregate types are forward-declared and exposed only
+through opaque references, keeping the seam thin.
+
+The stub names every surface required by §4 and the engine-wide
+decision records: `World` (query, spawn/despawn, component get/set,
+change-tick read), `Schedule` (system registration with `Phase` plus
+read/write component sets), `FrameLoop` (phase entry/exit hooks plus
+the fixed-step accumulator), `HotReloadBarrier` (`request_reload`,
+`step` driven from `Phase::HotReload`), `PluginLoader` (`load`,
+`unload`, `list` over manifest paths), `AssetHandle<T>` (opaque ID
+template), and `CommandBuffer` (record-then-flush deferred mutations).
+Typed error tags from `reviews/decisions/plugin-abi.md` and
+`reviews/decisions/hot-reload-protocol.md` (`core::Error::HotReload`,
+`core::Error::Plugin{...}` family, `core::Error::SchemaMigrationFailed`)
+are listed as the `core::Error` enum members so per-context error
+mapping is grounded.
+
 ```cpp
-// header-only stub goes here
+// specs/core/SPEC.md §5 — Public Interface (header-only stub).
+// C++23. Compiles standalone with `clang++ -std=c++23 -fsyntax-only`.
+// Authoritative ABI lives in glibre-core; this stub freezes the public shape.
+
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <filesystem>
+#include <span>
+#include <string_view>
+#include <variant>
+
+namespace glibre {
+
+// Forward-declared so this header stays free of context cycles. Full
+// definitions live in glibre/error.hpp (per error-model.md decision
+// record) and the per-context error enums.
+class Error;
+
+template <class T>
+using Result = std::expected<T, Error>;
+
+namespace core {
+
+// ---------------------------------------------------------------------------
+// 5.1 Error arms emitted by `core` (see §10 for full enumeration / recovery).
+// Listed here because every signature below names them by tag.
+// ---------------------------------------------------------------------------
+enum class Error : std::uint16_t {
+    // Entity / world invariants (§4.1, §4.3).
+    EntityStale,
+    EntityForeignWorld,
+    HierarchyCycle,
+    TypeUnregistered,
+    TypeRegistryClosed,
+
+    // Schedule / frame ordering (§4.4).
+    ScheduleAccessConflict,
+    SystemScheduleCycle,
+    FramePhaseMisordered,
+
+    // Asset table (§4.7).
+    AssetStale,
+
+    // Command buffer (§4.8).
+    CommandBufferOverflow,
+
+    // Plugin loader (plugin-abi.md §"Failure Modes → core::Error").
+    PluginDlopenFailed,
+    PluginMissingEntryPoint,
+    PluginManifestInvalid,
+    PluginAbiHashMismatch,
+    PluginEngineTooOld,
+    PluginNameCollision,
+    PluginDependencyMissing,
+    PluginDependencyCycle,
+    PluginInitFailed,
+
+    // Hot-reload barrier (hot-reload-protocol.md §"Refusal Cases").
+    HotReload,                // Umbrella tag — "a hot-reload was refused".
+    HotReloadDrainTimeout,
+    HotReloadAbiHashMismatch,
+    HotReloadSelfReference,
+    SchemaMigrationFailed,
+};
+
+// ---------------------------------------------------------------------------
+// 5.2 ID value objects.
+//
+// `Entity` and `AssetHandle` are opaque 64-bit generational handles
+// (§4.3, §4.7). The (index, generation) split is private; public
+// callers compare and pass them by value. `TypeId` and `SystemId` are
+// stable codegen-emitted IDs from `glibre-types.dylib`.
+// ---------------------------------------------------------------------------
+struct Entity {
+    std::uint64_t bits{};
+    friend constexpr bool operator==(Entity, Entity) noexcept = default;
+};
+
+template <class T>
+struct AssetHandle {
+    std::uint64_t bits{};
+    friend constexpr bool operator==(AssetHandle, AssetHandle) noexcept = default;
+};
+
+struct TypeId {
+    std::uint64_t value{};
+    friend constexpr bool operator==(TypeId, TypeId) noexcept = default;
+};
+
+struct SystemId {
+    std::uint64_t value{};
+    friend constexpr bool operator==(SystemId, SystemId) noexcept = default;
+};
+
+struct ChangeTick {
+    std::uint64_t value{};
+    friend constexpr bool operator==(ChangeTick, ChangeTick) noexcept = default;
+    friend constexpr auto operator<=>(ChangeTick, ChangeTick) noexcept = default;
+};
+
+// ---------------------------------------------------------------------------
+// 5.3 Frame phases (frame-phases.md). Numeric order is load-bearing;
+// any later phase observes only writes from earlier phases of the same
+// frame. The enum is an exhaustive 1..=9 list — `Custom(N)` insertions
+// are out of scope (frame-phases.md §Notes).
+// ---------------------------------------------------------------------------
+enum class Phase : std::uint8_t {
+    Input         = 1,  // platform
+    Logic         = 2,  // gameplay/scripting (deferred body in MVP)
+    PhysicsFixed  = 3,  // physics
+    Animation     = 4,  // animation (deferred body in MVP)
+    Transform     = 5,  // core (LocalTransform → GlobalTransform)
+    CullExtract   = 6,  // render
+    RenderSubmit  = 7,  // render
+    HotReload     = 8,  // core (drain → swap → migrate → resume)
+    Present       = 9,  // platform
+};
+
+// ---------------------------------------------------------------------------
+// 5.4 Aggregate forward declarations. Implementations are private; the
+// public API exposes references to these opaque types so the ABI seam
+// stays thin (PHILOSOPHY §6 — no runtime reflection in shipping).
+// ---------------------------------------------------------------------------
+class World;
+class Schedule;
+class FrameLoop;
+class HotReloadBarrier;
+class PluginLoader;
+class CommandBuffer;
+class TypeRegistry;
+class Query;          // Compiled archetype-set descriptor.
+class QueryDesc;      // Builder input — Reads / Writes / Withouts / Changed.
+class SystemContext;  // Per-system view supplied to `SystemFn`.
+
+// A `SystemFn` is a free-standing function pointer; capturing closures
+// are out of scope so plugin systems remain ABI-stable across reloads.
+using SystemFn = void (*)(SystemContext& ctx) noexcept;
+
+// ---------------------------------------------------------------------------
+// 5.5 World — query, spawn/despawn, get/set component, change-tick read.
+// (Aggregate root §4.1.) All mutating operations validate Entity
+// generation and TypeRegistry membership; failures return one of the
+// `core::Error` arms above. No exceptions cross this boundary.
+// ---------------------------------------------------------------------------
+class World {
+public:
+    // Lifecycle ------------------------------------------------------------
+    static Result<World*> create() noexcept;
+    static void           destroy(World* w) noexcept;
+
+    World(const World&)            = delete;
+    World& operator=(const World&) = delete;
+
+    // Entities -------------------------------------------------------------
+    [[nodiscard]] Result<Entity> spawn() noexcept;
+    [[nodiscard]] Result<void>   despawn(Entity e) noexcept;
+    [[nodiscard]] bool           is_alive(Entity e) const noexcept;
+
+    // Components — typed surface lives in plugin-side helpers; the ABI
+    // boundary is the type-erased pair below, keyed by codegen TypeId.
+    [[nodiscard]] Result<void>
+    set_component(Entity e, TypeId t, std::span<const std::byte> bytes) noexcept;
+
+    [[nodiscard]] Result<std::span<const std::byte>>
+    get_component(Entity e, TypeId t) const noexcept;
+
+    [[nodiscard]] Result<void>
+    remove_component(Entity e, TypeId t) noexcept;
+
+    // Change ticks ---------------------------------------------------------
+    [[nodiscard]] ChangeTick current_tick() const noexcept;
+    [[nodiscard]] Result<ChangeTick>
+    last_change_tick(Entity e, TypeId t) const noexcept;
+
+    // Queries — descriptor compiles once, query handle is opaque.
+    [[nodiscard]] Result<Query*> compile_query(const QueryDesc& desc) noexcept;
+
+    // Type registry access (immutable-after-init; §4.9).
+    [[nodiscard]] const TypeRegistry& type_registry() const noexcept;
+
+protected:
+    World() noexcept;
+    ~World();
+};
+
+// ---------------------------------------------------------------------------
+// 5.6 Schedule — system registration with Phase + read/write component
+// sets (§4.4). The DAG is compiled once into a CompiledFrame; further
+// registrations invalidate and recompile.
+// ---------------------------------------------------------------------------
+struct AccessSet {
+    std::span<const TypeId> reads{};
+    std::span<const TypeId> writes{};
+    std::span<const TypeId> without{};
+};
+
+struct SystemDesc {
+    std::string_view name{};       // Fully-qualified, used as deterministic tiebreaker.
+    Phase            phase{};
+    AccessSet        access{};
+    SystemFn         body{nullptr};
+    std::span<const std::string_view> after{};
+    std::span<const std::string_view> before{};
+};
+
+class Schedule {
+public:
+    [[nodiscard]] Result<SystemId> register_system(const SystemDesc& desc) noexcept;
+    [[nodiscard]] Result<void>     unregister_system(SystemId id) noexcept;
+
+    // Forces DAG (re)compilation; idempotent if no registrations changed.
+    [[nodiscard]] Result<void>     compile() noexcept;
+
+protected:
+    Schedule() noexcept;
+    ~Schedule();
+};
+
+// ---------------------------------------------------------------------------
+// 5.7 FrameLoop — phase entry/exit hooks, accumulator (§4.4).
+// One driver per World; phase ordering is the Phase enum above.
+// ---------------------------------------------------------------------------
+using PhaseHookFn = void (*)(World& world, Phase phase) noexcept;
+
+struct PhaseHooks {
+    PhaseHookFn on_enter{nullptr};
+    PhaseHookFn on_exit{nullptr};
+};
+
+class FrameLoop {
+public:
+    [[nodiscard]] static Result<FrameLoop*>
+    create(World& world, Schedule& schedule) noexcept;
+    static void destroy(FrameLoop* loop) noexcept;
+
+    // Advances the fixed-step accumulator by `delta_seconds`; runs as
+    // many frames as the accumulator releases (frame-phases.md
+    // §"One-frame pipeline preserved").
+    [[nodiscard]] Result<void> tick(double delta_seconds) noexcept;
+
+    // Per-phase observer hooks. Hooks fire on the loop thread between
+    // the schedule's phase-N exit and phase-(N+1) entry; they MUST NOT
+    // mutate world state — that is the schedule's job.
+    [[nodiscard]] Result<void> set_phase_hooks(Phase phase, PhaseHooks hooks) noexcept;
+
+    // Fixed-step accumulator state (read-only).
+    [[nodiscard]] double      accumulator() const noexcept;
+    [[nodiscard]] std::uint64_t frame_index() const noexcept;
+
+protected:
+    FrameLoop() noexcept;
+    ~FrameLoop();
+};
+
+// ---------------------------------------------------------------------------
+// 5.8 HotReloadBarrier — request_reload(plugin_path), step at frame 8.
+// (hot-reload-protocol.md.) Requests are queued; the barrier executes
+// at exactly the next Phase::HotReload boundary (PHILOSOPHY §8).
+// ---------------------------------------------------------------------------
+struct ReloadRequestId {
+    std::uint64_t value{};
+    friend constexpr bool operator==(ReloadRequestId, ReloadRequestId) noexcept = default;
+};
+
+enum class ReloadOutcome : std::uint8_t {
+    Pending,
+    Completed,
+    Refused,
+};
+
+struct ReloadStatus {
+    ReloadOutcome outcome{ReloadOutcome::Pending};
+    Error         cause{Error::HotReload};   // Meaningful only when Refused.
+};
+
+class HotReloadBarrier {
+public:
+    // Enqueue a reload of the plugin currently registered under
+    // `plugin_fqn` to point at `replacement_dylib_path`. Idempotent
+    // within one frame: re-requesting the same plugin coalesces.
+    [[nodiscard]] Result<ReloadRequestId>
+    request_reload(std::string_view             plugin_fqn,
+                   const std::filesystem::path& replacement_dylib_path) noexcept;
+
+    // Drives the four-step state machine (drain → swap → migrate →
+    // resume) for every queued request. Called once per frame from
+    // the FrameLoop at Phase::HotReload entry. Returns the count of
+    // requests processed (0 when the queue is empty — the no-op path).
+    [[nodiscard]] Result<std::size_t> step() noexcept;
+
+    // Polls a previously-queued request without blocking.
+    [[nodiscard]] ReloadStatus status(ReloadRequestId id) const noexcept;
+
+protected:
+    HotReloadBarrier() noexcept;
+    ~HotReloadBarrier();
+};
+
+// ---------------------------------------------------------------------------
+// 5.9 PluginLoader — load(manifest_path), unload, list (§4.5,
+// plugin-abi.md). Owns the dlopen/dlsym/manifest-parse/hash-check/
+// register sequence. Hot-reload requests route through the barrier.
+// ---------------------------------------------------------------------------
+struct PluginId {
+    std::uint64_t value{};
+    friend constexpr bool operator==(PluginId, PluginId) noexcept = default;
+};
+
+struct LoadedPlugin {
+    PluginId          id{};
+    std::string_view  name{};        // From PluginManifest.name.
+    std::string_view  abi_hash{};    // 64-char blake3 hex.
+    std::string_view  dylib_path{};  // Borrowed from the loader's storage.
+};
+
+class PluginLoader {
+public:
+    [[nodiscard]] static Result<PluginLoader*>
+    create(World& world, HotReloadBarrier& barrier) noexcept;
+    static void destroy(PluginLoader* loader) noexcept;
+
+    // Validates the manifest, gates on ABI hash, and registers the
+    // plugin's components / systems / passes / panels. The plugin's
+    // `glibre_plugin_register` runs synchronously on the calling
+    // thread; mid-frame calls are queued and run at Phase::HotReload.
+    [[nodiscard]] Result<PluginId>
+    load(const std::filesystem::path& manifest_path) noexcept;
+
+    [[nodiscard]] Result<void> unload(PluginId id) noexcept;
+
+    // Snapshot of currently-loaded plugins (stable for the duration of
+    // the call; the slice is invalidated by the next load/unload).
+    [[nodiscard]] std::span<const LoadedPlugin> list() const noexcept;
+
+protected:
+    PluginLoader() noexcept;
+    ~PluginLoader();
+};
+
+// ---------------------------------------------------------------------------
+// 5.10 CommandBuffer — apply on flush (§4.8). One per system; recorded
+// during the system body, replayed in deterministic order at the next
+// sync point. Failure modes are arena overflow + entity staleness.
+// ---------------------------------------------------------------------------
+class CommandBuffer {
+public:
+    [[nodiscard]] Result<Entity> spawn() noexcept;
+    [[nodiscard]] Result<void>   despawn(Entity e) noexcept;
+
+    [[nodiscard]] Result<void>
+    add_component(Entity e, TypeId t, std::span<const std::byte> bytes) noexcept;
+
+    [[nodiscard]] Result<void>
+    remove_component(Entity e, TypeId t) noexcept;
+
+    [[nodiscard]] Result<void>
+    set_component(Entity e, TypeId t, std::span<const std::byte> bytes) noexcept;
+
+    // Flushes recorded mutations into `world` in deterministic order.
+    // Called by the schedule at sync points; plugins do not invoke
+    // `flush` directly. Re-runnable (no-op when the buffer is empty).
+    [[nodiscard]] Result<void> flush(World& world) noexcept;
+
+    // Resets the per-frame arena without applying. Used by the
+    // hot-reload barrier when a refusal discards in-flight work.
+    void clear() noexcept;
+
+    [[nodiscard]] std::size_t recorded_count() const noexcept;
+
+protected:
+    CommandBuffer() noexcept;
+    ~CommandBuffer();
+};
+
+// ---------------------------------------------------------------------------
+// 5.11 Per-system view passed to SystemFn bodies. Carries scoped
+// references to the world, the system's CommandBuffer, and the
+// current ChangeTick. Borrowed-only — the pointer is invalidated
+// after the system body returns.
+// ---------------------------------------------------------------------------
+class SystemContext {
+public:
+    [[nodiscard]] World&         world() noexcept;
+    [[nodiscard]] const World&   world() const noexcept;
+    [[nodiscard]] CommandBuffer& commands() noexcept;
+    [[nodiscard]] ChangeTick     tick() const noexcept;
+    [[nodiscard]] Phase          phase() const noexcept;
+
+protected:
+    SystemContext() noexcept;
+    ~SystemContext();
+};
+
+// ---------------------------------------------------------------------------
+// 5.12 Hot-reload observer events (hot-reload-protocol.md
+// §"Observer Notification"). The bus is owned by HotReloadBarrier;
+// subscribers are called synchronously between barrier steps 4.2
+// and 4.3, so they always see a fully-swapped world.
+// ---------------------------------------------------------------------------
+struct HotReloadStartedEvent {
+    std::string_view plugin_fqn{};
+    std::string_view old_dylib_path{};
+    std::string_view new_dylib_path{};
+};
+
+struct HotReloadCompletedEvent {
+    std::string_view             plugin_fqn{};
+    std::string_view             old_abi_hash{};
+    std::string_view             new_abi_hash{};
+    std::span<const std::string_view> migrated_types{};
+};
+
+struct HotReloadRefusedEvent {
+    std::string_view plugin_fqn{};
+    Error            cause{Error::HotReload};
+};
+
+}  // namespace core
+}  // namespace glibre
 ```
 
-Event types, serialized schemas (Fory), error types.
+Event types: `HotReloadStartedEvent`, `HotReloadCompletedEvent`,
+`HotReloadRefusedEvent` — emitted synchronously by `HotReloadBarrier`
+between steps 4.2 and 4.3 (`reviews/decisions/hot-reload-protocol.md`
+§"Observer Notification"). Subscribers always see a fully-swapped,
+fully-migrated world.
+
+Serialized schemas (Fory): `core` itself does not own any schemas; the
+plugin manifest schema (`PluginManifest`, `SemVer`, `ComponentDecl`,
+`SystemDecl`, `PassDecl`, `PanelDecl`) lives under
+`reviews/decisions/plugin-abi.md` §"Plugin Manifest Schema" and is
+materialized by the `glibre-foryc` codegen pipeline; `core` consumes
+the deserialized POD only at load time.
+
+Error types: `glibre::Error` (rolled-up tagged union per
+`reviews/decisions/error-model.md`) carrying `glibre::core::Error` as
+one of its arms; the listed enumerators above are §10's authority and
+the targets of every refusal site in the loader, schedule, and
+barrier.
 
 ## 6. Internal Architecture
 
