@@ -20,5 +20,5 @@ keeps core untouched.
 | Game-framework primitives (containers, graphs, tables, attributes, grids, timelines, event logs) | game-framework | TBD |
 
 Stories for these epics remain drafts in the harmonius mirror until the
-post-MVP slice that owns them lands; only after that does triage begin
+post-MVP epic that owns them lands; only after that does triage begin
 in earnest.

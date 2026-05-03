@@ -1,24 +1,24 @@
 # Post-MVP Plan
 
-Layered onto MVP without core rewrite. Each item independent; ordering
-flexible. All work tracked in GitHub Issues; this file maps slices to
-epics.
+Layered onto MVP without core rewrite. Each epic independent; ordering
+flexible. All work tracked in GitHub Issues; this file maps epics
+to issue numbers.
 
-## Slices
+## Epics
 
-| Slice                       | New context(s)        | Epic Issue |
-|-----------------------------|-----------------------|------------|
-| Virtualized geometry        | geometry (extends)    | TBD        |
-| Hybrid-RT expansion (AO/refl/GI) | render (extends) | TBD        |
-| Visual scripting (logic graph) | scripting          | TBD        |
-| Material graph editor       | material              | TBD        |
-| Effects/VFX graph           | vfx                   | TBD        |
-| Render graph editor (viewer)| tools (extends)       | TBD        |
-| Skeletal animation          | animation             | TBD        |
-| Audio (spatial + mixer)     | audio                 | TBD        |
-| Spatial indexing + NavMesh  | simulation            | TBD        |
-| Profiler UI                 | tools (extends)       | TBD        |
-| Windows + Vulkan backend    | render-vulkan, platform-win | TBD  |
+| Epic                              | New context(s)              | Epic Issue |
+|-----------------------------------|-----------------------------|------------|
+| Virtualized geometry              | geometry (extends)          | TBD        |
+| Hybrid-RT expansion (AO/refl/GI)  | render (extends)            | TBD        |
+| Visual scripting (logic graph)    | scripting                   | TBD        |
+| Material graph editor             | material                    | TBD        |
+| Effects/VFX graph                 | vfx                         | TBD        |
+| Render graph editor (viewer)      | tools (extends)             | TBD        |
+| Skeletal animation                | animation                   | TBD        |
+| Audio (spatial + mixer)           | audio                       | TBD        |
+| Spatial indexing + NavMesh        | simulation                  | TBD        |
+| Profiler UI                       | tools (extends)             | TBD        |
+| Windows + Vulkan backend          | render-vulkan, platform-win | TBD        |
 
 ## Sequencing notes
 

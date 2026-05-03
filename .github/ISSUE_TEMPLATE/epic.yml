@@ -44,7 +44,7 @@ body:
     id: scope
     attributes:
       label: Scope
-      description: Single SRP slice. What changes; what does not.
+      description: Single SRP scope. What changes; what does not.
     validations: { required: true }
   - type: textarea
     id: stories

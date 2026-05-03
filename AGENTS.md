@@ -13,7 +13,7 @@ Aggregators carry **no estimate**; leaves carry estimates that roll up.
 1. **Initiative** (`type:initiative`) — top-level. Groups epics. No
    estimate. Source of truth for top-level plan execution status.
 2. **Epic** (`type:epic`) — under an initiative. Aggregates sub-epics
-   / plans / spikes. No estimate. SRP-bounded slice.
+   / plans / spikes. No estimate. SRP-bounded scope.
 3. **Sub-Epic** (`type:sub-epic`) — nested aggregator under an epic
    (or another sub-epic). No estimate.
 4. **User Story** (`type:user-story`) — persona-grounded testable

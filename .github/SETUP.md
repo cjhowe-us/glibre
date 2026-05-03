@@ -116,8 +116,8 @@ Live under `.github/ISSUE_TEMPLATE/`:
   `test(scope):`, `refactor(scope):`, `perf(scope):`, `chore(scope):`,
   `docs(scope):`, `build(scope):`, `ci(scope):`.
 - PR body uses `.github/pull_request_template.md`.
-- One plan issue may have multiple PRs; each PR closes a slice toward
-  the plan.
+- One plan issue may have multiple PRs; each PR advances the plan
+  toward closure.
 
 ## 7. Workflows
 

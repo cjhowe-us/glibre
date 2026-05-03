@@ -66,7 +66,7 @@ Aggregators carry no estimate; leaves do; estimates roll up.
   estimate. Source of truth for plan execution status; subagents post
   updates here in English.
 - **Epic** — `type:epic`. Aggregates sub-epics / plans / spikes under
-  an initiative. No estimate. SRP-bounded slice.
+  an initiative. No estimate. SRP-bounded scope.
 - **Sub-Epic** — `type:sub-epic`. Nested aggregator under an epic
   (or another sub-epic). No estimate.
 - **User Story** — `type:user-story`. Persona-grounded testable
