@@ -14,7 +14,7 @@ All work tracked in GitHub Issues; this file maps phases to epics.
 
 ## Bring-up DAG
 
-```
+```text
 infra-repo
    ↓
 core (ECS + plugin + reload + frame loop)
@@ -27,7 +27,7 @@ shader (DXC + msc + reflection)         │
    ↓                                    │
 render (graph + Metal + mesh-shader gbuffer + RT shadow)
    ↓
-geometry (meshlets) → content (import) → physics (Jolt)
+geometry (meshlets) → content (FBX import) → physics (Jolt)
    ↓
 tools (editor shell)
    ↓
@@ -50,8 +50,8 @@ in once GitHub repo is provisioned.
 | 5 | shader   | HLSL → DXC → metal-shaderconverter + reflection   | TBD   |
 | 6 | render   | Render graph + Metal backend + mesh-shader gbuffer| TBD   |
 | 7 | render   | Hybrid-RT shadow pass                             | TBD   |
-| 8 | geometry | meshoptimizer meshlets + cooked pak               | TBD   |
-| 9 | content  | cgltf + FBX + FreeImage + FreeType + CAS          | TBD   |
+| 8 | geometry | meshoptimizer meshlets + Draco compression + pak  | TBD   |
+| 9 | content  | FBX SDK + FreeImage + FreeType + CAS              | TBD   |
 |10 | physics  | Jolt rigid bodies + deterministic config          | TBD   |
 |11 | tools    | Editor shell + scene tree + inspector + gizmo     | TBD   |
 |12 | e2e      | InputDriver + trace replay + golden assertions    | TBD   |

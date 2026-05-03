@@ -44,7 +44,9 @@ inside each `specs/<context>/SPEC.md`. Terms used unchanged in code.
 ## Geometry
 
 - **Mesh** — vertex + index streams.
-- **Meshlet Pak** — cooked binary blob of meshlets + bounds + LOD links.
+- **Meshlet Pak** — cooked binary blob of meshlets + bounds + LOD
+  links. Vertex / index streams Draco-compressed at cook time;
+  decoded into GPU-resident format at load.
 
 ## Tools
 

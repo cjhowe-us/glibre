@@ -20,10 +20,10 @@ MVP contexts (each = one plugin + one spec + one epic):
 - `shader` — HLSL → DXC → metal-shaderconverter; HLSL reflection.
 - `render` — declarative render graph, Metal backend (metal-cpp), mesh
   shader gbuffer, deferred lighting, hybrid-RT shadows, present.
-- `geometry` — meshoptimizer meshlets (no virtualized DAG yet), BLAS
-  build for static meshes.
+- `geometry` — meshoptimizer meshlets + Draco mesh(let) compression
+  (cooked-asset side), BLAS build for static meshes.
 - `physics` — Jolt rigid bodies, deterministic config.
-- `content` — cgltf + FBX import, FreeImage, FreeType, CAS, residency.
+- `content` — FBX import (FBX SDK), FreeImage, FreeType, CAS, residency.
 - `tools` — editor shell: scene tree, transform gizmo, inspector, asset
   browser, play/pause. No graph editors.
 - `e2e` — InputDriver abstraction, replay traces, golden-screenshot +
@@ -45,7 +45,6 @@ Layered onto MVP without core rewrite. Each item independent:
 - Render graph editor (read-only viewer first).
 - Skeletal animation + state machines.
 - Audio (spatial, mixer).
-- Windows + Vulkan backend.
 - Spatial indexing, NavMesh.
 - Profiler UI.
 
@@ -56,12 +55,12 @@ a coherent architecture. Drives:
 
 - AI (behavior trees, perception, planners).
 - Networking (replication, prediction/rollback).
-- D3D12 backend; Linux + Vulkan polish.
 - Collaborative editing, asset versioning, build farm.
 - Procedural generation, cinematics/timeline.
 - Advanced rendering (DDGI, RTGI, volumetrics, hair, water).
 - Full game-framework primitives (containers, graphs, tables,
   attributes, grids, timelines, event logs) — re-validated, not ported.
+- Windows + D3D12 backend; Linux + Vulkan backend.
 
 Path mid-term → long-term is incremental plugin addition. SRP discipline
 keeps core untouched.

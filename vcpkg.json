@@ -10,6 +10,7 @@
     "entt",
     "joltphysics",
     "meshoptimizer",
+    "draco",
     "metal-cpp",
     "freeimage",
     "freetype",
@@ -19,7 +20,6 @@
     "fmt",
     "xxhash",
     "blake3",
-    "cgltf",
     "directx-shader-compiler"
   ],
   "features": {
