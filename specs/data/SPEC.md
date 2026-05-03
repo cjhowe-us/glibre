@@ -870,7 +870,405 @@ documented in `reviews/decisions/fory-codegen.md` §"Open Questions" #4
 
 ## 6. Internal Architecture
 
-Non-binding sketch for implementers.
+Non-binding sketch for implementers. Section §4 pins the *what* (the
+nine SRP-bounded aggregates and their cross-aggregate invariants);
+§5 pins the *contract surface* (the C++ headers exported by
+`glibre-types.dylib`); this section sketches the *how* — the module
+layout, the codegen pipeline shape, and the runtime data flow that
+together produce the surface in §5 while preserving the invariants
+in §4.
+
+The split below is binding only insofar as the public-surface
+guarantees in §5 require it; private internals (file names within a
+module, function signatures that never cross a header boundary,
+algorithmic choices inside a single TU) remain implementer's choice.
+Where this section names a directory or symbol, that name is the one
+the rest of the spec, the decision records, and the issue tracker
+will use; no synonyms.
+
+### 6.1 Module layout
+
+The data context's implementation splits into three modules along the
+single seam every aggregate already implies: code that runs on the
+*build host* and produces sources, code that runs at *engine runtime*
+and consumes those sources, and the *generated artifacts* themselves.
+The split is mechanical: each module owns one phase of the pipeline,
+each phase has one reason to change, and no module reaches across the
+seam to mutate another's outputs.
+
+#### 6.1.1 `tools/glibre-foryc/` — host codegen tool (build-time only)
+
+A standalone host executable, **not shipped at runtime**. Owns the
+`Foryc` aggregate (§4.2). Its sole job is to read every
+`data/schemas/<ctx>/<Type>.fory` source under the configured schema
+root, validate each parsed `Schema` against §4.1, and emit the
+generated C++ sources, the registry-population TU, the per-plugin
+manifest TU, and the embedded `AbiHash` constant.
+
+Translation-unit shape (illustrative, not normative beyond the names
+the rest of the spec already uses):
+
+```
+tools/glibre-foryc/
+  src/
+    main.cpp                 # arg parsing, deterministic file walk
+    lexer.cpp                # .fory -> token stream (§6.2 step 1)
+    parser.cpp               # tokens -> Schema AST (§6.2 step 2)
+    validator.cpp            # Schema -> validated Schema (§6.2 step 3)
+    emitter/
+      header_emitter.cpp     # generates <ctx>/<Type>.hpp
+      body_emitter.cpp       # generates <ctx>/<Type>.cpp
+      registry_emitter.cpp   # generates _registry.cpp
+      reflection_emitter.cpp # generates per-type ReflectionBlob data
+      abi_hash_emitter.cpp   # generates _abi_hash.cpp
+      manifest_emitter.cpp   # generates per-plugin manifest.cpp
+    canonicalize.cpp         # parsed-form canonicalization (§7.3)
+    blake3_wrapper.cpp       # blake3 over canonicalized bytes
+  CMakeLists.txt             # links Apache Fory privately; host-only
+  tests/                     # Catch2 unit tests for lexer/parser/etc.
+```
+
+`glibre-foryc` links Apache Fory and `blake3` privately; neither
+dependency leaks past this module's boundary. The tool is the only
+writer of files inside `data/codegen-output/` (§6.1.3) and the only
+reader of `.fory` source files. It performs no network I/O, opens no
+files outside the configured schema root and the configured output
+directory, and is bit-deterministic across hosts (§4.2 inv. 5).
+
+#### 6.1.2 `data/runtime/` — middleman runtime sources (in `glibre-types.dylib`)
+
+The hand-written, **runtime-shipped** translation units that
+`glibre-types.dylib` (§4.3) compiles into its binary alongside the
+codegen-emitted sources from §6.1.3. These are the implementations
+behind the §5 headers; they own the runtime mechanics that the
+generated code calls into.
+
+```
+data/runtime/
+  include/                   # public headers; mirror §5 file split
+    glibre/types/
+      identity.hpp
+      error.hpp
+      envelope.hpp
+      migration.hpp
+      registry.hpp
+      abi_hash.hpp
+      plugin_manifest.hpp
+      reflection.hpp
+  src/
+    schema_registry.cpp      # SchemaRegistry::instance, lookup,
+                             # entries; static-init ordering (§4.3 inv. 5)
+    envelope.cpp             # EnvelopeHeader read/write; little-endian
+                             # pinning (§4.8 inv. 3); peek primitives
+    migration_dispatcher.cpp # MigrationDispatcher (§6.3); keyed by
+                             # (SchemaId, version-pair); arena reset
+    register_migration.cpp   # glibre_types_register_migration entry
+    arena.cpp                # per-payload Arena; reset to high-water
+                             # between chain steps (§4.7 inv. 5)
+    abi_hash.cpp             # glibre_types_abi_hash() trampoline that
+                             # returns the codegen-embedded constant
+    plugin_manifest.cpp      # PluginManifest deserialize helpers
+                             # consumed by the core plugin loader
+  CMakeLists.txt             # contributes to the glibre-types target
+  tests/                     # Catch2 unit tests for dispatcher,
+                             # registry, envelope, arena
+```
+
+`data/runtime/` is the only module that may keep mutable state in
+process memory, and even that state is restricted to (a) static-init
+populated read-only structures and (b) the per-payload `Arena` whose
+lifetime is bounded by a single `deserialize` call. There is no
+allocation outside an arena and no I/O of any kind.
+
+#### 6.1.3 `data/codegen-output/` — generated artifacts (build dir, not in repo source tree)
+
+A **build-directory artifact** populated by `glibre-foryc` at
+configure / build time. Lives at
+`${CMAKE_BINARY_DIR}/generated/glibre-types/` and is **not committed
+to the repository**; the directory is regenerated from
+`data/schemas/**/*.fory` on every Ninja re-glob (per
+`reviews/decisions/fory-codegen.md` §"CMake Integration"). The data
+context's `.gitignore` suppresses any accidental check-in.
+
+```
+data/codegen-output/                 # (build dir; symbolic name only)
+  include/glibre/types/<ctx>/
+    <Type>.hpp                       # one per .fory file; tag-sorted
+                                     # struct, declaration-order-
+                                     # independent (§4.2 inv. 2)
+    <Type>_migrations.hpp            # GLIBRE_REGISTER_MIGRATION
+                                     # macros; included by the owning
+                                     # context's TU (§5 §migration.hpp)
+  src/<ctx>/
+    <Type>.cpp                       # serialize/deserialize bodies;
+                                     # extern "C" trampolines per
+                                     # §4.3 inv. 4
+  src/_registry.cpp                  # static-init RegistryEntry
+                                     # inserts; FQN-sorted (§4.5)
+  src/_abi_hash.cpp                  # const char* literal returned by
+                                     # glibre_types_abi_hash() (§6.4)
+  src/_manifest_<plugin>.cpp         # one TU per discovered
+                                     # plugins/*/plugin.fory (§6.5)
+  .stamp                             # CMake dependency stamp file
+```
+
+All sources under `data/codegen-output/` compile into
+`glibre-types.dylib` alongside `data/runtime/`. No human ever edits a
+file here; reproducibility flows from the rule that *identical
+inputs produce byte-equal outputs* (§4.2 inv. 1) on every supported
+host.
+
+The three-module split is the §6.1 SRP collapse: build-host
+codegen ↔ runtime engine ↔ generated bytes. Each owns one reason to
+change and depends only on the modules upstream of it (§6.1.1 →
+§6.1.3 → §6.1.2 ⇒ `glibre-types.dylib`).
+
+### 6.2 Codegen pipeline
+
+`glibre-foryc` runs a four-stage pipeline over the schema set; the
+stages are sequential, each stage's output is the input to the next,
+and the pipeline is a pure function of the schema set plus the tool
+binary itself (§4.2 inv. 1).
+
+**Stage 1 — Lex.** Each `.fory` source under the schema root is
+opened, UTF-8 / NFC-normalized (§7.1 storage shape), and lexed into
+a token stream against the grammar in §7.1. Lexer errors raise
+`ReservedTagViolation` (the codegen front-end's generic syntactic-
+error arm — see §10) with a file:line:col anchor. The lexer is
+streaming and allocates only inside the tool's arena.
+
+**Stage 2 — Parse.** The token stream is parsed into an in-memory
+`Schema` AST node — the §4.1 aggregate's authoring-time
+representation. Parser errors raise `ReservedTagViolation` with the
+same anchor shape. The parser produces one `Schema` value per file;
+no cross-file information is consulted at this stage.
+
+**Stage 3 — Validate.** Each `Schema` is checked against the §4.1
+invariants individually (FQN well-formedness, monotonic version,
+unique tag numbers, reserved-tag immutability, `since ≤ version`,
+default-on-non-`option` rule) and then against cross-schema
+invariants (no two `Schema`s share an `FQN`, every `TypeRef` to
+another generated type resolves to a `Schema` in the current set,
+no cycles in the type graph, no reuse of any tag number ever shipped
+in a prior committed version of the same `FQN`). Layout-additive
+checking (§4.2 inv. 3) compares each `Schema` against the prior
+committed version's parsed form: a new tag is permitted only if its
+sorted position appends past the prior version's last field's
+offset. Failures raise the §4 invariant's matching `data::Error` arm
+(`ReservedTagViolation`, `SchemaRegistryConflict`, etc., per §10);
+the build fails before any source is emitted.
+
+**Stage 4 — Emit.** From the validated `Schema` set the emitter
+writes the four artifact families:
+
+1. **Headers and bodies.** One header
+   `data/codegen-output/include/glibre/types/<ctx>/<Type>.hpp` and
+   one body `data/codegen-output/src/<ctx>/<Type>.cpp` per `.fory`
+   file. The header declares the `final` POD-like struct with
+   tag-sorted fields and the `Envelope<T>` specialization
+   declarations (§5 §envelope.hpp); the body emits the
+   `serialize`/`deserialize` trampolines (per §4.3 inv. 4) and
+   their `extern "C"` exports.
+2. **Reflection blob.** Per-type `ReflectionField` arrays are emitted
+   into the generated body (§4.9), inlined as `constexpr` data when
+   the field set permits and `const` static arrays otherwise. A
+   build flag (off by default in shipping profiles, on for
+   editor / tools) controls whether the blob is wired into the
+   `RegistryEntry::reflection` slot or left null (§4.9 inv. 5).
+3. **Registry TU.** A single `data/codegen-output/src/_registry.cpp`
+   collects every per-type `RegistryEntry` into the static-init
+   table the runtime exposes via `SchemaRegistry::instance()`
+   (§4.5). Entries are emitted in `FQN` byte-sort order so the
+   binary search in §4.5 inv. 3 is constant-time over a contiguous
+   array — the same ordering `AbiHash` consumes (§4.4 inv. 1, §6.4).
+4. **ABI-hash TU.** A single `data/codegen-output/src/_abi_hash.cpp`
+   embeds the 64-character lowercase hex `AbiHash` string as a
+   `constexpr` literal and provides the body of
+   `glibre_types_abi_hash()` (§6.4).
+5. **Manifest TUs.** One
+   `data/codegen-output/src/_manifest_<plugin>.cpp` per discovered
+   `plugins/<plugin>/plugin.fory`, embedding the Fory-serialized
+   `PluginManifest` blob into the plugin's `.rodata` (§6.5).
+
+Emission is deterministic: file iteration is `FQN`-sorted, every
+generated symbol is namespaced, generated newlines are LF, and the
+emitter never reads back its own outputs. Two independent runs of
+`glibre-foryc` over the same schema set on different hosts produce
+byte-equal sources (§4.2 inv. 1, PHILOSOPHY §7).
+
+The pipeline's input and output sides are pinned by §7 (the schema
+file format) and §5 (the public C++ surface) respectively; this
+section specifies only the four phases that connect them and the
+ordering rules each phase must obey.
+
+### 6.3 `MigrationDispatcher` (runtime composition)
+
+Lives in `data/runtime/src/migration_dispatcher.cpp`. Owns
+composition of the `MigrationChain` aggregate (§4.7) at deserialize
+time. The dispatcher is the single runtime consumer of the
+codegen-emitted migration tables; no other call site invokes
+`MigrationFn`s directly.
+
+**Key.** Lookup is keyed by `(SchemaId, version-pair)` where
+`version-pair` is `(from_version, to_version)` and `to_version ==
+from_version + 1`. No multi-step keys exist — the dispatcher
+composes `vN → vM` exclusively by iterating single-step entries
+(§4.6 inv. 5; §4.7 inv. 2). Hash table or sorted side-array is an
+implementation detail; the spec requires only constant-time amortized
+lookup and `FQN`-then-`from_version` deterministic iteration order
+when the chain is walked.
+
+**Storage.** The per-`FQN` migration entries live as a contiguous
+`std::span<const MigrationEntry>` inside the registry entry for that
+type (§4.5; §5 §registry.hpp). Codegen emits them in
+`from_version`-ascending order so the dispatcher can index by
+`from_version - 1` without sorting at runtime.
+
+**Invocation contract.** On `Envelope<T>::deserialize(src)`:
+
+1. Read `EnvelopeHeader` (§4.8 inv. 1, 2).
+2. Look up `RegistryEntry` by `header.schema` (§4.5 inv. 3); unknown
+   `FQN` → `data::Error::DeserializeError`.
+3. Compare `header.version` against `entry.version`:
+   * Equal → invoke `entry.deserialize(src, &out)` directly, return
+     the value.
+   * `header.version > entry.version` (newer-than-host) →
+     `data::Error::DeserializeError` (§4.8 inv. 5).
+   * `header.version < entry.version` → walk the migration chain.
+4. Migration walk. For `n = header.version; n < entry.version; ++n`
+   the dispatcher:
+   * Indexes `entry.migrations[n - 1]` (the `(n → n+1)` entry).
+   * Allocates a fresh `VNplus1` inside the per-payload `Arena`.
+   * Resets the arena to its post-deserialize high-water mark
+     between steps (§4.7 inv. 5).
+   * Invokes the type-erased trampoline; on `unexpected` returns
+     `data::Error::SchemaMigrationFailure` carrying the failing
+     `(FQN, n → n+1)` pair (§4.7 inv. 4).
+5. The final `entry.version`-shaped value is moved into the
+   caller-owned `out_value`; intermediates never escape the
+   dispatcher (§4.7 inv. 3).
+
+**Purity.** Every step the dispatcher calls is a pure function
+(§4.6 inv. 1, 4). The dispatcher itself reads only the registry it
+holds by `const&`, never mutates the registry, never publishes a
+mutating reference (§4.5 inv. 4), and allocates only inside the
+caller-supplied arena.
+
+**Hot-reload integration.** At the frame-8 barrier the loader passes
+the pre-swap snapshot through this same code path against the
+post-swap registry; success yields a migrated component row, failure
+yields `core::Error::SchemaMigrationFailed` and reverts the swap
+(§8; `reviews/decisions/hot-reload-protocol.md` §"Step 3 —
+Migrate"; `reviews/decisions/plugin-abi.md` §"Loader Sequence" step
+11). The dispatcher itself is unaware of the hot-reload phase — the
+code path is identical to a cold deserialize.
+
+### 6.4 ABI-hash construction and export
+
+The `AbiHash` aggregate (§4.4) lives at the seam between codegen and
+runtime: the value is *computed* at codegen time and *exported* at
+runtime as a stable C symbol the plugin loader compares.
+
+**Computation (codegen-time).**
+`glibre-foryc`'s `abi_hash_emitter` consumes the validated `Schema`
+set produced by stage 3 of §6.2 and produces the
+`_abi_hash.cpp` translation unit by:
+
+1. For each `Schema s`, compute
+   `schema_source_hash(s) = blake3(canonicalize(s))` where
+   `canonicalize` is the parsed-form canonicalization defined in
+   §7.3 (§4.4 inv. 2). The output is a 32-byte digest.
+2. Sort the resulting digests by the byte order of each `Schema`'s
+   `FQN` (§4.4 inv. 1).
+3. Concatenate the sorted digests with no separators (each digest
+   is fixed-width, so the boundary is unambiguous).
+4. Compute `blake3(concatenation)` — the resulting 32-byte digest is
+   the canonical `AbiHash`.
+5. Hex-encode the digest (lowercase, 64 characters) and embed it as
+   a `constexpr` `const char*` string literal in
+   `_abi_hash.cpp`.
+
+**Export (runtime).** The runtime side exposes the embedded literal
+through one C-stable entry point declared in §5 §abi_hash.hpp:
+
+```cpp
+extern "C" const char* glibre_types_abi_hash() noexcept;
+```
+
+The body lives in `data/runtime/src/abi_hash.cpp` and is a one-line
+return of the codegen-embedded literal; the symbol is exported with
+default visibility from `glibre-types.dylib`. Plugins re-export the
+identical string under `glibre_plugin_abi_hash`, captured at the
+plugin's compile time against the same headers
+(`reviews/decisions/plugin-abi.md` §"ABI Hash Function"). The loader
+compares the two byte-for-byte (no parsing) and refuses load on
+mismatch with `core::Error::PluginAbiHashMismatch`
+(`reviews/decisions/plugin-abi.md` §"Loader Sequence" step 4).
+
+The export is `noexcept`, allocates nothing, and is callable from
+static-init contexts. `glibre_types_abi_hash()` is the *only* path
+through which the hash crosses a dylib boundary; no other API exposes
+the digest, the canonicalization rule, or the construction inputs.
+
+### 6.5 Plugin-manifest emission (cross-cut with `core`)
+
+The data context owns the Fory-serialized layout of `PluginManifest`
+(§5 §plugin_manifest.hpp; `reviews/decisions/plugin-abi.md`
+§"Plugin Manifest Schema") but does not own the loader that consumes
+it. `glibre-foryc` extends its file walk to also process
+`plugins/<plugin>/plugin.fory` files, emitting one
+`data/codegen-output/src/_manifest_<plugin>.cpp` per discovered
+manifest source. Each emitted TU embeds the Fory-serialized
+`PluginManifest` blob into a `.rodata`-resident `std::byte` array,
+defines the plugin-side `glibre_plugin_manifest` /
+`glibre_plugin_manifest_size` exports against that array, and
+provides the plugin-side `glibre_plugin_abi_hash` re-export of the
+same constant `glibre_types_abi_hash()` returns. The loader's read
+path is owned by `core` (`reviews/decisions/plugin-abi.md`
+§"Loader Sequence" step 3); the data context's only contribution is
+the bytes the loader reads.
+
+### 6.6 Build-graph composition
+
+The CMake graph that wires the three modules together is pinned by
+`reviews/decisions/fory-codegen.md` §"CMake Integration"; this
+section names the targets, not their internals.
+
+```
+glibre-foryc            (host executable, tools/glibre-foryc/)
+   │
+   ▼
+glibre-types-codegen    (custom target; depends on schema glob +
+   │                     glibre-foryc; outputs to
+   │                     data/codegen-output/.stamp)
+   ▼
+glibre-types            (SHARED library; sources = data/runtime/src/
+                         + data/codegen-output/src/; depends on
+                         glibre-types-codegen)
+```
+
+`glibre-foryc` builds first and is host-only. Schema globs use
+`CONFIGURE_DEPENDS` so a touched `.fory` re-triggers regeneration
+without a CMake rerun. The middleman dylib's link line consumes both
+hand-written runtime sources and codegen-emitted sources as one unit;
+the static-init ordering rule (§4.3 inv. 5) is preserved by the
+emitter writing builtin-registration TUs lexicographically before
+generated-type TUs.
+
+No plugin links `glibre-foryc`; no plugin links `Apache Fory`
+directly; every plugin links exactly one `glibre-types.dylib`
+(§4.10 inv. 4).
+
+### 6.7 Section closure
+
+§6 specifies the *layout* and *plumbing*; it does not redefine any
+contract that §4 (aggregates / invariants), §5 (public surface), §7
+(schemas), or §8 (hot-reload) already pin. Implementers consult §6
+for *where the code lives* and *how the pieces talk*; they consult
+§4 / §5 / §7 / §8 for *what each piece must guarantee*. Conflicts
+between §6 and any of those sections resolve in favor of §4 / §5 /
+§7 / §8; this section is non-binding except where it names a module
+or symbol that the rest of the spec already references.
 
 ## 7. Persistence & Schemas
 
