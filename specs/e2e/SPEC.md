@@ -3806,7 +3806,318 @@ engine's `perf-budget.yml`.
 
 ## 10. Failure Modes & Error Model
 
-Typed errors. Recovery.
+Per `reviews/decisions/error-model.md`, every public e2e boundary
+returns `glibre::Result<T>` and never throws. The closed sum below
+is the canonical taxonomy of failures e2e is allowed to surface; the
+`std::variant`-typed `e2e::Error` declared in §5.1 is the in-code
+realisation of this taxonomy and contributes one arm to the
+engine-wide `glibre::Error` variant. The implementation plan that
+introduces `core/error.hpp` reconciles the §5 enumerator names with
+the canonical names below; §10 is the load-bearing description and
+§5 follows it.
+
+**Closure rules cited from `AGENTS.md`:**
+
+1. The `ClosureGate` rule (§4.1.14) is unchanged: a user-story flips
+   to `qa-ready` only when every cited trace reports `Passed`. A
+   failing trace **never** auto-closes a story, **never** auto-marks
+   it `qa-ready`, and **never** suppresses the manual test step.
+2. The manual-test PASS comment closure rule still applies: after a
+   green CI run, a human still records the manual PASS comment per
+   `AGENTS.md` § User Story closure. Failing traces leave the story
+   in its prior state — they do not move it backwards or forwards.
+3. Every `e2e::Error` value fails the trace it was raised against:
+   the trace's `TraceReport.status` is set to `Failed` (or `Aborted`
+   for pre-flight refusals) and the run's process exit code is the
+   stable non-zero code returned by `TraceRunner::exit_code(err)`
+   (§5.11). CI gates on the exit code; no other channel.
+
+### 10.1 Closed sum
+
+The arms below are the closed sum cited at the §5 boundary. Adding
+an arm edits this section, the `e2e::Error` variant in §5.1, the
+`TraceRunner::exit_code` mapping in §5.11, and the rolled-up
+engine-wide `glibre::Error` variant simultaneously, per the
+error-model composition rules. Removing an arm is a breaking ABI
+change and triggers a plugin ABI hash bump (`PHILOSOPHY.md` #9).
+Severity is logged by `glibre::log_error` using the `spdlog` levels
+named below; see error-model § Logging / Telemetry.
+
+| Arm | Payload | Severity (`spdlog`) | Exit-code class |
+|-----|---------|---------------------|------------------|
+| `EnvDrift` | — | `error` | env |
+| `TraceFormatInvalid` | — | `error` | parse |
+| `TraceTruncated` | — | `error` | parse |
+| `GoldenMissing` | `GoldenRef` | `error` | golden |
+| `GoldenMismatch{kind}` | `AssertOpId, FrameIndex, AssertKind, ArtefactRef` | `error` | golden |
+| `AssertFailed{kind}` | `AssertOpId, FrameIndex, AssertKind, ArtefactRef` | `error` | assert |
+| `InjectionLayerRefused` | `RunnerHost, InjectionLayer` | `warn` (refusal is policy, not bug) | host |
+| `RunnerHostUnsupported` | `RunnerHost` | `warn` (refusal is policy, not bug) | host |
+| `FrameSkew` | `FrameIndex expected, FrameIndex observed` | `error` | drift |
+
+The `kind` discriminator on `GoldenMismatch` and `AssertFailed`
+reuses the §5.1 `AssertKind` enum (`State`, `Screenshot`,
+`EcsSnapshot`, `LogContains`). `GoldenMismatch` is the
+post-comparison divergence arm that supersedes the generic
+`AssertFailed` for golden-backed kinds (`Screenshot`,
+`EcsSnapshot`); `AssertFailed` retains the non-golden kinds
+(`State`, `LogContains`). The split exists so `GoldenMismatch`
+can carry the `golden-update` recovery hint without overloading
+`AssertFailed`'s contract.
+
+### 10.2 Per-arm trigger, recovery, severity
+
+For each arm: **trigger** = the bytes-level / runtime condition
+that constructs the value at its failure site (per error-model
+composition rule 3, no aggregate translates another's error into
+its own). **Recovery** = the runner's downstream behaviour and the
+operator-facing remediation. **Severity** = `spdlog` level used by
+`glibre::log_error`; refusals (policy decisions) log at `warn`,
+genuine failures log at `error`. **Trace outcome** = whether the
+run sets `TraceReport.status` to `Failed` (a verdict) or `Aborted`
+(pre-flight refusal — no verdict reached).
+
+#### 10.2.1 `EnvDrift`
+
+- **Trigger.** `manifest.env_hash` (§4.1.3 inv 1) does not equal
+  the live `EnvHash` computed at gate time from the running
+  binary's engine version, plugin set + ABI hash, asset-pack
+  hash, locale, window size, DPI, RNG seed, and target driver
+  tier (§4.2 inv 2). Computed once before any op runs; mismatch
+  short-circuits before frame 0.
+- **Recovery.** Fail-fast: the runner refuses to start the frame
+  loop, the trace report is `Aborted`, no assert is evaluated,
+  no golden is touched. Operator hint emitted alongside the log
+  line names which manifest field diverged (engine version,
+  plugin ABI hash, asset-pack hash, locale, window size, DPI,
+  seed, driver tier) and points the operator at re-recording
+  the trace under the new environment via the editor's
+  `TraceWriter` (§4.1.12). No `golden-update` hint — env drift
+  is an environment problem, not a golden problem.
+- **Severity.** `error`.
+- **Trace outcome.** `Aborted` (pre-flight; no verdict).
+
+#### 10.2.2 `TraceFormatInvalid`
+
+- **Trigger.** Bytes-level framing, schema-version mismatch,
+  variant-tag out-of-range, footer-hash mismatch, or any
+  per-op payload validation failure detected at parse time
+  (§4.1.1 inv 4, §7). The file is well-sized but its contents
+  do not satisfy the `.glibre-trace` schema.
+- **Recovery.** Fail-fast: `Trace::load` returns the error; the
+  runner refuses to install the `ReplayDriver` and never
+  advances a frame. Operator hint names the offending offset
+  / op id / schema version where known. Suggested remediation
+  is to re-record the trace under the current schema; there
+  is no in-place migration (the spec rejects partial-trace
+  recovery — §4.1.1 inv 4).
+- **Severity.** `error`.
+- **Trace outcome.** `Aborted`.
+
+#### 10.2.3 `TraceTruncated`
+
+- **Trigger.** The on-disk file is shorter than the declared
+  header length, lacks a footer, ends mid-op, or is missing
+  the terminating `End` op (§4.1.4). Distinguished from
+  `TraceFormatInvalid` because the bytes that *are* present
+  pass schema validation; the file simply stops early.
+- **Recovery.** Fail-fast: `Trace::load` returns the error
+  before `TraceRunner::run` sees the trace. The runner refuses
+  to drive a partial trace — there is no "best-effort up to
+  truncation" mode. Operator hint names the last
+  successfully-parsed `FrameIndex`. Suggested remediation is
+  to re-capture the trace from the editor; if the truncation
+  is a `TraceWriter` bug, the report is filed against `tools`,
+  not e2e.
+- **Severity.** `error`.
+- **Trace outcome.** `Aborted`.
+
+#### 10.2.4 `GoldenMissing`
+
+- **Trigger.** A `GoldenRef` cited by an `AssertScreenshot` or
+  `AssertEcsSnapshot` (or any future golden-backed `AssertKind`)
+  has no file at the resolved `GoldenStore`-relative path at
+  gate time (§4.1.10 inv 2, §4.1.3 inv 3). Verified up-front
+  during `ClosureGate` pre-flight, before the frame loop starts;
+  the runner refuses to evaluate a trace whose goldens are not
+  on disk.
+- **Recovery.** Fail-fast: the runner refuses the run; report is
+  `Aborted`. Log payload carries the offending `GoldenRef`.
+  **Operator hint: invoke the explicit `golden-update` workflow
+  to materialise the missing reference.** The hint names the
+  exact CLI invocation (e.g. `glibre e2e golden-update --trace
+  <path> --assert <id>`); the workflow is the only path that
+  may write into `GoldenStore` (§4.1.10 inv 1). Authoring a new
+  golden is a deliberate human review step, never automatic.
+- **Severity.** `error`.
+- **Trace outcome.** `Aborted`.
+
+#### 10.2.5 `GoldenMismatch{kind}`
+
+- **Trigger.** A golden-backed assert (`AssertScreenshot`,
+  `AssertEcsSnapshot`) ran, its capture differed from the
+  reference under the configured `PixelTolerance` (screenshots)
+  or byte-equal predicate (ECS snapshots), and a diff artefact
+  has been written to the run's artefact bundle. `kind` is the
+  `AssertKind` discriminator (`Screenshot`, `EcsSnapshot`).
+- **Recovery.** The trace fails; remaining ops still execute up
+  to the trace's terminating `End` op so the report can capture
+  every divergence in one run (the runner does not short-circuit
+  on the first mismatch — see §4.1.7 / §6 replay loop). Each
+  mismatch publishes its diff (PNG diff for screenshots,
+  Fory-decoded structural diff for ECS snapshots) to the
+  `TraceReport.artefacts` bundle. **Operator hint: review the
+  diff, decide intent, and either fix the regression or
+  re-bless the golden via the `golden-update` workflow.** The
+  hint distinguishes "regression" (operator fixes engine code)
+  from "intentional change" (operator runs `golden-update`
+  with explicit `--accept`); auto-update is forbidden.
+- **Severity.** `error`.
+- **Trace outcome.** `Failed` (verdict reached; report includes
+  every `GoldenMismatch` and `AssertFailed` collected during
+  the run).
+
+#### 10.2.6 `AssertFailed{kind}`
+
+- **Trigger.** A non-golden-backed assert evaluated to false at
+  its recorded `FrameIndex`. `kind` is `State` (component or
+  resource path predicate, §4.1.6) or `LogContains` (substring
+  / regex over the structured log channel between the previous
+  assert and this frame, §4.1.6).
+- **Recovery.** The trace fails; remaining ops still execute up
+  to `End` to surface every failing assert in one run. Payload
+  carries the failing `AssertOpId`, the recorded `FrameIndex`,
+  the `AssertKind`, and an `ArtefactRef` to the captured slice
+  (component-path-and-value blob for `State`; log slice for
+  `LogContains`). Operator hint names the `AssertOpId`; there
+  is **no** `golden-update` suggestion — non-golden asserts
+  encode their expected value inside the trace itself, so the
+  remediation is either a code fix or a re-recorded trace via
+  `TraceWriter`, not a golden re-bless.
+- **Severity.** `error`.
+- **Trace outcome.** `Failed`.
+
+#### 10.2.7 `InjectionLayerRefused`
+
+- **Trigger.** The `RunnerHost` tag (`dev-headless`,
+  `dev-interactive`, `ci-headless`, `ci-isolated`) does not
+  permit the requested `InjectionLayer` (`InProcess`,
+  `PerProcess`, `OsAutomation`). Most concrete instance:
+  `OsAutomation` is requested on any host other than
+  `ci-isolated` (§3.2 #2 collapse, §4.1.8). The pairing is
+  validated up-front; the layer is never installed for an
+  illegal pair.
+- **Recovery.** **Refuse run:** the runner aborts before
+  driving a single frame; report is `Aborted`. Log payload
+  names the offending `(RunnerHost, InjectionLayer)` pair.
+  Operator hint depends on the pair: developer-host refusals
+  point the operator at re-running under `ci-isolated` (or
+  switching to an `InProcess` trace where applicable);
+  CI-runner refusals indicate a misconfigured workflow and
+  point the operator at the policy file. No `golden-update`
+  hint — this is a host-policy decision, not a content
+  problem.
+- **Severity.** `warn` — refusal is the system enforcing its
+  policy correctly, not a bug. The trace still does not pass.
+- **Trace outcome.** `Aborted`.
+
+#### 10.2.8 `RunnerHostUnsupported`
+
+- **Trigger.** The detected `RunnerHost` is one this build of
+  the runner does not support at all (e.g. an unrecognised CI
+  environment, or a `dev-interactive` host on a platform
+  whose `PerProcess` injection bridge has not yet shipped —
+  macOS `CGEventPostToPid`, Windows `PostMessage`, Linux
+  `xdotool --window` are the only currently-supported
+  bridges, §4.1.8). Distinguished from `InjectionLayerRefused`:
+  the layer/host pair is not merely *forbidden* by policy, the
+  host is *unknown* to the runner.
+- **Recovery.** **Refuse run:** the runner aborts before
+  installing any layer; report is `Aborted`. Log payload names
+  the detected `RunnerHost` value. Operator hint points at
+  the supported host list and at the platform-bridge issue
+  tracker; no `golden-update` is offered.
+- **Severity.** `warn` — same reasoning as
+  `InjectionLayerRefused`: the system is correctly refusing an
+  unsupported configuration.
+- **Trace outcome.** `Aborted`.
+
+#### 10.2.9 `FrameSkew`
+
+- **Trigger.** Replay frame index drift detected during the
+  frame loop: the runner's monotonic `FrameIndex` counter does
+  not match the `FrameIndex` the next op claims, in either
+  direction (the next op's index is behind the live counter,
+  or ahead by more than the trace's own gap). This is the
+  load-bearing determinism check — frame-equal replay is the
+  whole reason e2e exists (§4.1.3 inv 1). Examples: an op's
+  recorded index is below the current live index (impossible
+  under deterministic replay; indicates the engine consumed
+  more frames than the trace recorded), or the live counter
+  has overshot the next op's index without the trace having
+  emitted the expected `Input`s in between.
+- **Recovery.** Fail-fast: the runner aborts the frame loop at
+  the moment of detection; report is `Failed` (the divergence
+  is itself a verdict, not a refusal). Payload carries
+  `(expected, observed)` `FrameIndex` values. The runner
+  publishes a `DivergenceReport` (§4.1.11) when run in compare
+  mode (`run_with_compare`, §5.11) so the first differing
+  frame is named. Operator hint names the suspected
+  determinism break: non-deterministic plugin code, wall-clock
+  consultation, mismatched RNG seed, or a `RealDriver`
+  installed where `ReplayDriver` was required. No
+  `golden-update` hint — a frame-skew failure is a code-side
+  determinism bug and goldens are not the lever.
+- **Severity.** `error`.
+- **Trace outcome.** `Failed`.
+
+### 10.3 Reporting and CI contract
+
+1. **All e2e errors fail the trace.** No arm is recoverable in
+   the sense of "trace passes anyway"; every arm sets
+   `TraceReport.status` to either `Failed` (a verdict) or
+   `Aborted` (a pre-flight refusal), and `ClosureGate` treats
+   both as non-`Passed` and refuses to flip `qa-ready`
+   (§4.1.14 inv 1).
+2. **CI exit code is the public contract.** The runner's
+   process exit code is `TraceRunner::exit_code(err)` for
+   non-zero failures and `0` for `Passed`. CI gates on this
+   exit code alone; logs and artefacts are diagnostic, not
+   gate inputs.
+3. **One `glibre::log_error` call per error, at the boundary
+   that handles it** (error-model § Logging / Telemetry rule
+   1). The runner is the handler for every `e2e::Error`
+   raised inside its scope; it logs once, attaches the
+   structured fields above, and returns the value to its
+   caller (`ClosureGate` or the CLI).
+4. **Manual-test PASS rule unaffected by failures.** A red
+   trace does not move the user-story; it leaves it in
+   whatever state the prior run had set (`AGENTS.md` § User
+   Story closure). Only a green CI run *plus* a manual PASS
+   comment closes a story. Failures never auto-close; failures
+   never auto-open; failures never auto-flip labels other than
+   removing `qa-ready` if it had been set by an earlier
+   ClosureGate evaluation.
+
+### 10.4 Out of scope
+
+The following deliberately do **not** appear as `e2e::Error`
+arms:
+
+- Network failures, scheduler errors, OOM — those are core or
+  platform errors and surface via the engine-wide `glibre::Error`
+  variant from their owning context (`reviews/decisions/error-model.md`
+  composition rule 1: per-context enums are leaves). E2e never
+  re-types another context's failure.
+- Performance regressions (frame-time, memory) — the
+  `benchmarks` context owns those (§3.3); e2e asserts
+  behavioural equivalence, not speed.
+- Crash dumps as a verdict — under the present taxonomy a
+  crash of the binary under test surfaces as a host-detected
+  process exit, captured by the runner's wrapper logic. The
+  precise mapping from crash to trace verdict is a §6 / §7
+  internal-architecture concern (see §6 plugin-process
+  supervision), not a public `e2e::Error` arm.
 
 ## 11. Acceptance Criteria
 
