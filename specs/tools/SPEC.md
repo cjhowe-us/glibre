@@ -990,11 +990,1042 @@ public boundary at the seams between them:
 
 ## 5. Public Interface
 
+The header stub below is the §5 deliverable: every symbol that crosses
+the `tools` plugin's public boundary, declared in one C++23 header and
+verified clean under
+`clang++ -std=c++23 -fsyntax-only -Wall -Wextra -Wpedantic`. Bodies live
+inside the tools dylib; this header is the contract every caller (the
+embedded `core::World`, `render`'s extract slot, `content`'s listing
+surface, `data`'s `ReflectionBlob`, the E2E runner that consumes
+`.glibre-trace` files) compiles against. Cross-context invariants
+embedded here:
+
+- Every fallible operation returns `glibre::Result<T>` per
+  `reviews/decisions/error-model.md`. The tools-internal `Error` enum
+  is the closed sum named in §2 / §4 and rolled into `glibre::Error`'s
+  variant by `core` once the data context lands the central registry.
+- Aggregates listed in §4 (`EditorHost`, `Layout` /
+  `LayoutProfile` / `Panel` / `Viewport`, `SceneTree` / `Selection`,
+  `Inspector` / `InspectorView` / `ReflectedField`, `Gizmo` /
+  `GizmoFrame` / `GizmoConstraint` / `Snap`, `AssetBrowser` /
+  `AssetThumbnail`, `EditCommand` / `CommandStack` / `Transaction`,
+  `Toolbar` / `PlayPauseStep`, `TraceRecorder` / `TraceFile`) are
+  forward-declared classes whose layout is owned inside the plugin.
+  Callers manipulate them only through the methods exposed below.
+- The reflection-driven `Inspector` reads component bytes solely via
+  the data context's `ReflectionBlob` (§4.4 inv. 1 / §4.10 inv. 4); no
+  raw `T*` references to game-world storage cross this header.
+- `EditCommand` is a sealed sum over a small closed payload set
+  (component edit / entity add / entity remove / parent change / asset
+  slot bind); `CommandStack` is the single edit pipeline (§4.10 inv. 3)
+  and the only writer to game-world storage from inside tools.
+- `GizmoFrame` and `GizmoConstraint` are closed enums; widening them is
+  an ABI bump.
+- `TraceRecorder` is a write-only side channel — its surface exposes
+  no read path (§4.9 inv. 1, §4.10 inv. 5); replay is owned by
+  `specs/e2e/SPEC.md`.
+
+The header has no Fory-serialised event types in MVP — the editor
+republishes through `core`'s typed `EditorEvent` bus rather than a
+second bus (§3.2 collapse #9), and the only persistent on-disk artifact
+the editor authors is the `.glibre-trace` `TraceFile` (schema co-owned
+with `specs/e2e/SPEC.md`) plus the user's `LayoutProfile` JSON whose
+versioned schema is migrated by `data`.
+
 ```cpp
-// header-only stub goes here
+// SPDX-License-Identifier: Apache-2.0
+// glibre — tools plugin public interface (header-only stub).
+//
+// This file is the §5 deliverable of `specs/tools/SPEC.md`. It declares
+// every symbol crossing the tools plugin's public boundary. The bodies
+// live inside the tools dylib; this header is the contract every caller
+// (core / render / content / data / platform / e2e) compiles against.
+//
+// Cross-context invariants embedded here:
+//   * Every fallible call returns `glibre::Result<T>` per
+//     `reviews/decisions/error-model.md`. `-fno-exceptions` is enforced
+//     globally (the editor's ImGui interop carve-out converts at the
+//     module boundary before crossing this header).
+//   * Aggregates are opaque — `EditorHost`, `Layout`, `Panel`,
+//     `Viewport`, `Inspector`, `Gizmo`, `AssetBrowser`, `CommandStack`,
+//     `Transaction`, `Toolbar`, `TraceRecorder`, `TraceFile` are
+//     forward-declared classes whose layout is owned inside the plugin.
+//   * Inspector reads flow through the data context's `ReflectionBlob`;
+//     this header never exposes raw component pointers.
+//   * `EditCommand` is a sealed sum (closed payload variant) and the
+//     single edit pipeline into game-world storage from inside tools.
+//   * `GizmoFrame` / `GizmoConstraint` / `EditorMode` / `tools::Error`
+//     are closed enums — widening any of them is an ABI bump.
+//   * `TraceRecorder` is write-only; replay is owned by `specs/e2e`.
+//
+// This stub compiles standalone with
+// `clang++ -std=c++23 -fsyntax-only -Wall -Wextra -Wpedantic`.
+
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <functional>
+#include <memory>
+#include <span>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include <variant>
+#include <vector>
+
+// ---------------------------------------------------------------------------
+// Stand-in declarations from sibling contexts. The real definitions live
+// in `core/include/glibre/error.hpp`, `core/include/glibre/core/world.hpp`,
+// `data/include/glibre/types/reflection.hpp`, etc.; this header forward-
+// declares them so the stub compiles in isolation. The implementation .cpp
+// files include the real headers, not these stubs.
+// ---------------------------------------------------------------------------
+
+#if !defined(GLIBRE_HAVE_CORE_ERROR)
+namespace glibre {
+
+namespace core {
+enum class Error : std::uint16_t {
+    EntityStale,
+    EntityForeignWorld,
+    HierarchyCycle,
+    TypeUnregistered,
+    TypeRegistryClosed,
+    ScheduleAccessConflict,
+    SystemScheduleCycle,
+    FramePhaseMisordered,
+    AssetStale,
+    CommandBufferOverflow,
+    PluginAbiHashMismatch,
+    PluginInitFailed,
+    HotReload,
+    SchemaMigrationFailed,
+    OutOfBudget,
+};
+}  // namespace core
+
+struct ErrorContext {
+    std::string_view file{};
+    int              line{0};
+    std::string_view detail{};
+};
+
+class Error {
+public:
+    using Variant = std::variant<core::Error /*, tools::Error inserted in core */>;
+
+    template <class E>
+    constexpr Error(E e, ErrorContext ctx = {}) noexcept
+        : variant_{e}, ctx_{ctx} {}
+
+    constexpr const Variant&      code()  const noexcept { return variant_; }
+    constexpr const ErrorContext& where() const noexcept { return ctx_; }
+
+private:
+    Variant      variant_;
+    ErrorContext ctx_;
+};
+
+template <class T>
+using Result = std::expected<T, Error>;
+
+}  // namespace glibre
+#endif  // GLIBRE_HAVE_CORE_ERROR
+
+#if !defined(GLIBRE_HAVE_CORE_WORLD)
+namespace glibre::core {
+
+// Opaque ECS world handle. The editor borrows two: the dedicated
+// EditorWorld (constructed at plugin init) and the embedded GameWorld
+// (registered by the host runtime). Both are forward-declared; this
+// header touches them only by reference.
+class World;
+
+// Opaque per-world entity handle. The (index, generation) split is
+// private to core; tools compares and stores by value. Cross-world
+// passes are rejected at every public boundary with
+// `core::Error::EntityForeignWorld`.
+struct Entity {
+    std::uint64_t bits{0};
+    friend constexpr bool operator==(Entity, Entity) noexcept = default;
+};
+
+// Codegen-emitted stable component identifier. Listed by the type
+// registry; tools never invents new TypeId values.
+struct TypeId {
+    std::uint64_t value{0};
+    friend constexpr bool operator==(TypeId, TypeId) noexcept = default;
+};
+
+}  // namespace glibre::core
+#endif  // GLIBRE_HAVE_CORE_WORLD
+
+#if !defined(GLIBRE_HAVE_DATA_REFLECTION)
+namespace glibre::types {
+
+// Subset of `data`'s reflection surface (specs/data/SPEC.md §5)
+// reached by the inspector. Read-only; codegen-emitted; stripped to
+// nullptr in shipping builds.
+struct SchemaId {
+    std::string_view fqn{};
+    constexpr bool operator==(const SchemaId&) const noexcept = default;
+};
+
+using SchemaVersion = std::uint32_t;
+
+struct ReflectionField {
+    std::string_view name{};
+    std::uint16_t    tag{0};
+    std::string_view type_name{};   // builtin or another FQN
+    SchemaVersion    since{0};
+};
+
+struct ReflectionBlob {
+    SchemaId                          schema{};
+    SchemaVersion                     version{0};
+    std::span<const ReflectionField>  fields{};   // tag-sorted ascending
+};
+
+}  // namespace glibre::types
+#endif  // GLIBRE_HAVE_DATA_REFLECTION
+
+#if !defined(GLIBRE_HAVE_PLATFORM_INPUT)
+namespace glibre::platform {
+// Forward-declared opaque InputEvent. The real definition lives in
+// `specs/platform/SPEC.md` §5 as a closed `std::variant` over
+// KeyDown / KeyUp / MouseMove / MouseButtonEv / Wheel / TextInput /
+// GamepadAxisEv / GamepadBtnEv. Tools consumes by const reference.
+struct InputEvent;
+}  // namespace glibre::platform
+#endif  // GLIBRE_HAVE_PLATFORM_INPUT
+
+#if !defined(GLIBRE_HAVE_RENDER_FRAME)
+namespace glibre::render {
+// Forward-declared opaque RenderFrame and TextureId. RenderFrame is the
+// per-frame extract owned by render (specs/render/SPEC.md §4.1.1);
+// tools emits Dear ImGui draw lists into it once per editor frame.
+// `TextureId` is the borrowed opaque texture handle that backs a
+// Viewport blit and an AssetThumbnail.
+class RenderFrame;
+struct TextureId {
+    std::uint64_t bits{0};
+    friend constexpr bool operator==(TextureId, TextureId) noexcept = default;
+};
+}  // namespace glibre::render
+#endif  // GLIBRE_HAVE_RENDER_FRAME
+
+#if !defined(GLIBRE_HAVE_CONTENT_ASSET)
+namespace glibre::content {
+// Type-erased asset handle. The real `AssetHandle<T>` template lives in
+// `specs/content/SPEC.md` §5; the editor stores type-erased bits in the
+// drag-payload + thumbnail LRU and rebinds the typed view at the
+// `Inspector` slot only when an `EditCommand` applies.
+struct AssetHandle {
+    std::uint64_t bits{0};
+    friend constexpr bool operator==(AssetHandle, AssetHandle) noexcept = default;
+};
+}  // namespace glibre::content
+#endif  // GLIBRE_HAVE_CONTENT_ASSET
+
+namespace glibre::tools {
+
+// ---------------------------------------------------------------------------
+// 5.1 tools::Error — closed sum of every failure mode at a public
+//     tools boundary (named in §2 and rolled up in §10). Adding a
+//     variant is an ABI bump per error-model.md §"Composition Rules" #5.
+// ---------------------------------------------------------------------------
+
+enum class Error : std::uint16_t {
+    LayoutLoadFailed,        // §4.2 inv. 2 / inv. 3 — malformed JSON, unknown panel id, partial apply.
+    TraceWriteFailed,        // §4.9 inv. 3      — over-budget or backing-store error.
+    InspectorUnknownType,    // §4.4 inv. 3      — registry has no descriptor for the (Type, Field).
+    CommandConflict,         // §4.7 inv. 2 / §4.2 inv. 1 — apply/undo not inverse, or panel-id collision.
+    Refused,                 // catch-all closed-sum refusal arm — concurrent drag, second viewport, mode-change races.
+};
+
+[[nodiscard]] constexpr std::string_view to_string(Error e) noexcept;
+
+// ---------------------------------------------------------------------------
+// 5.2 EditorMode — closed sum (§4.1 inv. 2, §4.10 inv. 2). Drives whether
+//     the embedded GameWorld's FrameLoop advances and whether
+//     TraceRecorder captures ops. `Step` is a one-shot mode that
+//     advances exactly one game-world frame and reverts to `Paused`.
+// ---------------------------------------------------------------------------
+
+enum class EditorMode : std::uint8_t {
+    Edit,
+    Play,
+    Paused,
+    Step,
+    Recording,
+};
+
+[[nodiscard]] constexpr std::string_view to_string(EditorMode m) noexcept;
+
+// ---------------------------------------------------------------------------
+// 5.3 Stable string id type for Panels and LayoutProfiles.
+//
+// Panel ids and profile names are compile-time-stable tokens; the host
+// stores them by value. Equality is byte-equality of the string view.
+// ---------------------------------------------------------------------------
+
+struct PanelId {
+    std::string_view value{};
+    friend constexpr bool operator==(const PanelId&, const PanelId&) noexcept = default;
+};
+
+struct LayoutProfileName {
+    std::string_view value{};
+    friend constexpr bool operator==(const LayoutProfileName&, const LayoutProfileName&) noexcept = default;
+};
+
+// ---------------------------------------------------------------------------
+// 5.4 Layout / LayoutProfile / Panel / Viewport (§4.2).
+//
+// `Layout` is the versioned-JSON dock-arrangement value object; the
+// concrete shape (splits, sizes, tab groups, floats) is owned inside
+// the plugin. Public callers carry it as opaque bytes — the editor
+// host loads, saves, and switches profiles via the methods below.
+// ---------------------------------------------------------------------------
+
+class Layout;          // opaque value; serialised as versioned JSON
+class LayoutProfile;   // opaque named-Layout slot owned by EditorWorld
+class Panel;           // opaque base for all dockable panels
+class Viewport;        // opaque Viewport — the one panel that blits a
+                       // render-target via a TextureId from `render`
+                       // (multi-viewport refused in MVP per §4.2 inv. 4)
+
+struct PanelDesc {
+    PanelId          id{};
+    std::string_view title{};
+    bool             closeable{true};
+    bool             dockable{true};
+};
+
+// The draw callback is called once per editor frame at extract time
+// (phase 6). It emits Dear ImGui geometry into the host-owned
+// draw-list buffer routed to `render::RenderFrame`; it is forbidden to
+// allocate, mutate game-world storage, or hold engine-wide singletons.
+// Returning an error aborts the panel for this frame; the host logs.
+using PanelDrawFn = std::function<glibre::Result<void>() /* noexcept */>;
+
+// ---------------------------------------------------------------------------
+// 5.5 Selection (§4.3) — deterministically-ordered set of GameWorld
+//     entity ids. Single producer (SceneTree, viewport-pick, marquee
+//     commit, EditCommand undo/redo restoration); deterministic
+//     iteration; never persists to disk. `SelectionChanged` is
+//     published synchronously on every mutation that changes the set.
+// ---------------------------------------------------------------------------
+
+class Selection {
+public:
+    [[nodiscard]] std::span<const glibre::core::Entity> entities() const noexcept;
+    [[nodiscard]] std::size_t                           size()     const noexcept;
+    [[nodiscard]] bool                                  empty()    const noexcept;
+    [[nodiscard]] bool                                  contains(glibre::core::Entity) const noexcept;
+
+    // Hashed snapshot for change-detection / coalescing; stable per
+    // session (insertion-stable iteration, §4.3 inv. 2).
+    [[nodiscard]] std::uint64_t snapshot_hash() const noexcept;
+
+    Selection(const Selection&)            = delete;
+    Selection& operator=(const Selection&) = delete;
+
+protected:
+    Selection() noexcept = default;
+    ~Selection()         = default;
+};
+
+// ---------------------------------------------------------------------------
+// 5.6 SceneTree (§4.3 panel side). Walks the embedded GameWorld's
+//     ChildOf forest and surfaces row clicks as Selection mutations and
+//     parent-change EditCommands; it never mutates ChildOf directly
+//     (§4.3 inv. 5) and never owns Selection (§4.3 inv. 3).
+// ---------------------------------------------------------------------------
+
+class SceneTree {
+public:
+    // Re-walk the embedded GameWorld's hierarchy from the root forest;
+    // idempotent. Called once per panel-frame when the tree is dirty.
+    [[nodiscard]] glibre::Result<void> rebuild() noexcept;
+
+    SceneTree(const SceneTree&)            = delete;
+    SceneTree& operator=(const SceneTree&) = delete;
+
+protected:
+    SceneTree() noexcept = default;
+    ~SceneTree()         = default;
+};
+
+// ---------------------------------------------------------------------------
+// 5.7 Inspector / InspectorView / ReflectedField (§4.4).
+//
+// Reads flow through `glibre::types::ReflectionBlob`; writes return
+// EditCommand values rather than mutating component storage. A
+// ReflectedField with no registry descriptor refuses with
+// `tools::Error::InspectorUnknownType` and the row is omitted.
+// ---------------------------------------------------------------------------
+
+class EditCommand;           // declared in §5.10
+class InspectorView;
+class ReflectedField;
+
+class Inspector {
+public:
+    // Re-build the per-Selection view set. Called once per panel-frame.
+    [[nodiscard]] glibre::Result<void> refresh(const Selection&) noexcept;
+
+    // Number of (Entity, ComponentType) views currently bound. Used by
+    // tests and by the panel-header summary row.
+    [[nodiscard]] std::size_t view_count() const noexcept;
+
+    Inspector(const Inspector&)            = delete;
+    Inspector& operator=(const Inspector&) = delete;
+
+protected:
+    Inspector() noexcept = default;
+    ~Inspector()         = default;
+};
+
+class InspectorView {
+public:
+    [[nodiscard]] glibre::core::Entity                   entity()        const noexcept;
+    [[nodiscard]] glibre::core::TypeId                   component()     const noexcept;
+    [[nodiscard]] const glibre::types::ReflectionBlob*   reflection()    const noexcept;
+    [[nodiscard]] std::span<const ReflectedField>        fields()        const noexcept;
+
+    InspectorView(const InspectorView&)            = delete;
+    InspectorView& operator=(const InspectorView&) = delete;
+
+protected:
+    InspectorView() noexcept = default;
+    ~InspectorView()         = default;
+};
+
+// One row inside an InspectorView. The read closure resolves through
+// the registry's ReflectionBlob accessor; the write closure produces
+// an EditCommand value rather than mutating the component directly.
+class ReflectedField {
+public:
+    [[nodiscard]] std::string_view                     name()      const noexcept;
+    [[nodiscard]] std::string_view                     type_name() const noexcept;
+    [[nodiscard]] std::uint16_t                        tag()       const noexcept;
+
+    // Read the current value as an opaque byte view through the
+    // registry's ReflectionBlob accessor; the bytes are owned by the
+    // game-world component storage and outlive the call only until the
+    // next phase-5 boundary.
+    [[nodiscard]] glibre::Result<std::span<const std::byte>>
+        read() const noexcept;
+
+    // Produce an EditCommand that, when applied, writes `bytes` into
+    // the field. The command flows through CommandStack (§4.7); the
+    // inspector itself never mutates component storage.
+    [[nodiscard]] glibre::Result<EditCommand>
+        write(std::span<const std::byte> bytes) const noexcept;
+
+    ReflectedField(const ReflectedField&)            = delete;
+    ReflectedField& operator=(const ReflectedField&) = delete;
+
+protected:
+    ReflectedField() noexcept = default;
+    ~ReflectedField()         = default;
+};
+
+// ---------------------------------------------------------------------------
+// 5.8 Gizmo / GizmoFrame / GizmoConstraint / Snap (§4.5).
+//
+// Closed sums for mode, frame, and constraint. Drag-commit produces
+// exactly one EditCommand (or one Transaction, multi-entity); aborted
+// drags discard. Snap quantises after frame transform; constraint
+// masks input dimensions, leaving locked axes byte-identical.
+// ---------------------------------------------------------------------------
+
+enum class Gizmo : std::uint8_t {
+    Translate,
+    Rotate,
+    Scale,
+};
+
+enum class GizmoFrame : std::uint8_t {
+    World,
+    Local,
+    Parent,
+};
+
+enum class GizmoConstraint : std::uint8_t {
+    Free,
+    X,
+    Y,
+    Z,
+    XY,
+    XZ,
+    YZ,
+};
+
+[[nodiscard]] constexpr std::string_view to_string(Gizmo)           noexcept;
+[[nodiscard]] constexpr std::string_view to_string(GizmoFrame)      noexcept;
+[[nodiscard]] constexpr std::string_view to_string(GizmoConstraint) noexcept;
+
+// Snap quantisation rule. `mode` selects the active state; the
+// per-axis fields are read only when `mode == UniformPerAxis` /
+// `SinglePerAxis`. Steps are in metres / degrees / dimensionless
+// scale-factor; zero step disables that axis.
+struct Snap {
+    enum class Mode : std::uint8_t {
+        Off,
+        SinglePerAxis,
+        UniformPerAxis,
+    };
+
+    Mode  mode{Mode::Off};
+    float position_step_metres{0.0f};
+    float rotation_step_degrees{0.0f};
+    float scale_step{0.0f};
+
+    friend constexpr bool operator==(const Snap&, const Snap&) noexcept = default;
+};
+
+class GizmoController {
+public:
+    // Active mode / frame / constraint / snap. These are configuration
+    // resources persisted in user prefs (§4.5).
+    [[nodiscard]] Gizmo            mode()        const noexcept;
+    [[nodiscard]] GizmoFrame       frame()       const noexcept;
+    [[nodiscard]] GizmoConstraint  constraint()  const noexcept;
+    [[nodiscard]] Snap             snap()        const noexcept;
+
+    [[nodiscard]] glibre::Result<void> set_mode(Gizmo)                 noexcept;
+    [[nodiscard]] glibre::Result<void> set_frame(GizmoFrame)           noexcept;
+    [[nodiscard]] glibre::Result<void> set_constraint(GizmoConstraint) noexcept;
+    [[nodiscard]] glibre::Result<void> set_snap(Snap)                  noexcept;
+
+    // True iff a drag is in flight; concurrent drag attempts return
+    // `tools::Error::Refused` (§4.5 inv. 4).
+    [[nodiscard]] bool dragging() const noexcept;
+
+    GizmoController(const GizmoController&)            = delete;
+    GizmoController& operator=(const GizmoController&) = delete;
+
+protected:
+    GizmoController() noexcept = default;
+    ~GizmoController()         = default;
+};
+
+// ---------------------------------------------------------------------------
+// 5.9 AssetBrowser / AssetThumbnail (§4.6).
+//
+// Read-only over the project tree. Drops produce EditCommand values.
+// Thumbnails carry a borrowed render::TextureId and a source-asset
+// hash for cheap cache invalidation; eviction never invalidates a
+// drag in progress (§4.6 inv. 5).
+// ---------------------------------------------------------------------------
+
+struct AssetThumbnail {
+    glibre::content::AssetHandle source{};
+    glibre::render::TextureId    texture{};
+    std::uint64_t                source_hash{0};
+    std::uint16_t                width{0};
+    std::uint16_t                height{0};
+};
+
+class AssetBrowser {
+public:
+    // Read-only listing of paths surfaced by `content` rooted at
+    // `subpath`. Returns a borrowed view valid until the next refresh.
+    [[nodiscard]] glibre::Result<std::span<const glibre::content::AssetHandle>>
+        list(std::string_view subpath) const noexcept;
+
+    // Look up the cached thumbnail for `handle`; returns nullptr if
+    // not yet captured. Capture is scheduled by the editor and
+    // performed by render's capture-to-texture path.
+    [[nodiscard]] const AssetThumbnail*
+        thumbnail_for(glibre::content::AssetHandle handle) const noexcept;
+
+    // Pin / unpin a thumbnail entry (§4.6 inv. 5 — drag in flight).
+    // Pinned entries are never evicted by LRU pressure.
+    [[nodiscard]] glibre::Result<void>
+        pin(glibre::content::AssetHandle handle) noexcept;
+    [[nodiscard]] glibre::Result<void>
+        unpin(glibre::content::AssetHandle handle) noexcept;
+
+    AssetBrowser(const AssetBrowser&)            = delete;
+    AssetBrowser& operator=(const AssetBrowser&) = delete;
+
+protected:
+    AssetBrowser() noexcept = default;
+    ~AssetBrowser()         = default;
+};
+
+// ---------------------------------------------------------------------------
+// 5.10 EditCommand / CommandStack / Transaction (§4.7).
+//
+// EditCommand is a sealed sum over the closed payload set named in §4.7
+// Composition; CommandStack is the single edit pipeline (§4.10 inv. 3)
+// and the only writer to GameWorld storage from inside tools.
+// `apply` and `undo` are inverse functions of the (GameWorld, Selection)
+// pair (§4.7 inv. 2); violation refuses commit with CommandConflict.
+// ---------------------------------------------------------------------------
+
+namespace edit {
+
+// One byte-buffer payload + the type id it targets — used by
+// `ComponentEdit`, `AssetSlotBind`, and any future field-level
+// EditCommand subtype that carries Fory-encoded bytes.
+struct ComponentEdit {
+    glibre::core::Entity   entity{};
+    glibre::core::TypeId   component{};
+    std::vector<std::byte> previous_bytes{};
+    std::vector<std::byte> next_bytes{};
+};
+
+struct EntityAddComponent {
+    glibre::core::TypeId   component{};
+    std::vector<std::byte> bytes{};
+};
+
+struct EntityAdd {
+    glibre::core::Entity            parent{};   // optional; bits == 0 means root
+    std::vector<EntityAddComponent> components{};
+};
+
+struct EntityRemove {
+    glibre::core::Entity entity{};
+};
+
+struct ParentChange {
+    glibre::core::Entity child{};
+    glibre::core::Entity old_parent{};   // bits == 0 means was root
+    glibre::core::Entity new_parent{};   // bits == 0 means becomes root
+};
+
+struct AssetSlotBind {
+    glibre::core::Entity         entity{};
+    glibre::core::TypeId         component{};
+    std::uint16_t                field_tag{0};
+    glibre::content::AssetHandle previous{};
+    glibre::content::AssetHandle next{};
+};
+
+}  // namespace edit
+
+using EditCommandPayload = std::variant<
+    edit::ComponentEdit,
+    edit::EntityAdd,
+    edit::EntityRemove,
+    edit::ParentChange,
+    edit::AssetSlotBind>;
+
+// Pre/post Selection snapshot — captured by every EditCommand so undo
+// and redo restore selection deterministically (§4.7 inv. 5).
+struct SelectionSnapshot {
+    std::uint64_t                                hash{0};
+    std::vector<glibre::core::Entity>            entities{};
+};
+
+class EditCommand {
+public:
+    [[nodiscard]] const EditCommandPayload&    payload()        const noexcept;
+    [[nodiscard]] std::size_t                  byte_estimate()  const noexcept;
+    [[nodiscard]] const SelectionSnapshot&     pre_selection()  const noexcept;
+    [[nodiscard]] const SelectionSnapshot&     post_selection() const noexcept;
+
+    // Optional coalesce predicate — when present, the stack may merge
+    // `*this` with a successor command of the same shape (e.g.
+    // sliding the gizmo continuously). Predicate must be pure and
+    // deterministic.
+    [[nodiscard]] bool coalesces_with(const EditCommand& next) const noexcept;
+
+    EditCommand(const EditCommand&)            = default;
+    EditCommand& operator=(const EditCommand&) = default;
+    EditCommand(EditCommand&&) noexcept            = default;
+    EditCommand& operator=(EditCommand&&) noexcept = default;
+    ~EditCommand()                                 = default;
+
+protected:
+    EditCommand() noexcept = default;
+};
+
+class CommandStack;
+
+// RAII grouping handle (§4.7 inv. 3). begin() opens a transaction;
+// every push during its lifetime appends to a private buffer;
+// commit() atomically promotes the buffer to one stack entry; abort()
+// discards. A transaction in flight refuses any direct push to the
+// stack (push-while-grouped routes to the transaction buffer).
+class Transaction {
+public:
+    [[nodiscard]] glibre::Result<void> push(EditCommand cmd) noexcept;
+    [[nodiscard]] glibre::Result<void> commit()              noexcept;
+    void                               abort()               noexcept;
+
+    [[nodiscard]] bool active() const noexcept;
+
+    Transaction(const Transaction&)            = delete;
+    Transaction& operator=(const Transaction&) = delete;
+    Transaction(Transaction&&) noexcept;
+    Transaction& operator=(Transaction&&) noexcept;
+    ~Transaction();
+
+protected:
+    Transaction() noexcept = default;
+    friend class CommandStack;
+};
+
+class CommandStack {
+public:
+    // Push, undo, redo are O(1) amortised on the contiguous stack.
+    [[nodiscard]] glibre::Result<void> push(EditCommand cmd) noexcept;
+    [[nodiscard]] glibre::Result<void> undo()                noexcept;
+    [[nodiscard]] glibre::Result<void> redo()                noexcept;
+
+    // Open a transaction; while one is active, push() routes into it.
+    [[nodiscard]] glibre::Result<Transaction> begin_transaction() noexcept;
+
+    [[nodiscard]] std::size_t   undo_depth()    const noexcept;
+    [[nodiscard]] std::size_t   redo_depth()    const noexcept;
+    [[nodiscard]] std::size_t   bytes_in_use()  const noexcept;
+    [[nodiscard]] std::size_t   byte_budget()   const noexcept;
+
+    CommandStack(const CommandStack&)            = delete;
+    CommandStack& operator=(const CommandStack&) = delete;
+
+protected:
+    CommandStack() noexcept = default;
+    ~CommandStack()         = default;
+};
+
+// ---------------------------------------------------------------------------
+// 5.11 Toolbar / PlayPauseStep (§4.8).
+//
+// PlayPauseStep is the only legitimate EditorMode writer outside the
+// trace recorder. The toolbar reads-and-mutates Gizmo configuration and
+// reads TraceRecorder state; it never owns either.
+// ---------------------------------------------------------------------------
+
+class Toolbar {
+public:
+    [[nodiscard]] glibre::Result<void> press_play()  noexcept;
+    [[nodiscard]] glibre::Result<void> press_pause() noexcept;
+    // Step is a no-op outside Paused (§4.8 inv. 2).
+    [[nodiscard]] glibre::Result<void> press_step()  noexcept;
+
+    // Read-only mode mirror.
+    [[nodiscard]] EditorMode current_mode() const noexcept;
+
+    // Gizmo configuration shortcuts — delegate to GizmoController.
+    [[nodiscard]] glibre::Result<void> set_gizmo_mode(Gizmo)             noexcept;
+    [[nodiscard]] glibre::Result<void> set_gizmo_frame(GizmoFrame)       noexcept;
+    [[nodiscard]] glibre::Result<void> set_snap(Snap)                    noexcept;
+
+    Toolbar(const Toolbar&)            = delete;
+    Toolbar& operator=(const Toolbar&) = delete;
+
+protected:
+    Toolbar() noexcept = default;
+    ~Toolbar()         = default;
+};
+
+// ---------------------------------------------------------------------------
+// 5.12 TraceRecorder / TraceFile (§4.9).
+//
+// Write-only side channel. Capture is non-perturbing (§4.9 inv. 1).
+// Replay is owned by `specs/e2e/SPEC.md` — this header exposes no
+// read path. `TraceFile` is the on-disk artifact; tools authors it,
+// the E2E runner consumes it.
+// ---------------------------------------------------------------------------
+
+namespace trace {
+
+struct InputEventOp {
+    std::uint64_t                       tick{0};
+    const glibre::platform::InputEvent* event{nullptr};   // borrowed
+};
+
+struct SchedulerTickOp {
+    std::uint64_t tick{0};
+};
+
+struct AssertionOp {
+    std::uint64_t              tick{0};
+    glibre::core::Entity       entity{};
+    glibre::core::TypeId       component{};
+    std::uint16_t              field_tag{0};
+    std::span<const std::byte> expected_bytes{};
+};
+
+struct SelectionOp {
+    std::uint64_t                         tick{0};
+    std::span<const glibre::core::Entity> entities{};
+};
+
+struct CommandPushOp {
+    std::uint64_t      tick{0};
+    const EditCommand* command{nullptr};   // borrowed
+};
+
+}  // namespace trace
+
+using TraceOp = std::variant<
+    trace::InputEventOp,
+    trace::SchedulerTickOp,
+    trace::AssertionOp,
+    trace::SelectionOp,
+    trace::CommandPushOp>;
+
+// Append-only writer interface — opening a TraceFile truncates an
+// existing file; subsequent writes are append-only and never seek
+// backwards (§4.9 inv. 2). Bounded write latency per op is enforced
+// at runtime; over-budget writes return TraceWriteFailed and the
+// recorder exits Recording mode (§4.9 inv. 3).
+class TraceFile {
+public:
+    // Open a new recording; truncates if `path` already exists.
+    [[nodiscard]] static glibre::Result<std::unique_ptr<TraceFile>>
+        open_for_write(std::string_view path) noexcept;
+
+    // Append a single op. Serialisation is Fory-archived; schema
+    // version is co-owned with `specs/e2e/SPEC.md`.
+    [[nodiscard]] glibre::Result<void> append(const TraceOp& op) noexcept;
+
+    // Flush + close. Aborted recordings (process crash before close)
+    // leave a truncated but well-formed prefix file.
+    [[nodiscard]] glibre::Result<void> close() noexcept;
+
+    [[nodiscard]] std::string_view path()    const noexcept;
+    [[nodiscard]] std::uint64_t   op_count() const noexcept;
+
+    TraceFile(const TraceFile&)            = delete;
+    TraceFile& operator=(const TraceFile&) = delete;
+    TraceFile(TraceFile&&) noexcept;
+    TraceFile& operator=(TraceFile&&) noexcept;
+    virtual ~TraceFile();
+
+protected:
+    TraceFile() noexcept = default;
+};
+
+class TraceRecorder {
+public:
+    // True iff EditorMode == Recording and a TraceFile is open.
+    [[nodiscard]] bool recording() const noexcept;
+
+    // Begin a recording; writes a fresh TraceFile prefix and
+    // transitions EditorMode → Recording (§4.9 inv. 5 — the recorder
+    // is the only EditorMode writer outside the toolbar).
+    [[nodiscard]] glibre::Result<void> begin(std::string_view path) noexcept;
+
+    // End a recording; closes the TraceFile and transitions back to
+    // the previous EditorMode (typically Edit).
+    [[nodiscard]] glibre::Result<void> end() noexcept;
+
+    // Configure which assertion templates to capture. Capture is
+    // non-perturbing (§4.9 inv. 1) — assertion templates are
+    // evaluated against ReflectionBlob views, never against raw
+    // pointers.
+    struct AssertionTemplate {
+        glibre::core::Entity entity{};
+        glibre::core::TypeId component{};
+        std::uint16_t        field_tag{0};
+    };
+    [[nodiscard]] glibre::Result<void>
+        set_assertion_templates(std::span<const AssertionTemplate>) noexcept;
+
+    TraceRecorder(const TraceRecorder&)            = delete;
+    TraceRecorder& operator=(const TraceRecorder&) = delete;
+
+protected:
+    TraceRecorder() noexcept = default;
+    ~TraceRecorder()         = default;
+};
+
+// ---------------------------------------------------------------------------
+// 5.13 EditorEvent — typed sum republished through `core`'s ECS event
+//      bus (§3.2 collapse #9 — tools never owns a second bus).
+//      Listed here so plugin subscribers compile against one closed sum.
+// ---------------------------------------------------------------------------
+
+namespace events {
+
+struct SelectionChanged { std::uint64_t snapshot_hash{0}; };
+struct ModeChanged      { EditorMode previous{EditorMode::Edit}; EditorMode current{EditorMode::Edit}; };
+struct LayoutSwitched   { LayoutProfileName previous{}; LayoutProfileName current{}; };
+struct TraceStarted     { std::string_view path{}; };
+struct TraceStopped     { std::string_view path{}; std::uint64_t op_count{0}; };
+struct CommandPushed    { std::size_t undo_depth{0}; std::size_t redo_depth{0}; };
+struct CommandUndone    { std::size_t undo_depth{0}; std::size_t redo_depth{0}; };
+
+}  // namespace events
+
+using EditorEvent = std::variant<
+    events::SelectionChanged,
+    events::ModeChanged,
+    events::LayoutSwitched,
+    events::TraceStarted,
+    events::TraceStopped,
+    events::CommandPushed,
+    events::CommandUndone>;
+
+// ---------------------------------------------------------------------------
+// 5.14 EditorHost — aggregate root (§4.1).
+//
+// Owns the disjoint EditorWorld and a borrowed reference to the embedded
+// GameWorld. Toggles GameWorld scheduling through EditorMode transitions
+// at the phase-9 boundary (§4.1 inv. 3); never registers editor-only
+// components onto the GameWorld.
+// ---------------------------------------------------------------------------
+
+struct EditorHostDesc {
+    // Borrowed reference to the engine's game World. Tools never
+    // takes ownership; lifetime is managed by the host runtime.
+    glibre::core::World* game_world{nullptr};
+
+    // Optional path to the LayoutProfile JSON the editor loads at
+    // startup; empty = ship default.
+    std::string_view startup_profile_path{};
+};
+
+class EditorHost {
+public:
+    // Construct the host. Spawns the dedicated EditorWorld and binds
+    // `game_world`. Registers the default Panel set (Scene, Inspector,
+    // Assets, Console, Profiler, Viewport, Toolbar). Returns a host
+    // handle whose lifetime spans plugin load → unload.
+    [[nodiscard]] static glibre::Result<std::unique_ptr<EditorHost>>
+        create(const EditorHostDesc& desc) noexcept;
+
+    // World accessors. The EditorWorld is owned by the host and
+    // distinct from the game world (§4.1 inv. 1). Cross-world
+    // Entity passes are rejected with `core::Error::EntityForeignWorld`.
+    [[nodiscard]] glibre::core::World&       editor_world()       noexcept;
+    [[nodiscard]] const glibre::core::World& editor_world() const noexcept;
+
+    [[nodiscard]] glibre::core::World&       game_world()       noexcept;
+    [[nodiscard]] const glibre::core::World& game_world() const noexcept;
+
+    // Mode mirror — write-side lives on Toolbar / TraceRecorder
+    // (§4.10 inv. 2). Reads here are O(1).
+    [[nodiscard]] EditorMode mode() const noexcept;
+
+    // Sub-aggregate accessors — all references are stable across
+    // hot-reload of every plugin other than tools itself (§4.10 inv. 9).
+    [[nodiscard]] Selection&        selection()        noexcept;
+    [[nodiscard]] SceneTree&        scene_tree()       noexcept;
+    [[nodiscard]] Inspector&        inspector()        noexcept;
+    [[nodiscard]] GizmoController&  gizmo()            noexcept;
+    [[nodiscard]] AssetBrowser&     asset_browser()    noexcept;
+    [[nodiscard]] CommandStack&     command_stack()    noexcept;
+    [[nodiscard]] Toolbar&          toolbar()          noexcept;
+    [[nodiscard]] TraceRecorder&    trace_recorder()   noexcept;
+
+    // Panel registration — every dockable Panel registers a stable id
+    // and a draw closure; re-registering a known id refuses with
+    // `tools::Error::CommandConflict` (§4.2 inv. 1).
+    [[nodiscard]] glibre::Result<void>
+        register_panel(const PanelDesc& desc, PanelDrawFn draw) noexcept;
+
+    [[nodiscard]] glibre::Result<void>
+        unregister_panel(PanelId id) noexcept;
+
+    // LayoutProfile activation — atomic and lossless. On success the
+    // `LayoutSwitched` event is emitted; on failure the previous
+    // active layout is preserved and `LayoutLoadFailed` is returned
+    // (§4.2 inv. 3).
+    [[nodiscard]] glibre::Result<void>
+        activate_profile(LayoutProfileName name) noexcept;
+
+    [[nodiscard]] glibre::Result<void>
+        save_profile(LayoutProfileName name, std::string_view path) noexcept;
+
+    [[nodiscard]] glibre::Result<void>
+        load_profile(LayoutProfileName name, std::string_view path) noexcept;
+
+    // Per-frame entry. Called by the engine plugin manifest at the
+    // editor world's phase boundaries; it drains the input pump,
+    // runs panel-frame draw closures, emits Dear ImGui draw lists into
+    // `render::RenderFrame` exactly once (§4.1 inv. 4 / §4.10 inv. 7),
+    // and applies any phase-9 EditorMode transition.
+    [[nodiscard]] glibre::Result<void>
+        tick(glibre::render::RenderFrame& extract,
+             std::span<const glibre::platform::InputEvent> input) noexcept;
+
+    EditorHost(const EditorHost&)            = delete;
+    EditorHost& operator=(const EditorHost&) = delete;
+    virtual ~EditorHost();
+
+protected:
+    EditorHost() noexcept = default;
+};
+
+}  // namespace glibre::tools
 ```
 
-Event types, serialized schemas (Fory), error types.
+### 5.1 Events
+
+The editor publishes the closed `EditorEvent` sum declared above
+through `core`'s ECS event bus — there is no second bus
+(§3.2 collapse #9). Subscribers consume the sum by `std::visit` and
+match exhaustively; adding a variant is an ABI bump per
+`reviews/decisions/error-model.md` §"Composition Rules" #5. Tools is a
+producer of `EditorEvent`; its only consumers in MVP are tools itself
+(panels reading `SelectionChanged` / `ModeChanged`) and the E2E runner
+(which observes `TraceStarted` / `TraceStopped` to align replay with
+recording).
+
+### 5.2 Serialised schemas (Fory)
+
+The editor authors two persistent on-disk artifacts; both go through
+`data`'s Fory codegen pipeline (`reviews/decisions/fory-codegen.md`).
+
+- `data/schemas/tools/LayoutProfile.fory` — the versioned dock-arrangement
+  JSON described in §4.2. Schema version is monotonic; loaders accept
+  the current version and any older version reachable through `data`'s
+  migration table. Malformed or unknown-future-version documents refuse
+  load with `tools::Error::LayoutLoadFailed` and the previous active
+  layout is preserved (§4.2 inv. 2 / inv. 3).
+- `data/schemas/tools/TraceFile.fory` — the `.glibre-trace` artifact
+  declared in §4.9. Schema is co-owned with `specs/e2e/SPEC.md` and
+  versioned identically; older recordings replay through the same
+  migration table. The on-disk shape is an append-only sequence of
+  Fory-archived `TraceOp` envelopes prefixed by one schema-version
+  header (the only non-append write, on `open_for_write`).
+
+The `EditorEvent` sum is not persisted; it lives only on `core`'s
+in-memory event bus per PHILOSOPHY anti-pattern §"serialised event
+streams are not engine artifacts". `Selection` is also non-persistent
+across sessions (§4.3 inv. 2). `EditCommand` payloads carry typed
+component bytes that are themselves Fory-encoded by the originating
+context's schema; tools never invents a parallel encoding.
+
+### 5.3 Error types
+
+The closed sum is `glibre::tools::Error` declared above. Each arm maps
+to one §4 invariant:
+
+| Arm                     | Raised when                                                                         | Origin                            |
+|-------------------------|-------------------------------------------------------------------------------------|-----------------------------------|
+| `LayoutLoadFailed`      | malformed JSON, unknown panel id, schema version unreachable, partial profile apply | §4.2 inv. 2 / inv. 3              |
+| `TraceWriteFailed`      | `TraceFile::append` exceeds the §9 latency budget or the backing store errors       | §4.9 inv. 3                       |
+| `InspectorUnknownType`  | `Inspector::refresh` finds a `(Type, Field)` with no registry descriptor            | §4.4 inv. 3                       |
+| `CommandConflict`       | `apply` / `undo` not inverse, or panel-id collision on register                     | §4.2 inv. 1, §4.7 inv. 2          |
+| `Refused`               | concurrent gizmo drag, second viewport register, mode-change race                   | §4.2 inv. 4, §4.5 inv. 4, §4.10   |
+
+These arms wrap into `glibre::Error` via the central registry in
+`core` per `reviews/decisions/error-model.md` §"Composition Rules" #2;
+no other context's error enum nests inside `tools::Error`. Cross-context
+failures (e.g. `core::Error::EntityForeignWorld` from a stale Selection
+entity) are translated at the call site that crosses the boundary —
+the inspector / scene-tree / gizmo paths each map inner enumerators
+into their own `Error` arm where the §4 invariants demand it, and pass
+through the inner `glibre::Error` value otherwise.
+
+Verification: the stub above compiles clean under
+`clang++ -std=c++23 -fsyntax-only -Wall -Wextra -Wpedantic` on the
+toolchain documented in `reviews/decisions/fory-codegen.md` §"Open
+Questions" #4 (libc++ as shipped with macOS Xcode 15 / Homebrew-LLVM).
 
 ## 6. Internal Architecture
 
