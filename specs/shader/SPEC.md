@@ -55,8 +55,122 @@ Terms used unchanged in code.
 
 ## 3. Derived From
 
-Harmonius requirement IDs / file paths cited as research input. Note any
-collapse decisions (multiple harmonius concepts → one glibre primitive).
+Harmonius is unreliable prior art — its files were mined as research input
+only. Every conclusion below is independently re-derived against glibre's
+philosophy (SOLID, SRP, codegen-everywhere, zero runtime reflection in
+shipping). Citations name the harmonius source paragraph, not its
+authority.
+
+### Cited harmonius sources
+
+| Harmonius source | Path | What we mined |
+|------------------|------|---------------|
+| Shader Variants Design | `docs/design/rendering/shader-variants.md` | 4-axis permutation key `(ShadingModel, ShaderFeatures, RenderPath, Lod)`; per-axis enumerations; bitset feature dimension; precompile + on-demand-compile split; usage-metric-driven precompile list; pak-bundle layout. |
+| Shader Variants Test Cases | `docs/design/rendering/shader-variants-test-cases.md` | Concrete invariants (deterministic key hash, bit-stable ordering, dimension cardinalities, budget-fail-build behavior). |
+| GPU Abstraction Layer Reqs | `docs/requirements/rendering/gpu-abstraction-layer.md` § R-2.1.16 / R-2.1.17 / R-2.1.18 | Four descriptor-frequency groups (PerFrame / PerPass / PerMaterial / PerDraw); HLSL → DXIL + SPIR-V + metallib via DXC and metal-shaderconverter as **CLI subprocesses**; **no runtime shader compilation in shipping**; structured errors at every public boundary. |
+| GPU Runtime Reqs (GR) | `docs/requirements/rendering/gpu-abstraction.md` GR-2 / GR-4 | Confirmed that state-cache responsibilities (binding caches, push-constant caches) live in `render`, not `shader` — they consume reflection but don't produce it. |
+| Render Pipeline Design | `docs/design/rendering/render-pipeline.md` § "Shader Compilation Pipeline" + § "Descriptor Layout Inference" | Single HLSL front-end; DXC produces DXIL + SPIR-V; metal-shaderconverter consumes DXIL to emit metallib (DXIL is the pivot, not a parallel back-end); descriptor layout / bindings inferred from compiled-bytecode reflection. |
+| Pipeline State Cache Design | `docs/design/rendering/pipeline-state-cache.md` R-2.3.9.2 / R-2.3.9.8 | PSO key composes shader hash with device fingerprint (PSO cache lives in `render`); descriptor layout is inferred from DXIL/SPIR-V reflection **once** and cached — confirms reflection is a `shader`-context output, not a render-thread runtime job. |
+| Advanced Materials Reqs | `docs/requirements/rendering/advanced-materials.md` R-2.12.9 | Custom material graphs **codegen HLSL** consumed by this same DXC pipeline; the `material` context emits HLSL into `shader`'s front door — confirms HLSL is the engine-wide source-of-truth shader language. |
+| Rendering Core Design | `docs/design/rendering/rendering-core.md` Material System | `Material` references a `ShaderPermutationCache` keyed by `PermutationKey`; `ShadingModel` enum is the same axis used here. Confirms `render` and `material` both consume artifacts keyed by `PermutationKey`. |
+| Render Pipeline Design — RF-9 | `docs/design/rendering/render-pipeline.md` § RF-9 | Hot-reload re-runs reflection on new bytecode so descriptor layout stays in sync. Adopted as the `shader`-context hot-reload contract obligation; the runtime PSO-invalidate side belongs to `render`. |
+
+### Occam collapses (multiple harmonius concepts → one glibre primitive)
+
+1. **Shader source language: many → one (HLSL via DXC).** Harmonius's
+   advanced-materials text waves at HLSL as the lingua franca but its
+   broader render docs and assorted prior tooling left ambiguous room
+   for Slang front-ends, MSL hand-authored shaders, and direct GLSL
+   paths. Glibre collapses to **HLSL only** at the source layer and a
+   single tool pipeline:
+
+   ```text
+   HLSL ─► DXC ─► DXIL ─► metal-shaderconverter ─► metallib
+                        │
+                        └► SPIR-V (DXC --target spirv)
+   ```
+
+   Slang remains a *future research seed* via HLSL's Slang-compatible
+   subset, but no Slang front-end is adopted today. MSL is never
+   hand-authored. GLSL is rejected outright. Justification: SRP — one
+   front-end, one error vocabulary, one reflection format. (PHILOSOPHY
+   §1, §10.)
+
+2. **Shader permutation schemes: many → one 4D key.** Harmonius
+   gestured at per-feature `#ifdef` flags, `ShaderFeatures` bitsets,
+   `ShadingModel` enums, render-path enums, and LOD tiers as
+   independent permutation mechanisms scattered across the variant
+   doc and the rendering-core material system. Glibre collapses them
+   into the **single primitive** `Permutation Key = (ShadingModel,
+   FeatureSet, RenderPath, LODTier)` defined in §2. All four axes are
+   closed enums / bitsets known at codegen time; the cross-product is
+   finite, enumerable, and the sole cache key for shader artifacts.
+   Any axis growth requires a spec amendment, never an ad-hoc
+   `#define`.
+
+3. **Compiler invocation models: many → one (subprocess CLI).**
+   Harmonius's GR-1 through GR-4 implied either in-process linkage or
+   subprocess invocation depending on which paragraph one read.
+   Glibre collapses to **subprocess CLI only** for both DXC and
+   metal-shaderconverter — never linked in-process, never run on the
+   render thread. Justification: SRP for plugin boundaries (no DXC
+   ABI bleed into core) and determinism (subprocess sandbox + content
+   hash on inputs gives reproducible artifacts).
+
+4. **Reflection sources: many → one (DXIL/SPIR-V post-compile
+   reflection).** Harmonius mentioned three reflection paths
+   (DXC-produced DXIL metadata, SPIR-V cross-reflection, Metal IR
+   inspection). Glibre collapses to **a single reflection pass over
+   compiled bytecode** (DXIL preferred, SPIR-V as the secondary
+   source) producing one canonical `Reflection` record per artifact.
+   metallib is treated as terminal output, never re-reflected — its
+   binding layout is derived from the upstream DXIL reflection that
+   metal-shaderconverter preserves.
+
+5. **Descriptor-frequency taxonomy: keep harmonius's four groups
+   verbatim.** Harmonius R-2.1.16 named four frequency groups
+   (PerFrame, PerPass, PerMaterial, PerDraw). Independently
+   re-derived: any finer split overfits one backend; coarser loses
+   per-material change-rate information. Adopted unchanged as the §2
+   `Descriptor Frequency Group` enum. (Not a collapse so much as a
+   non-rejection — recorded here for traceability.)
+
+### Refusals (what `shader` does **not** own, despite harmonius prose)
+
+1. **Render-graph topology and pass scheduling.** Harmonius's
+   render-pipeline doc tangled shader compilation into the render
+   graph. Glibre keeps `shader` purely offline: the render graph,
+   barrier analysis, queue scheduling, and execution-plan compilation
+   live entirely in `render`. The `shader` context's only handoff to
+   `render` is the artifact + reflection blob.
+
+2. **Material-graph nodes and visual authoring.** Harmonius
+   `advanced-materials.md` R-2.12.9 lets material graphs codegen HLSL
+   *into* this pipeline. That codegen lives in the `material` context
+   (visual nodes, node-type registry, graph compilation to HLSL).
+   `shader` consumes the resulting HLSL like any other shader source —
+   it does not author or own material-graph node semantics.
+
+3. **Runtime shader compilation in shipping.** Harmonius's
+   shader-variants doc included an `OnDemandCompiler` runtime path.
+   Glibre **rejects** this for shipping builds: shipping ships only
+   precompiled artifacts loaded by handle, full stop. Editor / dev
+   builds may invoke the same offline pipeline on save, but this is a
+   tooling path, not a runtime path. Gating: `#if GLIBRE_SHIPPING` at
+   plugin manifest level — the runtime DXC subprocess code is
+   excluded from the shipping `shader` plugin entirely. (PHILOSOPHY
+   §6: "zero runtime reflection in shipping builds" extended to zero
+   runtime compilation.)
+
+4. **PSO objects and runtime binding.** PSO creation, root-signature
+   binding, and command encoding live in `render`. The `shader`
+   context produces the **inputs** (bytecode + reflection-derived
+   descriptor layouts and root-signature schemas); `render` builds
+   PSOs from those inputs.
+
+5. **GPU resource allocation, mesh / meshlet data.** Resource heaps,
+   sub-allocation, and meshlet buffers belong to `render` and
+   `geometry` respectively. `shader` never touches GPU memory.
 
 ## 4. Aggregates & Invariants
 
