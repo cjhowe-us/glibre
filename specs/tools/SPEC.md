@@ -2033,7 +2033,611 @@ Non-binding sketch for implementers.
 
 ## 7. Persistence & Schemas
 
-Fory schemas. Migration rules.
+Tools' persistence surface is intentionally narrow. The shell holds a
+great deal of in-memory state (`Selection`, `CommandStack`, `Gizmo`
+configuration, `Toolbar` mode mirror, `AssetThumbnail` LRU,
+`ReflectionBlob` views, `EditorEvent` republish queue) but **persists
+only what survives across editor-process lifetimes**: layout profiles,
+the project-rooted scene reference document, the per-session command
+journal envelope, and the user keymap. Per-frame artefacts and live
+ECS data are runtime-only and never serialised by tools.
+
+Tools **never invents a parallel encoding** for game-world component
+bytes. `EditCommand` payloads, scene component slots, and inspector
+field reads all flow through the originating context's Fory schemas
+(via `data`'s middleman dylib per `reviews/decisions/fory-codegen.md`).
+The schemas below are the *envelopes* tools owns — the structural
+spine that wraps opaque, plugin-owned payload bytes.
+
+All schemas are authored as `data/schemas/tools/<Type>.fory` files per
+`reviews/decisions/fory-codegen.md` and compile into the `glibre-types`
+middleman dylib. FQNs are `glibre.tools.<Type>`. Each schema ships
+with at least one Catch2 round-trip test under
+`tests/data/schemas/tools/<Type>.cpp` per the data SPEC §7 mandate.
+Cross-context: `TraceFile` (§4.9) is **owned by `specs/e2e/SPEC.md`**;
+its `.fory` schema lives at `data/schemas/e2e/TraceFile.fory` and is
+not enumerated here. Tools writes `TraceOp` envelopes through the e2e
+schema; this section enumerates only schemas tools authors.
+
+### 7.1 Persistent types
+
+#### 7.1.1 `LayoutProfile` — named dock arrangement
+
+**File:** `data/schemas/tools/LayoutProfile.fory`
+**FQN:** `glibre.tools.LayoutProfile`
+**Lifetime scope:** per-user, per-project; written by the editor on
+profile save, read at editor startup and on profile-switch (§4.2).
+Stored under `<project-root>/.glibre/tools/layouts/<profile_name>.fory`.
+
+```fory
+schema glibre.tools.LayoutProfile {
+  version  1
+  since    "0.1.0"
+
+  field profile_name   : string             tag 1 since 1
+  field schema_version : u32                tag 2 since 1
+  field root_split     : DockSplit          tag 3 since 1
+  field floats         : list<FloatingPanel> tag 4 since 1
+  field active_tabs    : list<ActiveTab>    tag 5 since 1
+  field active_viewport_id : string         tag 6 since 1   default ""
+}
+
+schema glibre.tools.DockSplit {
+  version 1
+  since   "0.1.0"
+
+  field axis     : u8           tag 1 since 1                  // 0=horiz, 1=vert, 2=leaf
+  field ratio    : f32          tag 2 since 1   default 0.5
+  field children : list<DockSplit> tag 3 since 1
+  field panel_id : string       tag 4 since 1   default ""     // populated only on leaves
+}
+
+schema glibre.tools.FloatingPanel {
+  version 1
+  since   "0.1.0"
+
+  field panel_id : string tag 1 since 1
+  field x        : f32    tag 2 since 1
+  field y        : f32    tag 3 since 1
+  field width    : f32    tag 4 since 1
+  field height   : f32    tag 5 since 1
+}
+
+schema glibre.tools.ActiveTab {
+  version 1
+  since   "0.1.0"
+
+  field dock_path : string tag 1 since 1                     // canonical "/0/1/2" descent
+  field panel_id  : string tag 2 since 1
+}
+```
+
+**Invariants** (echo §4.2 invariants 1-3):
+
+1. **Stable panel-id closure.** Every `panel_id` referenced (in
+   `DockSplit` leaves, `FloatingPanel` entries, `ActiveTab` entries,
+   and `active_viewport_id`) resolves to a panel registered in the
+   current host's panel registry at load time. Unknown ids refuse
+   load with `tools::Error::LayoutLoadFailed` and the prior active
+   layout is preserved (§4.2 inv. 1).
+2. **Versioned, monotonic.** `schema_version` mirrors the schema's
+   own `version` field for forward-compat handshake. Loaders accept
+   the current version and any older version reachable through the
+   `data` migration table; an unknown future version refuses load
+   (§4.2 inv. 2).
+3. **No partial apply.** The loader either materialises every dock
+   split, every floating panel, every active-tab record, and the
+   viewport selection wholesale, or it leaves the previous active
+   layout intact and returns `tools::Error::LayoutLoadFailed`
+   (§4.2 inv. 3). Round-trip golden tests assert byte equality of
+   `(load(write(p)) == p)` for every shipped profile fixture.
+4. **DockSplit is a closed-recursive value.** A leaf (`axis == 2`)
+   carries a non-empty `panel_id` and an empty `children` list; an
+   internal node carries an empty `panel_id` and a non-empty
+   `children` list. Mixed nodes refuse decode with
+   `tools::Error::LayoutLoadFailed`. The recursion terminates by
+   construction at a host-configured depth cap (mirrors the §9
+   layout depth budget cell).
+5. **Per-user, per-project; not transferred via game-state save.**
+   `LayoutProfile` files live alongside the project on the local
+   filesystem; they are not shipped inside `Scene` and never enter
+   the `glibre_types_abi_hash` payload digest (the schema does
+   contribute to `glibre_types_abi_hash` per §4.4 of the data spec —
+   the *files* do not).
+
+#### 7.1.2 `Scene` — tools-side scene reference document
+
+**File:** `data/schemas/tools/Scene.fory`
+**FQN:** `glibre.tools.Scene`
+**Lifetime scope:** per-project, per-named-scene; written on scene
+save from the toolbar, read at scene-open. Stored under
+`<project-root>/scenes/<scene_name>.fory`.
+
+The `Scene` is the **tools-side root document** that anchors a named
+ECS world snapshot. **It does not own component payloads.** Game-world
+ECS component bytes live in plugin-owned schemas under
+`data/schemas/<owning-context>/<Type>.fory` (e.g. `core::Transform`,
+`render::MeshHandle`, `physics::RigidBody`); `Scene` persists only the
+**structural references** (entity ids, parent links, component-slot
+references by `(TypeId, payload-bytes)` pair) plus the editor-side
+metadata that the shell needs to re-open the scene in the same visual
+state (last selection, last camera, last layout-profile binding).
+
+The split is load-bearing: every domain plugin retains authority over
+its own component encoding (PHILOSOPHY §3 — minimal core, plugin-only
+growth), and tools' `Scene` document is a thin index that points at
+those payloads. `Scene` is therefore an envelope, not a serializer.
+
+```fory
+schema glibre.tools.Scene {
+  version  1
+  since    "0.1.0"
+
+  field scene_name        : string             tag 1 since 1
+  field schema_version    : u32                tag 2 since 1
+  field game_types_abi    : bytes              tag 3 since 1   // 32-byte blake3
+  field entities          : list<EntityRecord> tag 4 since 1
+  field root_entity_ids   : list<u64>          tag 5 since 1
+  field saved_selection   : list<u64>          tag 6 since 1
+  field saved_layout_ref  : string             tag 7 since 1   default ""
+  field saved_viewport    : ViewportPose       tag 8 since 1
+}
+
+schema glibre.tools.EntityRecord {
+  version 1
+  since   "0.1.0"
+
+  field entity_id      : u64                  tag 1 since 1
+  field parent_id      : u64                  tag 2 since 1   default 0   // 0 == root
+  field child_order    : u32                  tag 3 since 1
+  field components     : list<ComponentSlot>  tag 4 since 1
+  field bookmark_label : string               tag 5 since 1   default ""
+}
+
+schema glibre.tools.ComponentSlot {
+  version 1
+  since   "0.1.0"
+
+  field type_id        : u64    tag 1 since 1
+  field payload_schema : string tag 2 since 1                // FQN of the plugin-owned schema
+  field payload_version : u32   tag 3 since 1
+  field payload_bytes  : bytes  tag 4 since 1                // opaque to tools
+}
+
+schema glibre.tools.ViewportPose {
+  version 1
+  since   "0.1.0"
+
+  field eye_x   : f32 tag 1 since 1
+  field eye_y   : f32 tag 2 since 1
+  field eye_z   : f32 tag 3 since 1
+  field pitch   : f32 tag 4 since 1
+  field yaw     : f32 tag 5 since 1
+  field fov_deg : f32 tag 6 since 1   default 60.0
+}
+
+```
+
+**Invariants:**
+
+1. **Structural references only — payloads are opaque.** Tools never
+   decodes `payload_bytes`. On scene-open, tools enumerates each
+   `ComponentSlot`, looks up `(payload_schema, payload_version)` in
+   the `data` `SchemaRegistry`, and dispatches the bytes through the
+   middleman's per-type `deserialize_<fqn>` entry point (which may
+   migrate). Unknown `payload_schema` returns
+   `tools::Error::InspectorUnknownType` (the same closed-sum arm
+   §4.4 inv. 3 already names) and the slot is dropped from the
+   loaded scene with a diagnostics-sink warning; the scene still
+   loads with the remaining slots present. This is **not** a
+   half-applied scene — entities with at least one missing slot are
+   loaded; `LoadFailed` is reserved for envelope-level corruption.
+2. **`game_types_abi` is advisory provenance, not a load gate.**
+   The hash records the middleman ABI used at write time. A mismatch
+   at load is **not** a refusal — the per-slot `(payload_schema,
+   payload_version)` migration path in invariant 1 already handles
+   schema evolution. The hash exists for diagnostics-sink reporting
+   and for the e2e trace replay seam (§4.9) which uses byte-equal
+   provenance to assert deterministic replay.
+3. **Selection persistence is best-effort.** `saved_selection` lists
+   entity ids that may or may not still resolve in the current load
+   (a plugin upgrade may have removed an entity). Unresolvable ids
+   are dropped silently and a single `EditorEvent::SelectionChanged`
+   fires after load (§4.3 inv. 1 — stale handles scrub at the next
+   selection-event boundary). `saved_selection` is **not** the same
+   as live cross-session selection; the §4.3 inv. 2 promise that
+   selection does not persist holds for the run-to-run editor
+   resource. `Scene` carries it explicitly as one document field for
+   user convenience, not as a `Selection` resource snapshot.
+4. **`saved_layout_ref` is a `LayoutProfile` name, not an inline
+   layout.** A `Scene` references a layout profile by name (defined
+   in §7.1.1); the empty string means "use the user's current
+   active profile". Inline layout payload inside `Scene` is refused
+   by codegen — the two schemas compose by reference, not by
+   embedding, so layout edits and scene edits stay independent edit
+   trails (§4.10 inv. 3 — one edit pipeline, scoped per aggregate).
+5. **Per-project scope; cross-machine portable.** A `Scene` file is
+   meaningful when paired with the same set of plugin dylibs (which
+   own the payload schemas). Moving a scene to a host with a
+   different middleman ABI hash is supported through the per-slot
+   migration path; moving it to a host missing a payload's owning
+   plugin yields per-slot `InspectorUnknownType` warnings per
+   invariant 1.
+6. **No engine resource pointers.** `Scene` carries no `RenderProxy`,
+   no `World*`, no GPU handle — those are runtime-only (§3.3 → render).
+   Every reference is by stable id (`Entity::bits`, `TypeId::value`,
+   string `panel_id`).
+
+#### 7.1.3 `CommandJournal` — opaque command-payload envelope
+
+**File:** `data/schemas/tools/CommandJournal.fory`
+**FQN:** `glibre.tools.CommandJournal`
+**Lifetime scope:** per-session (in-memory) and per-recording (when
+the `TraceRecorder` is active). The `CommandStack`'s in-memory
+representation persists across plugin hot-reload of `tools` itself
+(§4.10 inv. 9) by serialising through this envelope. **On-disk
+persistence of the full journal is deferred post-MVP** per §3.2
+collapse #6; the schema is defined now so:
+
+- (a) `TraceRecorder` (§4.9) can capture `EditCommand` push events as
+  `CommandJournalEntry` records inside the e2e trace stream.
+- (b) The hot-reload path drains and re-hydrates the `CommandStack`
+  through the envelope without inventing an ad-hoc wire format
+  (`reviews/decisions/hot-reload-protocol.md`).
+- (c) The post-MVP on-disk-history feature flips one boolean and
+  reuses this schema unchanged.
+
+```fory
+schema glibre.tools.CommandJournal {
+  version  1
+  since    "0.1.0"
+
+  field session_id  : u64                          tag 1 since 1
+  field cursor      : u32                          tag 2 since 1
+  field undo_depth  : u32                          tag 3 since 1
+  field redo_depth  : u32                          tag 4 since 1
+  field byte_budget : u64                          tag 5 since 1
+  field entries     : list<CommandJournalEntry>    tag 6 since 1
+}
+
+schema glibre.tools.CommandJournalEntry {
+  version 1
+  since   "0.1.0"
+
+  field sequence       : u64               tag 1 since 1
+  field group_id       : u64               tag 2 since 1   default 0   // 0 == not grouped
+  field kind           : u8                tag 3 since 1               // CommandKind discriminant
+  field payload_bytes  : bytes             tag 4 since 1               // Fory-encoded payload, kind-determined
+  field pre_selection  : SelectionSnapshot tag 5 since 1
+  field post_selection : SelectionSnapshot tag 6 since 1
+  field byte_estimate  : u64               tag 7 since 1
+  field timestamp_ns   : u64               tag 8 since 1
+}
+
+schema glibre.tools.SelectionSnapshot {
+  version 1
+  since   "0.1.0"
+
+  field hash     : u64       tag 1 since 1
+  field entities : list<u64> tag 2 since 1                            // Entity::bits values
+}
+```
+
+**`CommandKind` (closed sum, mirrors §5 `EditCommandPayload`).**
+The `kind` byte is a stable u8 discriminant matching the variant order
+of the `EditCommandPayload` `std::variant` declared in §5.10:
+
+| `kind` value | Variant                  | `payload_bytes` schema FQN                  |
+|--------------|--------------------------|---------------------------------------------|
+| 0            | `edit::ComponentEdit`    | `glibre.tools.ComponentEditPayload`         |
+| 1            | `edit::EntityAdd`        | `glibre.tools.EntityAddPayload`             |
+| 2            | `edit::EntityRemove`     | `glibre.tools.EntityRemovePayload`          |
+| 3            | `edit::ParentChange`     | `glibre.tools.ParentChangePayload`          |
+| 4            | `edit::AssetSlotBind`    | `glibre.tools.AssetSlotBindPayload`         |
+
+Each `<Variant>Payload` is its own `data/schemas/tools/<Variant>Payload.fory`
+(elided here for brevity; their shape mirrors the §5.10 structs by
+field). Tools owns the **envelope** schema; the `*Payload` schemas wrap
+plugin-owned component byte spans (`previous_bytes` / `next_bytes`
+inside `ComponentEditPayload`, etc.). The component bytes themselves
+are opaque to tools and decoded only by the originating context's
+schema at apply / undo time.
+
+**Invariants:**
+
+1. **Closed-sum `kind`.** `kind` values outside the table above
+   refuse decode with `tools::Error::CommandConflict` (the same arm
+   §4.7 inv. 2 already names — apply / undo non-inverse and
+   structural malformation share a refusal arm). Adding a sixth
+   variant requires a coordinated codegen bump (see §7.2.3).
+2. **Opaque payload bytes; tools never decodes.** Tools knows the
+   payload's schema FQN and version (via the kind table) but decodes
+   bytes only at `apply()` / `undo()` time inside the receiving
+   context's territory. A `CommandJournalEntry` whose
+   `payload_bytes` cannot be decoded by the receiving context
+   surfaces as `core::Error::SchemaMigrationFailed` from the
+   `data` middleman, which tools translates into
+   `tools::Error::CommandConflict` at the stack boundary (§4.7
+   inv. 2 — apply / undo not inverse implies pre-state cannot be
+   reconstructed).
+3. **Sequence is monotonic per session.** `sequence` strictly
+   increases with push order; `cursor` partitions
+   `entries[..cursor)` (the undo half) from `entries[cursor..)`
+   (the redo half) per §4.7 inv. 1. Decode rejects out-of-order
+   `sequence` values.
+4. **Group membership encodes `Transaction`.** Entries sharing a
+   non-zero `group_id` form one atomic undo step (§4.7 inv. 3); the
+   stack treats them as a single user-visible operation. A
+   `group_id == 0` entry is ungrouped. Mixed grouped /ungrouped
+   contiguity is allowed; sparse `group_id` values are allowed
+   (gaps from coalesce eviction).
+5. **`byte_estimate` is advisory, not a checksum.** It mirrors the
+   in-memory `EditCommand::byte_estimate()` for budget-cap accounting
+   only. It is **not** validated against `payload_bytes.size()` at
+   decode (the relationship is lossy because Fory's tagged-binary
+   encoding adds per-field overhead the in-memory estimate ignores).
+6. **`SelectionSnapshot` round-trips Selection's `hash + entities`
+   pair byte-equal.** `hash` is the deterministic order-stable hash
+   of `entities` (§4.3 inv. 2). Decode rejects entries whose
+   computed hash mismatches the stored hash with
+   `tools::Error::CommandConflict` — the snapshot is then untrustable
+   for `apply()` / `undo()` selection restoration.
+7. **Not on disk in MVP.** No editor binary in MVP writes a
+   `CommandJournal` file to disk. The schema's only live readers are
+   (a) the e2e `TraceRecorder` (§4.9) — which writes
+   `CommandJournalEntry` records inside the `.glibre-trace` stream,
+   not standalone files — and (b) the hot-reload barrier (§8) which
+   serialises the in-memory journal to a heap arena for swap
+   survival. Post-MVP enables a `<project-root>/.glibre/tools/journal/`
+   directory; the schema does not change when that flag flips.
+
+#### 7.1.4 `Shortcuts` — keymap binding actions to chords
+
+**File:** `data/schemas/tools/Shortcuts.fory`
+**FQN:** `glibre.tools.Shortcuts`
+**Lifetime scope:** per-user, project-agnostic by default with
+optional project-level overrides. Stored under
+`<user-data>/glibre/tools/shortcuts.fory` (default ring) and
+`<project-root>/.glibre/tools/shortcuts.fory` (project override).
+Read at editor startup; written on user-binding edit.
+
+```fory
+schema glibre.tools.Shortcuts {
+  version  1
+  since    "0.1.0"
+
+  field schema_version : u32                tag 1 since 1
+  field profile_name   : string             tag 2 since 1   default "default"
+  field bindings       : list<KeyBinding>   tag 3 since 1
+  field disabled       : list<string>       tag 4 since 1               // action ids whose default is suppressed
+}
+
+schema glibre.tools.KeyBinding {
+  version 1
+  since   "0.1.0"
+
+  field action_id : string tag 1 since 1                              // e.g. "tools.command.undo"
+  field chord     : Chord  tag 2 since 1
+}
+
+schema glibre.tools.Chord {
+  version 1
+  since   "0.1.0"
+
+  field modifier_mask : u8     tag 1 since 1                          // bit-OR of Modifier flags
+  field key           : u32    tag 2 since 1                          // platform::Key ordinal
+  field repeats       : bool   tag 3 since 1   default true
+}
+```
+
+**`Modifier` flags:** `Ctrl=1, Shift=2, Alt=4, Cmd=8` (bit positions
+mirror `glibre::platform::Modifier`; bit additions are append-only —
+see §7.2.4 below).
+
+**Invariants:**
+
+1. **Action id closure.** Every `action_id` in `bindings` resolves to
+   an action registered with the host's action registry at load
+   time. Unknown ids are dropped from the loaded keymap with a
+   diagnostics-sink warning; the load itself does not fail (a
+   stale binding is a soft failure — the user can still use the
+   editor). This is **not** the same closure rule as `LayoutProfile`
+   panel ids (§7.1.1 inv. 1) where unknown ids fail the load: a
+   shortcut with no action is a no-op; a layout with an unknown
+   panel breaks the dock graph.
+2. **Chord uniqueness.** Within one `Shortcuts` document, no two
+   `KeyBinding` entries share the same `(modifier_mask, key)` pair.
+   Duplicate chords refuse decode with
+   `tools::Error::CommandConflict` (a chord collision is structurally
+   identical to a panel-id collision — same closed-sum refusal arm,
+   per §4.2 inv. 1).
+3. **Override layering.** When a project-level `shortcuts.fory`
+   exists, it layers over the user-default ring: project bindings
+   replace the user default for the same `action_id`; project
+   `disabled` entries suppress the user default. The merged result
+   is the live keymap; neither file is mutated by the merge.
+4. **Closed-sum modifier set.** `modifier_mask` bits beyond the four
+   defined flags refuse decode (`tools::Error::CommandConflict`).
+   Adding a new modifier (e.g. a future `Hyper`) is an additive
+   schema change per §7.2.4.
+5. **Versioned, monotonic.** `schema_version` mirrors the schema's
+   own `version` field; loaders accept the current version and any
+   older version reachable through the `data` migration table; an
+   unknown future version refuses load with
+   `tools::Error::LayoutLoadFailed` (the same arm
+   `LayoutProfile` uses; both are versioned-config-load failures).
+
+### 7.2 Migration rules
+
+Per `reviews/decisions/fory-codegen.md` §"Migration Mechanic", every
+schema-version bump emits a generated dispatcher hookup. Tools owns
+the migration *bodies* for the types above; their *plumbing* is
+generated. Migration bodies live under
+`src/tools/migrations/<type>_v<N>_to_v<N+1>.cpp`.
+
+#### 7.2.1 `LayoutProfile` migrations — additive only
+
+Layout profiles follow the **additive defaulted-field** pattern:
+
+1. **N → N+1 adds a field at a new tag.** Default value defined in
+   the schema; codegen synthesises the default at deserialise time
+   when the payload omits the new field (Fory's `since` clause). No
+   migration body required; the codegen tool emits
+   `migrate_LayoutProfile_v<N>_to_v<N+1>` as the identity mapping
+   with default-fill. Examples that fit this rule: a future
+   `accent_color`, `panel_pinned`, `tab_overflow_strategy`.
+2. **N → N+1 adds a new variant to `DockSplit::axis` or any other
+   embedded closed-sum byte.** Treated as additive when the new
+   variant has a representable default that older code can ignore
+   (typically not the case — closed-sum bumps usually need a body).
+   When a body is required: the migration synthesises the variant
+   into a representable older shape (e.g. a new `axis` variant
+   collapses to a horizontal split) and the previous behaviour is
+   preserved.
+3. **N → N+1 changes the meaning of an existing field.** Treated as
+   breaking. The schema bumps to a new major; tools commits to
+   **no breaking layout changes inside MVP**. The migration body
+   lives in `src/tools/migrations/layout_profile_v<N>_to_v<N+1>.cpp`
+   and is reviewed against §4.2 inv. 3 (no half-applied profile).
+4. **N → N+1 removes a field.** Tag becomes `reserved`; never
+   reused. Codegen rejects reuse at generation time per data SPEC
+   §7. The migration body discards the value with a diagnostic
+   warning; downstream code re-derives any dependent state from the
+   surviving fields.
+
+Round-trip golden test contract (mandatory):
+`tests/data/schemas/tools/LayoutProfile.cpp` includes a recorded
+`vN` payload for every shipped schema version `N` and asserts
+`migrate(vN) == defaults_for_v_current()` modulo the explicitly-set
+fields in the recorded payload, plus the byte-equal round-trip
+`load(write(p)) == p` for every fixture profile.
+
+#### 7.2.2 `Scene` migrations — additive envelope, payload migration delegated
+
+`Scene` evolution follows two independent rules because the schema is
+an envelope:
+
+1. **Envelope-level changes (the `Scene` and `EntityRecord` schemas
+   themselves).** Additive defaulted-field pattern, identical to
+   §7.2.1 case 1. Examples: a future `layer_id` on `EntityRecord`,
+   a future `comment` on `Scene`. The migration body, if any, is
+   the identity-with-default-fill the codegen tool emits.
+2. **Per-slot payload changes (the schemas referenced by
+   `payload_schema`).** **Not tools' concern.** Each plugin owns its
+   own component schema's migration body in
+   `src/<context>/migrations/<Type>_v<N>_to_v<N+1>.cpp`. Tools'
+   per-slot decode loop calls the `data` middleman's
+   `deserialize_<fqn>` entry point, which dispatches through the
+   plugin-owned migration chain. Tools sees only the loaded T value
+   or the migration error; it does not author migration bodies for
+   non-tools schemas. This is the load-bearing boundary the user
+   brief calls out: "ECS data lives in plugin-owned schemas; tools
+   persists structural references + selection state".
+3. **`game_types_abi` mismatch handling.** Per §7.1.2 inv. 2, an
+   ABI hash mismatch between scene and host is an advisory log,
+   not a refusal — the per-slot migration chain (rule 2) is the
+   load gate, not the envelope hash. Migration bodies therefore
+   never read `game_types_abi`.
+
+Round-trip golden test contract:
+`tests/data/schemas/tools/Scene.cpp` includes a recorded `vN` envelope
+*plus* a fixture set of plugin-owned payload schemas pinned at known
+versions; the test asserts the envelope round-trips byte-equal and
+that the per-slot decode yields the expected (component, value) pairs.
+Plugin-owned migration tests live under
+`tests/data/schemas/<ctx>/<Type>.cpp` per §7 of each owning context.
+
+#### 7.2.3 `CommandJournal` migrations — additive envelope, additive variant set
+
+`CommandJournal` follows the same envelope / payload split as `Scene`,
+plus a third rule for the closed `CommandKind` discriminant:
+
+1. **Envelope-level additive bumps.** Identical to §7.2.1 case 1.
+2. **Per-payload-schema bumps (the `*Payload` schemas).** Tools owns
+   these payload schemas because they wrap tools' edit-command
+   variants — but the **inner component bytes** carried inside
+   (e.g. `ComponentEditPayload::previous_bytes`) are still opaque
+   plugin payloads and migrate through their owning context's chain.
+   The `*Payload` envelope itself uses additive defaulted fields.
+3. **Adding a new `CommandKind` variant (sixth and beyond).**
+   Closed-sum schema bump: the discriminant byte is **append-only**
+   in value (new variant gets `kind = 5`, never reuses 0..4); a new
+   `data/schemas/tools/<NewVariant>Payload.fory` ships alongside;
+   the §5.10 `EditCommandPayload` `std::variant` gains a
+   corresponding alternative in the same authoring change so
+   `kind` byte ↔ variant index stays 1:1. The codegen tool refuses
+   to emit a `CommandKind` table whose discriminant assignment does
+   not match the §5.10 variant order; this catches forgot-to-bump
+   regressions at build time.
+
+Round-trip golden test contract:
+`tests/data/schemas/tools/CommandJournal.cpp` records one fixture
+journal per shipped schema version with at least one entry per
+`CommandKind` variant; the test asserts byte-equal round-trip and
+that the discriminant-table covers every variant of the §5.10
+`EditCommandPayload` variant alternative set (a one-line
+`static_assert` in the test guards future drift).
+
+#### 7.2.4 `Shortcuts` migrations — additive bindings, append-only modifier bits
+
+1. **Adding a new `action_id` to the default ring.** Pure code-side
+   change; no schema bump. The new binding ships as a static default;
+   user-saved keymaps without the binding inherit the default at
+   load time (action-id closure rule §7.1.4 inv. 1 already drops
+   unknown ids gracefully — the *opposite* direction, missing
+   defaults, is just inheritance).
+2. **Adding a new `Modifier` flag bit.** Bit positions are
+   append-only (§7.1.4 inv. 4); the new bit reserves the next free
+   position in the `modifier_mask` u8 and rebuilds the dylib. The
+   `.fory` schema is unchanged. Older keymaps read on a newer build
+   present a zero in the new bit position; the gating rule treats
+   that as "modifier not held" — the safe default. Promoting
+   `modifier_mask` from `u8` to `u16` is a breaking schema bump
+   (new tag, defaulted to zero, old field marked reserved); the
+   migration body lives in
+   `src/tools/migrations/shortcuts_modifier_widen_v<N>_to_v<N+1>.cpp`.
+3. **Adding a new field on `Chord` (e.g. `os_only : u8` to scope a
+   chord to a specific OS).** Additive defaulted-field pattern,
+   identical to §7.2.1 case 1.
+4. **Override layer evolution.** The `disabled` list is a value
+   type — appending entries is forward- and backward-compatible.
+   Removing the project-level override file falls back to the
+   user-default ring per §7.1.4 inv. 3.
+
+Round-trip golden test contract:
+`tests/data/schemas/tools/Shortcuts.cpp` includes a recorded `vN`
+keymap fixture with one binding per built-in `action_id`, asserts
+byte-equal round-trip, and asserts that loading a `vN` fixture on
+the current build maps every action that exists in both versions
+(unknown-action drops are tested in a sibling case).
+
+### 7.3 What is NOT persisted
+
+To make the boundary explicit (in line with §5 "Serialised schemas":
+Fory exhausts the persistent surface — every other tools-owned
+artefact is runtime-only):
+
+| Artefact                 | Why not persisted                                                                                                           |
+|--------------------------|-----------------------------------------------------------------------------------------------------------------------------|
+| `EditorEvent` bus        | Republished from `core`'s event bus per §3.2 collapse #9; in-memory only.                                                   |
+| `Selection` resource     | Cross-session not promised (§4.3 inv. 2). `Scene::saved_selection` is an explicit one-shot doc-field, not a `Selection` mirror. |
+| `CommandStack` (live)    | In-memory only; serialised through `CommandJournal` only at hot-reload barrier and trace capture, never as a standalone file in MVP (§7.1.3 inv. 7). |
+| `Gizmo` drag state       | Per-frame transient; commits land as `EditCommand`s on the stack (§4.5 inv. 1).                                             |
+| `Toolbar` mode mirror    | Reads from `EditorMode` (§4.8 inv. 3); never owns state.                                                                    |
+| `AssetThumbnail` LRU     | Display-only cache; `content` owns asset persistence (§4.6 inv. 3).                                                         |
+| `ReflectionBlob` views   | Read-through immutable views over `data`'s registry; no copy, no persistence (§4.4 inv. 1).                                 |
+| `TraceRecorder` (live)   | Resource lifecycle is recording-bounded (§4.9); the *output* `.glibre-trace` is owned by `specs/e2e/SPEC.md`, **not tools**. |
+| `EditorMode` resource    | Per-session value; resets to `Edit` on startup.                                                                             |
+| Per-frame Dear ImGui draw lists | Extract slot in `render::RenderFrame`; one frame's lifetime (§4.1 inv. 4).                                            |
+| Profiler / Console output | Read-through over `core` and `render` measurement; tools owns display only (§3.2 collapse #8).                              |
+
+These appear in the persistence surface only as **identifiers** —
+`Entity::bits` from `Scene::EntityRecord`, `TypeId::value` from
+`ComponentSlot::type_id`, panel id strings from `LayoutProfile` —
+never as byte payloads. Cross-context: `TraceFile` (`.glibre-trace`)
+is **owned by `specs/e2e/SPEC.md`** and cited from §4.9 only as the
+artefact tools writes through; its schema and migration story live in
+the e2e spec.
 
 ## 8. Hot-Reload Contract
 
