@@ -523,11 +523,350 @@ context promises every consumer:
 
 ## 5. Public Interface
 
+The public interface of the `data` context is the surface exported by the
+`glibre-types.dylib` middleman (§4.3) plus the per-type generated headers
+emitted by `glibre-foryc` (§4.2). Every plugin and every host binary that
+exchanges persistent bytes consumes only what is declared below; nothing
+in the data context is reachable except through the middleman.
+
+The header stub that follows compiles under
+`clang++ -std=c++23 -fsyntax-only -fno-exceptions` against libc++ on
+macOS (the `-fno-exceptions` flag is the engine-wide default per
+`reviews/decisions/error-model.md` §Decision #3). It is intentionally
+declaration-only: the registry, ABI hash, and per-type trampolines are
+populated by codegen-emitted definitions inside the middleman and by
+generated `<glibre/types/<ctx>/<Type>.hpp>` headers that this stub does
+not enumerate.
+
+The `glibre::Error` type, `glibre::Result<T>` alias, and `glibre::core`
+error enum are owned by `core` and live in `<glibre/error.hpp>` per
+`reviews/decisions/error-model.md`. The stub forward-declares them as
+the ambient context this header is consumed in; the data context does
+not redefine them.
+
 ```cpp
-// header-only stub goes here
+// glibre-types.dylib public surface (header stub).
+//
+// Real headers split into:
+//   include/glibre/types/identity.hpp      — SchemaId / SchemaVersion / hash
+//   include/glibre/types/error.hpp         — data::Error closed sum
+//   include/glibre/types/envelope.hpp      — EnvelopeHeader, Envelope<T>
+//   include/glibre/types/migration.hpp     — MigrationFn, MigrationEntry,
+//                                            register entry-point
+//   include/glibre/types/registry.hpp      — RegistryEntry, SchemaRegistry
+//   include/glibre/types/abi_hash.hpp      — glibre_types_abi_hash()
+//   include/glibre/types/plugin_manifest.hpp — PluginManifest + sub-types
+//   include/glibre/types/reflection.hpp    — ReflectionBlob (editor-only)
+//
+// The stub below is the union, with section banners matching the
+// per-file split. § references point at this spec.
+
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <span>
+#include <string_view>
+
+// glibre::Error and glibre::Result<T> live in <glibre/error.hpp>; only
+// forward-declared here so this stub stays self-contained.
+namespace glibre {
+class Error;
+template <class T> using Result = std::expected<T, Error>;
+}  // namespace glibre
+
+namespace glibre::types {
+
+// ---- identity.hpp -------------------------------------------------------
+
+// FQN string view, lowercased dotted-context path + PascalCase leaf,
+// e.g. "glibre.core.Transform". Storage is owned by the registry's
+// per-type interning table (§4.5 inv. 3); SchemaId itself is a borrow.
+// Per §4.1 inv. 1.
+struct SchemaId {
+    std::string_view fqn{};
+
+    constexpr bool operator==(const SchemaId&) const noexcept = default;
+    constexpr auto operator<=>(const SchemaId&) const noexcept = default;
+};
+
+// Monotonically increasing, strictly positive version (§4.1 inv. 2).
+using SchemaVersion = std::uint32_t;
+
+// Blake3-256 of the canonicalized .fory bytes (§4.4 inv. 2).
+using SchemaSourceHash = std::array<std::byte, 32>;
+
+// ---- error.hpp ----------------------------------------------------------
+
+// Closed sum of every failure the data context can raise at a public
+// boundary (§10). Per error-model.md §"Composition Rules" #2 callers
+// translate these into their own context's enum at the call site.
+namespace data {
+enum class Error : std::uint16_t {
+    AbiHashMismatch,         // §4.4 inv. 3 — hash compared at plugin load
+    SchemaMigrationFailure,  // §4.7 inv. 4 — chain step returned unexpected
+    DeserializeError,        // §4.8 inv. 5 — newer-than-host or malformed
+    ReservedTagViolation,    // §4.1 inv. 3, §4.2 inv. 4 — codegen-time
+    SchemaRegistryConflict,  // §4.5 inv. 1 — duplicate FQN at static-init
+};
+}  // namespace data
+
+// ---- reflection.hpp (editor / tools only) -------------------------------
+
+// Compact, codegen-emitted descriptor of one generated type's tags
+// (§4.9). Read-only; never used to dispatch behavior on the hot path
+// (PHILOSOPHY §6, §4.9 inv. 1). Stripped to nullptr in shipping builds
+// (§4.9 inv. 5).
+struct ReflectionField {
+    std::string_view name{};
+    std::uint16_t    tag{0};
+    std::string_view type_name{};   // builtin or another FQN
+    SchemaVersion    since{0};
+};
+
+struct ReflectionBlob {
+    SchemaId                          schema{};
+    SchemaVersion                     version{0};
+    std::span<const ReflectionField>  fields{};   // tag-sorted ascending
+};
+
+// ---- envelope.hpp -------------------------------------------------------
+
+// Fixed-width Fory envelope prefix. Self-describing, little-endian
+// (§4.8 inv. 1, 3); peekable without consuming the payload (§4.8 inv. 2).
+struct EnvelopeHeader {
+    SchemaId      schema{};
+    SchemaVersion version{0};
+    std::uint32_t payload_length{0};
+    std::uint32_t flags{0};            // reserved for future use
+};
+
+// Typed wrappers around the per-FQN extern "C" trampolines emitted by
+// codegen (§4.3 inv. 4). Specializations live in each generated
+// <glibre/types/<ctx>/<Type>.hpp>; this primary template is left
+// undefined so misuse is a link-time error rather than a runtime one.
+template <class T>
+struct Envelope {
+    // Write envelope + payload into `dst`; returns bytes_written.
+    // Failure path is `data::Error::DeserializeError`-shaped only when
+    // `dst` is too small (size queryable via the registry).
+    static auto serialize(const T& value,
+                          std::span<std::byte> dst) noexcept
+        -> std::expected<std::size_t, data::Error>;
+
+    // Read envelope, dispatch by SchemaVersion, and run MigrationChain
+    // when the inbound version is older (§4.7). Newer-than-host ⇒
+    // data::Error::DeserializeError; chain failure ⇒
+    // data::Error::SchemaMigrationFailure.
+    static auto deserialize(std::span<const std::byte> src) noexcept
+        -> std::expected<T, data::Error>;
+};
+
+// ---- migration.hpp ------------------------------------------------------
+
+// Per-payload arena owned by the dispatcher (§4.6 inv. 2). Migration
+// bodies allocate only here; treated as opaque by user code.
+class Arena;
+
+// Single-step migration body, written by the originating context.
+// Pure, deterministic, total over deserialize_v<N> outputs (§4.6).
+template <class VN, class VNplus1>
+using MigrationFn =
+    auto (*)(const VN& src, VNplus1& dst, Arena& arena) noexcept
+        -> std::expected<void, ::glibre::Error>;
+
+// Type-erased migration record stored in the registry (§4.7).
+// Adjacent records form one FQN's MigrationChain, indexed by
+// from_version ascending.
+struct MigrationEntry {
+    SchemaVersion from_version{0};
+    SchemaVersion to_version{0};
+    // Erased trampoline; codegen casts back to the typed
+    // MigrationFn<VN, VNplus1> at registration time.
+    void (*invoke)(const void* src, void* dst, Arena& arena,
+                   ::glibre::Error* out_err) noexcept = nullptr;
+};
+
+// Plain-enum return so the C-ABI boundary stays free of std::expected.
+// The C++ wrapper macro lifts this into `Result<void>` for callers.
+namespace data {
+enum class RegisterStatus : std::uint16_t {
+    Ok = 0,
+    SchemaRegistryConflict =
+        static_cast<std::uint16_t>(Error::SchemaRegistryConflict),
+};
+}  // namespace data
+
+// Codegen-emitted entry-point. The owning context calls this at
+// static-init (§4.3 inv. 5) via the
+// `GLIBRE_REGISTER_MIGRATION(<Type>, <N>, <N+1>, <fn>)` macro placed in
+// the generated `<Type>_migrations.hpp` companion header.
+extern "C" auto glibre_types_register_migration(
+    SchemaId       schema,
+    MigrationEntry entry) noexcept -> data::RegisterStatus;
+
+// ---- registry.hpp -------------------------------------------------------
+
+// Read-only entry produced by codegen and inserted at static-init
+// (§4.5). Layout is fixed; new fields are appended only.
+struct RegistryEntry {
+    SchemaId         schema{};
+    SchemaVersion    version{0};
+    SchemaSourceHash source_hash{};
+
+    // Type-erased serialize/deserialize trampolines; the typed
+    // Envelope<T> specializations resolve to these at link time
+    // (§4.3 inv. 4).
+    std::expected<std::size_t, data::Error> (*serialize)(
+        const void* value, std::span<std::byte> dst) noexcept = nullptr;
+    std::expected<void, data::Error> (*deserialize)(
+        std::span<const std::byte> src,
+        void* out_value) noexcept = nullptr;
+
+    std::span<const MigrationEntry> migrations{};
+    const ReflectionBlob*           reflection{nullptr};  // null in ship
+};
+
+class SchemaRegistry {
+public:
+    // Binary search by FQN (§4.5 inv. 3). O(log N), allocation-free.
+    // Returns nullptr if no entry matches.
+    auto lookup(SchemaId schema) const noexcept -> const RegistryEntry*;
+
+    // FQN-sorted iteration order, matching AbiHash canonicalization
+    // (§4.4 inv. 1, §4.5 inv. 3).
+    auto entries() const noexcept -> std::span<const RegistryEntry>;
+
+    // The single immutable instance lives inside glibre-types.dylib;
+    // hot-reload publishes a *new* instance rather than mutating the
+    // live one (§4.5 inv. 4, §4.10 inv. 7).
+    static auto instance() noexcept -> const SchemaRegistry&;
+
+private:
+    SchemaRegistry() = default;
+};
+
+// ---- abi_hash.hpp -------------------------------------------------------
+
+// 64-char lowercase hex blake3 string compiled into glibre-types.dylib
+// at codegen time (§4.4). Plugins re-export the same value as
+// `glibre_plugin_abi_hash`; the loader compares them byte-for-byte and
+// refuses load on mismatch with `core::Error::PluginAbiHashMismatch`
+// (PHILOSOPHY §9; reviews/decisions/plugin-abi.md §"Loader Sequence"
+// step 4).
+extern "C" auto glibre_types_abi_hash() noexcept -> const char*;
+
+// ---- plugin_manifest.hpp ------------------------------------------------
+
+// Wire-shape of `plugin.fory`; codegen-serialized into the plugin's
+// .rodata, deserialized by the loader before invoking any plugin C++
+// code. Mirrors reviews/decisions/plugin-abi.md §"Plugin Manifest
+// Schema" verbatim. PluginManifest itself is a Fory-versioned schema
+// owned by `glibre.core`; this struct is the C++ projection.
+
+struct SemVer {
+    std::uint16_t major{0};
+    std::uint16_t minor{0};
+    std::uint16_t patch{0};
+};
+
+struct ComponentDecl {
+    std::string_view fqn{};
+    std::string_view schema_hash{};   // hex form of SchemaSourceHash
+    std::uint8_t     storage_hint{0}; // archetype / sparse / singleton
+};
+
+struct SystemDecl {
+    std::string_view                  name{};
+    std::uint8_t                      phase{0};   // 1..=9, frame-phases
+    std::span<const std::string_view> reads{};
+    std::span<const std::string_view> writes{};
+    std::span<const std::string_view> after{};
+    std::span<const std::string_view> before{};
+};
+
+struct PassDecl {
+    std::string_view                  name{};
+    std::uint8_t                      render_phase{0};   // 6 or 7
+    std::span<const std::string_view> inputs{};
+    std::span<const std::string_view> outputs{};
+};
+
+struct PanelDecl {
+    std::string_view id{};
+    std::string_view title{};
+    std::uint8_t     area{0};
+};
+
+struct PluginManifest {
+    std::string_view                  name{};
+    SemVer                            version{};
+    std::string_view                  abi_hash{};
+    SemVer                            min_engine_version{};
+    std::span<const ComponentDecl>    components{};
+    std::span<const SystemDecl>       systems{};
+    std::span<const PassDecl>         passes{};
+    std::span<const PanelDecl>        panels{};
+    std::span<const std::string_view> depends_on{};
+};
+
+}  // namespace glibre::types
 ```
 
-Event types, serialized schemas (Fory), error types.
+### 5.1 Events
+
+The data context emits no events. Schema-version bumps are observable
+only through the codegen-driven recomputation of
+`glibre_types_abi_hash()`; the plugin loader translates that into a
+`core::Error::PluginAbiHashMismatch` refusal at load time
+(`reviews/decisions/plugin-abi.md` §"Loader Sequence" step 4) — that is
+the data context's only externally-visible side effect.
+
+### 5.2 Serialized schemas (Fory)
+
+Persistent types are authored as `data/schemas/<ctx>/<Type>.fory` files
+(§4.1; format defined in `reviews/decisions/fory-codegen.md` §"Schema
+File Format"). The schemas the data context itself owns — referenced by
+the C++ structs above — are:
+
+- `data/schemas/core/PluginManifest.fory` — the `PluginManifest` /
+  `SemVer` / `ComponentDecl` / `SystemDecl` / `PassDecl` / `PanelDecl`
+  bundle declared in `reviews/decisions/plugin-abi.md` §"Plugin
+  Manifest Schema". Codegen emits the structs visible in §5 and the
+  per-plugin `manifest.cpp` blob.
+
+(No standalone envelope schema file exists; the envelope is Fory-defined
+and shared across every type — its layout is fixed by `Envelope<T>` in
+§5 and §4.8.)
+
+Domain-owned schemas (`Transform`, `Mesh`, ...) live in their
+originating context's directory under `data/schemas/<ctx>/`; the data
+context only guarantees the round-trip.
+
+### 5.3 Error types
+
+The closed sum is `glibre::types::data::Error` declared above. Each arm
+maps to one §4 invariant:
+
+| Arm                       | Raised when                                                  | Origin                   |
+|---------------------------|--------------------------------------------------------------|--------------------------|
+| `AbiHashMismatch`         | plugin's compiled-in ABI hash ≠ host's                       | §4.4 inv. 3              |
+| `SchemaMigrationFailure`  | a `MigrationFn` returned `unexpected` or chain incomplete    | §4.7 inv. 1, 4           |
+| `DeserializeError`        | malformed envelope, unknown FQN, newer-than-host version     | §4.8 inv. 5              |
+| `ReservedTagViolation`    | codegen detects reuse of a previously-shipped tag            | §4.1 inv. 3, §4.2 inv. 4 |
+| `SchemaRegistryConflict`  | static-init insert collides on FQN                           | §4.5 inv. 1              |
+
+Plugin loader code wraps these into `core::Error` arms per
+`reviews/decisions/plugin-abi.md` §"Failure Modes → core::Error";
+domain code wraps into its own context's `Error` per
+`reviews/decisions/error-model.md` §"Composition Rules" #2.
+
+Verification: the stub above compiles under
+`clang++ -std=c++23 -fsyntax-only -fno-exceptions` on the toolchain
+documented in `reviews/decisions/fory-codegen.md` §"Open Questions" #4
+(libc++ as shipped with the macOS Xcode 15 / Homebrew-LLVM clang).
 
 ## 6. Internal Architecture
 
