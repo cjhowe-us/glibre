@@ -1084,11 +1084,760 @@ public boundary at the seams between them:
 
 ## 5. Public Interface
 
+The header stub below is the §5 deliverable: every symbol that crosses
+the geometry plugin's public boundary, declared in one C++23 header and
+verified via `clang++ -std=c++23 -fsyntax-only -Wall -Wextra -Wpedantic`.
+Bodies live inside the geometry dylib (cook-time stages link the same
+header from the cooker driver); this header is the contract every caller
+(core, content, render, editor) compiles against. Cross-context
+invariants enforced here:
+
+- Every fallible operation returns `glibre::Result<T>` per
+  `reviews/decisions/error-model.md`. The geometry-internal `Error` enum
+  is the closed sum cited in §10 below; it is rolled into
+  `glibre::Error`'s variant in `core`. `-fno-exceptions` is enforced
+  globally; this header obeys.
+- Aggregates listed in §4 (`MeshletPak`, `PakReader`, `DecodePool`,
+  `GeometryRegistry`, `GpuMeshBuffers`) are forward-declared classes
+  whose layout is owned inside the plugin. Cook-time aggregates
+  (`MeshSource`, `OptimisedMesh`, `Meshlet`, `MeshletGroup`,
+  `ClusterDAG`, `BLASRecipe`, `MeshletPak`, `PakPage`, `PakHeader`,
+  `DracoStream`, `CookManifest`) are likewise opaque to runtime callers;
+  the cooker driver consumes them through the same opaque types.
+  Callers manipulate them only through the methods exposed below.
+- Resource handles (`MeshHandle`, `MeshletGroupHandle`,
+  `MaterialHandle`, `GpuBufferHandle`) are 64-bit generational
+  `Handle<Tag>` values with no payload pointers; this avoids ABI fixup
+  on hot-reload (PHILOSOPHY §8 + §9). The tag types are empty structs so
+  handles addressing different aggregates are distinct types and cannot
+  be cross-assigned. `MeshHandle` and `MaterialHandle` tags share names
+  with the render plugin's tag namespace so the same value travels both
+  contexts without translation (cross-aggregate invariant 9, §4.2).
+- `BoundingSphere` / `BoundingCone` are public value types: render's
+  cluster culler reads these per-`MeshletGroup` records via
+  `MeshletGroupHandle` resolution. They are the only meshlet-internal
+  numbers that ever cross the plugin boundary (otherwise §4.2 invariant
+  9 holds — no raw `Meshlet` / `MeshletGroup` records leak).
+- `ResidencyState` is a closed enum and the source of truth for
+  per-page residency; reads are lock-free atomics at the implementation
+  level (§4.1.13). `ResidencyHint` is cook-time-baked and never mutates
+  at runtime.
+- `GpuMeshBuffers` exposes only opaque `GpuBufferHandle` slots; geometry
+  never holds an `MTLBuffer*`. The render plugin owns GPU memory and
+  vends the upload path; geometry wires decoded bytes through it
+  (§4.1.15, cross-aggregate invariant 10).
+- The cook-time pipeline's stage entry points (`cook_mesh`,
+  `cook_is_up_to_date`, `inspect_pak`) live behind the
+  `GLIBRE_GEOMETRY_COOK` macro guard so the runtime dylib does not pull
+  cook-time meshoptimizer / Draco link symbols.
+
+The header has no event types in MVP — geometry publishes nothing back
+into the ECS event bus; runtime mutation points are inside phase 7 and
+the parent registry's caller drives them directly. No Fory schemas live
+in this surface either: `MeshletPak` is the on-disk format and is
+schema-versioned by `FormatHash` rather than serialised through Fory,
+and `CookManifest` is the cooker's bookkeeping side-table (also outside
+Fory). Geometry's contribution to telemetry is the structured
+per-context error enum returned through `Result<T>` and consumed by
+`glibre::log_error`.
+
 ```cpp
-// header-only stub goes here
+// SPDX-License-Identifier: Apache-2.0
+// glibre — geometry plugin public interface (header-only stub).
+//
+// This file is the §5 deliverable of `specs/geometry/SPEC.md`. It declares
+// every symbol crossing the geometry plugin's public boundary. The bodies
+// live inside the geometry dylib; cook-time stages link the same header
+// from the cooker driver, gated by GLIBRE_GEOMETRY_COOK.
+//
+// Cross-context invariants embedded here:
+//   * Every fallible call returns `glibre::Result<T>` per
+//     `reviews/decisions/error-model.md`. `-fno-exceptions` is enforced
+//     globally; this header obeys.
+//   * Aggregates are opaque — `MeshletPak`, `PakReader`, `DecodePool`,
+//     `GeometryRegistry`, `GpuMeshBuffers`, and the cook-time stage
+//     records are forward-declared classes whose layout is owned inside
+//     the plugin.
+//   * Resource handles are 64-bit generational `Handle<Tag>` values with
+//     no payload pointers; this avoids ABI fixup on hot-reload.
+//   * `MeshHandle` / `MaterialHandle` tag types match render's so the
+//     same handle value travels both contexts without translation.
+//   * Cook-time entry points are guarded by GLIBRE_GEOMETRY_COOK; the
+//     runtime dylib never pulls meshoptimizer / Draco link symbols.
+//
+// This stub compiles standalone with
+// `clang++ -std=c++23 -fsyntax-only -Wall -Wextra -Wpedantic`.
+
+#pragma once
+
+#include <array>
+#include <bit>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <functional>
+#include <memory>
+#include <span>
+#include <string_view>
+#include <type_traits>
+#include <variant>
+
+namespace glibre {
+
+// -----------------------------------------------------------------------
+// Stand-in declarations from sibling contexts. The real definitions live
+// in `core/include/glibre/error.hpp`, `render/include/...`, etc.; this
+// header forward-declares them so the stub compiles in isolation. The
+// implementation .cpp files include the real headers, not these stubs.
+// -----------------------------------------------------------------------
+
+#if !defined(GLIBRE_HAVE_CORE_ERROR)
+namespace core {
+enum class Error : std::uint16_t {
+    PluginAbiHashMismatch,
+    PluginInitFailed,
+    SchemaMigrationFailed,
+    HotReloadRefused,
+    FramePhaseMisordered,
+    OutOfBudget,
+};
+}  // namespace core
+
+struct ErrorContext {
+    std::string_view file;
+    int              line  = 0;
+    std::string_view detail;
+};
+
+class Error {
+public:
+    using Variant = std::variant<core::Error /*, geometry::Error inserted in core */>;
+
+    template <class E>
+    constexpr Error(E e, ErrorContext ctx = {}) noexcept
+        : variant_{e}, ctx_{ctx} {}
+
+    constexpr const Variant&      code() const noexcept  { return variant_; }
+    constexpr const ErrorContext& where() const noexcept { return ctx_; }
+
+private:
+    Variant      variant_;
+    ErrorContext ctx_;
+};
+
+template <class T>
+using Result = std::expected<T, Error>;
+#endif  // GLIBRE_HAVE_CORE_ERROR
+
+// -----------------------------------------------------------------------
+// geometry::Error — closed sum of every geometry-internal failure mode.
+// Every public geometry boundary returns Result<T> over this enum
+// (rolled into glibre::Error's variant per
+// reviews/decisions/error-model.md). The list is closed: adding a
+// variant is an ABI bump.
+// -----------------------------------------------------------------------
+
+namespace geometry {
+
+enum class Error : std::uint16_t {
+    // Cook-time — MeshSource validation (§4.1.1)
+    MeshSourceInvalidTopology,
+    AttributeLayoutMismatch,
+    MeshSourceEmpty,
+
+    // Cook-time — meshoptimizer / cluster build (§4.1.2 .. §4.1.5)
+    MeshoptStageFailed,
+    MeshletOversize,
+    MeshletBoundsInvalid,
+    ClusterDAGCycle,
+    LODBandSseNonMonotonic,
+    LOD0CoverIncomplete,
+
+    // Cook-time — Draco encode (§4.1.6.1)
+    DracoEncodeFailed,
+    DracoProfileUnknown,
+
+    // Cook-time — BLASRecipe (§4.1.7.2)
+    BLASRecipeInvalid,
+
+    // Cook-time — pak emission (§4.1.7, §4.1.8)
+    PakWriterIoFailed,
+    PakPageOversize,
+    CookManifestInvalid,
+    CookManifestMissingField,
+
+    // Runtime — pak load + header validation (§4.1.7, §4.1.7.1, §4.1.11)
+    PakHeaderMagicMismatch,
+    PakFormatHashMismatch,
+    PakHeaderOffsetOutOfRange,
+    PakReaderUnvalidated,
+    PakIoFailed,
+    PakPageIntegrityFailed,
+
+    // Runtime — decode pool (§4.1.12)
+    DecodePoolUndersized,
+    DecodePoolOverflow,
+    DecodePoolBusy,
+    DracoDecodeFailed,
+
+    // Runtime — handle / registry (§4.1.9, §4.1.10, §4.1.14)
+    MeshHandleStale,
+    MeshletGroupHandleStale,
+    MeshHandleNotFound,
+    MeshAlreadyRegistered,
+
+    // Runtime — residency (§4.1.13)
+    ResidencyTransitionIllegal,
+    ResidencyHintImmutable,
+    PageNotResident,
+
+    // Runtime — GPU buffer materialisation (§4.1.15)
+    GpuUploadRefused,
+    GpuBufferAllocFailed,
+};
+
+[[nodiscard]] constexpr std::string_view to_string(Error e) noexcept;
+
+// -----------------------------------------------------------------------
+// Format / quantisation enums. Bytes-on-disk are determined by these +
+// the cooker's recorded options; the runtime checks them at PakHeader
+// validation time and never branches on them in the decode hot path.
+// -----------------------------------------------------------------------
+
+enum class FormatHash : std::uint64_t { Unknown = 0u };
+
+enum class DracoQuantisationProfile : std::uint8_t {
+    // Closed list owned by geometry; one entry per attribute-quantisation
+    // tuple shipped at MVP. Profile 0 is reserved as "decoder rejects".
+    Reserved   = 0,
+    Standard   = 1,  // 14-bit positions, 10-bit normals, 12-bit UVs.
+    HighFi     = 2,  // 16-bit positions, 12-bit normals, 14-bit UVs.
+    LowFi      = 3,  // 11-bit positions, 8-bit normals, 10-bit UVs.
+};
+
+enum class AttributeKind : std::uint8_t {
+    Position,
+    Index,
+    Normal,
+    Tangent,
+    UV0,
+    UV1,
+    Color,
+    JointIndices,   // opaque; geometry never inspects (animation owns).
+    JointWeights,   // opaque; geometry never inspects (animation owns).
+};
+
+inline constexpr std::size_t kAttributeKindCount = 9u;
+
+// -----------------------------------------------------------------------
+// Generational handles. 64 bits, packed { generation : 24, index : 40 }.
+// Tag types are empty structs so handles to different aggregates are
+// distinct types and cannot be cross-assigned. The `mesh` and `material`
+// tags match the render plugin's tag namespace (cross-aggregate
+// invariant 9, §4.2) so the same value travels both contexts.
+// -----------------------------------------------------------------------
+
+namespace tags {
+struct mesh             {};
+struct meshlet_group    {};
+struct material         {};
+struct gpu_buffer       {};
+struct pak              {};
+struct pak_page         {};
+}  // namespace tags
+
+template <class Tag>
+class Handle {
+public:
+    using value_type = std::uint64_t;
+
+    constexpr Handle() noexcept = default;
+    explicit constexpr Handle(value_type v) noexcept : bits_{v} {}
+
+    [[nodiscard]] constexpr value_type    raw()        const noexcept { return bits_; }
+    [[nodiscard]] constexpr std::uint64_t index()      const noexcept { return bits_ & 0x000000FF'FFFFFFFFull; }
+    [[nodiscard]] constexpr std::uint32_t generation() const noexcept { return static_cast<std::uint32_t>(bits_ >> 40); }
+    [[nodiscard]] constexpr bool          valid()      const noexcept { return bits_ != 0u; }
+    [[nodiscard]] friend constexpr bool operator==(Handle, Handle) noexcept = default;
+
+private:
+    value_type bits_ = 0u;
+};
+
+using MeshHandle         = Handle<tags::mesh>;
+using MeshletGroupHandle = Handle<tags::meshlet_group>;
+using MaterialHandle     = Handle<tags::material>;
+using GpuBufferHandle    = Handle<tags::gpu_buffer>;
+using PakHandle          = Handle<tags::pak>;
+using PakPageHandle      = Handle<tags::pak_page>;
+
+// Hash functors for handle keys (set/map storage in callers).
+struct MeshHandleHash {
+    [[nodiscard]] constexpr std::size_t operator()(MeshHandle h) const noexcept {
+        return static_cast<std::size_t>(h.raw());
+    }
+};
+struct MeshletGroupHandleHash {
+    [[nodiscard]] constexpr std::size_t operator()(MeshletGroupHandle h) const noexcept {
+        return static_cast<std::size_t>(h.raw());
+    }
+};
+
+// -----------------------------------------------------------------------
+// Bounding primitives — public value types. Emitted per-Meshlet /
+// per-MeshletGroup at cook time; render's cluster culler reads them
+// per-frame via MeshletGroupHandle resolution (§4.1.3 / §4.1.4 / §4.2
+// invariant 9). These are the only meshlet-internal numbers that cross
+// the plugin boundary; raw Meshlet records do not.
+// -----------------------------------------------------------------------
+
+struct BoundingSphere {
+    float center_x = 0.0f;
+    float center_y = 0.0f;
+    float center_z = 0.0f;
+    float radius   = 0.0f;
+};
+
+struct BoundingCone {
+    // Axis is unit-length; cos_half_angle == -1.0 is the sentinel
+    // meaning "do not backface-cull this cluster" (§4.1.3 invariant 3).
+    float axis_x         = 0.0f;
+    float axis_y         = 0.0f;
+    float axis_z         = 0.0f;
+    float cos_half_angle = -1.0f;
+};
+
+// -----------------------------------------------------------------------
+// LOD band tier. 0 = finest. The runtime LOD-band selector compares the
+// per-group ScreenSpaceError against the view's pixel threshold and
+// picks the coarsest band whose every group has SSE ≤ T (§4.2 #2).
+// -----------------------------------------------------------------------
+
+enum class LODBand : std::uint8_t {
+    LOD0 = 0,
+    LOD1 = 1,
+    LOD2 = 2,
+    LOD3 = 3,
+    LOD4 = 4,
+    LOD5 = 5,
+    LOD6 = 6,
+    LOD7 = 7,
+};
+
+// -----------------------------------------------------------------------
+// Residency — public to render and content. The state enum is closed;
+// transitions are monotonic per-frame (§4.2 invariant 6). The hint is
+// cook-time-baked into PakHeader and is read-only at runtime
+// (§4.1.13 invariant 4).
+// -----------------------------------------------------------------------
+
+enum class ResidencyState : std::uint8_t {
+    NotResident = 0,
+    Pending     = 1,
+    Resident    = 2,
+    Evicting    = 3,
+};
+
+enum class ResidencyHint : std::uint8_t {
+    None             = 0,
+    AlwaysResident   = 1,  // bind-pose root / coarse impostor band.
+    HotPose          = 2,  // expected to be resident under typical play.
+    DistanceBucket0  = 3,  // 0–25m
+    DistanceBucket1  = 4,  // 25–100m
+    DistanceBucket2  = 5,  // 100–500m
+    DistanceBucket3  = 6,  // > 500m
+    OnDemand         = 7,  // load only when first observed.
+};
+
+// -----------------------------------------------------------------------
+// Aggregates — opaque to the public interface. Implementations live
+// inside the geometry dylib. Callers manipulate them only through the
+// methods exposed here.
+// -----------------------------------------------------------------------
+
+class MeshletPak;        // §4.1.7  — cooked on-disk container (mapped at runtime).
+class PakReader;         // §4.1.11 — runtime decode front-end.
+class DecodePool;        // §4.1.12 — Draco decode scratch arena.
+class GeometryRegistry;  // §4.1.14 — runtime aggregate root (engine singleton).
+class DecodedBuffer;     // post-decode RAII view returned by DecodePool.
+
+// Cook-time aggregates (linked only with GLIBRE_GEOMETRY_COOK defined).
+class MeshSource;        // §4.1.1  — authored static-mesh input.
+class OptimisedMesh;     // §4.1.2  — meshoptimizer-stage output.
+class ClusterDAG;        // §4.1.5  — acyclic LOD chain.
+class BLASRecipe;        // §4.1.7.2 — declarative BLAS-build description.
+class CookManifest;      // §4.1.8  — per-mesh build record.
+
+// -----------------------------------------------------------------------
+// DecodedBuffer — RAII view over one DecodePool slot's bytes. Held for
+// the duration of one upload; the slot returns to the pool when the
+// buffer is destroyed (§4.1.12 invariant 2). Move-only.
+// -----------------------------------------------------------------------
+
+class DecodedBuffer {
+public:
+    [[nodiscard]] AttributeKind              kind()         const noexcept;
+    [[nodiscard]] std::span<const std::byte> bytes()        const noexcept;
+    [[nodiscard]] std::size_t                decoded_size() const noexcept;
+
+    DecodedBuffer(DecodedBuffer&&) noexcept;
+    DecodedBuffer& operator=(DecodedBuffer&&) noexcept;
+    ~DecodedBuffer();
+
+    DecodedBuffer(const DecodedBuffer&)            = delete;
+    DecodedBuffer& operator=(const DecodedBuffer&) = delete;
+
+protected:
+    DecodedBuffer() noexcept;
+};
+
+// -----------------------------------------------------------------------
+// PakReader — runtime decode front-end. Constructed via
+// GeometryRegistry::register_mesh; lifetime is owned by the registry.
+// Header validation (FormatHash, magic, in-range offsets) happens at
+// construction; payload-touching methods are gated on validation
+// success (§4.1.11 invariant 1).
+// -----------------------------------------------------------------------
+
+struct PakHeaderInfo {
+    FormatHash    format_hash          = FormatHash::Unknown;
+    std::uint16_t engine_version_major = 0u;
+    std::uint16_t engine_version_minor = 0u;
+    std::uint16_t engine_version_patch = 0u;
+    std::uint32_t page_count           = 0u;
+    std::uint64_t source_content_hash  = 0u;
+};
+
+class PakReader {
+public:
+    [[nodiscard]] Result<PakHeaderInfo> header()      const noexcept;
+    [[nodiscard]] std::uint32_t         page_count()  const noexcept;
+    [[nodiscard]] Result<ResidencyHint>
+        page_hint(std::uint32_t page_index) const noexcept;
+    [[nodiscard]] Result<std::span<const std::byte>>
+        page_bytes(std::uint32_t page_index) const noexcept;
+
+    ~PakReader();
+    PakReader(const PakReader&)            = delete;
+    PakReader& operator=(const PakReader&) = delete;
+
+protected:
+    PakReader() noexcept;
+};
+
+// -----------------------------------------------------------------------
+// DecodePool — sized at engine init from the union of every loaded
+// PakHeader's per-attribute scratch maxima. Slot acquisition is
+// bounded-wait; a contention return surfaces DecodePoolBusy and the
+// scheduler retries on the next frame (§4.1.12 invariant 2).
+// -----------------------------------------------------------------------
+
+struct DecodePoolDesc {
+    std::array<std::size_t, kAttributeKindCount> per_attribute_max_bytes{};
+    std::uint16_t slot_count_per_attribute = 0u;
+};
+
+class DecodePool {
+public:
+    [[nodiscard]] static Result<std::unique_ptr<DecodePool>>
+        create(const DecodePoolDesc&) noexcept;
+
+    [[nodiscard]] Result<DecodedBuffer>
+        decode(const PakReader& reader,
+               std::uint32_t    page_index,
+               AttributeKind    kind) noexcept;
+
+    [[nodiscard]] Result<void>
+        accommodate(const PakHeaderInfo&) noexcept;  // refuses if undersized.
+
+    ~DecodePool();
+    DecodePool(const DecodePool&)            = delete;
+    DecodePool& operator=(const DecodePool&) = delete;
+
+protected:
+    DecodePool() noexcept;
+};
+
+// -----------------------------------------------------------------------
+// GpuMeshBuffers — handle-only view of one MeshHandle's currently-
+// resident bands. Geometry stores only the opaque GpuBufferHandle slots
+// allocated by the render plugin's buffer allocator; the handles are
+// consumed bindlessly via MaterialHandle indirection (§4.1.15).
+// -----------------------------------------------------------------------
+
+struct GpuMeshBuffers {
+    MeshHandle      mesh{};
+    LODBand         band                 = LODBand::LOD0;
+    GpuBufferHandle position_buffer{};
+    GpuBufferHandle index_buffer{};
+    GpuBufferHandle normal_buffer{};
+    GpuBufferHandle tangent_buffer{};
+    GpuBufferHandle uv0_buffer{};
+    GpuBufferHandle uv1_buffer{};
+    GpuBufferHandle color_buffer{};
+    std::uint32_t   resident_group_count = 0u;
+};
+
+// -----------------------------------------------------------------------
+// BLAS recipe view — read-only window into the cooked BLASRecipe blob a
+// MeshHandle's pak ships. Render's RTAccelStructures consumes this when
+// it builds the per-mesh BLAS (§4.1.7.2; §4.2 invariant 3 — LOD0 only).
+// Geometry never invokes a GPU API; the recipe is declarative.
+// -----------------------------------------------------------------------
+
+enum class BLASGeometryFormat : std::uint8_t {
+    Triangles32BitIndices,
+    Triangles16BitIndices,
+};
+
+struct BLASGeometryDescriptor {
+    GpuBufferHandle    vertex_buffer{};
+    std::uint32_t      vertex_byte_offset = 0u;
+    std::uint32_t      vertex_count       = 0u;
+    std::uint32_t      vertex_stride      = 0u;
+    GpuBufferHandle    index_buffer{};
+    std::uint32_t      index_byte_offset  = 0u;
+    std::uint32_t      index_count        = 0u;
+    BLASGeometryFormat format             = BLASGeometryFormat::Triangles32BitIndices;
+    MaterialHandle     material{};
+};
+
+enum class BLASBuildFlags : std::uint16_t {
+    None              = 0u,
+    PreferFastTrace   = 1u << 0,
+    PreferFastBuild   = 1u << 1,
+    AllowCompaction   = 1u << 2,
+    AllowUpdate       = 1u << 3,
+};
+[[nodiscard]] constexpr BLASBuildFlags
+    operator|(BLASBuildFlags a, BLASBuildFlags b) noexcept {
+    using U = std::underlying_type_t<BLASBuildFlags>;
+    return static_cast<BLASBuildFlags>(static_cast<U>(a) | static_cast<U>(b));
+}
+
+struct BLASRecipeView {
+    std::span<const BLASGeometryDescriptor> geometries{};
+    BLASBuildFlags                          flags = BLASBuildFlags::PreferFastTrace;
+};
+
+// -----------------------------------------------------------------------
+// MeshletGroupView — public projection of one DAG node, returned by
+// GeometryRegistry::resolve_group. Carries only the bounds, SSE, and
+// material slot the render-side cluster culler needs; the underlying
+// MeshletGroup record stays opaque (§4.2 invariant 9).
+// -----------------------------------------------------------------------
+
+struct MeshletGroupView {
+    MeshletGroupHandle handle{};
+    LODBand            band               = LODBand::LOD0;
+    BoundingSphere     bounds{};
+    BoundingCone       cone{};
+    float              screen_space_error = 0.0f;
+    MaterialHandle     material{};
+    std::uint32_t      meshlet_count      = 0u;
+    bool               fully_resident     = false;
+};
+
+// -----------------------------------------------------------------------
+// Mesh registration — content's pak loader hands a memory-mapped slice
+// to the registry; the registry constructs a PakReader, validates the
+// header, sizes (or refuses) the DecodePool, and issues a MeshHandle.
+// MeshSource metadata travels with the registration so the editor's
+// content browser and telemetry can cite authoring information.
+// -----------------------------------------------------------------------
+
+struct MeshSourceMetadata {
+    std::string_view source_path;     // e.g. "art/props/crate.fbx"
+    std::string_view author;          // optional; logged on cook only.
+    std::string_view tool_version;    // optional; cook driver tag.
+};
+
+struct MeshRegistrationDesc {
+    std::span<const std::byte> pak_bytes;          // memory-mapped, read-only.
+    std::string_view           pak_path;
+    MeshSourceMetadata         source_metadata{};
+};
+
+// -----------------------------------------------------------------------
+// GeometryRegistry — engine-singleton runtime aggregate root. All
+// public boundary calls flow through here. Writes happen at the
+// geometry-owned phase 7 mutation point; reads (resolve_group,
+// gpu_buffers, residency) are lock-free (§4.1.14, §4.2 invariant 6).
+// -----------------------------------------------------------------------
+
+class GeometryRegistry {
+public:
+    [[nodiscard]] static Result<GeometryRegistry*> instance() noexcept;
+
+    [[nodiscard]] static Result<std::unique_ptr<GeometryRegistry>>
+        create(DecodePoolDesc initial_pool_desc) noexcept;
+
+    // --- Mesh registration -------------------------------------------------
+    [[nodiscard]] Result<MeshHandle>
+        register_mesh(const MeshRegistrationDesc&) noexcept;
+
+    [[nodiscard]] Result<void>
+        unregister_mesh(MeshHandle) noexcept;
+
+    [[nodiscard]] Result<PakHeaderInfo>
+        pak_header(MeshHandle) const noexcept;
+
+    [[nodiscard]] Result<BLASRecipeView>
+        blas_recipe(MeshHandle) const noexcept;
+
+    // --- LOD / cluster lookup ----------------------------------------------
+    [[nodiscard]] Result<MeshletGroupHandle>
+        select_lod_group(MeshHandle     mesh,
+                         float          pixel_threshold,
+                         BoundingSphere view_sphere) const noexcept;
+
+    [[nodiscard]] Result<MeshletGroupView>
+        resolve_group(MeshletGroupHandle) const noexcept;
+
+    [[nodiscard]] Result<std::span<const MeshletGroupView>>
+        lod0_groups(MeshHandle) const noexcept;
+
+    // --- GPU buffers -------------------------------------------------------
+    [[nodiscard]] Result<GpuMeshBuffers>
+        gpu_buffers(MeshHandle, LODBand) const noexcept;
+
+    // --- Residency control -------------------------------------------------
+    [[nodiscard]] Result<ResidencyState>
+        page_state(MeshHandle, std::uint32_t page_index) const noexcept;
+
+    [[nodiscard]] Result<ResidencyHint>
+        page_hint(MeshHandle, std::uint32_t page_index) const noexcept;
+
+    [[nodiscard]] Result<void>
+        request_residency(MeshHandle, std::uint32_t page_index) noexcept;
+
+    [[nodiscard]] Result<void>
+        request_eviction(MeshHandle, std::uint32_t page_index) noexcept;
+
+    [[nodiscard]] Result<void>
+        notify_page_decoded(MeshHandle               mesh,
+                            std::uint32_t            page_index,
+                            DecodedBuffer            position,
+                            DecodedBuffer            index,
+                            std::span<DecodedBuffer> attributes) noexcept;
+
+    // --- Decode pool -------------------------------------------------------
+    [[nodiscard]] DecodePool&       decode_pool() noexcept;
+    [[nodiscard]] const DecodePool& decode_pool() const noexcept;
+
+    ~GeometryRegistry();
+    GeometryRegistry(const GeometryRegistry&)            = delete;
+    GeometryRegistry& operator=(const GeometryRegistry&) = delete;
+
+protected:
+    GeometryRegistry() noexcept;
+};
+
+// -----------------------------------------------------------------------
+// Cook-time interface — guarded by GLIBRE_GEOMETRY_COOK so the runtime
+// dylib never links the meshoptimizer / Draco code paths. The cooker
+// driver lives in `tools/cook/` and is the only translation unit that
+// defines this macro before including this header.
+// -----------------------------------------------------------------------
+
+#if defined(GLIBRE_GEOMETRY_COOK)
+
+namespace cook {
+
+struct MeshoptOptions {
+    bool         apply_vertex_cache_optimisation = true;
+    bool         apply_overdraw_optimisation     = true;
+    bool         apply_vertex_fetch_optimisation = true;
+    float        overdraw_threshold              = 1.05f;
+    std::uint8_t target_lod_count                = 6u;
+    float        lod_error_threshold             = 0.01f;
+};
+
+struct MeshletBuildOptions {
+    std::uint8_t max_vertices_per_cluster        = 64u;   // hard cap (§4.2 #4).
+    std::uint8_t max_triangles_per_cluster       = 124u;  // hard cap (§4.2 #4).
+    float        cluster_cone_weight             = 0.5f;
+    float        screen_space_reference_distance = 1.0f;  // metres at 1080p.
+};
+
+struct DracoEncodeOptions {
+    DracoQuantisationProfile profile = DracoQuantisationProfile::Standard;
+    std::uint8_t             speed   = 5u;  // 0 = highest compression.
+};
+
+struct PakWriterOptions {
+    std::uint32_t target_page_size_bytes = 64u * 1024u;
+    std::uint32_t max_page_size_bytes    = 256u * 1024u;
+    bool          enable_blas_recipe     = true;
+};
+
+struct CookOptions {
+    MeshoptOptions      meshopt{};
+    MeshletBuildOptions meshlet_build{};
+    DracoEncodeOptions  draco{};
+    PakWriterOptions    pak{};
+    std::string_view    output_pak_path;
+    std::string_view    manifest_path;
+};
+
+struct CookedMesh {
+    std::string_view pak_path;
+    FormatHash       format_hash         = FormatHash::Unknown;
+    std::uint64_t    source_content_hash = 0u;
+    std::uint32_t    page_count          = 0u;
+    std::uint32_t    meshlet_group_count = 0u;
+    std::uint8_t     lod_band_count      = 0u;
+};
+
+// One-shot cook. Source is an authored mesh wrapped in MeshSource (the
+// content plugin emits one of these from FBX / glTF / OBJ); options
+// drive every cook stage; output is written deterministically (§4.2 #4
+// + PHILOSOPHY §7). The cooker driver consumes the result and writes
+// CookManifest alongside the .pak file.
+[[nodiscard]] Result<CookedMesh>
+    cook_mesh(const MeshSource&         source,
+              const MeshSourceMetadata& metadata,
+              const CookOptions&        options) noexcept;
+
+// Incremental-cook gate. Returns true iff the recorded manifest's
+// content-hash + FormatHash match the engine's compiled hash; the
+// driver skips re-cook in that case (§4.1.8 invariant 1).
+[[nodiscard]] Result<bool>
+    cook_is_up_to_date(std::string_view manifest_path,
+                       std::uint64_t    source_content_hash,
+                       FormatHash       engine_format_hash) noexcept;
+
+// Pak inspection — used by the editor's content browser and by the
+// CI determinism gate (cook on host A, cook on host B, byte-compare).
+[[nodiscard]] Result<PakHeaderInfo>
+    inspect_pak(std::span<const std::byte> pak_bytes) noexcept;
+
+}  // namespace cook
+
+#endif  // GLIBRE_GEOMETRY_COOK
+
+}  // namespace geometry
+}  // namespace glibre
 ```
 
-Event types, serialized schemas (Fory), error types.
+**Event types.** Geometry publishes no events back into the ECS event
+bus in MVP. Residency transitions are observed by render through
+`GeometryRegistry::page_state` reads inside phase 6 / 7; the scheduler
+(`content`) drives writes via `request_residency` / `request_eviction`
+and `notify_page_decoded`. Hot-reload refusal events flow up through
+the per-call `Result<T>` return — geometry does not own a bus channel.
+
+**Serialised schemas (Fory).** None at this layer. `MeshletPak` is the
+on-disk format and is schema-versioned by `FormatHash` rather than
+serialised through Fory (§4.1.7.1). `CookManifest` lives next to each
+`.pak` file as a small fixed-layout record consumed only by the cooker
+driver (§4.1.8 invariant 3); it does not enter Fory either. The
+runtime never reads `CookManifest`.
+
+**Error types.** The closed sum `geometry::Error` declared above lists
+every failure mode at every public geometry boundary. It is the §10
+authority for failure-mode enumeration; new variants require an ABI
+bump per `reviews/decisions/error-model.md`.
 
 ## 6. Internal Architecture
 
