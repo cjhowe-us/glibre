@@ -4095,9 +4095,54 @@ from `reviews/decisions/error-model.md` §"Logging / Telemetry"):
 
 ## 11. Acceptance Criteria
 
-GitHub `type:user-story` issues this spec closes:
+GitHub `type:user-story` issues this spec closes (drafted under
+spike #148, parent sub-epic #138):
 
-- #TBD — `<title>`
+- #404 — content: FbxImporter ingests `.fbx` → `MeshArtifact`
+  precursor (no SDK leak) — exercises §4.1.2 `FbxImporter` and the
+  `-fexceptions` carve-out per the error-model decision.
+- #405 — content: `ImageImporter` (FreeImage) decodes
+  PNG / JPEG / EXR / HDR / TIFF — exercises §4.1.2 `ImageImporter`
+  and the §3.3 refusal to author GPU-format compression.
+- #406 — content: `FontImporter` (FreeType) bakes glyph metrics +
+  SDF atlas — exercises §4.1.2 `FontImporter` and the §2
+  `FontArtifact` shape.
+- #407 — content: `CookKey` is a pure function of declared inputs,
+  canonical + length-prefixed BLAKE3 — exercises §4.1.3 invariants
+  1-4 and PHILOSOPHY §7 cross-host determinism.
+- #408 — content: `CAS::commit` lands cooked bytes via tmp + fsync
+  + `rename(2)` — exercises §4.1.5 invariants 2-6 (atomic publish,
+  dedup, mmap-readable, path-scoped).
+- #409 — content: `Manifest` atomic publish — all-or-nothing
+  manifest swap — exercises §4.1.6 invariants 1-4 and §4.1.9
+  invariant 2 (CAS-write-before-manifest-publish).
+- #410 — content: `ResidencyManager` defends `MemoryBudget` via
+  `(screen_coverage, LRU)` priority eviction — exercises §4.1.7
+  invariants 1-5.
+- #411 — content: hot-reload re-cook on source save lands at the
+  frame-8 boundary in ≤ 500ms — exercises §4.1.7 invariant 6,
+  §4.1.10 invariants 1-4, and PHILOSOPHY §8.
+- #412 — content: `DependencyEdge` fan-out drives bottom-up
+  topological re-cook — exercises §4.1.6 invariant 4, §4.1.10
+  invariants 2-4, and §4.1.9 invariant 3.
+- #413 — content: `AssetHandle<T>::view()` resolves stable bytes
+  through `Manifest → CAS → ResidencyManager` — exercises §4.1.8
+  invariants 1-5 and §4.1.7 invariants 3, 6.
+- #414 — content: `CookSession` parallel topological orchestration
+  with all-or-rollback publish — exercises §4.1.9 invariants 1-5.
+- #415 — content: in-flight imports honor cancellation within one
+  frame — exercises §4.1.2 invariant 5 and §4.1.9 invariant 5.
+- #416 — content: importer faults surface as typed
+  `ImporterError::*` with path + offset — exercises §4.1.2
+  invariant 2 and the §2 `ImporterError` closed sum.
+- #417 — content: `Manifest::resolve` returns wait-free typed
+  result against publish race — exercises §4.1.6 invariants 1, 2, 5.
+- #418 — content: `Residency` state-machine totality
+  (`Unloaded → Pending → Resident → Evicting`) — exercises §4.1.7
+  invariants 2, 5, 6 and the §2 `Residency` closed sum.
+- #419 — content: `WatchEdge` debounces atomic-save bursts into
+  one `RecookRequest` per `AssetId` — exercises §4.1.10 invariants
+  1-4.
 
 Each must have a Catch2 test by name.
 
