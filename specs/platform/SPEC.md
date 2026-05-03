@@ -1218,7 +1218,302 @@ short.
 
 ## 8. Hot-Reload Contract
 
-What survives swap, what `migrate(...)` must do, what triggers refusal.
+The platform context is loaded into the engine in two distinct shapes,
+and the hot-reload contract separates them mechanically:
+
+1. **Platform aggregates as ambient OS state.** `Window`, `Surface`,
+   `EventQueue<T>`, `Pump`, `FileWatcher`, `Clock`, `Process`,
+   `FileIo`, and their value objects are *consumed* by every other
+   plugin (render, content, ecs, tools). When any of those *peer*
+   plugins reload at the phase 8 barrier, the platform aggregates
+   **do not** participate — they keep their state because their
+   state lives in the OS (window-server entries, kqueue / FSEvents
+   subscriptions, monotonic counters, kernel file descriptors), not
+   in the swapping plugin's heap. The four-step protocol from
+   `reviews/decisions/hot-reload-protocol.md` runs unchanged for
+   the peer plugin; platform-owned handles are passed through by
+   reference and remain valid across the swap.
+2. **Platform itself as a plugin.** Per PHILOSOPHY §3, every domain
+   ships as a `.dylib`, and platform is no exception. When the
+   *platform* `.dylib` itself is the outgoing plugin P at phase 8,
+   the same drain → swap → migrate → resume sequence runs, but the
+   state-survival rules below apply specifically to OS-backed
+   aggregates: most state survives by re-acquisition from the OS,
+   not by carrying bytes across the swap.
+
+This section answers, for each §4 aggregate, the three questions the
+hot-reload protocol asks (`reviews/decisions/hot-reload-protocol.md`
+§State Survival Rules, §Migrate Function Contract, §Refusal Cases):
+*what bytes does the loader preserve, what does `migrate(...)` do,
+what triggers refusal*.
+
+### 8.1 Per-aggregate disposition
+
+| §4 aggregate                       | Survives peer-plugin swap? | Survives platform-plugin swap?                                                          | `migrate(...)` body                                                                  |
+|------------------------------------|----------------------------|-----------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------|
+| `Window` / `Display` / `Surface`   | Yes — opaque pass-through  | Re-acquired from OS by Q::register; `WindowId` numeric value is preserved across swap. | Empty (no in-memory state to reshape; OS owns the bytes).                            |
+| `EventQueue<T>` / `Pump`           | Yes — opaque pass-through  | Buffered events drain to the engine before phase 8 (already true per §4.2 inv #1).      | Empty (queue contents are by construction empty at the barrier).                     |
+| `FileWatcher`                      | Yes — opaque pass-through  | Subscription list (`std::span<CanonicalPath>`) preserved; native fds re-acquired and replayed as fresh `Created` events. | Empty in plugin memory; fresh-event replay is a Q::register responsibility, not a typed migration. |
+| `Clock` / `Instant` / `WallTime`   | Yes — pass-through          | Monotonic origin is OS-owned; the in-process `Clock` accessor is rebuilt by Q::register but `Instant::count()` values remain comparable across the swap (same OS source). | Empty.                                                                               |
+| `Process`                          | Yes — pass-through          | Argv / env / cwd / pid recaptured by Q::register from `getpid` / `argv` / `environ`; installed signal handlers are re-installed by Q against the same `SignalHandlerFn` symbols (which now live in Q's text segment). | Empty.                                                                               |
+| `FileIo` / `IoToken`               | Yes — pass-through          | In-flight `IoToken`s are **drained to terminal state** by P::drain before swap (§8.4 refusal #1). The bounded I/O thread pool is torn down by P::drain and re-spun by Q::register. | Empty (no surviving plugin-side bytes; OS file handles are scoped to single tokens). |
+| `PlatformError` (closed sum, §4.7) | Yes — pass-through          | By-value error type returned through `std::expected`; never crosses the boundary as live state. | N/A.                                                                                  |
+
+The pattern above is a direct instance of `hot-reload-protocol.md`'s
+mechanical rule "*if it has a `.fory` schema, it survives; otherwise,
+it does not*" applied in reverse: §7 already established that platform
+ships **zero** `.fory` schemas, so by the survival rule there are no
+plugin-private bytes to migrate. Every aggregate's surviving state is
+either OS-owned (preserved by the OS across the loader's `dlclose` /
+`dlopen`) or vanished by drain (in-flight queues / tokens).
+
+The consequence — **`migrate(...)` is empty for every platform
+aggregate** — is the load-bearing simplification of this section.
+There is nothing to reshape because there are no bytes that simultaneously
+(a) live in plugin memory, (b) outlive the swap, and (c) change layout
+across versions. If a future addition violates this — e.g. a platform
+aggregate gains a persistent in-memory cache with a versioned layout —
+§7.3 already routes that to a peer context (preferences / content),
+so the precondition holds by construction.
+
+### 8.2 What the platform exports for peer-plugin reloads
+
+When a peer plugin reloads at phase 8, the platform contributes
+exactly two guarantees that the loader and the incoming plugin Q rely
+on:
+
+1. **Handle stability.** Every handle vended by platform —
+   `WindowId`, `DisplayId`, `WatchToken`, `IoToken` — is a numeric
+   identifier owned by the platform aggregate that vended it, not by
+   any peer plugin. Phase-8 swap of the *peer* plugin does not
+   invalidate the handle. Peer plugin Q's `glibre_plugin_register`
+   may receive the same `WindowId` it observed before, and
+   dereferencing it through `glibre::platform::Window` returns the
+   same OS window. The platform aggregate's lifetime is the
+   process's lifetime (or the platform-plugin's own swap, §8.3),
+   not the peer plugin's.
+2. **Pump quiescence at the barrier.** Per §4.2 inv #1, exactly one
+   `Pump::drain()` call per frame on the main thread. Phase 8 runs
+   *after* `render-submit` and *before* `present`
+   (`reviews/decisions/hot-reload-protocol.md` §Context); the per-
+   frame `drain()` already ran in phase 1 and will not run again
+   until phase 1 of frame N+1. So the `EventQueue<InputEvent>` and
+   `EventQueue<WindowEvent>` are consistent — neither full-mid-write
+   nor partially drained — when the loader takes over phase 8. No
+   coordination between platform and the loader is needed for this;
+   it falls out of the frame-phase ordering.
+
+These guarantees are why peer plugins can hold platform handles
+across their own reload without the loader needing per-handle
+migration support.
+
+### 8.3 Platform-plugin self-reload
+
+When the platform `.dylib` itself is the outgoing plugin P:
+
+- **Drain (step 1).** `glibre::platform::glibre_plugin_drain` MUST:
+  1. Refuse the swap if any `Window` is mid-frame — defined as
+     `Pump::drain()` having been called in phase 1 of the current
+     frame but the per-frame `Window::surface()` handle still being
+     held by render. The loader detects mid-frame state by the
+     phase 8 invariant from `frame-phases.md` (phase 8 begins after
+     `render-submit`), so the drain function only needs to assert
+     that no `Surface` value vended this frame has an outstanding
+     reference. Failure → §8.4 refusal case P1.
+  2. Drain every in-flight `IoToken` to its terminal state
+     (`Ready` or `Cancelled`); pending operations are forced to
+     completion by joining the bounded I/O pool. The pool is then
+     torn down. This is the only meaningful "wait for in-flight
+     work" responsibility platform has.
+  3. Capture the `FileWatcher`'s subscription list as
+     `std::span<CanonicalPath>` into a middleman-typed singleton
+     (re-derived by Q in step 4 — see *fresh-event replay* below).
+     Native fd / FSEvents stream handles are released; the OS
+     subscription list is *not* preserved at the OS layer because
+     SDL3 / kqueue / inotify do not survive `dlclose` on the
+     subscribing image. The canonical-path list does survive, in
+     middleman memory.
+  4. Capture each open `Window`'s `WindowDesc` (title, size,
+     resizable, fullscreen) and the per-window `WindowId` into a
+     middleman singleton; close the SDL3 windows. (Closing here
+     rather than re-using is the pragmatic choice: SDL3 windows
+     are bound to the SDL3 subsystem instance, which is itself
+     reset across plugin swap. Re-opening is sub-millisecond on
+     macOS.)
+  5. Uninstall every signal handler installed via
+     `Process::install_signal`; capture the `(Signal, fn)` set into
+     a middleman singleton for re-installation by Q.
+
+  Drain MUST NOT touch `Clock` — the OS monotonic source is
+  reload-stable and re-reading `now()` after the swap returns a
+  value that compares correctly against any pre-swap `Instant`.
+
+- **Swap (step 2).** Standard. ABI hash check is binding;
+  `host_glibre_types_abi_hash` includes the middleman types
+  declared above for survival (see §8.5).
+
+- **Migrate (step 3).** Empty. No platform-owned `.fory` schema
+  exists today (§7.1). If §7.3's deferred candidates are ever
+  promoted into platform, they get standard versioned migrate
+  functions per `hot-reload-protocol.md` §Migrate Function
+  Contract; until then the migrate phase is a no-op pass.
+
+- **Resume (step 4).** `Q::glibre_plugin_register` MUST:
+  1. Re-initialize the SDL3 subsystem and re-open every window
+     from the captured `WindowDesc` set. The new `WindowId` for
+     each reopened window is mapped to the prior `WindowId` via
+     the middleman singleton, so peer plugins continue to
+     dereference the same numeric value. (This is the single
+     non-trivial piece of platform-plugin migration, and it lives
+     entirely in Q's register, not in a typed migrate function —
+     because the reshape is "OS handle re-acquisition", not "byte
+     layout conversion".)
+  2. Re-spin the `FileIo` bounded I/O thread pool with the
+     configured `io_thread_budget`.
+  3. Re-subscribe the `FileWatcher` to every captured
+     `CanonicalPath`. **Each re-subscribed root re-emits a fresh
+     `FileEvent::Created` for every existing file under it.** This
+     is by design: consumers of the watcher (`content`, `tools`)
+     already idempotently handle `Created` events as "load or
+     refresh"; replaying them on platform-reload converges the
+     consumer's view to the current filesystem state without
+     platform needing to persist content hashes. The dedup window
+     (§4.3 inv #2) collapses the burst correctly.
+  4. Re-install every captured `(Signal, SignalHandlerFn)` pair
+     against the *same function pointers in Q's text segment*.
+     The middleman captures `Signal` enum values, not raw function
+     pointers, and Q is responsible for re-resolving the symbol;
+     this is what makes signal handlers survive a code swap.
+  5. Re-publish a `HotReloadCompleted` event per
+     `hot-reload-protocol.md` §Observer Notification.
+
+### 8.4 Refusal cases
+
+Platform inherits the three universal refusal cases from
+`hot-reload-protocol.md` §Refusal Cases (ABI hash mismatch, schema
+migration failure — vacuous here, plugin init failure) and adds one
+context-specific refusal:
+
+**P1. Mid-frame window drop.** If `glibre_plugin_drain` is called
+while any `Surface` vended this frame is still referenced by render
+(detected by a per-window outstanding-surface counter the platform
+maintains), the drain returns `unexpected(Unsupported)` and the
+loader maps it to `core::Error::HotReloadRefused` per
+`hot-reload-protocol.md` §Refusal Cases. The previous-good platform
+plugin remains live; the operator's recourse is to retry on the next
+frame boundary (the editor's reload UI typically does this
+automatically). This refusal exists because dropping a
+`CAMetalLayer*` mid-frame is undefined behavior in render's command
+encoding — the strictest possible failure mode and the one the
+protocol is built to prevent.
+
+The other three universal cases land naturally:
+
+- **ABI hash mismatch** — Q built against a different
+  `glibre-types.dylib` than the host. Detected at step 2.1. The
+  middleman types added by §8.5 are part of the hash, so any
+  platform-private survival type that changes layout forces a
+  rebuild rather than a silent migration.
+- **Schema migration failure** — vacuous in MVP; no platform
+  `.fory` schema exists today.
+- **Plugin init failure** — Q's `register` returns `unexpected`,
+  e.g. SDL3 fails to re-initialize because a window-server
+  dependency went away. Detected at step 4.1; rollback per
+  `hot-reload-protocol.md` §Failure & Rollback re-runs P's
+  register against the captured middleman state, which restores
+  windows and watchers to their pre-drain configuration.
+
+### 8.5 Middleman types contributed by platform
+
+Platform self-reload requires four pieces of plugin-side state to
+survive the swap. Per the survival rule, each is declared as a
+middleman type and gets a `.fory` schema living under
+`data/schemas/platform/` if and when this becomes implemented (the
+schemas are not part of the MVP §7 ledger because no peer context
+reads them — they are loader-internal). The types:
+
+1. `glibre::types::platform::WindowSurvival` —
+   `(WindowId, WindowDesc)` per open window.
+2. `glibre::types::platform::WatcherSurvival` —
+   `std::span<CanonicalPath>` of subscription roots.
+3. `glibre::types::platform::SignalSurvival` —
+   `std::span<Signal>` of installed handlers (the function-pointer
+   identity is recovered from the symbol name in Q, not stored).
+4. `glibre::types::platform::FileIoSurvival` — `FileIoConfig`
+   (the bounded-async budget the rebuilt pool must match).
+
+These types are loader-visible only during phase 8; they have no
+public surface in `glibre/platform/platform.hpp`. Their addition to
+`glibre-types.dylib` would bump `host_glibre_types_abi_hash` once
+when platform self-reload is first implemented; until then this
+section is a forward-declaration and platform's contribution to the
+hash remains zero (§7's net effect line preserved).
+
+### 8.6 Observer reseat
+
+Per `hot-reload-protocol.md` §Observer Notification, subscribers of
+the `HotReloadCompleted` event are called synchronously on the
+loader thread before phase 9 begins. For platform self-reload, the
+specific observers that MUST reseat are:
+
+- **Input event consumers** (any peer plugin draining
+  `EventQueue<InputEvent>`): the queue object is re-vended by Q;
+  consumers re-acquire the queue handle via the platform API
+  rather than caching the prior pointer.
+- **Window event consumers**: same pattern, against
+  `EventQueue<WindowEvent>`.
+- **File event consumers** (typically `content`): re-acquire the
+  `FileWatcher` handle and re-issue `take_events(WatchToken, …)`
+  against the new tokens vended by Q. Watch tokens **do not**
+  carry numeric identity across platform self-reload (unlike
+  `WindowId`); consumers receive new tokens as part of the
+  reseat. This trade-off is intentional: preserving watcher token
+  identity would force the loader to know the watcher's internal
+  token-to-subscription map, which violates
+  `hot-reload-protocol.md`'s rule that the loader needs no
+  plugin-private knowledge.
+
+The observer-reseat protocol is itself middleman-typed via the
+existing `HotReloadEvent` (`hot-reload-protocol.md` §Observer
+Notification, last paragraph), so no platform-private observer bus
+is needed.
+
+### 8.7 Test hooks
+
+The replay-driven `InputDriver` used by the e2e harness
+(`specs/e2e/SPEC.md`) is **frame-locked**, not handle-locked: it
+synthesizes `InputEvent` values into the input queue before phase 1
+of each replayed frame and never holds a long-lived reference to
+the queue object. This means a platform self-reload between
+recorded frames is invisible to replay — the next-frame inject runs
+against whatever queue the platform plugin currently exposes. The
+replay golden snapshots (`specs/e2e/SPEC.md` §6) therefore remain
+deterministic across an injected platform reload, and the e2e CI
+matrix can include a "reload mid-replay" scenario without changing
+the input vocabulary.
+
+The platform-specific addition to the loader's
+`#if defined(GLIBRE_E2E)` test surface is one fixture function:
+
+```cpp
+namespace glibre::platform::test {
+
+// E2E-only. Forces a platform self-reload to be requested at the
+// next phase 8 by enqueuing a reload of the platform plugin against
+// `replacement_dylib_path`. Returns the same ReloadRequestId the
+// generic loader hook returns; the harness blocks on
+// glibre::core::test::await_reload to observe completion.
+ReloadRequestId enqueue_platform_reload(
+    std::filesystem::path replacement_dylib_path) noexcept;
+
+}  // namespace glibre::platform::test
+```
+
+This is a thin wrapper over `glibre::core::test::enqueue_hot_reload`
+with the platform plugin's fqn baked in; it exists so the e2e
+fixture set under `tests/e2e/plugins/platform/` can ship a
+`platform-self-reload` variant without leaking the platform fqn
+literal across test files.
 
 ## 9. Performance Budget
 
