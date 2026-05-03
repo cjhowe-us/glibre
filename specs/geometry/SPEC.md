@@ -2527,7 +2527,485 @@ cache rebuild on either bump.
 
 ## 8. Hot-Reload Contract
 
-What survives swap, what `migrate(...)` must do, what triggers refusal.
+This section specialises the engine-wide hot-reload protocol
+(`reviews/decisions/hot-reload-protocol.md` — drain → swap → migrate →
+resume) to the **geometry plugin and its cooked artefacts**. Geometry is
+unusual among glibre's contexts because it owns *two* reload surfaces,
+not one:
+
+1. The geometry plugin `.dylib` itself, which rides the engine-wide
+   protocol unchanged (drain → swap → migrate → resume at phase 8).
+2. The cooked `.glibre-pak` files on disk that the running plugin maps
+   into the process. These are the artefact this section targets.
+
+The first surface adds nothing new beyond the protocol's existing
+machinery — geometry's `glibre_plugin_drain` releases the `DecodePool`,
+unmaps every `PakReader`, and clears the `GeometryRegistry` tables;
+`glibre_plugin_register` rebuilds them from the surviving `MeshHandle`
+slots' recorded `(pak_path, format_hash, content_hash)` triples in the
+middleman registry table. That is the standard pattern the protocol
+documents and is not re-stated here.
+
+The **second surface — pak-file change** — is what this section
+defines. A pak swap shares the protocol's four-step shape (drain → swap
+→ migrate → resume) and is dispatched from inside the same phase 8
+slot, but its trigger, refusal gate, and migrate body are geometry-
+specific: the trigger is a content-hash change on a `.glibre-pak`
+file (not a dylib), the refusal gate is `FormatHash` mismatch (not
+`glibre_types_abi_hash` mismatch), the survival inventory is keyed on
+`MeshHandle` identity preservation, and the migrate body re-resolves
+every `MeshHandle` and `MeshletGroupHandle` to a new payload address
+without changing the handle's bit-level value. Engine-wide concerns
+(per-plugin atomicity, observer bus event shapes, error wrapping rules,
+the `enqueue_hot_reload` E2E entry point) are not re-stated — see the
+protocol record. Geometry adds nothing to that machinery; it only fills
+in the four pluggable points the protocol leaves to each plugin
+(drain side-effects, survival inventory, migrate body, register-time
+rehydration) plus a small surface for the pak-file path so observers
+(notably `render`) can react.
+
+### 8.1 Trigger — `.glibre-pak` content-hash change
+
+A pak hot-reload is requested when, and only when, `content`'s
+filesystem-watcher (or the E2E test hook in §8.6) detects that a
+`.glibre-pak` file referenced by some live `MeshHandle` has changed
+**and** the new file's `PakHeader.content_hash` differs from the
+mapping currently held by the registry. The watcher posts the request
+to the loader's pending-reload queue; the loader consumes it at phase 8
+entry per the protocol, treating geometry as the originating context.
+
+Three observations make this trigger orthogonal to the dylib trigger:
+
+1. **The trigger payload is a path, not a dylib.** Geometry's reload
+   request carries `(MeshHandle target, std::filesystem::path
+   replacement_pak_path)` — never a `.dylib` path. The loader does not
+   `dlopen` anything in this branch; it routes the request to
+   geometry's `GeometryRegistry::reload_pak(...)` after phase 8 entry.
+   Plugin vtable swaps and pak-file swaps are independent transactions
+   in the same phase per protocol §"Failure & Rollback" (per-plugin
+   atomicity, here per-pak atomicity).
+2. **The trigger does not require any plugin code change.** A pak that
+   re-cooks because its `MeshSource` bytes changed — but whose
+   `FormatHash` still matches the engine's compiled value — reloads
+   with no dylib involvement. The plugin code remains stable; only
+   bytes inside the mapping change.
+3. **The trigger surface itself is a middleman type.**
+   `glibre::types::geometry::PakReloadRequest` carries the path, the
+   target `MeshHandle`, and a request id. Its layout survives a
+   geometry-plugin reload (which would be a dylib reload, the first
+   surface) so a queued pak reload outlives a concurrent plugin swap
+   in the same phase 8.
+
+**Mid-frame reload is refused.** A pak reload request that arrives at
+any phase 1–7 of frame N is queued; the loader's `pending_reloads`
+counter is consumed only at phase 8 entry per protocol §"Step 1 —
+Drain". Inside phase 8, geometry does not yield to LOD-band selection
+(phase 6) or `RenderProxy` consumption (phase 7) — the loader holds
+exclusive ownership for the duration of drain → swap → migrate → resume
+per protocol §"Decision". A request that would force any of phases
+1–7 to observe a partially-swapped `MeshHandle` resolution is treated
+as a contract violation by the loader, not a refusal — geometry
+contributes no new refusal arm here, but states the invariant
+explicitly so consumers cannot expect mid-frame swap semantics.
+
+### 8.2 Refusal — `FormatHash` mismatch is the only gate
+
+The pak hot-reload protocol has **exactly one geometry-specific
+refusal arm**: the new pak file's `PakHeader.FormatHash` does not
+match the engine's compiled-in `FormatHash`
+(`build/generated/glibre-types/include/glibre/types/geometry/_format_hash.hpp`,
+§7.3.2 consequence 2). On mismatch, geometry refuses the swap and the
+old pak remains mapped; no migration is attempted, no `BLASRecipe` is
+re-applied, no observer event is fired except the engine-wide
+`HotReloadRefused`. The refusal arm is the existing
+`geometry::Error::PakFormatHashMismatch` (§4.1.7 invariant 1, §10),
+wrapped under `core::Error::HotReloadRefused` per protocol §"Refusal
+Cases".
+
+This is the single seam that makes pak hot-reload's contract
+mechanically simple:
+
+1. **No in-process migration of pak bytes.** §7.3.2 already records
+   "invalidate, never migrate" for the pak binary. Hot-reload inherits
+   that rule verbatim — there is no migration ladder, no per-version
+   chain, no `migrate_pak_v<N>_to_v<N+1>` table. A `FormatHash` bump is
+   semantically identical to a fresh game on this surface.
+2. **Engine restart needed.** When `FormatHash` mismatches, the
+   operator's only recovery path is to (a) re-cook the pak against the
+   current engine (`§7.3.2` consequence 4 mandates this for any change
+   on `main`), (b) restart the engine process if step (a) requires a
+   plugin rebuild that the loader cannot apply mid-session. The
+   refusal log surfaces both the live `FormatHash` and the rejected
+   pak's `FormatHash` so the operator can act without grepping
+   generated headers.
+3. **Refusal is per-pak, not phase-wide.** The protocol's per-plugin
+   atomicity (§"Failure & Rollback") applies per-pak here: one pak's
+   `FormatHash` mismatch does not block another pak's reload in the
+   same phase 8.
+4. **No graceful "best-effort" path.** The engine never accepts a pak
+   whose `FormatHash` differs from its own. Partial validity is
+   forbidden per §7.3.2 consequence 3; this section restates the rule
+   in the hot-reload context for emphasis.
+
+The other two protocol refusal arms surface verbatim and are listed
+here for completeness only — they are not geometry-specific:
+
+| Engine arm                            | When it fires for a pak swap                                                                                        | Operator action                                                                                          |
+|---------------------------------------|---------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
+| `core::Error::PluginAbiHashMismatch`  | A *plugin*-level concept; cannot fire on a pak swap because the pak path does not invoke `dlopen`. Listed for completeness. | N/A in this branch.                                                                                      |
+| `core::Error::SchemaMigrationFailed`  | A `glibre-types` middleman type referenced by the pak's accompanying `CookManifest` side-record (§7.1.1) lacks a migrate chain. | Author the missing migrate function (`§7.3.1` rule 3) or restore the prior schema; refusal until either. |
+| `core::Error::PluginInitFailed`       | The replacement plugin's `register` body errored — orthogonal to the pak path; never a pak-file refusal cause.       | Read the geometry plugin's log; this is the dylib branch, not this section.                              |
+
+### 8.3 Survival inventory
+
+The engine-wide survival rule is mechanical: **state with a `.fory`
+schema in `glibre-types.dylib` survives across the swap; state without
+one does not** (protocol §"State Survival Rules"; PHILOSOPHY collapse:
+one check, not a per-aggregate manifest). Pak hot-reload narrows that
+rule further with a geometry-specific corollary: **opaque-handle
+identity (`MeshHandle`, `MeshletGroupHandle`) survives even though the
+backing pak bytes are replaced**. The handle's bit value does not
+change; the registry simply re-resolves it to a new payload address.
+The table below classifies every geometry aggregate against the rule.
+
+| Geometry-owned state                                     | Persistence path                                | Survives swap? | Reasoning                                                                                                                                                                                                                                                                                                                                                                                            |
+|----------------------------------------------------------|-------------------------------------------------|----------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `MeshHandle` (§4.1.9)                                    | None (in-process opaque id; recorded in middleman registry table)         | **Yes — bit-equal.** The `(u32 index, u32 generation)` pair stays the same; the registry slot is re-pointed at the new `PakReader`. Generation is **not** bumped because the handle's identity contract requires stability across pak content changes (§4.1.9 invariant 1). A new generation is reserved for explicit `unregister_mesh` followed by `register_mesh`, which is a different operation. |
+| `MeshletGroupHandle` (§4.1.10)                           | None (derived from `(MeshHandle, group_index)`) | **Yes — bit-equal.** Per §4.1.10 invariant 1, the handle is bijective with `(MeshHandle, group_index)` for the lifetime of the parent's generation. Hot-reload preserves the parent's generation (above), so every group handle issued before the swap continues to resolve. The group **may have moved** in the new pak's cluster DAG; re-resolution is the migrate body's job (§8.4).               |
+| `GpuMeshBuffers` (§4.1.15) — handle table                | None (per-band, per-`MeshHandle`)               | **No — replaced.** The buffer handles point at GPU memory whose contents are derived from the *old* pak's decoded bytes. Surviving them across a pak swap would expose stale geometry to render's bindless lookup. The migrate body releases every `GpuMeshBuffers` record for the affected mesh and re-allocates from `render`'s buffer allocator after the new pak's decode pool entries warm.    |
+| `ResidencyState` (§4.1.13) — per-`(MeshHandle, page)`    | None (per-process)                              | **Re-evaluated.** The new pak's `PakHeader` may declare a different page count, different residency hints, or different page-byte-offsets. The migrate body drops the old pak's entries and seeds the new pak's entries at `NotResident`; `content`'s scheduler is then free to re-prioritise based on the new `ResidencyHint` table. The state's *table identity* survives; its rows are rebuilt. |
+| `BLASRecipe` (§4.1.7.2) — per-`MeshHandle` blob          | Inside the new pak file                         | **Re-applied.** The recipe's bytes live in the new pak's `BLASRecipe` region (§7.2.2 layout). The migrate body publishes the new recipe to `render`'s `RTAccelStructures` peer (§4.1.8 of `specs/render/SPEC.md`) via the `MeshReplaced` event (§8.5); render then schedules a BLAS rebuild against the new geometry on its next phase-7 mutation point. Geometry never builds the BLAS itself.    |
+| `CookManifest` (§7.1.1) — Fory side-record               | `.fory` schema, middleman                       | **Reloaded.** The accompanying `<pak>.cookmanifest.fory` file is re-read whenever its sibling pak reloads; the new manifest's `format_hash`, `cook_options`, and `source_content_hash` overwrite the registry's recorded values for that `MeshHandle`. If the manifest's `format_hash` field disagrees with the new pak's `PakHeader.FormatHash`, the swap is refused with `geometry::Error::CookManifestInvalid` wrapped under `core::Error::HotReloadRefused`. |
+| `BLASRecipeRecord` (§7.1.2) — Fory side-record           | `.fory` schema, middleman                       | **Reloaded** alongside the pak. Tooling-only; runtime consumes the binary `BLASRecipe` blob directly. Re-read on swap purely so the editor's content browser displays the new descriptor count without restarting.                                                                                                                                                                                |
+| `MeshSourceMetadata` (§7.1.3) — Fory side-record         | `.fory` schema, middleman                       | **Reloaded.** Authoring-provenance only; no runtime consumer.                                                                                                                                                                                                                                                                                                                                       |
+| `PakReader` (§4.1.11)                                    | None — wraps the file mapping                   | **No — replaced.** The old `PakReader` is destroyed (its `mmap` is unmapped after the swap completes; see §8.4). A fresh `PakReader` is constructed against the new pak file. Construction performs the `FormatHash` check (§4.1.11 invariant 3) — this is where the §8.2 refusal fires.                                                                                                          |
+| `DecodePool` (§4.1.12)                                   | None — pool of scratch buffers                  | **Yes, but entries invalidated.** The pool itself persists (sized at engine init from the union of every loaded pak's `PakHeader` per-attribute maxima; §4.1.12 invariant 1). Decode-cache entries currently holding *intermediate* state for the affected `MeshHandle`'s pages are invalidated by the migrate body — every in-flight decode for the old pak is cancelled before the swap. Slots return to the pool after cancellation. The **pool's capacity is unchanged**; if the new pak's per-attribute maxima exceed the existing pool budget, the swap refuses with `geometry::Error::DecodePoolUndersized` (§4.1.12 invariant 1, restated in this hot-reload context). |
+| `GeometryRegistry` (§4.1.14) — handle table              | None — engine singleton                         | **Yes — table identity survives.** The `MeshHandle` table stays put; the migrate body re-points the affected slot's backing `PakReader` and clears the slot's `GpuMeshBuffers` record set. No other slots are touched.                                                                                                                                                                              |
+| `ClusterDAG` runtime form (§4.1.5) — derived from pak    | None — reconstructed at register-mesh           | **No — re-derived.** The DAG is reconstructed from the new pak's bytes at the migrate step. Group-index identity is **not** preserved across re-cooks; the migrate body's re-resolution step (§8.4 step 3) walks the new DAG and re-binds each surviving `MeshletGroupHandle` to the closest matching group in the new DAG (matching key: stable `group_id` recorded in pak per §7.1.2).            |
+| Per-plugin worker thread pools (decode workers)          | None                                            | No — destroyed by geometry's `glibre_plugin_drain` (the dylib branch of hot-reload, not this branch). Pak swaps do not spin down decode workers; they merely cancel in-flight decodes for the affected mesh.                                                                                                                                                                                        |
+
+The rule mechanically applied: every "Yes — bit-equal" row sits behind
+an opaque-handle boundary that the engine's middleman registry already
+preserves; every "No — replaced" row is bounded by a single
+`MeshHandle` so the swap is tractable in O(pages of the affected mesh)
+work; every "Reloaded" row is a `.fory` side-record that rides the
+engine's standard Fory reload path.
+
+### 8.4 `migrate(...)` body — geometry's responsibilities
+
+The protocol's `migrate` step (protocol §"Step 3 — Migrate") for a
+pak swap runs entirely inside `GeometryRegistry::reload_pak(...)`,
+called once per pending pak request from the loader's phase-8 driver.
+The body is **pure with respect to plugin code** — it touches the
+registry tables, the `DecodePool`, the `ResidencyState` table, and the
+observer bus, all of which live on the host side or in middleman
+types. It does not call into render's vtables (it only publishes the
+`MeshReplaced` event; render's response runs in render's own resume
+step or in render's next phase 7), nor into content's scheduler
+(scheduler reads `ResidencyState` lock-free at phase 6 of the next
+frame and re-prioritises naturally).
+
+The body has six numbered steps, executed in order; failure at step
+`K` rolls back through `K..1` and yields
+`core::Error::HotReloadRefused` per protocol §"Failure & Rollback".
+
+#### 8.4.1 Pre-swap header validation
+
+1. Construct a candidate `PakReader` against
+   `request.replacement_pak_path` — this performs the `FormatHash`
+   check (§4.1.11 invariant 3, §8.2) and the magic / offset checks
+   (§4.1.7.1). On any failure, refuse the swap with the underlying
+   `geometry::Error::*` wrapped under `core::Error::HotReloadRefused`;
+   leave the old `PakReader` mapped; emit `HotReloadRefused` with the
+   inner cause.
+2. Re-read the sibling `<pak>.cookmanifest.fory` file via the engine's
+   Fory loader. Cross-check its `format_hash` field against the
+   candidate `PakReader`'s `PakHeader.FormatHash`; mismatch refuses
+   with `geometry::Error::CookManifestInvalid` (§7.1.1 invariant 2).
+3. Walk the candidate pak's `PakHeader.DecodePool` sizing requirements
+   and verify they fit inside the live pool's capacity (§4.1.12
+   invariant 1). Failure refuses with
+   `geometry::Error::DecodePoolUndersized`.
+
+This step never mutates registry state. Postcondition: the candidate
+is fully validated and the rest of the migrate body is committed to
+running to completion.
+
+#### 8.4.2 Cancel in-flight decodes for the affected mesh
+
+1. For each `(MeshHandle, page_index)` pair in `ResidencyState` whose
+   state is `Pending`, mark it `NotResident` and signal cancellation
+   to the decode worker holding the slot. Workers check the
+   cancellation flag at the next decode-block boundary and return the
+   slot to the pool with `geometry::Error::DecodePoolBusy` (per
+   §4.1.12 invariant 2 — bounded-wait, no spin).
+2. Wait for cancellation to complete: this is a bounded wait because
+   §4.1.12 forbids unbounded blocking; in practice each in-flight
+   decode finishes its current sub-block within microseconds.
+3. Postcondition: no decode worker is still reading the old
+   `PakReader`'s mapped bytes for this mesh.
+
+#### 8.4.3 Re-resolve handles to the new payload
+
+This is the heart of the migrate body and the unique geometry
+contribution. The handle's bit-level value does not change; only its
+**resolution to a payload address** changes.
+
+1. **`MeshHandle` re-resolution.** The registry slot for the affected
+   `MeshHandle` is re-pointed at the new `PakReader`. The slot's
+   generation is **not** bumped (§4.1.9 invariant 1: handle stability
+   across pak content changes). Render's `RenderProxy` SoA may
+   continue holding the same `MeshHandle` value; subsequent lookups
+   resolve to the new pak.
+2. **`MeshletGroupHandle` re-resolution.** Every `MeshletGroupHandle`
+   issued before the swap is bijective with `(MeshHandle,
+   group_index)` for the lifetime of the parent's generation
+   (§4.1.10 invariant 1). Group indices may have shifted in the new
+   pak's cluster DAG (because re-cook can re-order DAG nodes
+   deterministically per `cluster_dag_layout_canonical`, §7.2.3). The
+   re-resolution table maps each pre-swap `(group_index_old)` to its
+   `(group_index_new)` by matching the stable per-group `group_id`
+   recorded in `BLASRecipeRecord` (§7.1.2) and the cluster-DAG
+   record (§7.1.1). Groups that have no match in the new DAG (e.g. a
+   simplification stage merged the group into a coarser node) yield
+   `geometry::Error::MeshletGroupHandleStale` on subsequent lookup —
+   the same contract as a generation mismatch in §4.1.9 invariant 3,
+   surfaced through the existing stale-handle path.
+3. The mapping table is published atomically; readers (render's LOD
+   selector at the next phase 6) see either the old table or the new
+   table, never a partial view. Publication is one relaxed atomic
+   store under the loader's exclusive phase-8 ownership.
+
+#### 8.4.4 Replace `GpuMeshBuffers`
+
+1. For every `(MeshHandle, LODBand)` entry in the registry's
+   `GpuMeshBuffers` table for the affected mesh, return the buffer
+   handles to render's allocator. The release call is the inverse of
+   the per-band acquisition (§4.1.15 invariant 4 — lifetime tied to
+   residency).
+2. Clear the table for the affected `MeshHandle`. New
+   `GpuMeshBuffers` records will be materialised lazily when the
+   first page in each band reaches `Resident` again — this is the
+   normal residency promotion path (§4.1.13), driven by `content`'s
+   scheduler in subsequent frames.
+3. Postcondition: render's bindless lookup against this `MeshHandle`
+   in the next phase 7 returns the §4.1.10 invariant 3 "page not
+   loaded yet" render-skip signal until the scheduler reseats pages.
+   The skip is brief (≤1–2 frames at MVP scheduling rates) and
+   never produces stale geometry.
+
+#### 8.4.5 Re-evaluate `ResidencyState`
+
+1. Drop every `ResidencyState` entry keyed `(this MeshHandle, *)`.
+2. Insert fresh entries for each `page_index` in the new pak's page
+   table, all initialised to `NotResident`.
+3. The new pak's `ResidencyHint` byte array (§4.1.7.1, §4.1.13
+   invariant 4 — hints never mutate at runtime) is read once during
+   this step and stored alongside the new entries; `content`'s
+   scheduler sees the updated hints on its next phase-6 read and
+   re-prioritises naturally. Geometry never adjudicates the budget
+   itself (§4.1.13 invariant 4).
+
+#### 8.4.6 Re-apply `BLASRecipe` and unmap the old pak
+
+1. Read the new pak's `BLASRecipe` blob (§4.1.7.2). Geometry does
+   *not* invoke any GPU API (§4.2 invariant 10); it only stores the
+   recipe inside the registry slot for `render` to consume.
+2. Publish the `MeshReplaced` event to the engine observer bus
+   (§8.5). The event carries the affected `MeshHandle`, the new
+   pak's `FormatHash` and `content_hash`, the count of resolved
+   group handles, and the count of stale group handles (§8.4.3 step
+   2). Render's `RTAccelStructures` peer (§4.1.8 of the render
+   SPEC) reads the recipe on its next phase-7 mutation point and
+   schedules a BLAS rebuild; the prior BLAS for this mesh remains
+   live until the rebuild completes (render's contract, not
+   geometry's).
+3. After the bus call returns synchronously (subscribers run on the
+   loader thread per protocol §"Observer Notification"), unmap the
+   old `PakReader`. Its file mapping is released, its decode pool
+   slots have already been returned (§8.4.2), and no other reference
+   exists.
+
+The total work in geometry's pak-reload migrate body is therefore
+bounded by **O(pages of affected mesh) for residency-table rebuild +
+O(groups in DAG) for handle re-resolution + O(bands of affected mesh)
+for `GpuMeshBuffers` release + one bus call**, fitting the protocol's
+"reload path bounded by drain + swap + Σ migrate + register" budget
+(`hot-reload-protocol.md` §Consequences).
+
+### 8.5 Observers — `MeshReplaced` event
+
+A pak swap's success is published as a single geometry-specific event
+piggy-backing on the engine observer bus:
+
+```text
+MeshReplaced {
+    mesh_handle:     glibre.types.geometry.MeshHandle,
+    old_format_hash: u64,
+    new_format_hash: u64,         // == old in non-§8.2 cases
+    old_content_hash: u64,
+    new_content_hash: u64,
+    groups_resolved: u32,
+    groups_stale:    u32,
+}
+```
+
+Atomicity follows protocol §"Observer Notification": subscribers are
+called synchronously by the loader on the game-loop thread, after
+§8.4.6 step 1 (recipe stored) and before §8.4.6 step 3 (old mapping
+unmapped). Subscribers see a fully-swapped registry and a fully-
+re-resolved handle table; they never observe a half-swapped pak.
+
+Two observer responsibilities are contractual:
+
+1. **`render` invalidates draw lists for affected entities.** Render
+   subscribes to `MeshReplaced` and walks every `RenderProxy` whose
+   `MeshHandle` field matches `mesh_handle` (the SoA layout makes
+   this a single linear scan keyed by the handle's `index` field).
+   For each match, render marks the proxy's per-frame draw entry
+   stale; the next phase 6 cull-extract rebuilds it against the new
+   `MeshletGroupHandle` resolution and the next phase 7 picks up the
+   replaced `GpuMeshBuffers` (rebuilt lazily by the residency
+   promotion path, §8.4.4 step 2). Render's contract is documented
+   in its own §8.5 (`RenderFrameDropPending` / `RenderHotReloadCompleted`
+   are the dylib-reload events; `MeshReplaced` is the asset-reload
+   event geometry adds). No render state survives the swap that
+   would yield stale geometry — the lazy `GpuMeshBuffers`
+   rebuild is the seam that closes the loop.
+2. **`content` re-prioritises residency.** Content's filesystem-watcher
+   *originated* the request, so it does not re-listen here; but it
+   does observe the event to clear any pending pre-fetch records keyed
+   on the old pak's page indices. The scheduler then schedules new
+   pre-fetches against the new pak's page table on its next phase-6
+   read.
+
+The `MeshReplaced` event type is itself a middleman type
+(`glibre::types::geometry::MeshReplaced`), so its layout survives any
+geometry-plugin reload (the dylib branch). No third event arm is
+permitted on this surface; new observability needs flow into the
+existing arms or graduate to a SPEC bump.
+
+A refusal — any of the §8.2 cases or any §8.4 step 1 failure — fires
+the engine's standard `HotReloadRefused { plugin_fqn:
+"glibre.geometry", cause: core::Error::* }` instead of `MeshReplaced`.
+The previous mapping stays live; observers see no event for the failed
+swap.
+
+### 8.6 Test hooks — deterministic pak-swap fixture
+
+Geometry's pak-reload contract is verified end-to-end by a single test
+fixture under `tests/geometry/hot_reload/` that drives the loader's
+existing `enqueue_hot_reload` E2E entry point (protocol §"Test
+Hooks") via a pak-path overload. The fixture has three layers, mirroring
+render's §8.6 structure to keep CI shape uniform across contexts.
+
+1. **Trace capture.** A fixture pak `tests/data/paks/cornell-mesh-v1.pak`
+   ships byte-identical from cook on every supported host (the
+   determinism contract of §4.1.7 invariant 2 makes this a goldens
+   commit, not a per-CI cook). The harness loads the pak, registers
+   one `MeshHandle`, runs the engine for `K = 8` frames against a
+   deterministic scene with `content`'s scheduler driven by a fixed
+   PRNG seed, and captures a structured trace per frame:
+   `(frame_counter, mesh_handle, resolved_meshlet_group_handles,
+   resident_pages, gpu_mesh_buffers_handles, blas_recipe_descriptor_count)`.
+   Stored canonical-ordered (per
+   `reviews/decisions/determinism-canonical-iteration.md`) at
+   `tests/data/traces/geometry/pak-swap-vN.bin`.
+2. **Reload trigger.** At frame `K/2`, the harness calls a
+   `enqueue_pak_reload(mesh_handle, "tests/data/paks/cornell-mesh-v2.pak")`
+   E2E entry point (a pak-flavoured overload of
+   `enqueue_hot_reload`). The `v2` pak is byte-different from `v1`
+   (a single vertex moved by a known offset; the cook is
+   deterministic) but its `FormatHash` is identical. This tests the
+   **happy-path content-only swap**: a swap that should preserve
+   handle identity and re-resolve to new payload addresses.
+3. **Post-reload assertion.** The harness records a second trace for
+   frames `K/2 .. K-1` against the new pak and asserts:
+   - frame `K/2`'s trace entry is byte-equal to the reference at the
+     same index (phase 8 publishes nothing observable in frame N per
+     `hot-reload-protocol.md` §Consequences);
+   - frame `K/2 + 1`'s `mesh_handle` is bit-equal to the original
+     handle (handle-identity preservation, §8.3 / §8.4.3);
+   - frame `K/2 + 1`'s resolved group handles are bit-equal to the
+     pre-swap handles (the pak's group-id stability check, §8.4.3
+     step 2);
+   - the `MeshReplaced` event was fired exactly once with
+     `groups_resolved == reference_group_count` and `groups_stale ==
+     0`;
+   - frame `K/2 + 1`'s `gpu_mesh_buffers_handles` is *different* from
+     the reference (the buffers were replaced, §8.4.4) — the
+     assertion is `not_equal`, with the new handles drawn from
+     `render`'s allocator at the next residency promotion;
+   - frame `K/2 + 2`'s rendered output (a captured framebuffer
+     screenshot) is byte-equal to the reference's frame `K/2 + 2`
+     captured against `v2` from a cold start; this is the seam that
+     proves the swap path produces the same observable output as a
+     re-run with the new pak from frame zero.
+
+Two more fixture pairs cover the refusal cases, mirroring render's
+matrix:
+
+- `cornell-mesh-v1` → `cornell-mesh-bad-format-hash`: the v2 pak is
+  cooked against a stub `FormatHash` that does not match the engine.
+  Asserts `HotReloadRefused { cause: PakFormatHashMismatch }` with the
+  prior pak still serving (frames `K/2 + 1 .. K-1` byte-equal to the
+  original trace; `mesh_handle` continues to resolve to v1 bytes).
+- `cornell-mesh-v1` → `cornell-mesh-undersized-pool`: the v2 pak's
+  `PakHeader.DecodePool` sizing exceeds the live pool's capacity.
+  Asserts `HotReloadRefused { cause: DecodePoolUndersized }` and the
+  same continuation behaviour.
+
+A fourth fixture exercises the group-stale path:
+`cornell-mesh-v1` → `cornell-mesh-simplified-v2` (same `FormatHash`,
+different DAG topology — one finer group merged into a coarser group
+between cooks). Asserts `MeshReplaced` fires with `groups_stale > 0`
+and the matching `MeshletGroupHandle` lookups return
+`geometry::Error::MeshletGroupHandleStale` (§8.4.3 step 2). Render's
+proxy update path (§8.5 observer responsibility 1) drops the affected
+draw entries on the next phase 6 cull-extract; the test asserts the
+draw-call count drops by exactly `groups_stale` between frames `K/2`
+and `K/2 + 1`.
+
+All four scenarios run inside a single CI job using the in-process
+trigger; no filesystem watcher races are involved (the watcher path is
+a thin wrapper that calls `enqueue_pak_reload`, exactly mirroring the
+protocol's filesystem-watcher policy in `hot-reload-protocol.md` §Test
+Hooks). The Catch2 cases are listed in §11 acceptance criteria as
+`Hot-reload preserves mesh handle identity`, `Hot-reload refuses
+FormatHash mismatch`, `Hot-reload refuses undersized decode pool`,
+`Hot-reload surfaces stale group handles`.
+
+### 8.7 Cross-references
+
+- Engine protocol: `reviews/decisions/hot-reload-protocol.md`
+  (drain → swap → migrate → resume; refusal arms; observer bus;
+  E2E hook).
+- Frame slot: `reviews/decisions/frame-phases.md` (phase 8 entry /
+  exit guarantees; one-frame pipeline preserved).
+- Persistence rules invoked: §7.1.1 / §7.3.1 (`CookManifest`
+  side-record reload), §7.2.2 / §7.3.2 (`MeshletPak` `FormatHash`
+  invalidation, no migration), §7.2.3 (`FormatHash` derivation),
+  §7.3.4 (frozen meshlet caps fold into `FormatHash`).
+- Aggregates touched: §4.1.7 `MeshletPak` (replaced wholesale),
+  §4.1.7.1 `PakHeader` (validated on every swap), §4.1.7.2
+  `BLASRecipe` (re-applied), §4.1.9 `MeshHandle` (bit-equal
+  survival), §4.1.10 `MeshletGroupHandle` (re-resolved),
+  §4.1.11 `PakReader` (replaced), §4.1.12 `DecodePool` (entries
+  invalidated, pool unchanged), §4.1.13 `ResidencyState`
+  (re-evaluated), §4.1.14 `GeometryRegistry` (slot re-pointed),
+  §4.1.15 `GpuMeshBuffers` (released and lazily re-materialised),
+  §4.2 invariant 1 (`FormatHash` is the sole schema-drift gate),
+  §4.2 invariant 10 (geometry never enqueues GPU work — the BLAS
+  rebuild is render's job).
+- Errors used: `geometry::Error::PakFormatHashMismatch`,
+  `geometry::Error::CookManifestInvalid`,
+  `geometry::Error::DecodePoolUndersized`,
+  `geometry::Error::MeshletGroupHandleStale` (§10 enum), each
+  wrapped by `core::Error::HotReloadRefused` per protocol
+  §"Refusal Cases".
+- Peer hot-reload contracts: `specs/render/SPEC.md` §8 (render's
+  own dylib-reload contract; consumes geometry's `MeshReplaced`
+  event per §8.5).
 
 ## 9. Performance Budget
 
