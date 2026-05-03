@@ -45,5 +45,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Verify task issue dependencies closed
-        env: { GH_TOKEN: ${{ github.token }} }
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: 'true  # TODO: enable once tooling lands'

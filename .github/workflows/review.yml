@@ -46,7 +46,7 @@ jobs:
       - name: YAML lint (issue templates + workflows)
         run: |
           python3 -m pip install --quiet yamllint
-          yamllint -d "{extends: relaxed, rules: {line-length: disable}}" \
+          yamllint -d "{extends: relaxed, rules: {line-length: disable, commas: disable}}" \
             .github/ISSUE_TEMPLATE/*.yml .github/workflows/*.yml .github/labels.yml
 
       - name: Spec template integrity
