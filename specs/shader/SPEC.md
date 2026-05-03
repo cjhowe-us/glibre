@@ -1945,7 +1945,142 @@ into the hot set.
 
 ## 10. Failure Modes & Error Model
 
-Typed errors. Recovery.
+The `shader` context returns `std::expected<T, shader::Error>` at every
+public boundary (§5; `reviews/decisions/error-model.md`). The closed
+`enum class shader::Error : std::uint16_t` declared in §5 is exhaustive
+for this context — every failure mode in this section maps onto exactly
+one enumerator, and no enumerator is reserved for a future failure that
+is not yet specified (`Result<T>` is reserved for *actual* failure modes
+per error-model decision §Composition Rules, item 4).
+
+### 10.1 Severity vocabulary
+
+Three severities; each is a fixed contract about how the shader plugin
+reacts and what the *next frame* sees. Severities are not opinions about
+how loud the log line is — they are testable bindings between an error
+and the cache / observer-bus state.
+
+| Severity | Meaning | Cache state after | Observer-bus event |
+|----------|---------|-------------------|--------------------|
+| `refuse` | Compile is rejected before any artifact is written. The prior cache state remains live; the offending input is blamed in `spdlog` and surfaced in editor UI. | unchanged | none — `render` keeps binding the prior artifact (§8.4) |
+| `fallback` | Lookup misses or yields a known-good prior; the read path serves the prior content-addressed `ShaderArtifact`. The miss is observable to callers via the `Result` return but the engine continues at full functionality. | prior entry remains authoritative | none |
+| `fatal` | An invariant has been violated that cannot be recovered without re-cooking. The error is logged at `error` level and bubbles to the caller; there is no in-process retry, and shipping builds may abort the process at the editor / asset-pipe boundary. | quarantined; cooker must re-run | none — surfacing is via `Result`, not the bus |
+
+The §8.4 *refusal-vs-publish* contract is the runtime projection of
+this table: every `refuse` severity here corresponds to a hot-reload
+refusal there, and vice versa.
+
+Recovery for every entry is mechanical (`refuse compile`, `fall back
+to prior cache entry`, or `fail the cook with no artifact emission`).
+The §10 contract bans silent retry: the plugin does **not** re-spawn
+DXC on transient subprocess failure, does **not** synthesise a "best
+effort" `ReflectionBlob`, and does **not** publish a partially-cooked
+artifact. Retries, when they happen, happen at the cooker / editor
+layer that called us, never inside `shader`.
+
+### 10.2 Per-enumerator contract
+
+The table below pins every §5 `enum class shader::Error` arm to its
+trigger, the recovery policy the plugin executes, and the severity
+class from §10.1. Names in **bold** are the canonical §5 enumerators;
+the parenthetical italic name is the alias used in spike #79's
+deliverable list (kept here so reviewers can cross-walk the spike's
+checklist against the spec without mutating §5).
+
+| Enumerator (§5) | Trigger | Recovery | Severity |
+|-----------------|---------|----------|----------|
+| **`SourceNotFound`** | `ShaderSource::open` cannot stat the project-relative path, or the path resolves outside the project source root (§4.1 inv 3). | refuse open; caller (cooker / editor) decides whether to retry after a filesystem rename or surface to the user. | `refuse` |
+| **`SourceParseFailed`** *(SourceParseError)* | DXC frontend rejects the HLSL translation unit during preprocessing or parsing — syntax error, unresolved entry-point attribute, malformed `[shader(...)]` annotation (§4.1 inv 1). | refuse compile; capture stderr verbatim into the structured error envelope (§6.2) and surface to the editor; prior artifact (if any) remains live. | `refuse` |
+| **`IncludeEscape`** *(IncludeResolutionFailed, escape variant)* | An `#include` resolves outside the project source root, or to an absolute path (§4.1 inv 3). | refuse open; the include graph is never partially admitted — `ShaderSource` construction fails atomically. | `refuse` |
+| **`IncludeCycle`** *(IncludeResolutionFailed, cycle variant)* | The include graph contains a cycle; closure is non-finite (§4.1 inv 3). | refuse open; report the cycle path through the structured error detail. | `refuse` |
+| **`EntryPointMissing`** | `compile` is invoked for an entry point name that the preprocessed `ShaderSource` does not expose. | refuse compile; surfaced to the cooker as a build-graph wiring bug, not a shader bug. | `refuse` |
+| **`EntryPointStageAmbiguous`** | An entry point carries zero or more than one `[shader(...)]` attribute (§4.1 inv 1). | refuse open. | `refuse` |
+| **`PermutationKeyMalformed`** | `PermutationKey::from_bytes` rejects bytes (e.g. enumerator out of declared range) (§4.2). | refuse decode; the cache entry that produced the bytes is quarantined and treated as `CacheCorrupt`. | `refuse` |
+| **`PermutationKeyOutOfRange`** *(PermutationOutOfRange)* | A `PermutationIndex` exceeds the §4.2 cardinality product. | refuse compile; indicates a codegen-table drift between the build that emitted the index and the build that consumes it. | `fatal` |
+| **`CompilerInvocationFailed`** *(DxcInvocationFailed)* | The `glibre-shadercc` driver subprocess cannot be spawned (binary missing, sandbox profile rejected, executable bit missing). | refuse compile; the artifact is not written; in-flight cook is failed — see §8.4 refusal case 2. | `refuse` |
+| **`CompilerExitNonZero`** *(DxcOutputDiagnostic)* | The driver exited non-zero with a structured `shader::Error` JSON envelope on stderr (§6.2). DXC or `metal-shaderconverter` emitted a diagnostic the driver mapped to this arm. | refuse compile; diagnostic JSON is forwarded verbatim into the editor / cooker logs; prior CAS entry remains the live artifact for that `(PermutationKey, target)`. | `refuse` |
+| **`CompilerTimedOut`** *(ShaderCompileTimeout)* | The driver subprocess exceeded the per-invocation wall-clock budget (§9 cook-time budget; pinned in the driver, not overridable from the plugin). | refuse compile; **no in-process retry**; the cooker may re-queue the job at its layer, which is outside this context. | `refuse` |
+| **`UnsupportedTarget`** | The `IShaderBackend` implementation rejects the requested `CompileTarget` (e.g., a non-HLSL backend asked for `MetalLib`). | refuse compile; capability mismatch surfaced through `IShaderBackend::capabilities()`. | `refuse` |
+| **`DxilEmissionFailed`** | DXC produced a non-zero exit *without* a structured diagnostic, or the driver could not parse the DXIL container header it received. | refuse compile; treated as a driver-level integrity error. | `refuse` |
+| **`SpirvEmissionFailed`** | DXC `--target spirv` produced a non-zero exit without a structured diagnostic, or emitted a SPIR-V module that fails the driver's container-shape check. | refuse compile. | `refuse` |
+| **`MetalLibLoweringFailed`** *(MetalShaderConverterFailed)* | `metal-shaderconverter` rejected the DXIL input or emitted a `metallib` whose container shape the driver could not validate (§3 collapse 4 — DXIL is the reflection pivot, never re-reflect from MSL). | refuse compile; prior `metallib` artifact (if any) remains the live entry for this permutation. | `refuse` |
+| **`ReflectionExtractionFailed`** *(ReflectionParseError)* | The `reflection/` DXIL parser (§6.3) cannot walk the container — unknown part FourCC, truncated parts table, malformed bind-table (§4.4). | refuse publish (the artifact is *not* inserted into the cache); prior `ReflectionBlob` for the prior artifact remains live; surfaces as §8.4 refusal case 3. | `refuse` |
+| **`DescriptorFrequencyAmbiguous`** *(DescriptorLayoutInvalid, ambiguous variant)* | A binding in the new `ReflectionBlob` carries no, or multiple, `DescriptorFrequencyGroup` annotations (§4.4 inv 3). | refuse publish; same path as `ReflectionExtractionFailed`. | `refuse` |
+| **`DescriptorFrequencyMissing`** *(DescriptorLayoutInvalid, missing variant)* | A binding lacks any `DescriptorFrequencyGroup` resolution after the §4.5 `DescriptorLayout::derive` pass. | refuse publish. | `refuse` |
+| **`LinkFailed`** | `IShaderBackend::link` rejected a SPIR-V spec-constant bake — entry-point set is incoherent, or specialization constants conflict across modules (§4.7 op `link`). | refuse compile of the linked module; per-module artifacts remain valid. | `refuse` |
+| **`SpecializationConstantMissing`** | A spec-constant referenced by the entry-point set is not bound at link time. | refuse link. | `refuse` |
+| **`CacheLookupMiss`** *(CacheMiss)* | `ShaderCache::lookup` finds no manifest entry for the requested `ShaderHash`. **This is the success case in disguise**: it is the only `Error` arm that callers are *expected* to handle non-fatally — the cooker's response is to enqueue a compile, the runtime's response is to refuse the bind (§4.6 inv 2 — runtime is read-only). | tooling: enqueue compile through `CompilationPipeline`. shipping: refuse bind; `render` falls back to its own missing-PSO policy (§render SPEC §8). | `fallback` |
+| **`CacheCorrupt`** | A CAS file under the cache root fails its BLAKE3 self-check, or a manifest entry references a hash whose CAS file is absent (§4.6 inv 3). | refuse load of the corrupt entry; the cooker is required to re-cook from source — there is no in-place repair. Prior valid entries in the same manifest remain live. | `fatal` |
+| **`CacheIntegrity`** | A `ShaderHash` collision against a non-byte-equal payload during cooker insert, or a manifest-vs-CAS skew detected by the integrity walk (§4.6 inv 3). | refuse insert; the in-flight artifact is dropped; prior hash continues to resolve — see §8.4 refusal case 4. | `fatal` |
+| **`CacheReadOnlyViolation`** | The shipping `shader.dylib` observed a write attempt against the cache root (§4.6 inv 2; §4.8 inv 3). | refuse the write; abort the offending caller — this is a build-system bug, never a runtime user fault. | `fatal` |
+| **`CapabilityNotSupported`** | A permutation requires a capability (mesh shaders, RT, work graphs, wave intrinsics, fp16) that the active backend does not advertise via `IShaderBackend::capabilities()` (§4.7 op `capabilities`). | refuse compile; the offline permutation enumerator (§6) is responsible for not asking — surfacing this at compile is a defense-in-depth check. | `refuse` |
+| **`ShippingCompilationAttempted`** *(ShippingBuildCannotCompile)* | Any code path inside a `GLIBRE_SHIPPING == 1` build invokes the (link-excluded) `IShaderBackend::compile` — only reachable if a test harness or stray dev tool is mistakenly enabled in shipping (§4.3 inv 3, §4.8 inv 3, §6.5, §8.4 refusal case 1). | refuse with this enumerator and abort the calling thread; shipping has no DXC binary, no `metal-shaderconverter` binary, and no `glibre-shadercc` driver bundled — there is no recovery path that a runtime could take. | `fatal` |
+
+#### 10.2.1 Spike-list enumerator added to §5
+
+Spike #79 enumerated one failure mode that is **not** present in the
+§5 declaration as of this revision:
+
+- **`ArtifactSizeExceeded`** — the driver emitted a bytecode artifact
+  (DXIL / SPIR-V / `metallib`) whose serialized payload exceeds the
+  per-artifact ceiling pinned in §9 (cook-time budget) and §7.5 (cooked
+  `ShaderLibrary` layout). Trigger: cooker insert observes
+  `payload.size() > artifact_size_ceiling` after the driver returns.
+  Recovery: refuse insert; treat as `refuse` severity in the §10.1
+  table; emit a structured diagnostic with the offending `ShaderHash`
+  and the byte count so the asset author can split the shader.
+  Severity: `refuse`.
+
+This enumerator is added to the §5 enum in the follow-up plan that
+amends §5 itself; §10 cannot mutate §5 by construction (this spike is
+scoped to §10). The amendment is tracked under sub-epic #69. Until
+that amendment lands, the cooker that detects an oversized artifact
+**must** map the condition onto `CacheIntegrity` (closest-fit `fatal`
+arm) so the closed-sum guarantee at the public boundary is never
+violated; this temporary mapping is unit-tested and deleted when
+`ArtifactSizeExceeded` lands in §5.
+
+### 10.3 Shipping-build refusal blanket rule
+
+Per §4.3 inv 3, §4.8 inv 3, §6.5, and §8.4 refusal case 1, the
+shipping `shader.dylib` does not link DXC, does not link
+`metal-shaderconverter`, and does not bundle the `glibre-shadercc`
+driver. The §5 public header `#if !GLIBRE_SHIPPING`-guards
+`IShaderBackend::compile` itself, so a shipping caller cannot reference
+the operation at compile time.
+
+The blanket runtime rule is therefore:
+
+> **Any DXC or `metal-shaderconverter` invocation attempted from a
+> `GLIBRE_SHIPPING == 1` process — by any code path, including test
+> harnesses mistakenly enabled in shipping — fails with
+> `Error::ShippingCompilationAttempted`** (§5 alias of spike #79's
+> `ShippingBuildCannotCompile`). There is no fallback, no retry, and
+> no degraded mode; the calling thread is aborted and the structured
+> log line carries the rejected request's `(SourceId, PermutationKey,
+> CompileTarget)` so the build that produced the offending binary can
+> be traced.
+
+This rule is enforceable both at link time (the symbols are absent)
+and at runtime (the surviving guard returns this enumerator before any
+subprocess is spawned). The §10.1 severity is `fatal`; the cache state
+is unchanged because no artifact was written; no observer-bus event is
+emitted because `render` should never have requested the operation in
+the first place.
+
+### 10.4 Cross-references
+
+- Closed enum source-of-truth: §5 (the §10 table tracks the §5
+  declaration; both are amended together when a new arm lands).
+- Hot-reload refusal projection: §8.4 (refusal cases 1–4).
+- Subprocess error envelope: §6.2 (driver maps DXC and
+  `metal-shaderconverter` exit codes onto this enum).
+- Reflection refusal path: §6.3 (DXIL container parse).
+- Cache integrity walk: §6.4, §4.6 invariant 3.
+- Shipping-cut linkage: §6.5.
+- Engine-wide error policy: `reviews/decisions/error-model.md`
+  (per-context enums roll into `glibre::Error` variant; logging via
+  `glibre::log_error`).
 
 ## 11. Acceptance Criteria
 
