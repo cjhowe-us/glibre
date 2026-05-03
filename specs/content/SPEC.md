@@ -3240,7 +3240,385 @@ acceptance criteria entries in §11.
 
 ## 9. Performance Budget
 
-Cycles / frame, memory ceiling, allocation rules.
+### 9.1 Engine-Wide Allocation (Citation)
+
+`reviews/decisions/perf-budget.md` Per-Context Budget Table assigns
+`content` the cell **0.20 ms CPU sim + 0.00 ms CPU submit + n/a GPU
++ 256 MiB heap**, with phase ownership "residency / streaming;
+one-shot import work is off-thread". The 16.67 ms / 60 fps wall-clock
+target is met with ≥1.5 ms reserved headroom (`perf-budget.md`
+§"Decision"); content's row is part of the **8.05 ms CPU steady-state**
+that constitutes the sim-plus-submit half of every frame on the
+game-loop driver thread. This SPEC §9 is the per-aggregate refinement
+of that cell — it MUST sum into the cited row and MUST NOT silently
+expand it. Any cell-level amendment requires a perf-budget amendment
+spike per `perf-budget.md` §"Consequences".
+
+The issue brief for spike #146 sets the per-aggregate sub-budgets
+against an MVP-refined CPU ceiling of **0.50 ms** that absorbs the
+0.20 ms `perf-budget.md` `content` sim slot plus 0.30 ms drawn from
+the engine 1.5 ms sim-half headroom row. The decision-record cell
+itself is unchanged at 0.20 ms in the engine-wide table; the 0.50 ms
+ceiling here is the **gate threshold** that includes one-shot
+variance and the import-handoff S3 path so the gate does not flap on
+runs where the import worker signals completion on the same frame as
+a manifest swap. The headroom draw is documented here per
+`perf-budget.md` §"CI Gate Spec" rule 5 (headroom regression alarm)
+and is the only non-trivial deviation §9 takes from the engine table.
+
+### 9.2 Cell Summary
+
+The content context's full cell, per the §9.1 refinement:
+
+| Axis              | Budget       | Source                                      |
+|-------------------|--------------|---------------------------------------------|
+| CPU (sim)         | **0.50 ms**  | §9.1 refinement (= 0.20 ms `content` row + 0.30 ms drawn from sim-half headroom for import-handoff variance) |
+| CPU (submit)      | 0.00 ms      | `perf-budget.md` Per-Context Budget Table (no submit-half work)     |
+| CPU (combined)    | **0.50 ms**  | sum, used as the §9.3 sub-budget ceiling    |
+| GPU               | n/a          | content owns no rendering work; GPU residency for cooked artifacts is render-tagged per `perf-budget.md` Allocator Rule 5 |
+| Heap ceiling      | **256 MiB**  | `perf-budget.md` Per-Context Budget Table   |
+| Phase ownership   | (none)       | content registers no phase-owned systems; participates as systems-in-phase |
+| Phase systems     | 1, 9         | residency tickle + handle resolve in phase 1; transient-arena drain in phase 9 |
+
+The cell is sized against **(S1)** = 1 character + 200 props + 8
+dynamic lights at 1920x1080 on M1 8-core GPU baseline, plus the
+**(S3)** asset-import scenario (one ~5 MiB FBX drag-drop while S1
+plays) exercising the off-thread import path. Content owns no
+per-frame phase (`perf-budget.md` §"Pipelined Frame Timing") — its
+work is systems-in-phase: residency state evaluation and
+`AssetHandle` resolution in phase 1 (input/scan), transient drain in
+phase 9 (present). Bulk import / cook is **off-thread** (the import
+worker pool); the 0.50 ms cell pays only for the runtime handoff
+seam (CAS lookup, residency-table update on worker completion) per
+`perf-budget.md` §"Justification Per Cell" (`content` row).
+
+The combined-CPU 0.50 ms ceiling is the figure the §9.3 per-aggregate
+rows sum into. The sim-only nature of the cell means every aggregate
+in §9.3 is annotated `sim`; no submit-half work exists for content
+in shipping builds.
+
+### 9.3 Per-Aggregate Sub-Budgets
+
+Sub-budgets refine the §9.2 cell across the ten content-owned
+aggregates from §4.1. Each row lists CPU ms (sim half), heap
+allocation under the 256 MiB ceiling, and the dominant operation that
+the budget pays for. The CI gate (§9.5) attaches one
+`BENCHMARK_CELL(...)` block per aggregate that asserts steady-state
+CPU time is `<= cpu_ms` under the S1 fixture defined in
+`perf-budget.md` §"Justification Per Cell". Hot-path activity is
+limited to three operations: residency-state evaluation, hot-reload
+manifest check, and `AssetHandle` resolution — every other aggregate
+is dormant on the per-frame critical path.
+
+| Aggregate (§4.1 ref)                | CPU ms  | Half | Heap     | Dominant operation                                                                |
+|-------------------------------------|---------|------|----------|-----------------------------------------------------------------------------------|
+| `SourceAsset` (§4.1.1)              | 0       | sim  | 0 MiB    | cook-only value object; never resident at runtime                                 |
+| `Importer` (§4.1.2)                 | 0       | sim  | 0 MiB    | cook-only entity; lives off-thread in importer worker arena (counted §9.3.1)      |
+| `CookKey` (§4.1.3)                  | 0       | sim  | 0 MiB    | cook-only value; ephemeral inside `CookSession` job table                         |
+| `CookedAsset` (§4.1.4)              | 0       | sim  | 0 MiB    | mmap-only at runtime; bytes counted as CAS hot-set, not heap (Allocator note §9.4)|
+| `CAS` (§4.1.5)                      | 0       | sim  | **160 MiB**| mmap-based; CAS hot-set residency. **mmap entries do not count against heap** per §9.4 rule 5; the 160 MiB is the resident-page ceiling tracked separately |
+| `Manifest` (§4.1.6)                 | ~0.05   | sim  | 16 MiB   | O(1) hash lookup `AssetId → ContentHash` on the handle-resolve path               |
+| `ResidencyManager` (§4.1.7)         | ~0.20   | sim  | 16 MiB   | residency-state evaluation: LRU + screen-coverage priority sweep over working set |
+| `AssetHandle` table (§4.1.8)        | ~0.05   | sim  | 0 MiB    | O(1) handle resolution; the slot table itself is core-owned (`core` SPEC §9.3 row `AssetHandle table` / 8 MiB) — content's column counts only the per-handle resolve work, not the table storage |
+| `CookSession` (§4.1.9)              | 0       | sim  | (off-thread)| importer-worker scratch arena; counted under §9.3.1 below as the soft 64 MiB    |
+| `WatchEdge` / `RecookRequest` (§4.1.10) | 0   | sim  | 0 MiB    | drained at phase 1; **0 ms on the hot path** — translation runs only on `FileEvent` arrival, gated by phase 1 watcher seam (§4.1.10 invariant 3) |
+| **per-aggregate runtime total**     | **0.30**| —    | **192 MiB**| sums against §9.2 combined-CPU 0.50 ms (~0.20 ms slack absorbs variance, §9.3.2)  |
+
+Plus the off-thread soft-ceiling row (counted separately per §9.3.1):
+
+| Off-thread aggregate                | CPU ms  | Half | Heap     | Dominant operation                                                                |
+|-------------------------------------|---------|------|----------|-----------------------------------------------------------------------------------|
+| Importer / `CookSession` scratch arena | (off-thread) | n/a | **64 MiB** | per-cook arena: FBX SDK / FreeImage / FreeType decode buffers. Off the game-loop driver thread; counted as a **soft ceiling** against the 256 MiB heap cell (§9.4 rule 4) |
+
+Heap composition exact: 16 (Manifest) + 16 (Residency) + 64 (importer
+soft ceiling) + 160 (CAS hot-set, mmap-tracked) = **256 MiB** = the
+cell heap ceiling.
+
+Notes per row, indexed by aggregate:
+
+- **`SourceAsset` / `Importer` / `CookKey` / `CookedAsset` (0 / 0
+  MiB).** These four aggregates are cook-only on the runtime side: the
+  runtime never holds a `SourceAsset` (§4.1.1 composition), an
+  `Importer` is constructed at cook-session start and destroyed at
+  session end on the importer worker pool (§4.1.2 identity), a
+  `CookKey` lives in a `CookSession`'s job table (§4.1.3 identity),
+  and `CookedAsset` bytes are reached only through the residency
+  manager's mmap mapping (§4.1.7 invariant 5; §4.1.4 distinction). No
+  per-frame CPU cost and no CPU-side heap on the runtime.
+- **`CAS` (0 / 160 MiB).** The CAS aggregate is stateless across reads
+  (§4.1.5 invariant 5); per-frame CPU is zero. The 160 MiB is the
+  resident-page ceiling for the **CAS hot-set** — the cooked artifact
+  bytes the kernel keeps mapped under the residency manager's mmap
+  regions for the steady-state working set (S1: ~200 props + 1
+  character + 8 light textures + UI / font atlases). This is **not**
+  heap-allocated bytes; per `perf-budget.md` Allocator Rule 4 + the
+  mmap-only invariants (§4.1.5 invariant 5; §4.1.7 invariant 5), mmap
+  entries are tracked separately and **do not count** against the
+  per-context allocator's tagged heap. The 160 MiB is enforced as a
+  **soft ceiling** in shipping builds (§9.4 rule 5) and asserted by a
+  resident-set-size benchmark in CI (§9.5).
+- **`Manifest` (~0.05 ms / 16 MiB).** The manifest's runtime hot path
+  is the `resolve(AssetId) → ContentHash` query on every
+  `AssetHandle::view()` cache miss / hot-reload generation bump
+  (§4.1.6 query API; §4.1.8 invariant 4). The query is an O(1) hash
+  lookup against the in-RAM snapshot. ~0.05 ms covers the per-frame
+  amortised cost across the resident handle set (S1 ≈ ~256 active
+  handles × ~200 ns per O(1) probe + the once-per-frame snapshot
+  pointer load). 16 MiB holds the in-RAM manifest snapshot for the
+  MVP asset count ceiling (~10k `(AssetId, ContentHash, CookKey,
+  Set<DependencyEdge>)` rows × ~1.5 KiB amortised per Fory-deserialized
+  `ManifestEntry` + dependency-edge sub-graph). Atomic publish swap
+  (§4.1.6 invariant 2) replaces the snapshot pointer at phase 8 — the
+  16 MiB allows two snapshots resident simultaneously during the
+  hot-reload swap window so the prior snapshot's reads drain naturally
+  (§4.1.7 invariant 6).
+- **`ResidencyManager` (~0.20 ms / 16 MiB).** The dominant runtime
+  cost. ~0.20 ms covers the per-frame **residency-state evaluation**:
+  scan the resident set for LRU stamp updates (every `view()` access
+  bumps the stamp) + screen-coverage priority recompute (input from
+  `render`'s extract path per §4.1.7 composition) + eviction
+  candidate selection. Sized for the S1 working set of ~256 resident
+  artifacts: SIMD-bound priority sort + bounded-degree pending-queue
+  drain. The evaluation never exceeds 0.2 ms because the priority
+  sort runs on a fixed-cap candidate ring (§4.1.7 invariant 4); over-
+  budget configurations refuse admission via
+  `ResidencyError::BudgetExceeded` (§4.1.7 invariant 1) rather than
+  bleeding into adjacent contexts. 16 MiB holds the residency table
+  per `ContentHash` (~10k slots × ~1 KiB metadata: state enum, mmap
+  region pointer, ref-count, LRU stamp, screen-coverage scalar) plus
+  the priority-ordered `LoadRequest` queue (§4.1.7 composition). The
+  CAS hot-set's mmap bytes (160 MiB) are owned by the residency
+  manager's mappings but accounted under the CAS row above.
+- **`AssetHandle` table (~0.05 ms / 0 MiB content-tagged).** O(1)
+  handle resolution: `asset_id → manifest hash lookup → residency
+  slot probe + generation-tag check` (§4.1.8 composition). ~0.05 ms
+  covers the per-frame amortised cost across the resident handle set
+  (S1 ≈ ~256 handle resolutions per frame, ~200 ns each). The handle
+  slot table itself is **core-owned**: it lives under `core`'s
+  `AssetHandle table` row (`core` SPEC §9.3 — 8 MiB / 0.05 ms
+  `core/asset` benchmark cell). Content's column here counts only the
+  per-handle resolve work, not the table storage. The split keeps the
+  ABI seam (`core::AssetHandle<T>` is a core primitive per
+  PHILOSOPHY §3) cleanly attributed to `core` while content owns the
+  resolution semantics. No double-counting: core asserts table heap;
+  content asserts resolve CPU.
+- **`CookSession` (off-thread / scratch in §9.3.1).** Cook orchestration
+  runs entirely off the game-loop driver thread on the importer worker
+  pool (§4.1.9 composition; `perf-budget.md` `content` row "one-shot
+  import work is off-thread"). Per-frame CPU on the driver thread is
+  zero. The session's staging table + worker arena live in the
+  off-thread soft-ceiling row (§9.3.1 / 64 MiB).
+- **`WatchEdge` / `RecookRequest` (0 / 0 MiB).** **0 ms on the hot
+  path.** Watcher event translation runs only on `FileEvent` arrival
+  from `platform`'s file watcher (§4.1.10 composition; §3.3 platform
+  seam). Events are drained at phase 1 (input phase, the platform
+  watcher's scheduled drain point), translated against the manifest's
+  in-RAM dependency graph (§4.1.10 invariant 3), and enqueued on the
+  off-thread importer pool — no FS operations on the driver thread,
+  no allocation per non-event frame. Steady-state S1 produces zero
+  watcher events per frame (no edits in flight) so the cost is
+  literally zero. The hot-reload frame budget (§9.5 + `perf-budget.md`
+  §"CI Gate Spec" rule 4) gates the rare event-frame separately.
+
+The per-aggregate runtime CPU total (~0.30 ms) is below the §9.2
+combined-CPU 0.50 ms ceiling by ~0.20 ms; that slack is intentional
+(§9.3.2) — it absorbs variance in residency-evaluation cost when the
+S3 import-completion handoff lands on the same frame as a hot-reload
+manifest swap, without spilling into another context's budget.
+
+#### 9.3.1 Off-thread soft ceiling — importer scratch arena
+
+Bulk import / cook (§4.1.2 importers, §4.1.9 cook session) runs on a
+**separate worker pool**, not on the game-loop driver thread. Per
+`perf-budget.md` §"Justification Per Cell" (`content` row): "Heavy
+work — FBX parse (S3), Draco decode, texture upload — runs on the
+import worker thread off the game loop." Therefore:
+
+1. The 0.50 ms CPU cell does **not** charge for cook-step CPU time on
+   the worker pool. The driver thread is the perf gate's measurement
+   surface (§9.5). The S3 fixture exercises this: a ~5 MiB FBX
+   drag-drop while S1 plays must not push the **driver thread** out
+   of its 0.50 ms cell, regardless of how long the worker takes to
+   decode the FBX.
+2. The cook-step **scratch arena** (FBX SDK decode buffers, FreeImage
+   bitmap scratch, FreeType glyph atlas staging) is allocated under
+   `ContextTag::content` per `perf-budget.md` Allocator Rule 1, but
+   tracked as a **soft ceiling** of **64 MiB**. "Soft" means: the
+   ceiling is enforced in `GLIBRE_ALLOC_STRICT=1` builds (per
+   Allocator Rule 2) but its breach in shipping builds emits the
+   once-per-frame `spdlog` warn (Allocator Rule 3) without aborting
+   the cook. The rationale: a single ~5 MiB FBX with skinning + LOD
+   chains can transiently allocate ~30-50 MiB of arena for normalize
+   + meshlet partition + BLAS construction; 64 MiB is the smallest
+   soft ceiling that admits S3 without surprise refusals while still
+   catching unbounded growth (e.g. an FBX importer leak).
+3. The arena is **drained between cooks**, not between frames:
+   `CookSession`'s end-of-session rollback / publish (§4.1.9
+   invariants 1, 5) frees the arena. It is not a per-frame transient
+   arena (`perf-budget.md` Allocator Rule 4 transient-arena
+   exemption) because the cook is multi-frame; the off-thread soft
+   ceiling is the right enforcement model.
+4. The off-thread arena counts against the `content` 256 MiB heap
+   cell (Allocator Rule 1 tag stamping). The cell composition (§9.4)
+   reflects this: 16 (Manifest) + 16 (Residency) + 64 (importer
+   soft) + 160 (CAS hot-set, mmap-tracked) = 256 MiB exactly.
+
+#### 9.3.2 Hot-path operations — exhaustive list
+
+To make the hot path explicit and gate-able, the **complete**
+per-frame work content does on the game-loop driver thread is:
+
+1. **Residency state evaluation** (`ResidencyManager`, ~0.20 ms) —
+   priority sort + LRU sweep + admission/eviction decisions over the
+   resident set.
+2. **Hot-reload check** (Manifest snapshot pointer load, ~ns scale
+   absorbed in `Manifest` 0.05 ms) — every `AssetHandle::view()`
+   reads the active snapshot pointer and re-resolves on generation
+   bump (§4.1.8 invariant 4); the once-per-frame snapshot pointer
+   load is constant-time.
+3. **`AssetHandle` resolution** (~0.05 ms amortised) — O(1) per call;
+   the per-frame total scales with `view()` call frequency from
+   `render` extract + system reads. Bounded by the resident handle
+   set under S1 (~256 calls / frame).
+
+Anything else (cook orchestration, FBX parse, texture decode,
+manifest publish, watcher-event translation) runs **off the driver
+thread** or **only on watcher-event frames** (which are rare and
+gated by §9.5 rule 4, not the steady-state cell).
+
+### 9.4 Allocator Rules
+
+`content` enforces its 256 MiB ceiling — and the per-aggregate
+sub-shares in §9.3 — through `glibre::PerContextAllocator`, the
+allocator declared in `perf-budget.md` §"Allocator Rules". The
+contract `content` SPEC §9 imposes:
+
+1. **Per-context tag (`ContextTag::content`).** Every allocation made
+   by any module under `content/src/**` is stamped with
+   `ContextTag::content` at the allocator-handle level
+   (`perf-budget.md` Allocator Rule 1). This includes the off-thread
+   importer worker pool's scratch arena (§9.3.1) — the worker pool
+   uses content's allocator handle, not a per-thread default.
+2. **Hard ceiling in diagnostic / debug builds.** When
+   `GLIBRE_ALLOC_STRICT=1` (debug + diagnostic presets), an
+   allocation that would push live `ContextTag::content` bytes above
+   256 MiB returns
+   `std::unexpected{core::Error::OutOfBudget}` (`perf-budget.md`
+   Allocator Rule 2). Every content call site that allocates uses
+   the `Result<T>` form (§5) and propagates the error.
+3. **Soft warning in shipping builds.** Shipping builds log a `warn`
+   once per-tag-per-frame to `spdlog` and increment a frame-stat
+   counter on overshoot (`perf-budget.md` Allocator Rule 3).
+4. **Importer scratch arena is soft, not transient.** The 64 MiB
+   importer arena (§9.3.1) is **not** a `perf-budget.md` Allocator
+   Rule 4 transient-arena exemption (those drain at phase 9 and do
+   not count against the cell). Cook arenas are multi-frame and
+   off-thread; they count against the 256 MiB cell with the
+   per-aggregate breakdown in §9.3.1 enforced as a soft sub-ceiling
+   inside the hard cell ceiling.
+5. **CAS mmap entries do not count against the heap.** Per §4.1.5
+   invariant 5 + §4.1.7 invariant 5, the CAS reads cooked bytes via
+   `mmap(2)` read-only mappings owned by the residency manager.
+   These mmap regions are **not heap allocations** — they are
+   page-cache-backed virtual memory views. `glibre::PerContextAllocator`
+   does not count them against `ContextTag::content`'s 256 MiB
+   ceiling. Instead the **CAS hot-set** (160 MiB, §9.3 row) is
+   tracked separately via a resident-set-size accounting hook
+   (RSS-delta sampled at phase 9) and enforced as a **soft ceiling**
+   in shipping builds (Allocator Rule 3 semantics). The strict-mode
+   build asserts the soft ceiling at the same threshold; overshoot
+   triggers the `OutOfBudget` arm with an "mmap" detail string. This
+   split matches the `render` precedent for GPU memory
+   (`perf-budget.md` Allocator Rule 5): residency-tracked,
+   not-allocator-tracked.
+6. **Manifest snapshot double-buffer.** The 16 MiB Manifest row
+   admits two snapshots resident simultaneously during a hot-reload
+   manifest swap (§4.1.6 invariant 2; §4.1.7 invariant 6). Both
+   snapshots count against the `content` tag; the 16 MiB ceiling is
+   sized so the steady-state single-snapshot foot is ~8 MiB and the
+   peak two-snapshot foot is ~16 MiB. Drain of the prior snapshot
+   happens once its referrers' generation bumps complete (§4.1.8
+   invariant 4); the `Manifest`-allocated bytes are released on the
+   next allocator service after the prior snapshot's last reader
+   exits.
+7. **No raw `new` / `malloc` in `content/`.** Per the
+   `-Wglibre-no-raw-alloc` clang custom-warning-as-error documented
+   in `perf-budget.md` Allocator Rules header, all dynamic
+   allocations in `content/src/**` MUST go through
+   `PerContextAllocator`. The build rejects raw `new` / `malloc`.
+   Vendored SDK arenas (FBX SDK / FreeImage / FreeType) allocate
+   through allocator hooks that route to the importer scratch arena
+   in §9.3.1; raw vendor `malloc` is the third-party-wrap exemption
+   covered at the importer ingress per §4.1.2 invariant 3
+   (allocations only inside the per-cook arena).
+
+### 9.5 CI Gate — `BENCHMARK_CELL` Per Aggregate
+
+The per-context CI gate (`perf-budget.yml`, scoped under the
+`task-breakdown-error-perf` follow-up spike) requires each per-context
+SPEC §9 to declare at least one `BENCHMARK_CELL(...)` block per
+aggregate that has non-zero hot-path activity (`perf-budget.md`
+§"CI Gate Spec" rule 1). The macro expands to a Catch2 `BENCHMARK`
+body that:
+
+1. constructs the §9.3 row's S1-derived fixture for the aggregate,
+2. measures wall-clock time over a steady-state sample,
+3. asserts `time <= cell_budget_ms` (the row's CPU ms cell),
+4. records resident-byte usage for the aggregate's
+   `ContextTag::content` sub-share and asserts `<= heap_budget_mib`
+   (the row's heap cell).
+
+Mandated `BENCHMARK_CELL` blocks for `content` (PR fails if any
+assert fails — `perf-budget.md` §"CI Gate Spec" rule 1):
+
+| Aggregate                | `BENCHMARK_CELL` test name                              | CPU ceiling | Heap ceiling          |
+|--------------------------|---------------------------------------------------------|-------------|-----------------------|
+| `Manifest`               | `content/manifest: o1_hash_lookup_latency`              | 0.05 ms     | 16 MiB                |
+| `ResidencyManager`       | `content/residency: state_evaluation_lru_priority_sweep`| 0.20 ms     | 16 MiB                |
+| `AssetHandle` resolve    | `content/handle: o1_resolve_generation_check`           | 0.05 ms     | n/a (core-owned table)|
+| Importer scratch arena   | `content/importer: scratch_arena_off_thread_residency`  | n/a (off-thread) | 64 MiB (soft)    |
+| CAS hot-set              | `content/cas: hot_set_resident_pages`                   | n/a         | 160 MiB (soft, RSS)   |
+
+In addition to the per-aggregate cells, content owns two engine-wide
+gate hooks called out by the spike #146 brief:
+
+1. **Residency churn benchmark.** A microbenchmark (test name
+   `content/residency: churn_under_pressure`) drives the
+   `ResidencyManager` with a synthetic load that requests admissions
+   exceeding the `MemoryBudget`, forcing eviction-driven churn. The
+   gate asserts: (a) churn-frame CPU stays inside the 0.20 ms
+   `ResidencyManager` cell, (b) no
+   `ResidencyError::BudgetExceeded` is silently swallowed, (c) the
+   eviction priority is `(screen_coverage, LRU)`-correct per §4.1.7
+   invariant 4 (validated against a known-good ordering oracle). PR
+   fails on any of (a)/(b)/(c). This is the **residency churn
+   benchmark** required by the perf-budget gate spec for content.
+2. **Manifest lookup latency.** A microbenchmark (test name
+   `content/manifest: o1_hash_lookup_latency`, the same as the
+   per-aggregate row above) measures p50 / p99 latency of
+   `Manifest::resolve(AssetId)` over a manifest of ~10k entries
+   (MVP ceiling). The gate asserts p99 ≤ 0.05 ms / call; sustained
+   regression flips the `perf:headroom-low` label per
+   `perf-budget.md` §"CI Gate Spec" rule 5. This is the **manifest
+   lookup latency** gate required by the perf-budget gate spec for
+   content.
+
+Hot-reload-frame variance is exercised by the engine-wide
+**hot-reload frame budget** gate (`perf-budget.md` §"CI Gate Spec"
+rule 4) which scripts an S2 reload and asserts phase 8 cost ≤ 0.40 ms;
+content's manifest-swap cost participates in that aggregate gate via
+§4.1.6's atomic-publish path and §4.1.7 invariant 6's drain
+semantics. The S2 fixture is engine-wide; content's contribution is
+asserted as "manifest snapshot pointer swap is constant-time" inside
+the S2 script's phase 8 measurement.
+
+S3 (asset-import while S1 plays) is exercised by an end-to-end
+**off-thread soundness** gate (`content/import:
+s3_off_thread_no_driver_spike`): the test runs S1 for 600 frames
+while triggering a synthetic ~5 MiB FBX import on a worker thread and
+asserts the **driver thread**'s p99 phase-1 + phase-9 cost stays
+inside the 0.50 ms content cell. This is the gate that proves
+importers do not bleed onto the game loop.
 
 ## 10. Failure Modes & Error Model
 
