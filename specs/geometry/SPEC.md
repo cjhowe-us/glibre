@@ -4385,11 +4385,70 @@ graduate to a SPEC bump.
 
 ## 11. Acceptance Criteria
 
-GitHub `type:user-story` issues this spec closes:
+GitHub `type:user-story` issues this spec closes (parent sub-epic
+#104). Each story carries `type:user-story,phase:mvp,domain:geometry`
+plus a `pts:<n>` ≤ 5 (per `AGENTS.md` leaf-sizing rule). Each must
+have a Catch2 test by name; benchmarks asserting §9 budgets are
+named in §9.6.
 
-- #TBD — `<title>`
+### 11.1 Pak load + header validation
 
-Each must have a Catch2 test by name.
+- #470 — register_mesh O(header) — mmap, validate, issue MeshHandle
+  (§6.3.1, §4.1.7 invariant 4).
+- #471 — PakHeaderMagicMismatch refusal at registration
+  (§7.2.2 step 1, §10.2).
+- #472 — PakHeaderOffsetOutOfRange refusal at validation step 5
+  (§7.2.2 step 5, §10.2).
+- #473 — PakFormatHashMismatch refusal at first load
+  (§4.2 invariant 1, §7.3.2, §10.2).
+- #474 — FormatHash mismatch is the only hot-reload refusal gate
+  (§8.2, §10.2 hot-reload severity row).
+
+### 11.2 Cluster decode (off-frame DecodePool path)
+
+- #476 — on-demand cluster decode within 5 ms p99, zero hot-path
+  drift (§6.3.2, §6.4, §9.4, §9.6.2).
+- #477 — DracoDecodeFailed → coarser-band fallback + profile
+  quarantine (§10.2, §10.4.1).
+- #478 — PakPageIntegrityFailed (CRC32) routes through
+  residency-downgrade (§7.2.1, §10.2, §10.4.1).
+
+### 11.3 Residency state machine (phase-7 mutation point)
+
+- #479 — phase-7 Pending→Resident CAS sweep within 0.20 ms cap
+  (§6.3.2 step 7, §9.3, §4.2 invariant 8).
+- #480 — Resident→Evicting→NotResident with band refcount release
+  (§6.3.2 eviction, §4.1.15 invariant 4, §9.3).
+- #481 — ResidencyTransitionIllegal guards monotonic-per-frame rule
+  (§4.2 invariant 6, §10.2).
+
+### 11.4 BLAS recipe handoff to render
+
+- #482 — BLASRecipe descriptor packing handoff to render's
+  RTAccelStructures (§4.1.7.2, §9.3, §4 cross-aggregate invariant 10).
+- #483 — BLASRecipe re-apply via MeshReplaced after pak swap
+  (§8.4.6, §8.5 observer responsibility 1).
+
+### 11.5 LOD band selection (phase-6 inputs)
+
+- #484 — select_lod_band coarsest-resident with 0.15 ms cap
+  (§6.3.3, §9.2, §4.1.13 invariant 2).
+- #486 — phase-6 0.02 ms reserve absorbs warm-start cold caches
+  (§9.2 reserve row, §9.6.4 headroom-low tripwire).
+
+### 11.6 Hot-reload pak swap
+
+- #487 — pak hot-reload swap on content_hash change preserves handle
+  bit-identity (§8.4 migrate body, §8.5 `MeshReplaced`).
+- #488 — DAG-topology-changing pak swap re-binds via stable group_id
+  (§8.4.3 step 2, §8.5 observer responsibility 1).
+
+### 11.7 Decode-pool back-pressure
+
+- #489 — DecodePoolBusy bounded back-pressure with 3-frame escalation
+  (§4.1.12 invariant 2, §10.2, §10.4.2, §9.6.2).
+- #490 — DecodePoolUndersized refusal preserves fixed pool sizing
+  (§4.1.12 invariant 1, §10.2).
 
 ## 12. Open Questions
 
