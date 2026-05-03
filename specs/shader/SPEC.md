@@ -2119,4 +2119,19 @@ Each must have a Catch2 test by name.
 
 ## 12. Open Questions
 
-- Owner / resolution gate.
+None. All design decisions for the `shader` context — ubiquitous
+language (§2), aggregate boundaries and invariants (§4), the public
+`IShaderBackend` interface (§5), internal architecture (§6), on-disk
+schemas (§7), the hot-reload contract (§8), the performance budget
+(§9), the failure-mode taxonomy (§10), and the `type:user-story`
+acceptance criteria (§11) — are resolved in this spec. Cross-context
+decisions consumed here (engine error model, hot-reload protocol,
+performance harness, plugin ABI) are owned by their respective
+records under `reviews/decisions/` and referenced in-place above.
+
+Any decision that surfaces during implementation and cannot be
+absorbed by an existing section will be opened as a new
+`type:spike` under sub-epic #70 (`Acceptance + Implementation Plan
+— shader`); this section is then re-opened in the same PR that
+files the spike. Until that happens, downstream contexts may
+treat §1–§11 as load-bearing.
