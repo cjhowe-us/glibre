@@ -2542,9 +2542,25 @@ case, never null pointers.
 
 ## 11. Acceptance Criteria
 
-GitHub `type:user-story` issues this spec closes:
+GitHub `type:user-story` issues this spec closes (drafted under spike
+#63; each carries a Catch2 test name plus the story-required E2E
+`.glibre-trace`):
 
-- #TBD — `<title>`
+- #362 — data/schema: author persistent type via `.fory` schema file (§4.1, §4.2, §7.1) — pts:3
+- #363 — data/foryc: enforce tag-sort layout-additive rule (§4.2 inv #3) — pts:3
+- #364 — data/foryc: deterministic, host-stable codegen (§4.2 inv #1, #5) — pts:2
+- #365 — data/abi-hash: plugin loader refuses dylibs whose ABI hash mismatches (§4.4 inv #3, §4.10 inv #3) — pts:3
+- #366 — data/abi-hash: `glibre_types_abi_hash` reproducible from sources (§4.4 inv #1, #2, #4) — pts:2
+- #367 — data/envelope: serialize/deserialize round-trip byte-equal across hosts (§4.8 inv #4, §4.10 inv #6) — pts:3
+- #368 — data/migration: `MigrationChain` dispatches single-step migrations in ascending order (§4.6, §4.7) — pts:5
+- #369 — data/migration: per-schema round-trip golden harness (§4.6 inv #1, #3; §9.4) — pts:3
+- #370 — data/manifest: plugins ship Fory-serialized `PluginManifest` in `.rodata` (§5 plugin_manifest.hpp; §6.5) — pts:5
+- #371 — data/hot-reload: `migrate(...)` walks world snapshot at frame-8 (§8.2) — pts:5
+- #372 — data/hot-reload: phase-8 budget within 0.20 ms / 4 MiB on S1 (§9.1, §9.2, §9.5) — pts:3
+- #373 — data/reflection: `ReflectionBlob` present in editor, stripped from shipping (§4.9; PHILOSOPHY §6) — pts:3
+- #374 — data/registry: `SchemaRegistry` refuses duplicate FQN, `O(log N)` lookup (§4.5 inv #1, #3; §9.4) — pts:2
+
+Total: 13 stories, 42 pts roll up into sub-epic #53.
 
 Each must have a Catch2 test by name.
 
