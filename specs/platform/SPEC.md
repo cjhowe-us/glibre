@@ -2687,11 +2687,31 @@ formatting and dispatches to spdlog.
 
 ## 11. Acceptance Criteria
 
-GitHub `type:user-story` issues this spec closes:
+GitHub `type:user-story` issues this spec closes (drafted under spike
+#46; each carries a Catch2 test name plus the story-required E2E
+`.glibre-trace`):
 
-- #TBD — `<title>`
+- #349 — platform/window: open, resize, close lifecycle on macOS (§4.1, §9.1) — pts:3
+- #350 — platform/window: LogicalSize / PhysicalSize / DpiScale invariant (§4.1 inv #3, #4) — pts:3
+- #351 — platform/surface: SDL3 → CAMetalLayer bridge with strict Window lifetime (§4.1 inv #1, #6) — pts:5
+- #352 — platform/pump: drain once per frame, main-thread-only, exactly-once delivery (§4.2 inv #1, #2, #3, #5) — pts:3
+- #353 — platform/eventqueue: SPSC ring sized at construction, no runtime growth (§4.2 inv #6, §9.2) — pts:2
+- #354 — platform/input: closed InputEvent variant for keyboard/mouse/gamepad/text (§4.2 sealed sum) — pts:3
+- #355 — platform/window-events: CloseRequested + DpiChanged never coalesced (§4.2 inv #4) — pts:2
+- #356 — platform/file-watcher: canonical paths + content-hash dedup + atomic renames (§4.3 inv #1, #2, #3, #6) — pts:5
+- #357 — platform/file-watcher: off-main-thread, recursive subscription, RAII teardown (§4.3 inv #4, #5; §8.1) — pts:3
+- #358 — platform/clock: monotonic non-decreasing + wall correlation (§4.4 inv #1, #2, #3, #4) — pts:2
+- #359 — platform/process: argv/env/cwd snapshots + signal install + exit code (§4.5 inv #1, #2, #3, #5) — pts:3
+- #360 — platform/fileio: IoToken bounded-async with poll/cancel + atomic write (§4.6 inv #3, #4, #6, #7) — pts:5
+- #361 — platform/fileio: CanonicalPath-only public surface, never blocks main thread (§4.6 inv #1, #2) — pts:2
 
-Each must have a Catch2 test by name.
+Total leaf rollup: **41 pts** across 13 stories. Each issue body
+mirrors `.github/ISSUE_TEMPLATE/user-story.yml` (Domain, Phase,
+Persona, User Story, Acceptance Criteria in Gherkin, Manual Test
+Script, E2E Test Plan, Closure Checklist, Harmonius Source,
+Notes / Open Questions). Per AGENTS.md the closure rule for every
+story above is: E2E green in CI **before** manual testing begins;
+PASS recorded as a comment; both gates required for close.
 
 ## 12. Open Questions
 
