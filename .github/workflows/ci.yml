@@ -16,8 +16,12 @@ jobs:
       - name: clang-format
         run: |
           brew install clang-format
-          shopt -s globstar
-          clang-format --dry-run --Werror $(git ls-files '**/*.cpp' '**/*.hpp' '**/*.h' '**/*.cc') || exit 1
+          files=$(git ls-files '*.cpp' '*.hpp' '*.h' '*.cc')
+          if [ -z "$files" ]; then
+            echo "No C/C++ sources to lint."
+            exit 0
+          fi
+          clang-format --dry-run --Werror $files
 
   build:
     runs-on: macos-14
