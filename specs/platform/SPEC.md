@@ -1096,7 +1096,531 @@ sum from §4.7, contributed as one arm of the engine-wide
 
 ## 6. Internal Architecture
 
-Non-binding sketch for implementers.
+Non-binding sketch for implementers. Nothing in this section adds a
+contract beyond §4–§5; if an implementation diverges in shape but
+preserves the §4 invariants and the §5 surface, the divergence is
+allowed. The intent is to give a reader who has just finished §5 a
+mechanical picture of how the seven aggregates partition into source
+files, where the lone Objective-C++ translation unit sits, and which
+abstraction seams are *kept open* against the day a non-macOS host is
+added.
+
+### 6.1 Module layout
+
+The platform context lives at `engine/platform/` and is split into
+seven sibling modules — one per §4 aggregate — plus a tiny `detail/`
+folder for shared internals. Each module is a directory under
+`engine/platform/src/<name>/` with a parallel public header tree under
+`engine/platform/include/glibre/platform/<name>/` (the §5 single-
+header projection is the union of these). The seven modules and their
+1:1 mapping to §4 aggregates:
+
+| Module      | §4 aggregate(s)                                      | One reason to change                                          |
+|-------------|------------------------------------------------------|---------------------------------------------------------------|
+| `window/`   | §4.1 `Window` / `Display` / `LogicalSize` / DPI      | OS window-server contract shifted (SDL3 minor, AppKit, DPI).  |
+| `surface/`  | §4.1 `Surface` (the GPU-presentable handle)          | The SDL3 → `CAMetalLayer` → metal-cpp bridge contract shifted.|
+| `event/`    | §4.2 `EventQueue<T>` / `Pump` / `InputEvent` / `WindowEvent` | SDL3's event vocabulary or the SPSC ring protocol shifted. |
+| `watcher/`  | §4.3 `FileWatcher` / `FileEvent` / dedup / canonical | The OS file-watch backend or canonicalization rule shifted.   |
+| `clock/`    | §4.4 `Clock` / `Instant` / `WallTime`                | The OS time source's resolution / API / guarantees shifted.   |
+| `process/`  | §4.5 `Process` / argv / env / signals                | The OS process-control contract shifted.                      |
+| `fileio/`   | §4.6 `FileIo` / `IoToken` / `Stat` / `DirEntry`      | The OS file-IO contract or async budget shape shifted.        |
+
+`Surface` is split out of `window/` into its own module deliberately:
+the SDL3 → AppKit bridge is the single Objective-C++ translation unit
+in the entire engine (§6.2), and giving it a sibling directory rather
+than burying it inside `window/` makes that load-bearing fact visible
+in the source tree. Lifetime is still the `Window`'s — the §4.1 inv #1
+"Surface lifetime is strictly bound to its Window" rule is preserved
+by `Window::surface()` being the sole `Surface` factory and by
+`Window`'s destructor releasing the layer through the bridge.
+
+`detail/` holds two shared internals only: a private arena that backs
+`CanonicalPath::view_` (so equal canonical paths share a backing
+buffer and `operator==` reduces to pointer compare in the common
+case), and a tiny `error/` translator that maps `errno` /
+`SDL_GetError()` / `NSError` → `platform::Error` at one site per
+backend. No other cross-module reach-throughs exist; if a module
+needs another module's output, it goes through the §5 public surface
+just like the engine does.
+
+The build system compiles `engine/platform/` as a single static
+library `libglibre_platform.a`; modules are not separate compilation
+units linked together because the §4.7 `PlatformError` closed sum and
+the §6.5 `Pump` cross-aggregate fan-out require them to share inline
+visibility. CMake (or the build tool of choice) globs `src/*/`*.cpp`
+plus the lone `surface/bridge.mm` (§6.2) and produces one archive
+that engine targets link against.
+
+### 6.2 The single Objective-C++ bridge file
+
+The entire engine has **exactly one** Objective-C++ translation unit:
+`engine/platform/src/surface/bridge.mm`. It is the only file in the
+repository that:
+
+- compiles with `-x objective-c++`,
+- includes `<AppKit/AppKit.h>`, `<QuartzCore/CAMetalLayer.h>`, or any
+  Cocoa / Foundation header,
+- may catch an `NSException`,
+- links against the `AppKit`, `Foundation`, `QuartzCore`, and `Metal`
+  frameworks.
+
+Every other `.cpp` (and `.hpp`) in the engine is pure C++23/26. The
+build system enforces this: a CMake check rejects any file with a
+`.mm` extension outside `engine/platform/src/surface/`, and the
+linker flag `-framework AppKit` is added only to
+`bridge.mm.o`'s compile flags, not engine-wide. The bridge is what
+the §1 collapse "C++ cannot reach the OS without it" stands on; if
+two `.mm` files appear, we have failed the rule and one must be
+re-collapsed.
+
+The bridge's public C++ shape is a tiny header
+`engine/platform/src/surface/bridge.hpp` (internal to the platform
+library, not part of the §5 surface):
+
+```cpp
+// Internal — platform/surface only. No engine code outside the
+// surface module includes this header.
+namespace glibre::platform::surface::detail {
+
+// Create a CAMetalLayer-backed view on the given SDL_Window. The
+// returned void* is a non-owning CAMetalLayer*; the SDL_MetalView
+// out-parameter holds the owning handle that must be released by
+// destroy_metal_view() when the Window dies.
+struct LayerHandle {
+    void* layer{nullptr};       // CAMetalLayer*, opaque outside this TU.
+    void* sdl_metal_view{nullptr};  // SDL_MetalView, opaque outside this TU.
+};
+
+[[nodiscard]] auto create_metal_view(void* sdl_window) noexcept
+    -> Result<LayerHandle>;
+
+auto destroy_metal_view(LayerHandle) noexcept -> void;
+
+// Read-back the layer's drawable size and DPI in one call. Used by
+// Window to refresh its DpiScale snapshot after DpiChanged events.
+[[nodiscard]] auto query_layer_metrics(void* layer) noexcept
+    -> Result<std::pair<PhysicalSize, DpiScale>>;
+
+}  // namespace glibre::platform::surface::detail
+```
+
+Inside `bridge.mm` the implementation calls `SDL_Metal_CreateView` to
+get the `SDL_MetalView`, retrieves the underlying `CAMetalLayer*` via
+`SDL_Metal_GetLayer`, sets `layer.contentsScale` to match the
+window's `backingScaleFactor`, and returns the layer as `void*`. Any
+`@try / @catch` around AppKit calls converts the `NSException` to
+`Error::IoFailure { OsCode { (std::int32_t) [exception code] } }`
+before returning — per §4.7 inv #2, no exception ever crosses the
+public surface. The pointer that crosses the bridge is `void*`; it is
+up-cast to `MTL::Layer*` only on the **render** side via
+`reinterpret_cast`, gated by the engine-wide rule that render is the
+sole consumer of `Surface::raw_layer()`.
+
+The bridge owns no observable state: it is a stateless mapping
+function. `LayerHandle`s are stored inside `Window::Impl`, not inside
+the bridge. This keeps the bridge's lifetime concerns trivial (none)
+and lets `Window::~Window()` drive teardown via a single
+`destroy_metal_view` call regardless of how the `Window` got
+destroyed.
+
+### 6.3 SDL3 facade — `window/` and `event/`
+
+`window/` and `event/` together form the SDL3 facade for the
+window-server and input subsystems. SDL3 is an implementation detail;
+no SDL type, header, or macro escapes either module's public surface.
+
+`window/` wraps `SDL_Window` and the SDL3 display query API:
+
+- `Window::open(WindowDesc)` → `SDL_CreateWindow` with the
+  `SDL_WINDOW_METAL | SDL_WINDOW_HIGH_PIXEL_DENSITY` flags on macOS,
+  followed by `surface::detail::create_metal_view` to attach the
+  `CAMetalLayer`. The handle pair `(SDL_Window*, surface::detail::LayerHandle)`
+  is stored in the pimpl `Window::Impl` along with a cached
+  `LogicalSize` / `DpiScale` snapshot kept in sync by the §6.5
+  pump.
+- `Window::request_resize` → `SDL_SetWindowSize`; the actual resize
+  arrives back as a `WindowEvent::Resized` from the pump.
+- `Window::request_close` → `SDL_PushEvent` with a synthesized
+  `SDL_EVENT_WINDOW_CLOSE_REQUESTED`, so the close path goes through
+  the same §6.5 fan-out as user-initiated close.
+- `Window::display()` → re-query SDL3's display list each call. The
+  §4.1 inv #5 "Display snapshots are immutable" rule is preserved
+  by the value semantics of the returned `Display` struct; the
+  underlying SDL3 query is *not* cached across frames — caching is
+  the consumer's choice if they want it.
+
+The `Display` enumerator lives inside `window/` rather than its own
+module because hot-plug events are delivered to the same SDL3 event
+pump that drives windows; splitting them would re-introduce the
+two-callback-site bug §4.1 collapses away.
+
+`event/` wraps `SDL_PollEvent` and SDL3's gamepad / sensor APIs:
+
+- The `Pump` is the sole owner of the `SDL_PollEvent` loop. On
+  construction it captures references to one `EventQueue<InputEvent>`
+  and one `EventQueue<WindowEvent>` (the two queues in §4.2).
+- `Pump::drain()` runs `while (SDL_PollEvent(&ev))` to exhaustion,
+  classifies each event into one of three buckets — input, window,
+  or "consumed-internally" — and writes typed variants into the
+  appropriate `EventQueue<T>`. No SDL constant, no `SDL_Event`, no
+  `SDL_Keycode` value ever appears in either queue: every payload
+  goes through a translation table that maps the SDL3 enum to the
+  §5 `KeyCode` / `ScanCode` / `MouseButton` / `GamepadAxis` /
+  `GamepadBtn` enums. Unknown SDL3 events are dropped per §4.2 inv #5.
+- `EventQueue<T>` itself is a fixed-capacity SPSC ring buffer
+  templated on the payload type, sized at construction. Its
+  `Impl` uses two `std::atomic<std::size_t>` indices (head, tail)
+  with `memory_order_release` on producer publish and
+  `memory_order_acquire` on consumer drain — the canonical lock-
+  free SPSC. Capacity is a power of two so wrap-around is a mask, not
+  a modulo. The producer side is touched only by `Pump::drain()`
+  and by `FileWatcher`'s I/O thread (which writes into a third
+  `EventQueue<FileEvent>` — see §6.4); the consumer side is the
+  engine's main thread.
+
+A subtle point: `WindowEvent::DpiChanged` is the only event whose
+processing crosses module boundaries inside the platform library.
+The pump receives `SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED` from SDL3,
+calls `surface::detail::query_layer_metrics` to get the new
+`PhysicalSize`+`DpiScale` pair, updates the owning `Window::Impl`'s
+cached snapshot, and *then* enqueues the typed `DpiChanged` event.
+The §4.1 inv #4 "PhysicalSize = round(LogicalSize * DpiScale) always"
+rule survives because the snapshot is updated before the event is
+visible to the engine; a frame that reads `Window::physical_size()`
+after draining `DpiChanged` reads the new value.
+
+### 6.4 `FileWatcher` — SDL3 FSEvents on macOS, abstracted for the rest
+
+The §1 collapse points the watcher at "SDL3's filesystem events on
+macOS today; kqueue / inotify / ReadDirectoryChangesW elsewhere
+later". `watcher/` realizes that with a one-method internal interface
+plus one backend implementation:
+
+```cpp
+// engine/platform/src/watcher/backend.hpp - internal.
+namespace glibre::platform::watcher::detail {
+
+// One concrete backend per OS family. Selection is compile-time.
+class IBackend {
+public:
+    virtual ~IBackend() = default;
+
+    [[nodiscard]] virtual auto subscribe(CanonicalPath root) noexcept
+        -> Result<WatchToken>                     = 0;
+    [[nodiscard]] virtual auto unsubscribe(WatchToken)   noexcept
+        -> Result<void>                           = 0;
+
+    // Drains pending raw events from the OS into the supplied span;
+    // returns the number written. Called only by the watcher I/O
+    // thread, never by the engine.
+    [[nodiscard]] virtual auto poll_raw(std::span<RawEvent> out) noexcept
+        -> std::size_t                            = 0;
+};
+
+}  // namespace glibre::platform::watcher::detail
+```
+
+The MVP ships exactly one implementation,
+`watcher/backends/sdl3_fsevents.cpp`, which uses
+`SDL_GetPathInfo` for canonicalization and SDL3's filesystem-event
+API (which on macOS sits on top of `FSEventStreamCreate` /
+`FSEventStreamScheduleWithRunLoop` from Core Services). The runloop
+is hosted inside the watcher's own I/O thread (one thread per
+`FileWatcher` instance, started by `FileWatcher::create()` and
+joined by the destructor — §4.3 inv #4 "Watcher lifetime owns its
+subscriptions"). The thread's loop, sketched:
+
+```text
+while (!stop_requested) {
+    backend->poll_raw(scratch);          // pulls raw OS events
+    canonicalize(scratch, canon_buf);    // §4.3 inv #1
+    dedup(canon_buf, content_hash_lru);  // §4.3 inv #2
+    reassemble_renames(canon_buf);       // §4.3 inv #3
+    for (auto& e : canon_buf) {
+        per_token_queue[e.token].push(e);  // SPSC ring per WatchToken
+    }
+}
+```
+
+`FileWatcher::take_events(token, out)` is a non-blocking drain of
+the SPSC ring keyed on the `WatchToken`; the I/O thread is producer,
+the calling (main) thread is consumer. This is the §4.3 inv #5
+"Watcher does not block the main thread" rule, structurally enforced.
+
+The future kqueue / inotify / RDC ports are dropped in by adding
+`watcher/backends/kqueue.cpp`, `.../inotify.cpp`,
+`.../rdc.cpp` and selecting one at build time via a CMake variable.
+The selection is compile-time, not runtime — there is no virtual
+dispatch in the hot path past construction; the `IBackend` interface
+exists only so the watcher's frontend code (canonicalize / dedup /
+rename-reassembly / SPSC fan-out) is shared verbatim across hosts.
+The macOS FSEvents-via-SDL3 implementation specifically uses SDL3's
+event-pump bridging where it can; if SDL3's filesystem-event surface
+proves insufficient for recursive watches across mount points, the
+backend falls back to a direct `FSEventStreamCreate` call inside the
+same `.cpp` (still no `.mm` — Core Services is C, not Objective-C),
+and that decision is local to one file.
+
+Content-hash dedup uses BLAKE3 (a small in-tree dependency, no
+networking or platform calls) over the file contents at the moment
+of the OS event; an LRU keyed on `(canonical_path, hash)` collapses
+debounce-window duplicates per §4.3 inv #2. The LRU is a fixed-
+capacity ring (no allocation in the hot path) sized at construction
+via a `WatcherConfig` parameter not shown in the §5 stub but added
+when the implementation lands; the spike notes this so a future PR
+that surfaces the config can do so without re-deriving the
+invariant.
+
+### 6.5 `FileIo` — bounded SPSC queue + worker thread; poll-only `IoToken`
+
+The §4.6 `FileIo` aggregate takes the same shape as `watcher/` but
+with the directionality reversed: the engine writes requests into a
+queue, a worker thread reads them and performs blocking POSIX I/O,
+and per-request `IoToken`s carry the completion result back through
+their own per-token slot. There is **no** completion queue and **no**
+callback dispatch — §4.6 inv #7 "No public callbacks" is the rule
+that makes this whole design simple.
+
+Layout inside `fileio/`:
+
+- `fileio/sync.cpp` — the synchronous primitives
+  (`read_all`, `write_atomic`, `stat_path`, `list_dir`, `remove`).
+  Each is a thin wrapper over POSIX (`open` / `read` / `pwrite` /
+  `stat` / `readdir` / `unlink` / `rename`). `write_atomic` follows
+  §4.6 inv #4: write to `<target>.tmp.<pid>.<rand>`, `fsync`,
+  `rename` over the target, `fsync` the parent dir. None of these
+  allocate; they take spans and write into caller-supplied buffers
+  whenever the API allows it. Debug builds assert the calling thread
+  is *not* the main thread (§4.6 inv #2) by comparing
+  `pthread_self()` to a TLS sentinel set by the engine's main loop.
+- `fileio/async.cpp` — the bounded-async primitives
+  (`read_async`, `write_atomic_async`). Each enqueues a `Request`
+  struct into a single bounded SPSC ring, returns an `IoToken` whose
+  `Impl` holds a pointer to a slot in a `Slot[]` array indexed by
+  the request id, and lets the caller poll. The `Slot` carries:
+  - `std::atomic<IoToken::State>` state,
+  - `std::span<const std::byte>` result_bytes (filled before state
+    transitions to `Ready`, with `memory_order_release`),
+  - a `Result<void>` error code for failure cases.
+- `fileio/worker.cpp` — exactly one worker thread per `FileIo`
+  instance (the §4.6 inv #6 budget knob — `FileIoConfig::io_thread_budget`
+  — sizes a *pool* when > 1, but the MVP ships with the default of
+  2 and the design holds for both 1 and N).
+- `fileio/queue.hpp` — the bounded SPSC ring. Same lock-free
+  primitive as `event/`'s `EventQueue<T>` (a tiny shared template
+  in `detail/spsc_ring.hpp` consumed by both modules). Bounded
+  capacity from the start; saturating it returns
+  `Error::IoFailure { OsCode{ENOBUFS-equivalent} }` per §4.6 inv #6,
+  not enqueue-and-grow.
+
+The hot path:
+
+```text
+engine main thread                 worker thread
+------------------                 -------------
+read_async(path) →
+   alloc slot, push Request →     pop Request,
+   return IoToken{slot}           open + read(path),
+                                  copy bytes into result_buf,
+                                  store state = Ready (release)
+poll() →
+   load state (acquire) ─────────┘
+   if Ready → take_result()
+```
+
+`IoToken::poll()` is a single relaxed `atomic::load` followed by an
+acquire fence on the state transition — no syscall, no allocation.
+`IoToken::wait_for(Duration)` uses
+`std::this_thread::sleep_for` with exponential backoff capped at the
+supplied duration; we deliberately avoid futex / mutex /
+condition-variable, both because this keeps the per-token slot the
+size of one cache line and because pulling in a kernel wait would
+re-introduce a callback-shaped surface.
+
+`IoToken::cancel()` flips the slot to `Cancelled` (release); the
+worker thread checks the state on dequeue and short-circuits the
+operation if cancellation arrives before the I/O begins. If the
+operation has already started, cancel is best-effort and the worker
+runs it to completion before noticing — this matches §4.6 inv #3
+"Cancellation is best-effort — the OS may have already completed".
+
+`~IoToken()` is the load-bearing piece: it stamps `Cancelled` and
+returns the slot to a free-list, but only **after** the worker has
+released the slot back. The implementation uses a two-phase scheme:
+the destructor sets a "abandoned" bit, the worker on completion
+checks the bit and either delivers the result or marks the slot
+free. The slot pool is sized by `FileIoConfig::io_thread_budget *
+queue_depth`; abandoned-but-not-yet-released slots count against
+the budget, so a caller that drops `IoToken`s without polling can
+exhaust the budget — that is by design, mirroring the kernel's
+"don't drop file descriptors" rule.
+
+### 6.6 `Clock` — `mach_absolute_time()` on macOS; abstracted seam
+
+`clock/` is the simplest module. The MVP ships
+`clock/clock_macos.cpp` with this shape:
+
+```cpp
+namespace glibre::platform {
+
+auto Clock::now() const noexcept -> Instant {
+    static const auto info = []() noexcept -> mach_timebase_info_data_t {
+        mach_timebase_info_data_t i{};
+        ::mach_timebase_info(&i);
+        return i;
+    }();
+    const auto t = ::mach_absolute_time();
+    // Convert mach ticks -> nanoseconds via numer/denom.
+    const auto ns = static_cast<std::int64_t>(
+        (__uint128_t(t) * info.numer) / info.denom);
+    return Instant{ns};
+}
+
+auto Clock::wall() const noexcept -> WallTime {
+    return WallTime{std::chrono::system_clock::now()};
+}
+
+auto Clock::native_tick() const noexcept -> Duration {
+    // Minimum representable Duration on this clock — sized so the
+    // deterministic simulation step (specs/ecs §...) lands on an
+    // integer multiple of it without drift.
+    return Duration{1};  // 1 ns; macOS's mach_absolute_time is sub-µs.
+}
+
+Clock& Clock::get() noexcept {
+    static Clock c;  // Meyers singleton — §4.4 inv #5.
+    return c;
+}
+
+}  // namespace glibre::platform
+```
+
+The §4.4 inv #1 "monotonic non-decreasing" rule is structurally true
+of `mach_absolute_time` (it does not slew, does not wrap on the
+timescales the engine cares about). A defensive `assert(ns >= last)`
+guards regression in debug builds; on a detected regression we abort
+rather than clamp, per the invariant.
+
+The future ports follow the same one-file-per-host pattern:
+`clock/clock_windows.cpp` calls `QueryPerformanceCounter` /
+`QueryPerformanceFrequency`; `clock/clock_linux.cpp` calls
+`clock_gettime(CLOCK_MONOTONIC_RAW, &ts)`. CMake selects exactly one
+`clock_<host>.cpp` for the build; there is no virtual dispatch — the
+function bodies vary, the API does not.
+
+### 6.7 `Process` — POSIX argv / env / signals
+
+`process/process_macos.cpp` is a thin POSIX wrapper:
+
+- argv / env captured via `_NSGetArgv()` / `_NSGetArgc()` /
+  `_NSGetEnviron()` on macOS, copied once at startup into UTF-8
+  string-view spans backed by an arena owned by `Process::Impl`.
+  The capture function is the engine's `main()` shim; `Process::get()`
+  returns the populated singleton thereafter.
+- `cwd()` calls `getcwd` once at startup (its result is the only
+  source of the engine's notion of working directory; chdir
+  out-of-band is unsupported per §4.5 inv #1).
+- `executable_path()` calls `_NSGetExecutablePath` and canonicalizes
+  the result via `CanonicalPath::from_absolute`.
+- `pid()` returns `getpid()`.
+- `set_exit_code(int)` writes to a `std::atomic<int>` read by the
+  engine's `main` shim on return.
+- `install_signal(Signal, Fn)` calls `sigaction` with `SA_SIGINFO`
+  and an internal trampoline that calls the user-supplied
+  async-signal-safe function. The trampoline lives in a `.text`
+  segment marked `__attribute__((no_sanitize_address))` so ASan
+  builds do not corrupt the signal-safety guarantee. §4.5 inv #3
+  "At most one handler per signal" is enforced by checking the
+  internal handler-table slot before calling `sigaction`; an
+  already-installed slot returns `Error::AlreadyExists`.
+
+`process/process_macos.cpp` is the only host-specific file in this
+module; the future Linux port shares it nearly verbatim minus the
+`_NSGet*` symbols (replaced by `__libc_argv` / `environ`), and the
+Windows port replaces signals with `SetConsoleCtrlHandler` /
+`AddVectoredExceptionHandler`. The aggregate's surface (§5.10) is
+host-agnostic; only the implementation file changes.
+
+### 6.8 Threading topology
+
+The platform context creates and owns at most three OS threads at
+any time; everything else runs on the engine's main thread:
+
+| Thread          | Owner            | Producer for                     | Lifetime                  |
+|-----------------|------------------|----------------------------------|---------------------------|
+| Main            | engine           | (consumer of every queue)        | process                   |
+| Watcher I/O     | `FileWatcher`    | `EventQueue<FileEvent>` per token| `FileWatcher` instance    |
+| FileIo worker(s)| `FileIo`         | per-`IoToken` slots              | `FileIo` instance         |
+
+There is no platform-owned thread pool, no fiber scheduler, no
+job-graph dispatcher — those are sibling-context concerns per §1's
+refusal list. SDL3 is configured with
+`SDL_HINT_MAIN_CALLBACK_RATE` set to single-threaded mode; we never
+let SDL3 spawn its own helper threads.
+
+Cross-thread communication is exclusively through the SPSC rings
+described above. There are no mutexes on the platform → engine
+producer side; there is exactly one mutex inside `process/`, used
+during signal-handler installation to guard the handler table
+against concurrent installs from non-main threads (which are
+themselves a contract violation, but the mutex catches the race
+deterministically rather than producing a torn write).
+
+### 6.9 Allocation discipline
+
+Every heap allocation in the platform context happens inside a
+constructor or static factory. After construction:
+
+- `Pump::drain()` does not allocate.
+- `EventQueue<T>::drain()` does not allocate.
+- `FileWatcher::take_events()` does not allocate.
+- `IoToken::poll()` / `take_result()` does not allocate.
+- `Clock::now()` / `wall()` does not allocate.
+- `Process::env()` / `argv()` does not allocate.
+
+The synchronous `FileIo::read_all` is the lone exception: it must
+allocate to return the file contents. The aggregate returns the
+allocated buffer as `std::span<const std::byte>` and the platform
+library owns the backing storage in a per-call arena released on
+the next `read_all` from the same `FileIo` instance. Callers that
+need to keep the bytes copy them out before the next call; this is
+documented at the API site when the implementation lands.
+
+### 6.10 Failure-translation seam
+
+Every backend call funnels its error through one of three
+translators in `detail/error/`:
+
+- `errno_to_error(int)` — POSIX errno → `platform::Error`.
+- `sdl_to_error(const char* sdl_msg)` — `SDL_GetError()` →
+  `platform::Error`. The message is parsed for known prefixes
+  (`"Permission denied"`, `"No such file"`) and falls through to
+  `Error::IoFailure { OsCode{0} }` with the message stashed in a
+  thread-local diagnostic buffer for logging.
+- `ns_to_error(NSException*)` — only callable from `bridge.mm`;
+  reads `[exception code]` and produces
+  `Error::IoFailure { OsCode{code} }`.
+
+This is the §4.7 inv #3 "Errors are constructed at the site they
+happen" rule made physical: no aggregate ever calls another
+aggregate's translator; if a `FileIo` call surfaces an SDL3 error
+(it should not — `FileIo` is POSIX-direct), that is a bug, not a
+fall-through path.
+
+### 6.11 What §6 does *not* do
+
+- §6 does not introduce any new public type, function, or invariant.
+  Everything visible to the engine is in §5; everything enforced is
+  in §4. This section's job is to make a reader's mental model of
+  the implementation faithful, not to extend the contract.
+- §6 does not pin any specific SDL3 version, BLAKE3 implementation,
+  or POSIX revision. Those are vendor decisions recorded under
+  `reviews/decisions/` when the implementation PR lands.
+- §6 does not specify the build system. CMake is the working
+  assumption everywhere else in the repository, and §6 reads
+  naturally on top of CMake, but a future move to Bazel / Buck /
+  Meson would not change any of the §4 invariants or §5 surface;
+  it would change a few sentences here and nothing else.
 
 ## 7. Persistence & Schemas
 
