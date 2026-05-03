@@ -1845,7 +1845,685 @@ Non-binding sketch for implementers.
 
 ## 7. Persistence & Schemas
 
-Fory schemas. Migration rules.
+Geometry's persistence surface is split across two distinct media:
+
+1. **The `MeshletPak` custom binary container** (`§4.1.7`) — the
+   cooked-artefact byte stream. **Not Fory-serialised.** It is a
+   fixed-layout, little-endian, `FormatHash`-gated mmap-friendly file
+   format owned end-to-end by `geometry` (`§4.1.7` invariant 4 — header
+   validated before any payload read). The pak's payload bytes (vertex
+   streams, index streams, attribute streams, page bytes, the
+   `BLASRecipe` blob, the cluster-DAG bytes) are produced by `PakWriter`
+   and consumed by `PakReader` directly; Fory never touches them.
+2. **A small set of Fory side-records** describing the build-time and
+   tooling-facing metadata around each cooked pak. These compile into
+   `glibre-types.dylib` per `reviews/decisions/fory-codegen.md` and
+   are authored at `data/schemas/geometry/<Type>.fory`. FQNs are
+   `glibre.geometry.<Type>`. Each schema ships with at least one
+   Catch2 round-trip test under `tests/data/schemas/geometry/<Type>.cpp`
+   per `specs/data/SPEC.md` §7.7.
+
+The split is load-bearing. The pak format must be byte-equal across
+hosts, mmap-friendly, and gated by a single content-of-schema hash
+(`FormatHash`, `§4.1.7` invariant 1) so the runtime can refuse a pak
+whose schema does not match its compiled-in expectation in O(1) before
+any other byte is touched. Fory's tagged variable-length encoding
+cannot satisfy those constraints — it would force a parse pass over
+every page on load, defeat mmap residency, and admit the kind of
+silent additive drift that `MeshletPak` precisely forbids. The Fory
+side-records, by contrast, ride the same migration mechanic every
+other glibre persistent type rides; they describe the pak rather than
+*being* the pak.
+
+This section pins (a) the inventory of Fory side-records (§7.1), (b)
+the `MeshletPak` binary file format and the rules its `FormatHash`
+encodes (§7.2), (c) migration rules for both surfaces (§7.3), and
+(d) the explicit list of artefacts that are *not* persisted (§7.4).
+
+### 7.1 Persistent Fory side-records
+
+#### 7.1.1 `CookManifest` — per-mesh build record
+
+**File:** `data/schemas/geometry/CookManifest.fory`
+**FQN:** `glibre.geometry.CookManifest`
+**Lifetime scope:** one per cooked `.pak`; written by the cook driver
+alongside the pak file (`<pak-path>.manifest`); read by the cooker on
+the next build to gate incremental cooks (`§4.1.8` invariant 1).
+**Runtime never reads** (`§4.1.8` invariant 3).
+
+```fory
+schema glibre.geometry.CookManifest {
+  version  1
+  since    "0.1.0"
+
+  // Identity & cook-incremental gating.
+  field source_path          : string  tag 1  since 1
+  field pak_path             : string  tag 2  since 1
+  field source_content_hash  : u64     tag 3  since 1
+  field format_hash          : u64     tag 4  since 1   // mirrors PakHeader.FormatHash
+  field foryc_abi_hash       : u64     tag 5  since 1   // glibre_types_abi_hash at cook
+  field cooker_version       : string  tag 6  since 1   // SemVer of cooker driver
+  field cooked_at_unix_ms    : u64     tag 7  since 1
+
+  // Cook-time options used (mirror of CookOptions in §5).
+  field meshopt_overdraw_threshold       : f32  tag 10 since 1   default 1.05
+  field meshopt_lod_error_threshold      : f32  tag 11 since 1   default 0.01
+  field meshopt_target_lod_count         : u8   tag 12 since 1   default 6
+  field meshopt_apply_vertex_cache_opt   : bool tag 13 since 1   default true
+  field meshopt_apply_overdraw_opt       : bool tag 14 since 1   default true
+  field meshopt_apply_vertex_fetch_opt   : bool tag 15 since 1   default true
+
+  field meshlet_max_vertices             : u8   tag 20 since 1   // hard-frozen 64; see §7.3
+  field meshlet_max_triangles            : u8   tag 21 since 1   // hard-frozen 124; see §7.3
+  field meshlet_cone_weight              : f32  tag 22 since 1   default 0.5
+  field meshlet_sse_reference_distance_m : f32  tag 23 since 1   default 1.0
+
+  field draco_profile                    : u8   tag 30 since 1   // DracoQuantisationProfile
+  field draco_speed                      : u8   tag 31 since 1   default 5
+
+  field pak_target_page_size_bytes       : u32  tag 40 since 1   default 65536
+  field pak_max_page_size_bytes          : u32  tag 41 since 1   default 262144
+  field pak_enable_blas_recipe           : bool tag 42 since 1   default true
+
+  // Cooker bookkeeping for diagnostics & roll-up reports.
+  field cooked_meshlet_group_count       : u32  tag 50 since 1
+  field cooked_lod_band_count            : u8   tag 51 since 1
+  field cooked_page_count                : u32  tag 52 since 1
+  field cooked_pak_size_bytes            : u64  tag 53 since 1
+}
+```
+
+**Invariants** (echoing `§4.1.8`):
+
+1. **Hash + format twin lock.** `(source_content_hash, format_hash,
+   foryc_abi_hash)` is the cook-incremental key. A cook is skipped
+   iff *all three* match the cooker's live values; any mismatch forces
+   a full re-cook. Recording `foryc_abi_hash` makes the manifest
+   self-invalidating across middleman bumps even when `format_hash`
+   is unchanged, closing the same drift hole `PSOCacheRecord` closes
+   for render (`specs/render/SPEC.md` §7.1.2 invariant 2).
+2. **Frozen meshlet caps.** `meshlet_max_vertices == 64` and
+   `meshlet_max_triangles == 124` (`§4.1.3` invariant 1). The fields
+   are persisted for diagnostic completeness, **not** as tuneables —
+   `Foryc` recognises these tags as frozen and the cooker rejects any
+   loaded manifest whose values diverge (`Error::CookManifestInvalid`).
+   See migration rule §7.3.4.
+3. **Closed-set enums refuse unknown values.** `draco_profile` is a
+   `u8` projection of `DracoQuantisationProfile` (`§5`). Loading a
+   manifest whose value is outside the live closed set yields
+   `Error::CookManifestInvalid` rather than silently coercing — the
+   same closed-sum rule render applies to its enum-encoded `u8`s.
+4. **Cook-time only.** No runtime path consumes `CookManifest`
+   (`§4.1.8` invariant 3). The plugin loader does not read it; only
+   the cook driver and the editor's content-browser do. Render and
+   `geometry`'s runtime aggregate (`GeometryRegistry`) get every
+   gating value they need from `PakHeader` (§7.2).
+5. **Manifest is the cook-time mirror of `PakHeader`.** Every field
+   in `PakHeader` that the runtime checks (`format_hash`,
+   `source_content_hash`, the cook-time options that *parameterise*
+   the pak's bytes) has a counterpart here. A manifest missing a
+   field that `PakHeader` carries refuses cook with
+   `Error::CookManifestMissingField` rather than emitting a pak
+   under-described by its bookkeeping (`§4.1.8` invariant 2).
+
+#### 7.1.2 `BLASRecipeRecord` — Fory projection of the pak's BLAS recipe
+
+**File:** `data/schemas/geometry/BLASRecipeRecord.fory`
+**FQN:** `glibre.geometry.BLASRecipeRecord`
+**Lifetime scope:** one per cooked pak; emitted **alongside** the pak
+under `<pak-path>.blas-recipe` for **editor / tooling / RT-shader
+authoring** introspection. The runtime BLAS build path inside `render`
+reads the recipe **from the pak's binary `BLASRecipe` block** (the
+authoritative source per `§4.1.7.2`), not from this Fory side-record;
+this file exists so external tools (Metal-shader authoring,
+acceleration-structure profiler, content-browser preview) can read
+the recipe without touching the pak's binary blob.
+
+```fory
+schema glibre.geometry.BLASRecipeRecord {
+  version  1
+  since    "0.1.0"
+
+  // Identity — must match the owning pak's PakHeader.
+  field pak_path                : string  tag 1 since 1
+  field format_hash             : u64     tag 2 since 1
+  field source_content_hash     : u64     tag 3 since 1
+
+  // Recipe-level flags forwarded into the MTLAccelerationStructure build.
+  field accel_struct_flags      : u32     tag 10 since 1   // MTLAccelerationStructureFlags
+  field lod0_descriptor_count   : u32     tag 11 since 1
+
+  // Per-LOD0-group geometry descriptors, sorted by ascending group_index.
+  field descriptors             : list<BLASGeometryDescriptor>  tag 12 since 1
+}
+
+schema glibre.geometry.BLASGeometryDescriptor {
+  version  1
+  since    "0.1.0"
+
+  field group_index             : u32  tag 1 since 1   // LOD0 MeshletGroup index
+  field material_slot_index     : u32  tag 2 since 1   // bindless material id
+
+  // Byte offsets into the owning pak's vertex / index regions.
+  // The runtime resolves these against PakHeader-recorded base offsets;
+  // the editor's recipe-viewer resolves against the same base offsets.
+  field vertex_buffer_offset    : u64  tag 10 since 1
+  field vertex_buffer_length    : u64  tag 11 since 1
+  field vertex_stride_bytes     : u32  tag 12 since 1
+  field vertex_format           : u8   tag 13 since 1   // closed-sum: pos-only / pos+normal / etc.
+
+  field index_buffer_offset     : u64  tag 20 since 1
+  field index_buffer_length     : u64  tag 21 since 1
+  field index_format            : u8   tag 22 since 1   // closed-sum: u16 / u32
+
+  field triangle_count          : u32  tag 30 since 1
+}
+```
+
+**Invariants** (echoing `§4.1.7.2`):
+
+1. **Authoritative source is the pak.** A `BLASRecipeRecord` whose
+   `format_hash` or `source_content_hash` does not match the
+   companion `<pak-path>` is `Error::BLASRecipeInvalid` and consumers
+   discard the side-record, **not** the pak. The pak's binary
+   `BLASRecipe` block remains canonical (`§4.1.7.2` invariant 1).
+2. **LOD0-only.** `descriptors` lists exactly the LOD0 cluster band
+   (`§4.1.7.2` invariant 1). Any descriptor whose `group_index`
+   resolves to a non-LOD0 group at load time refuses with
+   `Error::BLASRecipeInvalid`.
+3. **Deterministic ordering.** `descriptors` is sorted by ascending
+   `group_index`; out-of-order lists are `Error::BLASRecipeInvalid`
+   at deserialise (`§4.1.7.2` invariant 3).
+4. **Self-contained — no GPU calls.** The record describes inputs
+   only. The `accel_struct_flags` value is a forward-projection of
+   `MTLAccelerationStructureFlags`; render's `RTAccelStructures`
+   peer reads either this side-record (tooling path) or the pak's
+   binary block (runtime path) to issue the actual build
+   (`§4.1.7.2` invariant 2).
+5. **Closed-set enums.** `vertex_format` and `index_format` are
+   closed sums; unknown values refuse, mirroring `CookManifest`
+   invariant 3.
+
+#### 7.1.3 `MeshSourceMetadata` — authoring provenance
+
+**File:** `data/schemas/geometry/MeshSourceMetadata.fory`
+**FQN:** `glibre.geometry.MeshSourceMetadata`
+**Lifetime scope:** one per `MeshSource` registration; carried with
+`MeshRegistrationDesc` (`§5`) into `GeometryRegistry::register_mesh`,
+emitted to the editor's content browser, and logged at cook-time
+into the cook-driver's audit trail. Persists separately from the pak
+(under `<pak-path>.metadata`) so tooling can read it without mapping
+the pak.
+
+```fory
+schema glibre.geometry.MeshSourceMetadata {
+  version  1
+  since    "0.1.0"
+
+  field source_path        : string  tag 1 since 1   // e.g. "art/props/crate.fbx"
+  field author             : string  tag 2 since 1   default ""
+  field tool_version       : string  tag 3 since 1   default ""
+  field source_content_hash : u64    tag 4 since 1   // matches PakHeader / CookManifest
+  field authored_at_unix_ms : u64    tag 5 since 1   default 0
+  field license_tag         : string tag 6 since 1   default ""   // free-form, content-policy
+  field bounding_box_min    : vec3f  tag 10 since 1
+  field bounding_box_max    : vec3f  tag 11 since 1
+  field source_vertex_count : u32    tag 12 since 1
+  field source_triangle_count : u32  tag 13 since 1
+}
+```
+
+**Invariants:**
+
+1. **Read-only metadata, never gating.** `MeshSourceMetadata` is
+   informational. No runtime decision (residency, LOD selection,
+   handle issuance) branches on its fields. The loader tolerates a
+   missing or malformed metadata file by surfacing
+   `Error::CookManifestMissingField` (re-used as the generic
+   side-record absence arm) at the editor / telemetry boundary; the
+   registry still issues a `MeshHandle`.
+2. **Hash twins the pak.** `source_content_hash` MUST equal
+   `PakHeader.source_content_hash` (`§4.1.7.1`). Mismatch routes the
+   metadata to a per-load diagnostic warning; the warning is the
+   editor's signal that source-tree drift has decoupled the
+   provenance record from the cooked artefact.
+3. **Bounding box is authoring-frame, not LOD-derived.** The box is
+   the authored bind-pose AABB of the source geometry (`§4.1.1`
+   invariant 1). It is *not* the LOD0 group cover or any cluster
+   sphere — those live inside `MeshletPak` and are byte-equal across
+   hosts (`§4.1.7` invariant 2). The metadata box is for the editor's
+   content-browser preview only.
+
+### 7.2 `MeshletPak` binary container — out-of-band format
+
+`MeshletPak` (`§4.1.7`) is the cooked on-disk artefact; its byte
+stream is **not Fory-serialised**. The format below is the load-bearing
+contract every `PakWriter` emit and every `PakReader` map must obey;
+its content-of-schema hash is `FormatHash` (`§4.1.7` invariant 1), and
+the pak's loader-time validation gate is `PakHeader` (`§4.1.7.1`).
+
+#### 7.2.1 Byte layout (logical)
+
+The pak is a single flat file, mmap-friendly, little-endian throughout
+(`§4.1.7.1` "fixed-layout little-endian"). All offsets are byte
+offsets from the start of the file.
+
+```text
+File layout (offsets are absolute, byte units, little-endian):
+
+  0x0000  PakHeader  (fixed-size; see §7.2.2)
+   ...    cluster-DAG bytes        (linearised group / meshlet tables)
+   ...    BLASRecipe blob          (binary; LOD0 geometry descriptors)
+   ...    PakPage[0]               +-+
+   ...    PakPage[1]                 |-- compressed vertex / index /
+   ...    ...                        |   attribute streams; Draco-encoded
+   ...    PakPage[N-1]             +-+
+   ...    PageTable                  (PakHeader.page_table_offset)
+                                     (page_index -> byte_offset, page_byte_length)
+  EOF
+```
+
+The header sits at offset 0 unconditionally; every other region's
+offset is a field of the header. `PakReader` validates the header
+first (`§4.1.7` invariant 4), refusing any payload access until the
+magic, version, and `FormatHash` checks pass.
+
+#### 7.2.2 `PakHeader` byte layout
+
+`PakHeader` (`§4.1.7.1`) is a fixed-layout, no-padding-beyond-natural,
+little-endian record. Every field's offset is determined at compile
+time from the schema; field order is the canonical order below
+(matching the data SPEC §7's tag-sorted layout rule applied to the
+binary surface).
+
+```text
+Offset  Size   Field                          Notes
+------  ----   -----                          -----
+0x0000  4      magic                          ASCII "GLPK"
+0x0004  2      pak_version_major              u16
+0x0006  2      pak_version_minor              u16
+0x0008  2      pak_version_patch              u16
+0x000A  2      reserved_alignment             u16   = 0
+0x000C  4      header_byte_length             u32   total header size in bytes
+0x0010  8      format_hash                    u64   FormatHash (§7.2.3)
+0x0018  8      source_content_hash            u64   blake3 of MeshSource (§4.1.1)
+0x0020  2      glibre_engine_version_major    u16
+0x0022  2      glibre_engine_version_minor    u16
+0x0024  2      glibre_engine_version_patch    u16
+0x0026  2      reserved_align2                u16   = 0
+0x0028  8      cluster_dag_offset             u64
+0x0030  8      cluster_dag_length             u64
+0x0038  8      blas_recipe_offset             u64
+0x0040  8      blas_recipe_length             u64
+0x0048  8      page_table_offset              u64
+0x0050  4      page_count                     u32
+0x0054  4      lod_band_count                 u8 + 3 pad
+0x0058  4      meshlet_group_count            u32
+0x005C  1      draco_profile                  u8    DracoQuantisationProfile
+0x005D  1      meshlet_max_vertices           u8    = 64 (§7.3.4)
+0x005E  1      meshlet_max_triangles          u8    = 124 (§7.3.4)
+0x005F  1      reserved_align3                u8    = 0
+0x0060  N*4    decode_pool_scratch_max[N]     u32 per AttributeKind (§4.1.12)
+        ...    residency_hint_table[page_count]   u8 per page (§4.1.6 / harmonius hot-pose)
+        ...    reserved-tail padding to align next region to 16 bytes
+```
+
+`header_byte_length` carries the pak's own knowledge of how many bytes
+it occupies; readers use it to seek past the header into the
+cluster-DAG region without recomputing alignments. The two
+variable-length tail arrays (`decode_pool_scratch_max[]` and
+`residency_hint_table[]`) sit inside the header region (everything
+before the cluster-DAG bytes) so the header is one contiguous read.
+
+##### Reader-side validation order
+
+`PakReader` validates fields in this exact order; the first failure
+short-circuits with the listed error:
+
+1. `magic == "GLPK"` else `Error::PakHeaderMagicMismatch`.
+2. `format_hash == compiled_FormatHash` else
+   `Error::PakFormatHashMismatch` (`§4.1.7` invariant 1).
+3. `header_byte_length <= mmap_size` else
+   `Error::PakHeaderOffsetOutOfRange`.
+4. `cluster_dag_offset + cluster_dag_length <= mmap_size` else
+   `Error::PakHeaderOffsetOutOfRange` (`§4.1.7.1` invariant 2).
+5. `blas_recipe_offset + blas_recipe_length <= mmap_size` else
+   `Error::PakHeaderOffsetOutOfRange`.
+6. `page_table_offset + page_count * sizeof(PageTableEntry) <=
+   mmap_size` else `Error::PakHeaderOffsetOutOfRange`.
+7. `meshlet_max_vertices == 64` and `meshlet_max_triangles == 124`
+   else `Error::PakFormatHashMismatch` (caps are encoded into
+   `FormatHash` per §7.3.4; this check is a defence-in-depth arm).
+8. `draco_profile != Reserved` and resolves inside the live closed
+   set else `Error::DracoProfileUnknown`.
+
+Only after all eight checks pass does any payload access proceed
+(`§4.1.7` invariant 4).
+
+##### Twin record `glibre.geometry.PakHeaderRecord` (Fory side-record)
+
+A Fory-encoded sibling of `PakHeader` exists at
+`data/schemas/geometry/PakHeaderRecord.fory` (FQN
+`glibre.geometry.PakHeaderRecord`) **strictly for tooling** — the
+editor's pak inspector, the cooker's verify pass, and the
+content-browser preview. The runtime never reads it; it is a
+human/tool-readable snapshot of the same field set.
+
+```fory
+schema glibre.geometry.PakHeaderRecord {
+  version  1
+  since    "0.1.0"
+
+  field pak_path                    : string  tag 1  since 1
+  field magic                       : u32     tag 2  since 1   // "GLPK" packed
+  field pak_version_major           : u16     tag 3  since 1
+  field pak_version_minor           : u16     tag 4  since 1
+  field pak_version_patch           : u16     tag 5  since 1
+  field format_hash                 : u64     tag 6  since 1
+  field source_content_hash         : u64     tag 7  since 1
+  field glibre_engine_version       : string  tag 8  since 1   // "M.m.p"
+  field cluster_dag_offset          : u64     tag 10 since 1
+  field cluster_dag_length          : u64     tag 11 since 1
+  field blas_recipe_offset          : u64     tag 12 since 1
+  field blas_recipe_length          : u64     tag 13 since 1
+  field page_table_offset           : u64     tag 14 since 1
+  field page_count                  : u32     tag 15 since 1
+  field lod_band_count              : u8      tag 16 since 1
+  field meshlet_group_count         : u32     tag 17 since 1
+  field draco_profile               : u8      tag 18 since 1
+  field meshlet_max_vertices        : u8      tag 19 since 1
+  field meshlet_max_triangles       : u8      tag 20 since 1
+  field decode_pool_scratch_max     : list<u32>  tag 21 since 1
+  field residency_hint_table        : bytes      tag 22 since 1
+}
+```
+
+This Fory record is optional; absence does not gate runtime load. Its
+presence lets `glibre-foryc-pak-inspect` (a tools-context utility,
+not a `data` concern) emit a JSON dump of any pak by reading only
+the side-record. It is the side-channel render's §7 calls a "Fory
+side-record" — same shape, same bootstrap rule.
+
+#### 7.2.3 `FormatHash` — content-of-schema hash
+
+`FormatHash` (`§4.1.7` invariant 1) is computed at `glibre-foryc` time
+from a deterministic byte serialisation of the pak schema's defining
+inputs:
+
+```text
+FormatHash := blake3_64(canonical_bytes(
+    "GLPK"                            ascii bytes, 4
+    pak_version_major                 u16 LE
+    pak_version_minor                 u16 LE
+    pak_version_patch                 u16 LE
+    pak_header_field_layout_canonical UTF-8 (the exact field-table
+                                       above, sorted by offset, comma-
+                                       separated `name:type@offset`)
+    cluster_dag_layout_canonical      UTF-8 (group / meshlet table
+                                       record schemas, sorted)
+    blas_recipe_layout_canonical      UTF-8 (binary descriptor record
+                                       schema, sorted)
+    page_layout_canonical             UTF-8 (page-format-version, sub-
+                                       record table)
+    page_table_entry_layout_canonical UTF-8
+    meshlet_max_vertices              u8 = 64
+    meshlet_max_triangles             u8 = 124
+    sort(DracoQuantisationProfile.values_canonical)
+                                      UTF-8 enum table; closed-sum
+    sort(AttributeKind.values_canonical)
+                                      UTF-8 enum table; closed-sum
+))[:8]                                truncated to first 8 bytes ->
+                                      u64 little-endian
+```
+
+Properties:
+
+1. **Schema-only, payload-blind.** `FormatHash` depends solely on the
+   pak schema; two paks whose mesh data differ but whose schemas are
+   identical have identical `FormatHash` (`§4.1.7` invariant 1).
+2. **Frozen-cap input.** `meshlet_max_vertices = 64` and
+   `meshlet_max_triangles = 124` are fixed inputs to the digest. Any
+   change to either bumps `FormatHash`; see §7.3.4.
+3. **Closed-sum enums fold in.** `DracoQuantisationProfile` and
+   `AttributeKind` enumerator tables fold in. Adding an enumerator
+   bumps `FormatHash` (a previously-unknown profile is a different
+   format).
+4. **64-bit truncation.** The full Blake3-256 is truncated to its
+   first 8 bytes, little-endian, and embedded in `PakHeader` as a
+   `u64`. The truncation is acceptable because the value is gated by
+   exact equality, not by collision-resistance against an adversarial
+   miner — schema authors are first-party to the build.
+5. **`AbiHash` independence.** `FormatHash` is the **pak-schema**
+   hash; `glibre_types_abi_hash` is the **middleman-dylib** hash
+   (`reviews/decisions/fory-codegen.md`). The two coexist:
+   `CookManifest` records both (§7.1.1); the pak header records only
+   `FormatHash` because runtime pak-load only gates on pak-schema.
+   `glibre_types_abi_hash` is checked by the plugin loader at dylib
+   load time, before any pak is mapped.
+
+#### 7.2.4 Why `MeshletPak` is not Fory
+
+The decision is the same one render's `PSOCacheRecord` makes for its
+`archive_blob` field (`specs/render/SPEC.md` §7.1.2): the *envelope*
+rides Fory; the *opaque large binary* does not. For `MeshletPak`,
+*everything* is the opaque binary — its bytes are mmap'd directly into
+the runtime's address space and decoded by domain-specialised code
+(Draco for streams, hand-rolled u32/u8 for tables). Forcing Fory's
+tagged variable-length encoding on this surface would:
+
+1. Break mmap residency (Fory's varints require a parse pass before
+   any field is addressable; mmap'd pak pages are addressable by raw
+   offset).
+2. Defeat byte-equal-across-hosts determinism (`PHILOSOPHY` §7,
+   `§4.1.7` invariant 2): Fory's tagged encoding admits multiple
+   byte-equivalent forms via tag-skipping; the pak's contract is
+   single-canonical bytes.
+3. Admit silent additive drift: Fory's `since` clause synthesises
+   defaults at deserialise time, which is exactly the wrong behaviour
+   for a runtime that must refuse loads of pak schemas it does not
+   understand. `FormatHash` mismatch is the only acceptable drift
+   signal, and it is binary.
+
+Fory's role for the pak is therefore confined to (a) the *manifest*
+that describes the pak from outside (§7.1.1), (b) the *side-records*
+that mirror the pak's read-mostly metadata (§7.1.2, §7.1.3, §7.2.2's
+twin record), and (c) tooling that wants to read the pak without
+linking against `geometry`.
+
+### 7.3 Migration rules
+
+Geometry's persistence has two distinct migration mechanisms because
+it has two distinct media. Both obey the engine-wide rules in
+`specs/data/SPEC.md` §7.4 where applicable; the pak-binary path adds
+its own, stricter rule.
+
+#### 7.3.1 Fory side-records — additive fields, owned migrations
+
+`CookManifest`, `BLASRecipeRecord`, `MeshSourceMetadata`, and
+`PakHeaderRecord` follow the standard glibre Fory migration pattern:
+
+1. **Additive fields at new tags.** Adding a field at a new (unused)
+   tag with a `since N+1` clause and a `default` is the preferred
+   migration shape. No migration-provider body is required; codegen
+   synthesises the default at deserialise time. This is the only
+   migration shape geometry expects to need at MVP.
+2. **Removal marks tag reserved.** A removed field becomes a
+   `reserved tag N` line; the tag number is never reused
+   (`specs/data/SPEC.md` §7.4 rule 7).
+3. **Closed-set enum extensions force a schema bump.** Adding a new
+   `DracoQuantisationProfile` enumerator, a new `vertex_format`
+   value, or a new `index_format` value adds an entry to the closed
+   sum; the schema bumps and a migration body lives under
+   `src/geometry/migrations/<Type>_v<N>_to_v<N+1>.cpp`. The body is
+   pure (`specs/data/SPEC.md` §7.4 rule 2): it remaps old
+   enumerator values into the new closed set or refuses with
+   `Error::SchemaMigrationFailure` for irreconcilable values.
+4. **Stepwise only.** Migrations are `vN -> vN+1`; the dispatcher
+   composes chains (`specs/data/SPEC.md` §7.4 rule 1).
+5. **Round-trip goldens.** Per `specs/data/SPEC.md` §7.5, every
+   shipped schema version `N` ships a `vN.fory.bin` golden under
+   `tests/data/schemas/geometry/<Type>/v<N>.fory.bin`; the migration
+   chain is exercised end-to-end against the registry rather than
+   step-by-step.
+
+Geometry commits to **no breaking schema changes** to these
+side-records inside MVP. Post-MVP changes follow rules 1-5.
+
+#### 7.3.2 `MeshletPak` binary — `FormatHash` invalidation, no migration
+
+The pak format is **schema-versioned by `FormatHash`**, not by Fory's
+runtime migration. Any change to the pak schema — new `PakHeader`
+field, new region in the file layout, change to the `BLASRecipe`
+binary descriptor schema, change to the page format, change to the
+cluster-DAG byte layout, addition of an `AttributeKind` enumerator,
+or any of the inputs to `FormatHash` listed in §7.2.3 — bumps
+`FormatHash` and **the new engine refuses the old pak with
+`Error::PakFormatHashMismatch`**.
+
+There is no in-process migration path for paks. The cooker re-cooks
+from `MeshSource`. This is the same rule render applies to its
+`PSOCacheRecord` archive (`specs/render/SPEC.md` §7.2.2 "invalidate,
+never migrate"): paks are *cache* of a deterministic cook, not
+authored user-data.
+
+Operational consequences:
+
+1. **Cook-driver re-cook trigger.** `CookManifest.format_hash` is
+   compared against the live `FormatHash` at cook-time; mismatch
+   forces a re-cook (`§4.1.8` invariant 1). The cook driver's
+   incremental layer treats mismatched manifests the same way it
+   treats absent manifests.
+2. **Build-system advertisement.** `glibre-foryc` emits the live
+   `FormatHash` value into a constant header
+   (`build/generated/glibre-types/include/glibre/types/geometry/_format_hash.hpp`)
+   that the runtime, the cooker, and the editor all consume from a
+   single source. Schema drift therefore cannot leak into a partial
+   build.
+3. **No partial-validity middle state.** A pak whose `FormatHash`
+   mismatches is treated as absent, never as a candidate for
+   field-level migration. The editor's content browser surfaces the
+   mismatch as a "needs re-cook" badge; the runtime refuses load.
+4. **Acceptance gate.** The acceptance criteria for any change that
+   alters `FormatHash` MUST include a re-cook of every shipped MVP
+   pak in `assets/cooked/` so the repository never holds a pak that
+   the engine refuses on `main`.
+
+#### 7.3.3 Cluster DAG layout — additive fields, no migration
+
+The cluster-DAG bytes inside the pak (`§4.1.5`) are part of the pak
+schema and ride §7.3.2. The DAG's evolution rule, however, is
+specifically called out in this spike's brief:
+
+1. **Layout changes are additive only at the field level.** Adding
+   a per-`MeshletGroup` field (e.g. a new bounding-cone tightening
+   metric, an additional SSE band) appends past the existing record
+   tail; no field is reordered, no field is reinterpreted. Padding
+   is allowed where ABI alignment demands it (`reviews/decisions/fory-codegen.md`
+   §"ABI Stability Rules" rule 3, applied to the binary surface).
+2. **Topology changes are not "additive".** Changing the watertight-cut
+   bookkeeping shape (`§4.1.4` invariant 1), changing the LOD-band
+   monotonicity contract (`§4.1.4` invariant 2), or changing the
+   parent/child edge encoding bumps `FormatHash` and forces re-cook
+   per §7.3.2. These are not additive — they alter the meaning of
+   existing bytes.
+3. **No in-place field-level migration.** Even when a change is
+   field-additive at the DAG level, the pak's overall `FormatHash`
+   bumps because the pak's inputs to §7.2.3 include
+   `cluster_dag_layout_canonical`. The "additive" property here is a
+   property of the *cooker's source code* (it does not need to
+   re-derive the DAG from `MeshSource`; it can reuse the prior
+   stage's output and only patch in the new field), not of the pak
+   bytes (which still get rewritten at re-cook time).
+
+The collapse: the pak is rewritten on every schema bump; the DAG
+field set within the pak grows additively across schema versions to
+keep the cooker's incremental machinery cheap.
+
+#### 7.3.4 Frozen meshlet caps — `vertex_count <= 64`, `prim_count <= 124`
+
+The hard caps enforced by `§4.1.3` invariant 1 are **frozen** for
+the life of the engine:
+
+1. **Encoded into `FormatHash`.** Both caps fold into the digest
+   (§7.2.3 input list). Changing either cap bumps `FormatHash` and
+   invalidates every shipped pak per §7.3.2.
+2. **Encoded into `CookManifest` as fixed values.** The
+   `meshlet_max_vertices` and `meshlet_max_triangles` fields of
+   `CookManifest` (§7.1.1 tags 20-21) are persisted but locked: any
+   manifest carrying values other than `64` and `124` is
+   `Error::CookManifestInvalid` (§7.1.1 invariant 2). The fields
+   exist for diagnostic completeness, not as tuneables.
+3. **Encoded into `PakHeader` as range-checked `u8`.** `PakHeader`
+   carries the caps as `u8` fields (§7.2.2 offsets `0x005D` /
+   `0x005E`); the reader-side validation order checks them at step
+   7. The `u8` width is itself part of the contract — a cap that
+   would not fit in `u8` triggers a `FormatHash` bump regardless of
+   whether the new value is "still small" (`§4.1.3` invariant 1
+   "the count fields are `u8` with range checks").
+4. **No graceful relaxation.** Loosening the caps post-MVP requires
+   a `FormatHash` bump and a full re-cook of every pak; the
+   migration path is "new format, not new field" per §7.3.2. The
+   cooker's `MeshletBuildOptions` (§5) presents the values as
+   `default = 64 / 124` and the cooker rejects user attempts to
+   override them with `Error::MeshletOversize` at cook-time stage 3.
+
+The collapse: the meshlet shape is the single physical-layout knob
+the entire downstream pipeline is parameterised by — Metal 4
+mesh-shader payload limits, `PakPage` packing density, Draco profile
+tuning, BLAS descriptor sizing all key off it. Freezing it removes
+an entire combinatorial axis from the format-evolution surface.
+
+### 7.4 What is NOT persisted
+
+To make the boundary explicit (echoing render's §7.3 table):
+
+| Artefact                       | Why not persisted                                                                                                              |
+|--------------------------------|--------------------------------------------------------------------------------------------------------------------------------|
+| Cooked vertex / index bytes    | Live in `MeshletPak` binary blocks; consumed by `PakReader` directly. Not Fory-serialised by design (§7.2.4).                  |
+| `DracoStream` payloads         | Pak binary blocks; decoded by `DecodePool` into transient buffers (`§4.1.12`).                                                 |
+| `PakPage` bytes                | Pak binary blocks; mmap'd by `PakReader` and streamed by the residency manager (`§4.1.13`).                                    |
+| `ClusterDAG` runtime form      | Reconstructed from pak bytes at register-mesh; never rebuilt at runtime (`§4.1.5`).                                            |
+| `MeshSource`                   | Cook-time only (`§4.1.1`); content-context owns the source-asset import; geometry consumes a transient `MeshSource` view.      |
+| `OptimisedMesh`                | Cook-time intermediate (`§4.1.2`); never enters a pak directly; not persisted.                                                 |
+| `Meshlet` / `MeshletGroup`     | Persisted *inside* the pak binary, not as Fory records. Their layout is part of `FormatHash`.                                  |
+| `BLASRecipe` runtime blob      | Pak binary block; the `BLASRecipeRecord` Fory side-record (§7.1.2) is the tooling projection, not the runtime input.           |
+| `MeshHandle` / `MeshletGroupHandle` | Per-process opaque identifiers (`§4.1.9` / `§4.1.10`); regenerated on each register-mesh; never persisted.                |
+| `DecodePool` / `ResidencyState`| Per-process runtime state (`§4.1.12` / `§4.1.13`); rebuilt from `PakHeader` on each pak map.                                   |
+| `GeometryRegistry` table       | Per-process runtime aggregate (`§4.1.14`); rebuilt from registered paks at startup.                                            |
+| `GpuMeshBuffers`               | Device-side mappings (`§4.1.15`); allocated by render's `Device` peer; never persisted.                                        |
+
+These appear in the persistence surface only as **identifiers** and
+**byte-offset references** (`source_content_hash`, `format_hash`,
+`pak_path`, page indices, group indices) carried inside the four
+Fory side-records and the pak header, never as standalone byte
+payloads.
+
+### 7.5 Cross-context obligations
+
+Per `specs/data/SPEC.md` §7.7, this section inherits the engine-wide
+schema rules. Specifically:
+
+1. The `.fory` grammar in `specs/data/SPEC.md` §7.1 is the only
+   legal syntax for files at `data/schemas/geometry/<Type>.fory`.
+2. Migration providers (when needed; none at v1) obey
+   `specs/data/SPEC.md` §7.4.
+3. Round-trip goldens follow the harness in `specs/data/SPEC.md`
+   §7.5; per-version goldens are mandatory whenever a schema's
+   version exceeds 1.
+4. The `MeshletPak` binary format is **out-of-band** with respect to
+   the `.fory` registry; it is not enumerated in `AbiHashManifest`
+   (`specs/data/SPEC.md` §7.2.3). Its evolution is gated by
+   `FormatHash` per §7.3.2, not by the spine's per-schema source
+   hash. A `FormatHash` bump does not automatically force an
+   `AbiHashManifest` rebuild; an `AbiHashManifest` rebuild does not
+   automatically force a `FormatHash` bump. The two surfaces are
+   independent — the same independence render's §7.1.2 calls out
+   between `glibre_types_abi_hash` and the PSO archive's
+   `archive_blob_blake3`.
+
+The collapse: domain Fory schemas migrate via the spine; the pak
+migrates via `FormatHash`. Two surfaces, two gates, one cooker-driven
+cache rebuild on either bump.
 
 ## 8. Hot-Reload Contract
 
