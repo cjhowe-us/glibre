@@ -28,7 +28,7 @@ Aggregators carry **no estimate**; leaves carry estimates that roll up.
    one or more granular Conventional Commit PRs.
 6. **Spike** (`type:spike`) — time-boxed research / design. Output =
    doc, decision record, or prototype branch. No tests required.
-   Has estimate.
+   **No estimate** — spikes do not carry story points.
 
 Story-point rollup is automatic: tracking issues never carry a
 `pts:*` label; their total = sum of `pts:*` across leaf descendants.
@@ -41,14 +41,24 @@ Story-point rollup is automatic: tracking issues never carry a
 - Top-level executors are launched in a single message with multiple
   `Agent` tool calls.
 
-## Plan Size
+## Leaf Sizing — One Session, One Leaf
 
-- Each generated plan must be **completable in a single Claude Code
-  session** (rough budget: ≤ ~30 leaf issues, ≤ ~100 story points
-  total). Larger scopes split into multiple plans, each with its own
-  tracking issue.
-- A "plan" is therefore: one tracking issue + its leaf descendants +
-  the design/spec docs that motivate them.
+Every leaf issue (`type:user-story`, `type:plan`, `type:spike`) must
+be **completable inside a single Claude Code session**. No leaf is
+allowed to carry a major chunk of work without an intermediate
+checkpoint. Practical heuristics:
+
+- `type:plan` ≤ pts:5. Larger scopes split into multiple plans.
+- `type:user-story` ≤ pts:5. Bigger stories split into smaller ones
+  whose acceptance criteria compose.
+- `type:spike` produces one decision record / prototype / triage
+  document — no estimate; if it would not fit one session, split into
+  smaller spikes whose deliverables compose.
+
+If a subagent realizes mid-session that a leaf has grown beyond one
+session, it must: (a) check in via the issue comments, (b) split the
+leaf into smaller leaves and link them, (c) close out the original
+session boundary cleanly without committing half-done work.
 
 ## Status Communication (in issue comments)
 

@@ -79,8 +79,9 @@ Aggregators carry no estimate; leaves do; estimates roll up.
   test plan (≥1 Catch2 test name). Closed by one or more granular
   Conventional Commit PRs.
 - **Spike** — `type:spike`. Time-boxed research / design. Output =
-  doc, decision record, or prototype branch.
+  doc, decision record, or prototype branch. No estimate.
 - **Story Point** — Fibonacci 1/2/3/5/8 relative effort. > 8 splits.
-  Rolls up from leaves; aggregators never carry one.
+  Carried only by `type:user-story` and `type:plan`. Aggregators
+  (`initiative` / `epic` / `sub-epic`) and `type:spike` never carry one.
 - **Pull Request** — granular, single-purpose, Conventional Commit
   subject. A `type:plan` may have one or more PRs.
