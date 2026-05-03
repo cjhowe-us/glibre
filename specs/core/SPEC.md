@@ -2575,7 +2575,187 @@ the only enforcement `core` SPEC §9 imposes per-aggregate.
 
 ## 10. Failure Modes & Error Model
 
-Typed errors. Recovery.
+This section is the closed enumeration of every `core::Error` arm
+emitted by the public boundaries declared in §5, the trigger condition
+that raises each arm, the recovery posture (rollback / retry / refuse /
+abort) the loader, schedule, or barrier takes, the observer event (if
+any) published when the arm fires, and the `spdlog` severity each arm
+uses. The table is the authoritative cross-reference for §11
+acceptance-criteria tests: every arm below MUST have at least one
+Catch2 case named in §11 that drives the trigger and asserts the
+recovery + severity.
+
+The arms below are the §5.1 enum (`enum class core::Error`)
+listed in registration order. Per `reviews/decisions/error-model.md`
+§"Type Sketch", every arm is a leaf with stable `to_string` mapping;
+per the same record's §"Logging / Telemetry" rule, each arm is logged
+**exactly once at the boundary where it is handled** (not at the site
+that raises it) via `glibre::log_error(err, level)`. The "Severity"
+column below is the level that handler passes; arms wrapped under the
+`HotReload` umbrella (§8.7) keep `warn` per the error-model decision
+record's hot-reload-refusal rule, even when their inner cause would
+otherwise log at `error`.
+
+The table is grouped by the §4 aggregate that emits each arm. The
+"Recovery" column uses one of four verbs:
+
+- **Refuse** — public API call returns `std::unexpected`; caller state
+  is unchanged; no rollback needed because no state moved (the arm
+  fires before any mutation). Caller decides whether to retry, log, or
+  surface to the operator.
+- **Rollback** — internal state had partially advanced; the emitting
+  module reverts to the pre-call snapshot before returning
+  `std::unexpected`. The §8.8 hot-reload rollback discipline is the
+  load-bearing example; the schedule's compile-on-failure-revert
+  (§4.4 invariant 3) is another.
+- **Retry** — the next equivalent invocation may succeed without
+  operator action (e.g. a coalesced `request_reload` on the same
+  `plugin_fqn` after the operator addresses the cause). The arm itself
+  refuses *this* attempt; "retry" is shorthand for "the API admits a
+  follow-up call once the trigger condition clears".
+- **Abort** — process termination via `std::terminate` (or equivalent
+  loud-fail). Reserved for contract violations the loader's invariants
+  cannot tolerate (§8.8 step 2.3 / 2.4 fault, non-invertible step-4
+  rollback). Distinguished from "Refuse" because abort cannot be
+  caught and is observed only via the OS-level exit code +
+  `glibre::log_error(err, error)` written before termination.
+
+### 10.1 Failure-Mode Table
+
+| `core::Error` arm                | Trigger (§ ref)                                                                                                            | Recovery   | Observer event (§5.12)                       | Severity |
+|----------------------------------|----------------------------------------------------------------------------------------------------------------------------|------------|----------------------------------------------|----------|
+| `EntityStale`                    | `Entity` resolves to a slot whose generation has advanced (§4.3 #1, §4.11 #1).                                              | Refuse     | none                                         | `warn`   |
+| `EntityForeignWorld`             | `Entity` from world A passed to world B's API (§4.3 #3; reserved for post-MVP multi-world).                                 | Refuse     | none                                         | `error`  |
+| `HierarchyCycle`                 | `ChildOf` mutation would introduce a cycle in the parent/child forest (§4.1 #2).                                            | Refuse     | none                                         | `error`  |
+| `TypeUnregistered`               | Public API names a `TypeId` not present in the immutable-after-init `TypeRegistry` (§4.1 #3, §4.9 #2).                      | Refuse     | none                                         | `error`  |
+| `TypeRegistryClosed`             | Mutation of `TypeRegistry` attempted after `World` construction completes (§4.9 #1).                                        | Refuse     | none                                         | `error`  |
+| `ScheduleAccessConflict`         | Two systems' declared `(reads, writes)` sets overlap such that no DAG ordering is conflict-free (§4.4 #2, §6.4).            | Refuse     | none                                         | `error`  |
+| `SystemScheduleCycle`            | Schedule rebuild detects a cycle in the union of every loaded plugin's `(after, before)` declarations (§4.4 #4, §8.6 #2).   | Rollback   | `HotReloadRefusedEvent` (when raised in §8.6) | `warn` (in hot-reload context) / `error` (at static `Schedule::compile`) |
+| `FramePhaseMisordered`           | Debug-build assertion: a phase observed a write from a later phase of the same frame (§4.4 #1).                             | Abort      | none                                         | `error`  |
+| `AssetStale`                     | `AssetHandle::resolve` finds a slot whose generation has advanced past the handle's (§4.7 #1).                              | Refuse     | none                                         | `warn`   |
+| `CommandBufferOverflow`          | A `CommandBuffer` append would exceed the per-frame arena cap declared by §9.3 (§4.8 #4).                                   | Refuse     | none                                         | `warn`   |
+| `PluginDlopenFailed`             | `dlopen` returns null at `PluginLoader::load` step 1 (`reviews/decisions/plugin-abi.md` §"Loader Sequence").                | Refuse     | none (load-time, no barrier transaction)      | `error`  |
+| `PluginMissingEntryPoint`        | `dlsym` cannot resolve one of the four required exports at step 2 (plugin-abi §"Loader Sequence").                          | Refuse     | none                                         | `error`  |
+| `PluginManifestInvalid`          | Fory `deserialize<PluginManifest>` fails at step 3 — or, in §8.4 step 2.2, Q drops a component FQN P registered.            | Refuse / Rollback | `HotReloadRefusedEvent` (when raised at §8.4 step 2.2) | `error` (at load) / `warn` (under §8.7 umbrella) |
+| `PluginAbiHashMismatch`          | Plugin-vs-host hash mismatch at load step 4, OR `schema_hash` drift on an existing FQN at §8.4 step 2.2.                    | Refuse / Rollback | `HotReloadRefusedEvent` (when raised under §8.4) | `error` (at load) / `warn` (under §8.7 umbrella) |
+| `PluginEngineTooOld`             | Host `glibre_core_version` < `manifest.min_engine_version` at load step 5 (plugin-abi §"Versioning Rules").                 | Refuse     | none                                         | `error`  |
+| `PluginNameCollision`            | A plugin with the same `PluginManifest.name` is already registered under a different file path (load step 6, §4.5 #1).      | Refuse     | none                                         | `error`  |
+| `PluginDependencyMissing`        | An entry in `manifest.depends_on` is not yet registered at load step 7 (§4.5 #3).                                           | Refuse     | none                                         | `error`  |
+| `PluginDependencyCycle`          | The `depends_on` graph contains a cycle when the loader topologically sorts a multi-plugin batch (§4.5 #3).                 | Refuse     | none                                         | `error`  |
+| `PluginInitFailed`               | `glibre_plugin_register` returns `unexpected(...)` at load step 9 OR §8.6 step 4.1 (resume) OR drain returns unexpected at §8.3 step 2 (drain arm). | Rollback (compensating unregister) | `HotReloadRefusedEvent` (when raised under §8.6 / §8.3) | `error` (at load) / `warn` (under §8.7 umbrella) |
+| `HotReload`                      | Umbrella tag set on every refusal raised inside `HotReloadBarrier::step` (§4.6 #7, §8.7). Wraps one of the inner causes below. | Rollback   | `HotReloadRefusedEvent`                      | `warn`   |
+| `HotReloadDrainTimeout`          | `glibre_plugin_drain` does not return within the §9 drain budget (§4.6 #2, §8.3 step 3).                                    | Rollback   | `HotReloadRefusedEvent`                      | `warn`   |
+| `HotReloadAbiHashMismatch`       | ABI-hash recheck at §8.4 step 2.1 fails between `PluginLoader::load` and the next phase-8 entry (§4.6 #3).                  | Rollback   | `HotReloadRefusedEvent`                      | `warn`   |
+| `HotReloadSelfReference`         | `request_reload` names a plugin whose register-time work would itself touch the loader (§4.11 #5, §8.7 last row).            | Refuse     | none (refused at request, not at barrier step) | `warn`  |
+| `SchemaMigrationFailed`          | Missing chain `(stored → current)` for a type at §8.5 step 3, or a migrate-chain step returns `unexpected` (§4.6 #4, §8.7). | Rollback   | `HotReloadRefusedEvent`                      | `warn`   |
+
+### 10.2 Cross-Cutting Notes
+
+1. **Severity escalation under hot-reload.** Every arm raised inside
+   `HotReloadBarrier::step` (§8.3–§8.6) logs at `warn`, even when its
+   non-barrier counterpart logs at `error`. The hot-reload contract
+   guarantees the previous-good plugin keeps running on every refusal
+   (§4.6 #7, §8.8 #1–#5), so the steady state remains tolerable; the
+   `warn` level signals "operator action required, but engine still
+   ticking". This is the load-bearing rule from
+   `reviews/decisions/error-model.md` §"Logging / Telemetry" #3 applied
+   uniformly across §10.1's umbrella column. Outside the barrier
+   (e.g. `PluginLoader::load` raising `PluginAbiHashMismatch` on a
+   first-time load) the arm logs at `error` because there is no
+   prior-good plugin to fall back on.
+
+2. **Observer events fire on terminal transitions only.** Per §8.6
+   and §8.8 #6, `HotReloadRefusedEvent` is published exactly once
+   per per-plugin transaction at the rollback commit point;
+   `HotReloadCompletedEvent` is the success-path counterpart and
+   is the *absence* of any §10.1 arm. Subscribers that received a
+   `HotReloadStartedEvent` for a `plugin_fqn` see exactly one
+   terminal event per transaction (refusal or completion), never
+   both, never neither (§8.6 step 3, §8.8 #6).
+
+3. **`HotReload` umbrella semantics.** `core::Error::HotReload`
+   carries an inner cause arm via `glibre::Error`'s `ErrorContext`
+   payload (per the error-model decision record's `ErrorContext`
+   sketch). Consumers pattern-match `code()` against `HotReload`
+   first, then read the inner arm from `where().detail` for the
+   specific cause. The §8.7 refusal-cases table is the closed
+   mapping from inner cause to operator action.
+
+4. **Abort is reserved.** The two `Abort` rows in §10.1
+   (`FramePhaseMisordered` debug assertion, plus the §8.8 step 2.3 /
+   2.4 fault and non-invertible step-4 rollback paths whose
+   triggers are *not* enumerated in §10.1 because they are loader
+   contract violations rather than `core::Error` arms in their own
+   right) terminate the process with `glibre::log_error(err, error)`
+   written first. CI surfaces the exit code; no observer event
+   fires because the process is already exiting. Silent recovery
+   is forbidden because it would mask bugs the
+   deterministic-snapshot contract (PHILOSOPHY §7) cannot tolerate.
+
+5. **Caller-side recovery posture.** Public APIs in §5 return
+   `Result<T> = std::expected<T, glibre::Error>`. Callers handle
+   each §10.1 arm at exactly one boundary (per the error-model
+   decision record's §"Logging / Telemetry" #1). The recovery
+   verb in §10.1 is the *emitting module's* posture; the *caller's*
+   posture is always one of:
+   - **propagate** (`return std::unexpected{err}`) — common in
+     plugin-loader internal helpers,
+   - **handle + log** (`glibre::log_error(err, level)` followed
+     by a bounded fallback) — common at the `FrameLoop::tick`
+     boundary that drives `HotReloadBarrier::step`,
+   - **terminate** (the §10.2 #4 abort path) — reserved for
+     contract violations.
+
+6. **Allocator-budget arm interaction.** `core::Error::OutOfBudget`
+   from `reviews/decisions/error-model.md` §"Type Sketch" is
+   raised by `glibre::PerContextAllocator` (§9.4 rule #2) when an
+   allocation under `ContextTag::core` would exceed the 64 MiB
+   ceiling. It is **not** listed in §10.1 because its emitter is the
+   per-context allocator (an engine-wide service shared across all
+   contexts), not a `core` aggregate. The arm is documented under
+   the engine error-model record and surfaces in `core` call sites
+   as a propagated `std::unexpected` from any allocation-bearing
+   API; recovery is identical to the other §10.1 arms (refuse,
+   propagate, log at the handling boundary). `core` SPEC §10
+   references it here so the allocator interaction is explicit
+   without duplicating the engine-wide enumeration.
+
+7. **Deterministic-replay obligation.** Every §10.1 arm that fires
+   inside the deterministic core path (everything except hot-reload,
+   which is by contract excluded from determinism per §8.1 and
+   PHILOSOPHY §7) must be byte-equal across runs and hosts: the same
+   trigger from the same input produces the same arm with the same
+   `ErrorContext` payload. Tests in §11 backed by the S1 fixture
+   (`reviews/decisions/perf-budget.md` §"Justification") assert this
+   via golden-snapshot comparison on the error stream. Hot-reload
+   arms are exempt only because the trigger (a filesystem watcher
+   event, an operator request) is non-deterministic; the rollback
+   path itself is deterministic and asserted under §8.9 scenario
+   class 2.
+
+### 10.3 Cross-References
+
+- §4 aggregate invariants — every arm in §10.1 names the §4
+  invariant (`#N`) that detects its trigger.
+- §5.1 — the closed `enum class core::Error` whose arms §10.1
+  enumerates one-to-one (modulo `OutOfBudget`, which is engine-wide
+  per §10.2 #6).
+- §5.12 — the three `HotReload*Event` structs whose firing rule
+  §10.1 references in the "Observer event" column.
+- §8.7, §8.8 — the hot-reload refusal-cause table and rollback
+  discipline §10.1 cites for every `HotReload*` arm.
+- §9.4 — `glibre::PerContextAllocator` and the
+  `core::Error::OutOfBudget` interaction noted in §10.2 #6.
+- §11 — acceptance-criteria tests; every §10.1 row must have at
+  least one Catch2 case driving the trigger.
+- `reviews/decisions/error-model.md` — `glibre::Error` umbrella,
+  per-context enum composition, and the `glibre::log_error`
+  severity/once-per-handle rule §10.2 #1 and §10.2 #5 cite.
+- `reviews/decisions/hot-reload-protocol.md` — the four-step state
+  machine and the three-refusal-cases rule §10.1 expands across
+  the §8.3–§8.6 detection points.
+- `reviews/decisions/plugin-abi.md` — the loader sequence and the
+  load-time refusal arms §10.1 lists in the `Plugin*` rows.
 
 ## 11. Acceptance Criteria
 
