@@ -237,8 +237,322 @@ Designs:
 
 ## 4. Aggregates & Invariants
 
-- Aggregate / entity / value object.
-- Invariants that must hold at every public API boundary.
+Each aggregate below is the smallest cohesive cluster of entities and
+value objects whose state mutates together at the OS seam. The
+**SRP justification** for every aggregate is "one OS facet — one
+reason to change"; if two facets ever shared a reason to change we
+would fuse them, but the OS already keeps them separate
+(window-server vs filesystem vs scheduler vs process), so the seam
+inherits that separation.
+
+The aggregate boundary is what the engine enforces; OS handles
+themselves are opaque implementation details and never escape
+through public headers.
+
+### 4.1 `Window` (aggregate root) — `Display` (entity) — `Surface` (entity) — `LogicalSize` / `PhysicalSize` / `DpiScale` (value objects)
+
+A `Window` is the aggregate root for one OS window-server entry
+plus everything attached to it that cannot outlive it: its
+`Surface` (a single `metal_cpp::MTL::Layer*` reached through the
+SDL3 → `CAMetalLayer` bridge) and the `Display` it currently
+inhabits. `Display` re-enumeration is owned here because hot-plug
+events are delivered to the same SDL3 pump that drives windows,
+and the window's current `Display`, refresh rate, DPI, and HDR
+capability are read together as one consistent snapshot.
+`LogicalSize`, `PhysicalSize`, and `DpiScale` are immutable value
+objects returned by query and updated by `WindowEvent::Resized` /
+`DpiChanged`.
+
+**SRP:** one reason to change — the OS window-server contract
+shifted (SDL3 minor bump, AppKit fullscreen behavior, DPI rounding
+rule). Splitting `Window` from `Surface` would lie about lifetime;
+splitting `Display` into its own aggregate would force every
+window-state read to cross two aggregate boundaries for what is
+one consistent OS query.
+
+Invariants enforced at every public boundary of this aggregate:
+
+1. **Surface lifetime is strictly bound to its `Window`.** A
+   `Surface` handle handed to render is valid only while the owning
+   `Window` is alive; `Window::~Window()` releases the
+   `CAMetalLayer*` and any `Surface` value previously vended is
+   thereafter UB to dereference. The engine enforces this by
+   issuing `Surface` only through `Window::surface()` and never
+   through a free function.
+2. **`Window` operations are main-thread-only.** Any call from a
+   non-main thread is a contract violation; debug builds assert,
+   release builds return `PlatformError::Unsupported`. SDL3 + AppKit
+   require this and we do not paper over it.
+3. **`LogicalSize` >= 1x1; `DpiScale` > 0.** Constructed values
+   outside this range are rejected at the API boundary with
+   `PlatformError::Unsupported` (the aggregate refuses to enter an
+   invalid state rather than carry a `Validity` flag).
+4. **`PhysicalSize = round(LogicalSize * DpiScale)` always.**
+   Conversion lives in one place; callers cannot construct a
+   `PhysicalSize` directly from a `LogicalSize` without going
+   through the owning `Window`'s current `DpiScale`.
+5. **`Display` snapshots are immutable.** A `Display` value is the
+   state at the moment it was queried; subsequent hot-plug arrives
+   as `WindowEvent::DisplayChanged` and a new query returns the new
+   snapshot. Old values do not silently mutate.
+6. **`Surface` is opaque to engine code.** Its only public shape is
+   `metal_cpp::MTL::Layer*`; the bridging Objective-C translation
+   unit is the sole site that touches AppKit. No header outside
+   platform's bridge file may include `<AppKit/AppKit.h>` or any
+   Objective-C runtime symbol.
+
+### 4.2 `EventQueue<T>` (aggregate root) — `InputEvent` / `WindowEvent` (sealed sums) — `Pump` (entity)
+
+A pair of typed bounded SPSC ring buffers — `EventQueue<InputEvent>`
+and `EventQueue<WindowEvent>` — together with the `Pump` that
+writes to them, forms one aggregate: the **OS-event ingress**.
+The two queues live or die together because the `Pump` drains
+SDL3's single event stream and produces both families in the order
+SDL3 reported them; splitting the two queues into independent
+aggregates would re-introduce the cross-family ordering bug we are
+collapsing away.
+
+`InputEvent` is a closed `std::variant` over: `KeyDown`, `KeyUp`,
+`MouseMove`, `MouseButton`, `Wheel`, `TextInput`, `GamepadAxis`,
+`GamepadButton`. `WindowEvent` is a closed `std::variant` over:
+`Resized`, `DpiChanged`, `Minimized`, `Restored`, `FocusGained`,
+`FocusLost`, `CloseRequested`, `DisplayChanged`. Both sums are
+sealed at compile time; adding a variant is a deliberate central
+edit, not an open extension point.
+
+**SRP:** one reason to change — SDL3's event vocabulary or the
+ring-buffer protocol shifted. Splitting per-event-family would
+fragment the ordering invariant across aggregates.
+
+Invariants:
+
+1. **Pump is single-threaded, main-thread-only.** Exactly one
+   `Pump::drain()` call per frame, from the main thread. SDL3 event
+   pumping is not thread-safe and we do not pretend otherwise.
+2. **Per-device monotonic event ordering.** For events emitted by
+   the same physical device (e.g. one keyboard, one gamepad index),
+   the order in the queue matches the order SDL3 reported them.
+   Cross-device interleave is permitted but never reordered within
+   a single device.
+3. **Exactly-once delivery; no silent drops.** Every event accepted
+   from SDL3 is enqueued exactly once. A queue that is full at pump
+   time is a fatal pump misconfiguration: the platform returns
+   `PlatformError::IoFailure { OsCode }` and the engine treats this
+   as unrecoverable. We do not coalesce, drop, or reorder to make
+   room.
+4. **`CloseRequested` and `DpiChanged` are never coalesced.** Even
+   if multiple arrive in one pump cycle, each is delivered as its
+   own queue entry with its frame-local sequence preserved.
+5. **Sealed variant: no unknown event escapes.** Any SDL3 event
+   that does not map to a known variant is dropped at the pump
+   boundary, never queued as "unknown". This refusal is logged at
+   `debug` level and does not surface as an error.
+6. **Queues are bounded; capacity is fixed at construction.** The
+   `EventQueue<T>` does not grow at runtime; it is sized for the
+   worst-case frame burst once and never resized.
+
+### 4.3 `FileWatcher` (aggregate root) — `FileEvent` (sealed sum) — `CanonicalPath` (value object)
+
+A `FileWatcher` owns a recursive directory subscription and the
+deduplication state needed to emit only `(canonical_path, kind)`
+tuples to the engine. The aggregate fuses three concerns harmonius
+kept apart — path canonicalization, OS watch delivery, and
+content-hash dedup — because they only have value when delivered
+together; consumers only care about the deduped stream.
+
+`FileEvent` is a closed `std::variant` over: `Created`, `Modified`,
+`Deleted`, `Renamed { from, to }`. Every payload carries a
+`CanonicalPath` value object (UTF-8 absolute path with symlinks,
+junctions, and case folded per platform rule).
+
+**SRP:** one reason to change — the OS file-watch backend shifted
+(SDL3 filesystem events on macOS today; kqueue / inotify /
+ReadDirectoryChangesW elsewhere later) or the canonicalization
+rule changed. Splitting "watcher" from "canonicalizer" would force
+every consumer to re-canonicalize and re-dedup, defeating the
+collapse.
+
+Invariants:
+
+1. **Every emitted path is canonical.** No raw OS path, no
+   relative path, no symlink-bearing path is ever emitted. The
+   aggregate refuses to construct a `FileEvent` with a
+   non-canonical path; canonicalization failure becomes
+   `PlatformError::IoFailure` at the watch ingestion site, not a
+   leaky event.
+2. **Deduplication is by canonical path + content hash.** Two OS
+   events that resolve to the same `(canonical_path, content_hash)`
+   within the watcher's debounce window collapse to one
+   `FileEvent`. Hash computation is internal; the algorithm is
+   pluggable but always produces a stable digest.
+3. **Renames are atomic.** A rename surfaces as one
+   `FileEvent::Renamed { from, to }`, not as a `Deleted` plus a
+   `Created`. If the OS reports the latter pair, the aggregate
+   reassembles the rename from inode / file-id metadata.
+4. **Watcher lifetime owns its subscriptions.** `~FileWatcher`
+   tears down every native subscription it holds; no orphaned
+   kqueue fd / inotify watch / FSEvents stream survives.
+5. **Watcher does not block the main thread.** Watch delivery
+   happens on an internal I/O thread and is funneled to the engine
+   through an `EventQueue<FileEvent>` drained by `Pump::drain()`.
+6. **`CanonicalPath` is a value object.** Two `CanonicalPath`s
+   with byte-equal contents are equal. Construction validates UTF-8
+   and absoluteness; failure returns `PlatformError::Unsupported`
+   rather than a half-formed value.
+
+### 4.4 `Clock` (aggregate root) — `Instant` / `WallTime` / `Duration` (value objects)
+
+`Clock` is the aggregate root for time, owning both a monotonic
+source and a wall source. They live together because the engine
+periodically needs to correlate the two (e.g. wall-time stamp on a
+crash dump emitted from a monotonic frame budget) and the
+correlation rule must be one place.
+
+`Instant` is opaque, monotonic, never-wrapping, never-decreasing,
+immune to NTP slew. `WallTime` is the calendar source; it may slew.
+`Duration = Instant - Instant` and is the only signed time
+arithmetic allowed at the seam.
+
+**SRP:** one reason to change — the OS time source's resolution,
+backing API, or guarantees shifted. Splitting monotonic from wall
+into separate aggregates would re-create the correlation gap.
+
+Invariants:
+
+1. **Monotonic non-decreasing.** For any two `Instant` values
+   `a, b` produced by the same `Clock` with `a` returned before
+   `b`, `b - a >= Duration::zero()`. The platform aborts on a
+   detected regression rather than silently clamping.
+2. **`Instant` is not serializable.** It carries no calendar
+   meaning; cross-process or cross-run comparisons are forbidden
+   and the type provides no I/O surface for them.
+3. **`WallTime` is the only source for log timestamps.** Engine
+   code never reads `time(nullptr)` or `gettimeofday` directly.
+4. **Resolution is at least 1 ms; native resolution is exposed.**
+   The `Clock` advertises its native tick so the deterministic
+   simulation step can be sized to it without integer drift.
+5. **One `Clock` per process.** It is a static / Meyer's
+   singleton at the seam; aggregates that need time take a
+   `Clock&` parameter rather than constructing their own.
+
+### 4.5 `Process` (aggregate root) — `Argv` / `Env` / `ExitCode` / `SignalHandler` (value objects + entity)
+
+`Process` is the aggregate root for the running process's
+identity-and-control surface: argv, environment, working directory,
+executable path, PID, exit-code setter, and signal install /
+uninstall. These belong in one aggregate because they share the
+same lifetime (the process) and changing one (e.g. installing a
+fatal-signal handler) interacts with another (e.g. the exit-code
+path used by a crash dump).
+
+**SRP:** one reason to change — the OS process-control contract
+shifted (a new POSIX revision, a sandboxing rule, a notarization
+constraint that forbids SIGTERM trapping). Splitting argv from
+signals would separate fields that crash-handling code reads
+together.
+
+Invariants:
+
+1. **Argv / env / cwd are read-only snapshots.** They are captured
+   once at startup and exposed as `std::span<const std::string_view>`
+   / equivalent. Mutation through the aggregate is forbidden;
+   out-of-band `setenv` use is unsupported and undefined for
+   engine code.
+2. **Exit code is set, never read back.** `Process::set_exit_code`
+   stores the value to be reported when the engine returns from
+   `main`. The aggregate exposes no getter; debugging exit codes
+   reads them from logs.
+3. **At most one handler per signal.** Installing a handler for a
+   signal that already has one engine-side returns
+   `PlatformError::AlreadyExists`. The aggregate does not chain.
+4. **Signal handlers are async-signal-safe.** Engine code that
+   passes a callable to `Process::install_signal` accepts the
+   constraint and the aggregate documents it; calling unsafe
+   functions from the handler is the caller's contract violation.
+5. **Process aggregate is single-instance.** There is one
+   `Process` per running engine; second-instance construction is a
+   programming error and the aggregate refuses to build.
+
+### 4.6 `FileIo` (aggregate root) — `IoToken` (entity) — `OpenMode` / `Stat` / `DirEntry` (value objects)
+
+`FileIo` is the aggregate root for blocking and bounded-async file
+primitives: open, read, write, stat, list, delete — all keyed by
+`CanonicalPath`. The bounded-async surface returns an `IoToken`
+entity that the caller polls or awaits through a `complete(token)`
+API; the token, the in-flight buffer, and the completion event
+form a single aggregate so that lifetime and cancellation cannot
+get out of sync.
+
+**SRP:** one reason to change — the OS file-I/O contract shifted
+(io_uring on Linux; APFS atomic-rename rule on macOS; long-path
+support on Windows) or the bounded-async budget shape changed.
+Splitting blocking from async would duplicate the canonical-path
+discipline.
+
+Invariants:
+
+1. **Every path is `CanonicalPath`.** No raw `const char*` /
+   `std::filesystem::path` ever reaches the public surface; the
+   type system prevents non-canonical paths from being passed in.
+2. **`FileIo` never blocks the main thread.** The bounded-async
+   path runs on an internal I/O thread pool sized at construction;
+   the blocking surface is documented as off-main-thread only and
+   asserts in debug builds when called from the main thread. This
+   is the load-bearing rule that keeps frame timing intact.
+3. **`IoToken` is a single-consumer handle.** Each token is owned
+   by exactly one caller; copying is forbidden, moving transfers
+   ownership, dropping cancels the operation. Cancellation is
+   best-effort — the OS may have already completed.
+4. **Atomic write protocol.** `write_atomic(path, bytes)` writes
+   to a sibling temp file, fsyncs, and renames over the target.
+   The aggregate is the sole site that knows this protocol;
+   callers that want atomicity ask for it by name.
+5. **`Stat` and `DirEntry` are value objects.** They are
+   point-in-time snapshots; staleness is the caller's problem.
+   The aggregate does not auto-refresh.
+6. **Bounded-async budget is enforced.** The internal I/O pool
+   is sized once; saturating it returns
+   `PlatformError::IoFailure { code: OutOfBudget }` rather than
+   queuing unboundedly.
+7. **No public callbacks.** Completion is observed via
+   `IoToken::poll()` or `IoToken::wait_for(Duration)`; no callable
+   crosses the boundary, in either direction.
+
+### 4.7 `PlatformError` (closed sum, cross-aggregate invariant)
+
+`PlatformError` is the closed sum of typed failures every
+aggregate above may surface at its public boundary, returned via
+`std::expected<T, PlatformError>` per the engine-wide error model
+(`reviews/decisions/error-model.md`). Variants:
+
+- `NotFound` — path / window / display id not present.
+- `PermissionDenied` — OS denied the operation.
+- `AlreadyExists` — create-only operation collided.
+- `Interrupted` — OS-level interrupt (EINTR class).
+- `Unsupported` — operation valid in shape but not on this OS /
+  this hardware (e.g. fullscreen-mode transition unavailable,
+  non-canonical path supplied).
+- `IoFailure { OsCode }` — wraps an opaque OS error code where no
+  finer mapping exists.
+- `OsCode` — raw fallback when the OS reports a code with no
+  semantic mapping yet.
+
+Cross-aggregate invariants:
+
+1. **Closed sum.** Adding a variant is a deliberate central edit
+   to platform's error enum; aggregates do not invent their own
+   error types. The platform context's enum sits inside the
+   engine-wide `glibre::Error` variant per the error-model
+   decision record.
+2. **No exceptions cross the boundary.** Every public function
+   returns `std::expected<T, PlatformError>` (or `void` on
+   guaranteed-success paths). The Objective-C bridge file is the
+   only place that may catch an `NSException`-equivalent, and it
+   converts before returning.
+3. **Errors are constructed at the site they happen.** No
+   aggregate translates another aggregate's error into its own
+   automatically; the call site that crosses the boundary maps
+   explicitly, per the error-model composition rule.
 
 ## 5. Public Interface
 
