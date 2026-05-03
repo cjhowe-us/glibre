@@ -4531,29 +4531,48 @@ regex-scraping prose.
   recorder is the deterministic seam, but AI tool-invocation that
   would mutate editor state through a side channel is out of scope.
 
-### 10.7 Open questions (carried into §12)
+### 10.7 Open questions — resolved
 
-- **Promote `"user-cancelled"` to a first-class `tools::Error::UserRefused`
-  arm** when a second user-prompt site lands (close-without-save,
-  discard recording, etc.). Today only the layout-profile prompt
-  discriminates; the diagnostic prefix is sufficient and the closed
-  sum stays small per the same Occam's-razor argument
-  `specs/platform/SPEC.md` §10.7 makes for `SurfaceLost`.
-- **Promote `"out-of-budget"` to a first-class arm** if a second
-  consumer needs to discriminate it from other `Refused` cases. The
-  command stack already discriminates on the diagnostic prefix; the
-  arena-allocator sub-case is rare in MVP.
-- **Per-pair-per-session log throttling for `InspectorUnknownType`**
-  — the §10.1 contract caps to one log line per `(TypeId, FieldName)`
-  pair per session. Validate the throttle map's memory bound under
-  fuzz (a malicious plugin could register many distinct unknown
-  types). Decided in the implementation plan.
+The five questions originally carried into §12 each resolve to an
+existing external gate or to an answer frozen until a known trigger;
+§12 holds no tools-owned residue. Each entry below names the gate
+that re-opens it, so a future change does not need to re-derive the
+deferral.
+
+- **Promote `"user-cancelled"` to a first-class
+  `tools::Error::UserRefused` arm.** Frozen as the diagnostic prefix
+  on the existing `Refused` arm until a *second* user-prompt site
+  lands (close-without-save, discard recording, or similar). Today
+  only the layout-profile prompt discriminates; per principle 10
+  (Occam's razor) one consumer does not justify a sealed-sum slot.
+  This is the same shape as the `SurfaceLost` promotion gate in
+  `specs/platform/SPEC.md` §10.8. Trigger to re-open: a second
+  prompt site lands and wants to branch on user cancellation without
+  parsing the prefix string.
+- **Promote `"out-of-budget"` to a first-class arm.** Same shape as
+  the `UserRefused` question: frozen as the diagnostic prefix on the
+  existing `Refused` arm. The command stack already discriminates on
+  the prefix; the arena-allocator sub-case is rare in MVP, and a
+  second consumer that needs to branch typed has not appeared.
+  Trigger to re-open: a second consumer (likely a future profiler /
+  budget visualiser) needing typed dispatch on the budget exhaustion
+  path.
+- **`InspectorUnknownType` throttle-map memory bound under fuzz.**
+  Owned by the §11 stories that exercise the inspector path
+  (#432 + #450 — the §10.3 owners of `InspectorUnknownType`). The
+  throttle-map sizing is a cap on the `(TypeId, FieldName)` key
+  set; the implementation plan attached to those stories declares
+  the cap and the malicious-plugin fuzz fixture that asserts it.
+  No tools-side spec residue: the §10.1 per-arm contract already
+  fixes the "one log line per pair per session" rule, and any
+  growth attempt is a §10.1 amendment, not a silent reallocation.
 - **`magic_enum` vs hand-written `to_string` for `tools::Error` arm
-  names in log output** — deferred to `core/error.hpp` per
-  `error-model.md` open question 1; tools follows whatever core
-  picks.
-- **`source_location` adoption for `ErrorContext`** — same deferral
-  as `error-model.md` open question 3; tools follows core.
+  names.** Owned by `core/error.hpp` per
+  `reviews/decisions/error-model.md` Open Q #1; tools follows
+  whatever core picks. No tools-side residue.
+- **`source_location` adoption for `ErrorContext`.** Owned by
+  `core/error.hpp` per `reviews/decisions/error-model.md` Open Q
+  #3; tools follows core. No tools-side residue.
 
 ## 11. Acceptance Criteria
 
@@ -4607,4 +4626,6 @@ Each must have a Catch2 test by name.
 
 ## 12. Open Questions
 
-- Owner / resolution gate.
+None. The five carry-ins in §10.7 each resolved in place against
+existing external gates — see that subsection for the trigger that
+re-opens each one. Per spike #166.
