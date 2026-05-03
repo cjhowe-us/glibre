@@ -1127,7 +1127,449 @@ barrier.
 
 ## 6. Internal Architecture
 
-Non-binding sketch for implementers.
+Non-binding sketch for implementers. The §5 public interface and the
+§4 aggregates are authoritative; this section records the module
+layout, the data structures, and the algorithmic shape we currently
+expect to ship — together with the load-bearing decisions taken in
+`reviews/decisions/{frame-phases,error-model,plugin-abi,
+hot-reload-protocol,fory-codegen,perf-budget}.md`. Implementers may
+deviate from the sketches below provided every §5 signature, §4
+invariant, §9 budget cell, and §10 error arm is preserved.
+
+### 6.1 Module Layout
+
+The `core` library compiles to a single `glibre-core` static archive
+whose internals are partitioned into seven sub-modules. Each sub-module
+owns one aggregate from §4 and exposes only the §5 facade headers; the
+internal headers live under `core/src/<sub>/` and are not on the
+include path of plugins or other contexts.
+
+| Sub-module        | Owns aggregates (§4)                  | §5 surface           | Sketches in 6.x |
+|-------------------|---------------------------------------|----------------------|-----------------|
+| `world/`          | `World`, `Entity`, archetype storage  | `World`, `CommandBuffer` | §6.2, §6.3 |
+| `schedule/`       | `Schedule`, `SystemId`, access sets   | `Schedule`           | §6.4 |
+| `frame/`          | `FrameLoop`, the nine phases          | `FrameLoop`, `Phase` | §6.5 |
+| `plugin/`         | `Plugin`, `PluginLoader`              | `PluginLoader`       | §6.6 |
+| `hot-reload/`     | `HotReloadBarrier`, migration arena   | `HotReloadBarrier`   | §6.7 |
+| `asset/`          | `AssetHandle<T>` table                | `AssetHandle<T>`     | §6.8 |
+| `type-registry/`  | `TypeRegistry`, `TypeId`              | (§5 header internals)| §6.9 |
+
+SRP rule (PHILOSOPHY #1): a sub-module has one reason to change — its
+owned aggregate's invariants. Any change that touches two sub-modules'
+internals at once is a seam-violation flag and must be reviewed against
+§4's invariant ownership column. The `core/src/` tree is forbidden
+from cross-sub-module includes except through the §5 facades; the
+build enforces this with per-sub-module visibility rules in CMake.
+
+The codegen-emitted middleman (`glibre-types.dylib`,
+`reviews/decisions/fory-codegen.md`) is a sibling library, not a
+sub-module of `core`. `core` links it the same way every plugin does;
+the only privileged consumer of `glibre-types.dylib`'s `_registry.cpp`
+internals is `type-registry/`.
+
+### 6.2 `world/` — Codegen-Driven Archetype Storage
+
+ECS storage is hand-written-shape C++ emitted by `glibre-foryc`, **not**
+a third-party ECS library (PHILOSOPHY #6 forbids runtime reflection in
+shipping; entt and friends are out). The pipeline:
+
+1. Every component declared in any plugin's `plugin.fory` (per
+   `reviews/decisions/plugin-abi.md` §"Plugin Manifest Schema",
+   `ComponentDecl.fqn` + `schema_hash` + `storage_hint`) lands in
+   `glibre-types.dylib`'s registry alongside its POD layout.
+2. `glibre-foryc` additionally emits an *archetype shape table* keyed
+   by the sorted set of `TypeId`s present in an archetype. The shape
+   table is built lazily at first-spawn into a new combination, but
+   the *storage column code* (per-component `Column<T>` with `T`'s
+   alignment + size hard-coded) is fully emitted at codegen time and
+   resolved through a single function-pointer indirection per
+   component-access.
+3. `World` stores entities in fixed-size **chunks** (target 16 KiB per
+   `reviews/decisions/perf-budget.md` heap accounting). Each chunk
+   holds a parallel array per component column (SoA), padded to the
+   component's `alignof`. Iteration walks chunks in registration order
+   (PHILOSOPHY #7 fixed iteration order).
+
+Sketch (illustrative; final shapes emit from `glibre-foryc`):
+
+```cpp
+// core/src/world/archetype.hpp — internal, not on include path.
+
+namespace glibre::core::detail {
+
+struct ArchetypeKey {
+    std::span<const TypeId> sorted_type_ids;  // canonical ascending.
+    friend constexpr bool operator==(ArchetypeKey, ArchetypeKey) noexcept;
+};
+
+class Chunk {
+public:
+    static constexpr std::size_t kBytes = 16 * 1024;
+    std::byte storage[kBytes];                 // SoA columns laid out by emit.
+    std::uint32_t row_count;
+    std::uint32_t row_capacity;                // depends on row stride.
+    ChangeTick last_modified[/*per-column*/];  // codegen sizes this array.
+};
+
+class Archetype {
+public:
+    ArchetypeKey                          key;
+    std::pmr::vector<std::unique_ptr<Chunk>> chunks;   // PerContextAllocator-tagged.
+    std::pmr::vector<ColumnDescriptor>    columns;     // emitted from registry.
+    std::pmr::vector<Entity>              row_to_entity;
+};
+
+// Spawn / despawn / move-between-archetypes implemented in archetype.cpp;
+// public API exposed through World facade in §5.
+
+}  // namespace glibre::core::detail
+```
+
+Move-between-archetype paths (component add/remove) are bounded by the
+chunk size and codegen-emitted memcpy stencils; no per-row virtual
+dispatch.
+
+### 6.3 `world/` — `CommandBuffer` Arena
+
+Each system body receives a `CommandBuffer&` — a per-system, per-frame
+arena (`PerContextAllocator` transient pool, drained at phase 9) that
+captures spawn/despawn/insert/remove intents as 32-byte `Command`
+records. The `Schedule` flushes a system's `CommandBuffer` only after
+the system's owning phase exits; this guarantees every system body
+observes a consistent `World` snapshot for its phase (§4.4 invariant).
+
+### 6.4 `schedule/` — DAG From Declared Access Sets
+
+Plugins declare each system's access set in `plugin.fory`
+(`SystemDecl.reads`, `.writes`, `.after`, `.before`, `.phase`; per
+plugin-abi §"Plugin Manifest Schema"). The schedule build
+(triggered at process start and at each successful hot-reload) is
+purely data-driven over the union of all loaded plugins' system
+declarations — no system code runs during the build.
+
+Algorithm (per-phase, runs nine times):
+
+1. Collect every `SystemDecl` whose `phase` matches the current phase
+   number (1..9).
+2. Build a directed graph `G` on system names. Add an edge `A → B`
+   whenever:
+   - `A.writes ∩ B.reads ≠ ∅`, **or**
+   - `A.writes ∩ B.writes ≠ ∅`, **or**
+   - `A.name ∈ B.after`, **or**
+   - `B.name ∈ A.before`.
+3. Topologically sort `G`. A cycle yields
+   `core::Error::SystemScheduleCycle` (§5 enum, §10 row); the loader
+   rolls back the offending plugin's registration per
+   `reviews/decisions/plugin-abi.md` §"Loader Sequence" step 10.
+4. Cache the sorted order as the phase's `CompiledPhase` — a flat
+   `std::pmr::vector<SystemId>` walked by `FrameLoop`.
+
+Complexity: `O(systems²)` worst-case for the access-set intersection
+sweep (acceptable; system count is bounded by plugin count × ~tens, and
+the rebuild runs only at hot-reload, not per frame). Per-frame phase
+execution is `O(systems)` and dispatches each system through a
+codegen-emitted thunk that resolves component columns by `TypeId`
+without runtime lookup.
+
+Single-worker MVP: every system runs on the game-loop driver thread in
+sorted order. The `(reads, writes)` machinery is already collected so
+post-MVP per-system parallelism (a thread pool fanning out independent
+nodes per phase, fence at the phase exit) drops in without re-spec'ing
+the schedule shape. The codegen step that emits per-system thunks is
+the natural seam to also emit a parallel-dispatch wrapper later.
+
+### 6.5 `frame/` — The Nine-Phase Loop
+
+`FrameLoop` owns the strict numeric ordering locked by
+`reviews/decisions/frame-phases.md`. The loop body is a hard-coded
+`switch` over `Phase` 1..9; phase identity is not data-driven because
+PHILOSOPHY #1 (one reason to change) gives each phase one owning
+context, and adding a phase is a frame-phases amendment, not a
+configuration change.
+
+Sketch:
+
+```cpp
+// core/src/frame/frame_loop.cpp — internal.
+
+void FrameLoop::tick(World& w, Schedule& s) noexcept {
+    run_phase(Phase::Input,         w, s);  // 1: platform
+    run_phase(Phase::Logic,         w, s);  // 2: deferred (empty in MVP)
+    run_phase(Phase::PhysicsFixed,  w, s);  // 3: physics
+    run_phase(Phase::Animation,     w, s);  // 4: deferred (empty in MVP)
+    run_phase(Phase::Transform,     w, s);  // 5: core
+    run_phase(Phase::CullExtract,   w, s);  // 6: render
+    run_phase(Phase::RenderSubmit,  w, s);  // 7: render
+    barrier_.step(w, plugins_);             // 8: HotReloadBarrier (core)
+    run_phase(Phase::Present,       w, s);  // 9: platform
+    w.advance_change_tick();
+}
+```
+
+The `HotReloadBarrier` is **inserted between phases 7 and 8 as a
+distinct call** rather than threaded through `run_phase` — its body is
+not a normal system schedule (no `(reads, writes)`-driven dispatch;
+it mutates the loader registries directly), so the §6.4 DAG machinery
+does not apply. Frame-phases §"Phase Table" line 8 already names this
+shape.
+
+Critical-path perf (per `perf-budget.md`):
+
+- Phase ordering hot loop has a **~0.5 ms ceiling** for `core`'s share
+  (0.40 ms sim + 0.05 ms submit per `perf-budget.md` Per-Context
+  Budget Table, plus a handful of cycles for the `switch` itself).
+- The `switch` dispatches through a function-pointer table populated
+  at process start; no virtual calls, no `std::variant<>` visiting.
+
+### 6.6 `plugin/` — `dlopen` + Manifest Read + ABI Hash Gate
+
+`PluginLoader` is the sole module permitted to call `dlopen` /
+`dlsym` / `dlclose`. The implementation is a literal transcription of
+`reviews/decisions/plugin-abi.md` §"Loader Sequence":
+
+1. **`dlopen`** the candidate `.dylib` with `RTLD_NOW | RTLD_LOCAL`.
+   Failure → `core::Error::PluginDlopenFailed`.
+2. **`dlsym`** the four required entry points
+   (`glibre_plugin_abi_hash`, `glibre_plugin_manifest`,
+   `glibre_plugin_manifest_size`, `glibre_plugin_register`). Missing
+   symbol → `core::Error::PluginMissingEntryPoint`.
+3. **Manifest read**: deserialize the in-`.rodata` Fory blob via
+   `glibre::types::deserialize<PluginManifest>(...)`. Failure →
+   `core::Error::PluginManifestInvalid`.
+4. **ABI hash gate**: byte-compare `manifest.abi_hash` and the
+   redundant `glibre_plugin_abi_hash` symbol against the host's
+   `glibre_types_abi_hash()`. Either mismatch →
+   `core::Error::PluginAbiHashMismatch`. PHILOSOPHY #9.
+5. Engine-version, name-collision, dependency, and cycle checks
+   (steps 5–7 of plugin-abi loader sequence) → matching
+   `core::Error::PluginEngineTooOld / PluginNameCollision /
+   PluginDependencyMissing / PluginDependencyCycle` arms.
+6. **Register entry-point invocation**:
+   `glibre_plugin_register(PluginContext&)` runs with the `World`,
+   the four registries, and the deserialized manifest passed by
+   reference (plugin-abi §"Registration Entry-Point Signature").
+   The registries record per-plugin ownership so a refused load can
+   be cleanly rolled back without leaking partial state.
+
+Internal data structures:
+
+```cpp
+// core/src/plugin/loader.hpp — internal.
+
+struct LoadedPlugin {
+    std::string             fqn;               // PluginManifest.name
+    std::filesystem::path   dylib_path;
+    void*                   dl_handle;
+    PluginManifest          manifest;          // deserialized once at load.
+    std::array<void*, 4>    entry_points;      // dlsym'd at load.
+    std::pmr::vector<TypeId>    owned_types;
+    std::pmr::vector<SystemId>  owned_systems;
+    // ... mirrors PassDecl / PanelDecl ownership for rollback.
+};
+
+class PluginLoader {
+public:
+    // §5 facade: load(), unload(), list().
+private:
+    std::pmr::vector<LoadedPlugin> loaded_;     // registration order.
+    TypeRegistry&                  types_;
+    SystemRegistry&                systems_;
+    PassRegistry&                  passes_;
+    PanelRegistry&                 panels_;
+};
+```
+
+The registries (`TypeRegistry`, `SystemRegistry`, `PassRegistry`,
+`PanelRegistry`) live in `type-registry/` and `schedule/` respectively;
+the loader holds references obtained at construction. Cross-plugin
+direct symbol use is forbidden (plugin-abi §"Decision" rule 2);
+plugins communicate exclusively through middleman-typed components and
+registered systems.
+
+### 6.7 `hot-reload/` — Drain → Swap → Migrate → Resume
+
+`HotReloadBarrier::step` is a literal transcription of
+`reviews/decisions/hot-reload-protocol.md` §"Protocol Sequence".
+Per-plugin state machine, executed by the loader on the game-loop
+thread:
+
+```cpp
+// core/src/hot-reload/barrier.cpp — internal.
+
+void HotReloadBarrier::step(World& w, PluginLoader& loader) noexcept {
+    if (pending_.load(std::memory_order_relaxed) == 0) return;  // hot path.
+
+    for (auto& req : pending_requests_) {
+        const auto txn = begin_txn(req);
+        if (!drain(req, w, txn))   { rollback(txn); continue; }
+        if (!swap(req, loader, txn)) { rollback(txn); continue; }
+        if (!migrate(req, w, txn))   { rollback(txn); continue; }
+        if (!resume(req, loader, txn)) { rollback(txn); continue; }
+        publish(HotReloadCompleted{req.fqn, /*...*/});
+    }
+    pending_requests_.clear();
+    pending_.store(0, std::memory_order_relaxed);
+}
+```
+
+State that survives a swap (hot-reload-protocol §"State Survival
+Rules"): every byte that has a `.fory` schema. ECS archetype storages
+of middleman-typed components, world singletons, asset-handle table,
+plugin/type registries, frame counter, world tick, PRNG state. State
+that does not survive: GPU resource handles, plugin-private caches,
+worker-thread pools — re-derived in `glibre_plugin_register`.
+
+Migrate functions (per `reviews/decisions/fory-codegen.md`
+§"Migration Mechanic" + hot-reload-protocol §"Migrate Function
+Contract") are pure free functions invoked from `glibre-types.dylib`'s
+static migration table. The barrier supplies a per-phase migration
+arena (16 MiB ceiling, accounted under `core`'s 64 MiB heap per
+`perf-budget.md` Allocator Rules rule 6); the arena resets between
+rows and never grows across plugins in the same phase.
+
+Refusal cases (exactly three, per hot-reload-protocol §"Refusal
+Cases"): ABI hash mismatch (`PluginAbiHashMismatch`), schema
+migration failure (`SchemaMigrationFailed`), plugin init returns
+error (`PluginInitFailed`). All three roll up under
+`core::Error::HotReload` (umbrella) and leave the previous-good
+plugin instance live and linked.
+
+The barrier is a true no-op when no reload is pending: a single
+relaxed atomic load on `pending_`, no fence, no cache flush — well
+inside the `<0.1 ms` steady-state budget (`perf-budget.md`
+"Pipelined Frame Timing" line for phase 8).
+
+### 6.8 `asset/` — Generation-Tagged Opaque Slots
+
+`AssetHandle<T>` (§5 stub) is an opaque `std::uint64_t` packing
+`(index: 40, generation: 22, type_tag: 2)`. The internal table:
+
+```cpp
+// core/src/asset/table.hpp — internal.
+
+template <class T>
+struct Slot {
+    std::uint32_t generation;        // bumped on each release.
+    bool          live;
+    T             payload;           // typed asset payload.
+};
+
+template <class T>
+class AssetTable {
+public:
+    AssetHandle<T> insert(T&& payload) noexcept;
+    Result<T*>     resolve(AssetHandle<T>) noexcept;     // AssetStale on miss.
+    void           release(AssetHandle<T>) noexcept;
+private:
+    std::pmr::vector<Slot<T>> slots_;
+    std::pmr::vector<std::uint32_t> free_indices_;
+};
+```
+
+Generation-tagged dereference rules (§4.7 invariant): any handle whose
+`generation` mismatches its slot's current generation resolves to
+`core::Error::AssetStale` (§5 enum). Slots are never compacted in MVP;
+the index is stable for the slot's lifetime, the generation rolls over
+on `release` to invalidate every outstanding handle to that slot.
+
+The handle table itself is a middleman-typed singleton (per the
+hot-reload survival rule "if it has a `.fory` schema, it survives");
+the *payloads* may or may not survive depending on whether the asset
+type is middleman-declared. Plugin-private payloads are released at
+drain and re-acquired at register, identical to GPU resource handles.
+
+### 6.9 `type-registry/` — `TypeId` Lookup
+
+`TypeRegistry` answers `TypeId → ColumnDescriptor` queries (size,
+alignment, codegen-emitted move/destroy thunks) used by `world/` for
+archetype storage and by `schedule/` for access-set intersection.
+The registry is append-only within a process session: hot-reload may
+add `TypeId` entries (a new plugin registers a new type) but never
+remove or repurpose an existing entry — the ABI hash gate refuses
+loads that would conflict, so the *rules* hold by construction.
+
+The registry's contents are populated entirely from
+`glibre-types.dylib`'s `_registry.cpp` (codegen-emitted) plus
+per-plugin registration calls during `glibre_plugin_register`. No
+reflection, no string lookup on the hot path: `TypeId` is a stable
+codegen-emitted integer, equal byte-for-byte across every plugin
+linked against the same middleman.
+
+### 6.10 Concurrency
+
+MVP runs every system on a single worker thread (the game-loop driver
+thread). Justification:
+
+- **Determinism**: PHILOSOPHY #7 forbids platform intrinsics in
+  simulation. A single thread is the smallest model that trivially
+  satisfies byte-equal world-snapshot replay across hosts.
+- **Schedule data is already there**: §6.4 collects `(reads, writes)`
+  per system; per-system parallel dispatch (a fork-join thread pool
+  fanning out independent DAG nodes per phase, fence at phase exit)
+  is a pure additive change over the same `CompiledPhase` shape.
+- **Codegen as the seam**: the per-system thunk that today calls one
+  function will tomorrow be a parallel dispatch wrapper emitted by
+  the same `glibre-foryc` step that emits the thunk. No SPEC §5
+  signature changes.
+
+Hot-reload is single-threaded by contract (hot-reload-protocol
+§"Decision": loader runs on the game-loop thread; observer
+notifications are synchronous on that same thread). The `World`
+exclusive write lock during phase 8 is documentation, not contention,
+in MVP — the loader is the only writer because no system runs in
+phase 8.
+
+Memory ordering: every public API in §5 is `noexcept` and assumes
+single-threaded access except where marked otherwise. The pending
+hot-reload counter (§6.7) is the one `std::atomic` in core that is
+read on the hot path. Every other shared-state read happens between
+phases (i.e., on barriers the schedule already enforces).
+
+### 6.11 Critical Paths
+
+The two paths that pay our perf budget:
+
+1. **Phase ordering hot loop (~0.5 ms / frame budget for `core`)** —
+   `FrameLoop::tick` plus `core`-owned phases 5 and 8. The
+   `run_phase` switch dispatches through a function-pointer table;
+   the `Phase::Transform` body is a tight SIMD walk over packed
+   `LocalTransform` columns; `Phase::HotReload` is a single relaxed
+   atomic load when no reload is pending. Steady-state target is
+   ~0.45 ms, leaving 0.05 ms for `switch` overhead and counter
+   bumps. Drift here trips the `perf-budget.yml` p99 gate.
+2. **Schedule (re)build — `O(systems²)`, runs only at hot-reload** —
+   the access-set intersection sweep is the dominant cost and
+   bounded by total registered system count (estimated ~tens × plugin
+   count). The build must complete within phase 8's reload-frame
+   budget (≤0.40 ms one-shot per `perf-budget.md`); a system count
+   that approaches this ceiling is the `task-breakdown` trigger to
+   move to a per-`(reads,writes)`-set bucketing build (`O(systems)`
+   amortized). Listed as an open question in §12.
+
+Allocator-tag rule (per `perf-budget.md` Allocator Rules): every
+allocation in `core/src/` carries the `core` `ContextTag`; the build
+flag `-Wglibre-no-raw-alloc` rejects raw `new` / `malloc`. The 64
+MiB heap ceiling covers archetype tables, schedule DAG storage,
+loader bookkeeping, and the migration arena's 16 MiB sub-budget.
+
+### 6.12 Open Implementation Questions
+
+Tracked in §12 alongside SPEC-level open questions; listed here
+because each is internal-architecture-shaped:
+
+1. Should `Chunk` size be a per-archetype tunable (heuristic on
+   per-row stride) instead of a fixed 16 KiB? Defer until a real
+   archetype distribution exists.
+2. Per-system parallelism's seam: does the `glibre-foryc` thunk emit
+   a single fork-join wrapper, or does the schedule own a separate
+   `ParallelCompiledPhase`? Decide when the parallelism plan opens.
+3. Does the `AssetTable` ever need compaction? MVP says no (slot
+   indices are stable for the process lifetime); reconsider when
+   asset count reaches `O(2^20)`.
+4. Should the `HotReloadBarrier`'s migration arena grow on demand
+   inside one phase, or refuse the reload when the 16 MiB ceiling
+   is hit? Hot-reload-protocol §"Open Questions" #1 already lists
+   this; cross-referenced here so the implementation plan owns it.
 
 ## 7. Persistence & Schemas
 
