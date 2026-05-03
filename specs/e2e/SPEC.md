@@ -4154,4 +4154,9 @@ end-to-end coverage of each story comes from the
 
 ## 12. Open Questions
 
-- Owner / resolution gate.
+None. All MVP-blocking questions are resolved in §1–§11 of this spec;
+the user-stories listed in §11 carry the implementation gates. The
+single in-prose deferral in §4.1.10 (multi-platform golden shadows at
+the `RunnerHost` level) is an explicit post-MVP scope decision per
+PHILOSOPHY's "two concrete users" rule and will be reopened only via a
+fresh sub-epic that re-amends §4.1.10. Per spike #183.
