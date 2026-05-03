@@ -3350,7 +3350,356 @@ FormatHash mismatch`, `Hot-reload refuses undersized decode pool`,
 
 ## 9. Performance Budget
 
-Cycles / frame, memory ceiling, allocation rules.
+This section quotes geometry's row from the engine-wide budget table
+(`reviews/decisions/perf-budget.md`), breaks it down per geometry-owned
+hot-path slot inside the phases the §6.3 runtime path participates in
+(phases 6 and 7 per `reviews/decisions/frame-phases.md`), specifies the
+**off-frame** worker budget that the on-demand cluster decode path
+(§6.3.2) runs against, fixes the heap composition inside the 256 MiB
+ceiling (with the pak mmap exemption that §4.1.7 invariant 4 implies),
+restates the allocator rules geometry plugs into, and lists the CI gate
+hooks geometry owns (cluster-decode latency, residency-churn rate). Every
+number in this section is a **contractual ceiling**, not a steady-state
+expectation — the budget gate fails on any frame that exceeds the cell
+or any sub-slice (§9.6). The §11 acceptance criteria name the Catch2
+benchmarks that enforce these ceilings.
+
+### 9.1 Cell — geometry row
+
+Geometry's cell from `reviews/decisions/perf-budget.md` §"Per-Context
+Budget Table", restated verbatim:
+
+| Slot                                | Ceiling   | Notes                                                                                                |
+|-------------------------------------|-----------|------------------------------------------------------------------------------------------------------|
+| CPU per frame (sim, phase 6 slice)  | **0.30 ms**| Meshlet visibility scoring + LOD-band selection inputs that render's phase-6 cull-extract consumes. |
+| CPU per frame (submit, phase 7 slice)| **0.20 ms**| Residency-state writes + `GpuMeshBuffers` materialisation + `BLASRecipe` descriptor packing.       |
+| CPU per frame total                 | **0.50 ms**| Sum of the two slices above; this is geometry's hot-path CPU ceiling on the driver thread.           |
+| GPU per frame                       | **n/a**   | Geometry never enqueues GPU work (§4 cross-aggregate invariant 10). BLAS GPU cost lives in render's `shadow-rt` slice (`render` SPEC §9.4.1). |
+| Heap ceiling                        | **256 MiB**| `ContextTag::geometry` live bytes; pak mmap is exempt per `perf-budget.md` Allocator Rule (see §9.5). GPU bytes for vertex / index / meshlet streams are render-tagged per Allocator Rule 5. |
+| Phase ownership                     | (none)    | Geometry owns no phase end-to-end; it **registers systems into** phases 6 (meshlet selection inputs) and 7 (residency writes + BLAS-recipe submit) per `frame-phases.md` row 6 / 7 and §4 cross-aggregate invariant 8. |
+| Off-frame worker (decode pool)      | **n/a on hot path; ~5 ms wall-clock per request, off-thread** | Draco decode for one cluster, executed on the bounded decode-pool worker (§6.3.2, §6.4); zero contribution to the driver-thread CPU ceiling above. Gated separately in §9.4. |
+
+The cell is sized against **(S1)** = 1 character + 200 props + 8
+dynamic lights at 1920x1080 on M1 8-core baseline, the same fixture as
+every other context's §9. Justification for each slot lives in
+`perf-budget.md` §"Justification Per Cell" (geometry row) and is not
+re-derived here. Geometry's SPEC §9 only **refines** the cell into its
+sub-budgets; it does not amend the cell. Any future amendment is a
+perf-budget spike per `perf-budget.md` §Consequences.
+
+The cell's two SRP-clean halves — **hot-path CPU on the driver thread**
+(0.50 ms, sub-divided in §9.2 / §9.3 below) and **off-frame decode work
+on the worker pool** (no contribution to the cell, gated separately in
+§9.4) — match the §6.3 runtime path's split: phase-6 / phase-7 slices
+participate in the frame; `DecodePool` workers execute outside it.
+Conflating the two would let off-frame decode cost silently eat
+hot-path budget, which §4.1.12 invariant 1 (`DecodePool` sized at
+startup, never mid-frame) was specifically designed to prevent.
+
+### 9.2 Phase 6 slice — meshlet selection inputs (sim, 0.30 ms)
+
+Phase 6 is owned by `render` (`frame-phases.md` row 6); geometry
+registers two systems inside it that render's `cull-extract` consumes
+as inputs. The combined ceiling is 0.30 ms on the driver thread,
+asserted as one Catch2 `BENCHMARK` block (§9.6).
+
+| Step (file, §6.3 reference)                                          | Ceiling   | Cost model                                                                                                                              |
+|----------------------------------------------------------------------|-----------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| `runtime/residency_state.cpp` — lock-free `page_state` reads         | 0.05 ms   | Per-`MeshletGroupHandle` atomic load (§4.1.13 invariant 2) for the visible candidate set; ~3.2k loads on S1 (200 props × ~16 meshlets). |
+| `runtime/handle_table.cpp` — `MeshletGroupHandle` resolution         | 0.05 ms   | Slot+generation lookup per handle render asks about; immutable table (§4.1.14 invariant 3); SIMD-friendly array indexing.                |
+| `runtime/registry.cpp` — `select_lod_band` per visible mesh          | 0.15 ms   | `ScreenSpaceError` × `BoundingCone` test against the active view, walking the cluster DAG cut to the coarsest band whose every constituent group is `Resident` (§6.3.3). ~200 props × ~3-5 candidate bands = ≤1k SIMD-bound comparisons. |
+| `runtime/gpu_mesh_buffers.cpp` — bindless slice handout              | 0.03 ms   | One per surviving `MeshletGroupHandle`; pure index pack into a small struct that render copies into its `RenderFrame` extract.            |
+| **Geometry subtotal**                                                | **0.28 ms**| Geometry-owned work in phase 6.                                                                                                          |
+| Reserve inside phase 6 slice                                         | 0.02 ms   | Absorbs first-frame warm-start on a freshly-registered mesh (cold caches on the residency / handle tables).                              |
+
+**Cap:** 0.30 ms geometry CPU inside phase 6, including reserve. These
+costs are **not** counted in render's 0.5 ms phase-6 ceiling (`render`
+SPEC §9.2 Geometry-meshlet-selection row); the gate measures them
+separately on `ContextTag::geometry`. Render's gate does not double-
+count them.
+
+Cross-frame ordering (matches §4.2 invariant 8 + §6.3.3): every read
+inside this slice is lock-free against the immutable post-frame-N-1
+state of the residency / handle tables. Writes happen in §9.3 (phase
+7), so phase 6 sees a consistent snapshot.
+
+### 9.3 Phase 7 slice — residency state machine + BLAS-recipe submit (submit, 0.20 ms)
+
+Phase 7 is owned by `render` (`frame-phases.md` row 7); geometry
+registers its **single phase-7 mutation point** here (§4 cross-
+aggregate invariant 8, §6.3.2 step 7, §6.4 concurrency model). The
+ceiling is 0.20 ms on the driver thread, asserted as one Catch2
+`BENCHMARK` block (§9.6).
+
+| Step (file, §6.3 reference)                                          | Ceiling   | Cost model                                                                                                                              |
+|----------------------------------------------------------------------|-----------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| `runtime/residency_state.cpp` — `Pending → Resident` CAS sweep       | 0.06 ms   | One CAS per page that completed decode this frame (typical S1 frame: 0-8 transitions; cold-stream worst case at S1 entry: ~32).         |
+| `runtime/residency_state.cpp` — `Resident → Evicting → NotResident`  | 0.04 ms   | Eviction CAS sweep when the scheduler signals departure; refcount decrement on `GpuMeshBuffers` bands (§4.1.15 invariant 4).            |
+| `runtime/gpu_mesh_buffers.cpp` — band materialisation / release       | 0.05 ms   | Pack `GpuBufferHandle` slices for newly-resident bands; release handles back to render's allocator on departure (§6.3.2 step 5 / 6.3.2 eviction). |
+| `runtime/registry.cpp` — `BLASRecipe` descriptor packing for refit   | 0.03 ms   | One descriptor per LOD0 dynamic-cluster set whose residency newly settled this frame; pure CPU-side blob copy that render's `passes/blas_refit.cpp` consumes (`render` SPEC §9.4.1). Geometry packs descriptors only — render submits the refit. |
+| `runtime/registry.cpp` — `notify_page_decoded` callback to `content` | 0.01 ms   | Bounded fan-out to scheduler (§6.3.2 step 7).                                                                                            |
+| **Geometry subtotal**                                                | **0.19 ms**| Geometry-owned driver-thread work in phase 7.                                                                                            |
+| Reserve inside phase 7 slice                                         | 0.01 ms   | Absorbs hot-reload-frame transitions where a `MeshReplaced` event drives a one-shot extra residency-table scan (§8.5).                  |
+
+**Cap:** 0.20 ms geometry CPU inside phase 7, including reserve, on
+the driver thread. The phase-7 mutation point is single-writer
+(§6.4): no other thread mutates geometry state during this slice, so
+its cost is deterministic given S1.
+
+These costs are **not** counted in render's 1.0 ms phase-7 ceiling
+(`render` SPEC §9.3 BLAS-refit-submit row); the gate measures them
+separately on `ContextTag::geometry`. The GPU cost of the BLAS refit
+itself is funded inside render's `shadow-rt` slice per `render` SPEC
+§9.4.1 — geometry contributes only descriptor packing.
+
+Phase 6 (0.30) + phase 7 (0.20) = **0.50 ms** = geometry's CPU cell.
+
+### 9.4 Off-frame decode pool — wall-clock per cluster, zero on hot path
+
+The on-demand cluster decode path of §6.3.2 runs entirely on the
+`DecodePool`'s bounded worker pool (§6.4: default `min(4,
+hwconcurrency - render_threads - sim_threads)`; hard cap 4 workers in
+MVP). It contributes **zero** to the 0.50 ms hot-path CPU cell — every
+worker thread is by construction not the driver thread (§4.1.12
+invariant 1: pool sized at startup, never mid-frame). The cell budget
+above is therefore **independent of decode-pool load**: a frame whose
+scheduler issued zero decode requests and a frame whose scheduler
+issued every available worker's max load both see the same 0.50 ms
+hot-path ceiling.
+
+The off-frame work has its own latency contract, gated separately by
+the CI gate of §9.6.2:
+
+| Off-frame slot                                | Ceiling                        | Cost model                                                                                                                              |
+|-----------------------------------------------|--------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| Cluster decode wall-clock per request         | **~5 ms (p99)**                | Time from `request_residency` enqueue to `Pending → Resident` ready-to-CAS (i.e. all per-stream Draco decodes complete and `GpuMeshBuffers` upload returned). Single-cluster S1 size (~64 verts × 6 attribute streams). |
+| Worker count (concurrency)                    | ≤ 4                            | Hard cap (§6.4); decode pool never grows mid-frame.                                                                                      |
+| Slot-acquisition contention behaviour         | Bounded-wait, returns `DecodePoolBusy` | A worker that cannot acquire a per-attribute scratch slot returns the job (§4.1.12 invariant 2); no spinning, no allocation around contention. The scheduler re-issues. |
+| Decode pool memory                            | 64 MiB (§9.5)                  | Sized at startup from union of per-attribute scratch maxima across loaded paks (§4.1.12 invariant 1).                                   |
+| Drift onto the hot path                       | **0 ms — gate fails on any non-zero** | The driver thread never blocks on a decode worker (§6.3.2 step 7: `Pending → Resident` is CASed inside phase 7 only after the worker has *already* signalled completion). A scenario where the driver waited would be a §6.3.2 violation. |
+
+The 5 ms p99 wall-clock per cluster is sized so that, with up to 4
+workers, the pool can complete ~3 200 cluster decodes / second of
+worker-time — comfortably above the steady-state churn implied by the
+S1 fixture (a slow camera dolly across the prop set evicts and
+re-residency-streams ≤ 64 clusters / second per the
+`reviews/decisions/perf-budget.md` content row's residency tickle
+rate). Spike loads (S3 import while S1 plays) are absorbed by the
+worker pool's natural backpressure: the scheduler's queue of pending
+requests grows, and the residency state stays `Pending` until the
+worker drains it. No frame deadline is missed because the hot path
+never observes the queue.
+
+If a future workload drives the decode wall-clock past 5 ms p99 or
+forces the queue to grow without bound, the amendment goes into this
+section and a new `perf-budget.md` amendment for the geometry row, not
+into the hot-path 0.50 ms cell.
+
+### 9.5 Heap composition inside the 256 MiB ceiling
+
+The 256 MiB ceiling is `ContextTag::geometry`-tagged CPU live bytes.
+Per `perf-budget.md` Allocator Rule 5, the **GPU bytes** of geometry's
+vertex / index / meshlet streams are tagged `ContextTag::render` (they
+live in render's 512 MiB and are accounted in `render` SPEC §9.5
+"Persistent textures + buffers"). Per the §4.1.7 invariant 4 read-
+only mmap discipline, the **pak mmap** does not count against this
+ceiling either: the mapping is `MAP_PRIVATE | PROT_READ` from the
+filesystem and is not heap-allocated; the OS pages it in and out
+under VM pressure. (Allocator Rule 1's tag mechanism only covers
+allocations through `glibre::PerContextAllocator`; mmap is neither
+counted nor capped here.) The 256 MiB therefore covers the
+**non-mmap, CPU-resident** bookkeeping geometry's runtime aggregates
+hold at steady state.
+
+| Sub-budget                                                         | Ceiling     | Aggregate / source                                                                                                                                          |
+|--------------------------------------------------------------------|-------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Pak mmap** (§4.1.7 invariant 4, §4.1.11 invariant 2)             | **exempt**  | Read-only `MAP_PRIVATE` mapping per `register_mesh` (§6.3.1 step 1). Not heap-tagged; OS-paged. Reported in the perf HUD as a separate counter for visibility, not enforced against the 256 MiB cap. |
+| **DecodePool scratch slots** (§4.1.12, §6.3.2 step 4)              | **64 MiB**  | Per-attribute pre-sized scratch buffers (positions / indices / normals / tangents / UVs / colours), sized at engine init from the union of every loaded pak's `PakHeader` per-attribute maxima (§4.1.12 invariant 1). Sized once; never grows. |
+| **In-memory cluster cache** (§4.1.13, §4.1.14, §4.1.15 CPU shadow) | **192 MiB** | The CPU-resident bookkeeping for currently-resident clusters: `ResidencyState` table entries, `MeshHandle` / `MeshletGroupHandle` table slot+generation arrays, `GpuMeshBuffers` CPU shadow (per-band `GpuBufferHandle` lists, refcount, residency-set membership), and the small per-mesh metadata (page-table copy when not directly mapped, `BoundingSphere` / `BoundingCone` / `ScreenSpaceError` arrays for the LOD-band selector). Sized to MVP fixture: ~16 KiB per resident `MeshletGroup` × ~12 000 resident groups = ~192 MiB. |
+| **Subtotal (CPU live bytes, non-mmap)**                            | **256 MiB** | Sum of the two enforced rows = geometry's cell ceiling exactly.                                                                                              |
+
+The two enforced rows are exhaustive and additive; geometry does not
+maintain a third catch-all bucket. The decode pool is sized once at
+startup and is not a transient arena — it persists across frames
+(§4.1.12 identity). The cluster cache size is workload-driven: as the
+scheduler residency-streams more clusters in, the cache grows; the
+192 MiB cap is the budget gate that forces the scheduler to evict
+before geometry refuses registration. Refusal cases on the cap:
+allocations that would push the tag over 256 MiB return
+`std::unexpected{core::Error::OutOfBudget}` per Allocator Rule 2,
+which `runtime/registry.cpp` maps at the call site to the appropriate
+`geometry::Error::*` arm (typically by signalling
+`request_residency` with `DecodePoolBusy` so the scheduler re-issues
+later, never by registering the mesh and failing later).
+
+#### 9.5.1 Allocator rules geometry plugs into
+
+`perf-budget.md` §"Allocator Rules" defines `glibre::PerContextAllocator`
+and the `ContextTag` mechanism. Geometry plugs into it as follows;
+nothing here amends the engine-wide rules:
+
+1. **Tag stamp at register.** Geometry's `glibre_plugin_register`
+   receives the allocator handle, which is pre-stamped with
+   `ContextTag::geometry`. All call sites inside the geometry dylib
+   are tag-free per Allocator Rule 1.
+2. **Strict-mode enforcement.** Diagnostic / debug builds run with
+   `GLIBRE_ALLOC_STRICT=1`; an allocation that would push geometry's
+   live bytes above 256 MiB returns
+   `std::unexpected{core::Error::OutOfBudget}` per Allocator Rule 2.
+   Geometry maps that to a typed-error return at the call site (§5
+   header contract); no allocation failure is silently swallowed.
+3. **Soft warning in shipping.** Shipping builds log `warn` once
+   per-frame on overshoot per Allocator Rule 3 and increment the
+   frame-stat counter; the editor's perf HUD surfaces it. Geometry
+   does not down-grade quality silently.
+4. **Transient arena exemption.** Geometry has **no per-frame
+   transient arena** — every runtime aggregate is persistent across
+   frames (§4.1.12 / §4.1.13 / §4.1.14 / §4.1.15 lifetimes). Allocator
+   Rule 4's transient-arena drain check therefore trivially holds for
+   `ContextTag::geometry` (no transient arena exists; nothing can
+   leak past phase 9). The cook driver runs in a separate process and
+   is not subject to runtime allocator rules.
+5. **GPU-memory-is-render-owned.** Per Allocator Rule 5, geometry's
+   vertex / index / meshlet stream bytes are GPU-allocated under the
+   `render` tag (geometry never owns a Metal heap; §4 cross-aggregate
+   invariant 10). CPU-side staging shadows for those streams remain
+   `ContextTag::geometry` and are accounted in §9.5's "in-memory
+   cluster cache" row.
+6. **Pak mmap exemption.** As recorded in §9.5 above: read-only mmap
+   of `.glibre-pak` files is not tag-routed (it is not an
+   allocation), and is not bounded by the 256 MiB cap. The mmap is
+   reported separately for observability, not enforcement. Adding a
+   pak with a writable mmap would be a §4.1.11 invariant 2 violation,
+   not a budget escape hatch.
+
+### 9.6 CI gate hooks geometry owns
+
+`perf-budget.md` §"CI Gate Spec" defines `perf-budget.yml` (authored
+under the `task-breakdown-error-perf` spike) and the five gate items.
+Geometry owns the per-context portions of items 1, 2, and 3 — i.e.
+the micro-benchmarks that prove its row, the off-frame decode-latency
+slice, and the heap-ceiling enforcement on `ContextTag::geometry`.
+The §11 acceptance criteria name the Catch2 benchmarks; this section
+fixes the **measurement mechanism** so the gate authors and benchmark
+authors agree on what is counted.
+
+#### 9.6.1 CPU phase-6 + phase-7 budget asserts
+
+Geometry's two phase slices are asserted as Catch2 `BENCHMARK` blocks
+under `tests/geometry/perf/`. Each block runs the S1 fixture (one
+character, 200 props, 8 lights, 1920×1080) as set up by the engine's
+shared perf fixture (`e2e/perf/`). The assertion is the
+`time <= cell_budget_ms` form of `perf-budget.md` §"CI Gate Spec"
+item 1.
+
+| Catch2 benchmark name (under `tests/geometry/perf/`)              | Measures                                                                                                                  | Asserts            |
+|-------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------|--------------------|
+| `BENCHMARK("phase-6 meshlet-selection inputs, S1, p99")`          | CPU wall-clock for the geometry-owned systems registered in phase 6 (residency reads + handle resolution + LOD-band).      | ≤ 0.30 ms          |
+| `BENCHMARK("phase-7 residency mutation point, S1, p99")`          | CPU wall-clock for the geometry-owned phase-7 mutation block (residency CAS sweep + GpuMeshBuffers material + BLASRecipe). | ≤ 0.20 ms          |
+| `BENCHMARK("phase-6 + phase-7 CPU total, S1, p99")`               | Sum of the two above on the driver thread.                                                                                 | ≤ 0.50 ms          |
+| `BENCHMARK("geometry heap ceiling, S1, strict-mode")`             | Live bytes on `ContextTag::geometry` after phase 7 retire (excludes pak mmap; includes decode-pool + cluster cache).       | ≤ 256 MiB          |
+| `BENCHMARK("decode-pool memory at steady state, S1")`             | `DecodePool` resident bytes after warm-up (§9.5 row).                                                                      | ≤ 64 MiB           |
+| `BENCHMARK("cluster cache memory at S1 saturation")`              | Geometry CPU live bytes minus `DecodePool` after the scheduler has fully resident-streamed the S1 prop set.                | ≤ 192 MiB          |
+
+The benchmarks are authored by the `task-breakdown-error-perf` spike
+per `perf-budget.md` §Consequences; this SPEC §9 names them so
+reviewers can map cell numbers to test artifacts. The S1 fixture and
+the e2e perf harness live under `e2e/perf/` and are versioned
+alongside the gate.
+
+#### 9.6.2 Cluster-decode latency (off-thread)
+
+The off-frame decode-pool path (§9.4) is gated separately because it
+runs outside the driver thread. The harness instruments
+`runtime/decode_worker.cpp` to record per-job timestamps at queue-
+enqueue and at `Pending → Resident`-CAS-ready (i.e. after `GPU upload`
+of §6.3.2 step 5 has returned). Aggregate distributions land in the
+nightly perf CSV emitted by the e2e harness.
+
+| Gate slot (off-frame)                                         | Computed as                                                                                                | Ceiling                                         |
+|---------------------------------------------------------------|------------------------------------------------------------------------------------------------------------|-------------------------------------------------|
+| `cluster-decode-latency` (per-request, p99)                   | wall-clock from `request_residency` enqueue → `Pending → Resident` CAS-ready, on the worker thread.        | ≤ 5.0 ms p99                                    |
+| `cluster-decode-latency` (per-request, p50)                   | same, median.                                                                                              | ≤ 2.5 ms p50                                    |
+| `decode-queue-depth` (steady state, S1)                       | `DecodePool` pending-queue length sampled once per frame for 600 frames after warm-up.                     | ≤ pool_size × 4 (queueing-theory utilisation)   |
+| `decode-pool-busy-rate` (S1)                                  | fraction of decode jobs returned with `geometry::Error::DecodePoolBusy` per `perf-budget.md` (§4.1.12 inv 2). | ≤ 5 % steady; spikes to 20 % during S3 import allowed |
+| `driver-thread blocks on decode-worker` (drift onto hot path) | count of frames in which `phase-7 residency mutation` waited > 0 ns on a worker for the CAS.               | **== 0** (any drift is a §6.3.2 violation)      |
+
+The first two slots are the headline cluster-decode latency CI gate
+called out in the issue brief; the bottom three are the contracts
+they imply (queue grows, contention, hot-path drift). The drift slot
+is the structural guarantee that decoupling the decode pool from the
+driver thread is enforced: any frame in which the driver thread had
+to wait for a worker is a regression of §6.3.2 step 7's "CAS only
+*after* the worker signalled completion" rule.
+
+#### 9.6.3 Residency-churn rate
+
+The CI gate of `perf-budget.md` §"CI Gate Spec" item 2 names
+end-to-end frame timing. Geometry adds one residency-specific gate to
+catch a pathology that does not show up in CPU ms: the *churn rate*
+of `(MeshHandle, page_index)` entries oscillating between residency
+states. A shipping scene where the same cluster transitions
+`Resident → Evicting → Resident` once per second is silently within
+every CPU budget, but is producing GPU upload thrash and decode-pool
+load that the user observes as visible stutter.
+
+| Gate slot                                  | Computed as                                                                                                          | Ceiling                                                |
+|--------------------------------------------|----------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------|
+| `residency-churn-rate` (per-second, S1)    | sum over residency-table entries of state-transition events per second, after S1 warm-up of 5 s.                     | ≤ 64 transitions/s steady-state                        |
+| `residency-churn-rate` (per-second, S3)    | same, during the asset-import scenario (S3) where new paks are registered while S1 plays.                            | ≤ 256 transitions/s during the 1-second import window  |
+| `residency-monotonic-per-frame violations` | count of frames in which a `(MeshHandle, page_index)` made a backwards transition inside one frame (§4.1.13 inv 1).  | **== 0** (any violation is a §4.1.13 invariant break)  |
+| `residency-pending-orphans` (per-frame)    | count of `(MeshHandle, page_index)` entries stuck in `Pending` for > 30 frames after their decode job returned.      | **== 0** (orphan = scheduler / registry desync bug)    |
+
+The 64 / 256 transitions/s ceilings are sized from the `perf-budget.md`
+content row's residency-tickle rate (the scheduler ticks at 60 Hz;
+S1's slow camera dolly evicts ~1 cluster/frame and resident-streams
+~1 cluster/frame, summing to ≤ 60 transitions/s with bursts headroom
+to 64). The two zero-tolerance rows (monotonic, pending-orphans) are
+structural invariants of §4.1.13 and §6.3.2; their gate slot is a
+CI-visible restatement, not a budget loosening.
+
+#### 9.6.4 Headroom-low tripwire
+
+Per `perf-budget.md` §"CI Gate Spec" item 5, if p50 CPU sits within
+0.5 ms of the ceiling for two consecutive nightlies, the gate posts a
+warning comment on the next PR and labels it `perf:headroom-low`.
+Geometry-specific thresholds: ≥ 0.40 ms p50 CPU (out of 0.50 ms cell),
+≥ 200 MiB p50 heap (out of 256 MiB), or ≥ 4.0 ms p50 cluster-decode
+latency (out of 5.0 ms p99 ceiling) for two consecutive nightlies
+trip the alarm. The tripwire does not block merge; it requests a
+perf-budget amendment spike before the budget is broken. This is the
+only place in §9 where the cell may be informally elastic — by the
+time a hard ceiling fails, the amendment-or-fix decision has already
+had a working window.
+
+### 9.7 Cross-references
+
+- Engine budget record: `reviews/decisions/perf-budget.md` (per-context
+  table — geometry row 0.30 sim + 0.20 submit + 256 MiB; allocator
+  rules; CI gate spec; pipelined-frame timing model).
+- Frame slot ownership: `reviews/decisions/frame-phases.md` rows 6 and
+  7 (entry / exit guarantees consumed in §9.2 / §9.3); geometry owns
+  no phase end-to-end (§4 cross-aggregate invariant 8).
+- Aggregates touched: §4.1.7 `MeshletPak` (mmap exemption, §9.5 row),
+  §4.1.11 `PakReader` (mmap discipline, §9.5 row), §4.1.12
+  `DecodePool` (§9.4 off-frame budget + §9.5 row), §4.1.13
+  `ResidencyState` (§9.2 read-side, §9.3 write-side, §9.6.3 churn
+  gate), §4.1.14 `GeometryRegistry` (§9.3 phase-7 mutation point,
+  §9.5 cluster-cache row), §4.1.15 `GpuMeshBuffers` (§9.3 band
+  materialisation, GPU bytes accounted under `render` per Allocator
+  Rule 5).
+- Concurrency: §6.3.2 (decode pool worker path), §6.3.3 (render LOD
+  hot path lock-free), §6.4 (no driver-thread block on workers).
+- Errors used: `core::Error::OutOfBudget` (allocator-side; §9.5),
+  `geometry::Error::DecodePoolBusy` (§9.4 off-frame backpressure;
+  §4.1.12 invariant 2), `geometry::Error::DecodePoolUndersized`
+  (§4.1.12 invariant 1, registration refusal). Hot-reload-frame
+  cost is funded inside the §9.3 phase-7 reserve and logged via the
+  §8 hot-reload contract; no separate cell.
+- §11 acceptance criteria: see `Phase 6 meshlet-selection within 0.30 ms`,
+  `Phase 7 residency mutation within 0.20 ms`, `Cluster decode within
+  5 ms p99 off-thread`, `Geometry heap within 256 MiB`,
+  `Residency churn within 64/s steady`.
 
 ## 10. Failure Modes & Error Model
 
