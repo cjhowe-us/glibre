@@ -3,21 +3,22 @@
 Plans are executed by parallel nested subagents. Progress is tracked
 exclusively through GitHub issue comments (English).
 
-## Issue Kinds (only three)
+## Issue Types (only five — no roles, no kinds)
 
-1. **Tracking** (`type:tracking`) — non-leaf. Aggregates child issues.
-   **No own story-point estimate**; estimate = sum of leaf descendants.
-   Source of truth for plan execution status. Updated by subagents
-   posting comments as work progresses. Roles (via `role:*` label):
-   - `role:epic` — full context slice (largest)
-   - `role:plan` — one Claude Code session's worth of work
-   - `role:slice` — mid-level grouping under an epic
-   - `role:review` — review-iteration tracker
-2. **User Story** (`type:user-story`) — testable acceptance criterion;
-   leaf for testing purposes. Has its own story-point estimate.
-3. **Task Execution** (`type:task-execution`) — leaf unit of work.
-   Kind label: `kind:implementation`, `kind:design`, `kind:planning`,
-   `kind:bug`, or `kind:chore`. Has its own story-point estimate.
+1. **Tracking** (`type:tracking`) — non-leaf aggregator. **No own
+   story-point estimate**; total = sum of leaf descendants. Source of
+   truth for plan execution status; subagents post status comments
+   here as work progresses.
+2. **User Story** (`type:user-story`) — testable acceptance criterion.
+   Has its own story-point estimate.
+3. **Epic** (`type:epic`) — multi-PR work item under a tracking issue.
+   Carries an estimate (rolls up to its parent tracking issue).
+4. **Plan** (`type:plan`) — leaf; closes with **exactly one PR**.
+   Carries an estimate. Conventional Commit subject pre-declared on
+   the issue.
+5. **Spike** (`type:spike`) — time-boxed research / design exploration.
+   Output is a doc / decision record / prototype branch. Carries an
+   estimate.
 
 Story-point rollup is automatic: tracking issues never carry a
 `pts:*` label; their total = sum of `pts:*` across leaf descendants.

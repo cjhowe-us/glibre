@@ -1,19 +1,8 @@
-name: Task Execution
-description: Implementation, design, or planning task. Leaf-level work.
-title: "[TASK] "
-labels: ["type:task-execution"]
+name: Plan
+description: Leaf unit that closes with exactly one PR.
+title: "[PLAN] "
+labels: ["type:plan"]
 body:
-  - type: dropdown
-    id: kind
-    attributes:
-      label: Kind
-      options:
-        - implementation
-        - design
-        - planning
-        - bug
-        - chore
-    validations: { required: true }
   - type: dropdown
     id: domain
     attributes:
@@ -48,8 +37,8 @@ body:
   - type: dropdown
     id: points
     attributes:
-      label: Story Points (Fibonacci, > 8 must split)
-      options: [ "pts:1", "pts:2", "pts:3", "pts:5", "pts:8" ]
+      label: Story Points (Fibonacci, > 5 should split — 1 PR target)
+      options: [ "pts:1", "pts:2", "pts:3", "pts:5" ]
     validations: { required: true }
   - type: textarea
     id: stories
@@ -60,34 +49,27 @@ body:
   - type: input
     id: parent
     attributes:
-      label: Parent Tracking Issue
+      label: Parent (Tracking or Epic)
       placeholder: "#42"
     validations: { required: true }
   - type: textarea
     id: scope
     attributes:
       label: Scope
-      description: Single SRP slice. What changes; what does not.
+      description: Single SRP slice. Closes with exactly one PR.
+    validations: { required: true }
+  - type: input
+    id: pr-subject
+    attributes:
+      label: Conventional Commit Subject
+      placeholder: "feat(core): add Plugin manifest type"
     validations: { required: true }
   - type: textarea
     id: dependencies
     attributes:
       label: Depends on
-      description: Topologically ordered. Use GitHub native dependencies.
-      placeholder: "- #1\n- #5"
-  - type: textarea
-    id: pr-plan
-    attributes:
-      label: PR Plan
-      description: Granular Conventional Commit PRs intended to close this.
-      placeholder: |
-        - feat(core): add Plugin manifest type
-        - test(core): manifest round-trip
+      placeholder: "- #1"
   - type: textarea
     id: agent-notes
     attributes:
       label: Agent Execution Notes
-      description: |
-        Plan-executor subagents post status comments here in English:
-        `agent:<name> status:<started|done|blocked> notes:<…>`.
-        Final closure must reference all merged PRs.

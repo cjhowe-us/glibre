@@ -1,18 +1,8 @@
 name: Tracking Issue
-description: Non-leaf. Aggregates child issues. No own estimate. Use for epics, plan trackers, slice trackers, review-iteration trackers.
+description: Non-leaf aggregator. No own estimate. Aggregates epics / plans / spikes / other tracking issues.
 title: "[TRACK] "
 labels: ["type:tracking"]
 body:
-  - type: dropdown
-    id: role
-    attributes:
-      label: Role
-      description: |
-        Epic = largest scope (full context slice). Plan = one Claude Code
-        session's worth of work. Slice = mid-level grouping under an epic.
-        Review = a review-iteration tracker.
-      options: [ "epic", "plan", "slice", "review" ]
-    validations: { required: true }
   - type: dropdown
     id: phase
     attributes:

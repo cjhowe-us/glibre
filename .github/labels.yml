@@ -1,19 +1,15 @@
 # Apply with: gh label create -f .github/labels.yml (via a sync action).
-# Three issue kinds only: tracking, user-story, task-execution.
-- { name: "type:tracking",       color: "5319e7" }
-- { name: "type:user-story",     color: "0e8a16" }
-- { name: "type:task-execution", color: "0366d6" }
-
-- { name: "kind:implementation", color: "0366d6" }
-- { name: "kind:design",         color: "5319e7" }
-- { name: "kind:planning",       color: "fbca04" }
-- { name: "kind:bug",            color: "d73a4a" }
-- { name: "kind:chore",          color: "cfd3d7" }
-
-- { name: "role:epic",           color: "5319e7" }
-- { name: "role:plan",           color: "5319e7" }
-- { name: "role:slice",          color: "5319e7" }
-- { name: "role:review",         color: "5319e7" }
+# Issue types:
+#   tracking    — non-leaf aggregator; no estimate; rolls up
+#   user-story  — testable acceptance criterion (leaf for testing)
+#   epic        — multi-PR work item under a tracking issue
+#   plan        — leaf; closes with exactly one PR
+#   spike       — time-boxed research/design; output = doc/decision
+- { name: "type:tracking",     color: "5319e7" }
+- { name: "type:user-story",   color: "0e8a16" }
+- { name: "type:epic",         color: "0366d6" }
+- { name: "type:plan",         color: "1d76db" }
+- { name: "type:spike",        color: "fbca04" }
 
 - { name: "phase:mvp",         color: "0e8a16" }
 - { name: "phase:post-mvp",    color: "fbca04" }

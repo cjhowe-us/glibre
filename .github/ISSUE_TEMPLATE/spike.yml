@@ -1,0 +1,63 @@
+name: Spike
+description: Time-boxed research or design exploration. Output is a doc / decision / prototype.
+title: "[SPIKE] "
+labels: ["type:spike"]
+body:
+  - type: dropdown
+    id: domain
+    attributes:
+      label: Domain
+      options:
+        - core
+        - platform
+        - data
+        - shader
+        - render
+        - geometry
+        - physics
+        - content
+        - tools
+        - e2e
+        - scripting
+        - material
+        - vfx
+        - animation
+        - audio
+        - ai
+        - networking
+        - simulation
+        - infra
+    validations: { required: true }
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Phase
+      options: [ "phase:mvp", "phase:post-mvp", "phase:long-term" ]
+    validations: { required: true }
+  - type: dropdown
+    id: points
+    attributes:
+      label: Story Points
+      options: [ "pts:1", "pts:2", "pts:3", "pts:5", "pts:8" ]
+    validations: { required: true }
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+    validations: { required: true }
+  - type: textarea
+    id: deliverable
+    attributes:
+      label: Deliverable
+      description: Doc path, decision record, or prototype branch.
+    validations: { required: true }
+  - type: input
+    id: parent
+    attributes:
+      label: Parent Tracking Issue
+      placeholder: "#42"
+    validations: { required: true }
+  - type: textarea
+    id: agent-notes
+    attributes:
+      label: Agent Execution Notes

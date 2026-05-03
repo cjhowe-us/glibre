@@ -54,24 +54,23 @@ inside each `specs/<context>/SPEC.md`. Terms used unchanged in code.
 
 ## Stories, Tasks, Issues
 
-All live in GitHub Issues; not in the repo filesystem. Three kinds only.
+All live in GitHub Issues; not in the repo filesystem. Five types only;
+no roles, no kinds.
 
-- **Tracking Issue** — `type:tracking`. Non-leaf. Aggregates child
-  issues. **No own story-point estimate**; total = sum of leaves.
-  Source of truth for plan execution status; subagents post updates
-  here as comments in English. Plays one of four roles via `role:*`:
-  `role:epic` (full context slice), `role:plan` (one Claude Code
-  session), `role:slice` (mid-level grouping), `role:review` (review
-  iteration).
+- **Tracking Issue** — `type:tracking`. Non-leaf aggregator. **No own
+  `pts:*`**; total rolls up from leaves. Source of truth for plan
+  execution status; subagents post updates here in English.
 - **User Story** — `type:user-story`. Persona-grounded testable
   acceptance criterion. `As a <persona>, I want <capability>, so that
   <outcome>.` Has its own `pts:*` estimate.
-- **Task Execution** — `type:task-execution`. Leaf unit of work.
-  Kind label: `kind:implementation`, `kind:design`, `kind:planning`,
-  `kind:bug`, or `kind:chore`. Has its own `pts:*` estimate. Satisfies
-  ≥1 user story (or none for `kind:chore`); lives under exactly one
-  tracking issue parent.
-- **Story Point** — Fibonacci 1/2/3/5/8 relative effort. > 8 must split.
-  Rolls up from leaves only.
+- **Epic** — `type:epic`. Multi-PR work item under a tracking issue.
+  Has its own `pts:*` estimate.
+- **Plan** — `type:plan`. Leaf; closes with **exactly one PR**.
+  Conventional Commit subject pre-declared on the issue.
+- **Spike** — `type:spike`. Time-boxed research / design. Output =
+  doc, decision record, or prototype branch.
+- **Story Point** — Fibonacci 1/2/3/5/8 relative effort. > 8 splits.
+  Rolls up from leaves; tracking issues never carry one.
 - **Pull Request** — granular, single-purpose, Conventional Commit
-  subject. One task-execution issue may have multiple PRs.
+  subject. A `type:plan` issue closes with exactly one PR; a
+  `type:epic` may have multiple.

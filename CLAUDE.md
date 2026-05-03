@@ -10,9 +10,9 @@ SDL3 + Metal (via metal-cpp) + HLSL (DXC + metal-shaderconverter).
 - **Spec → story → test → code.** Stories and tasks live in **GitHub
   Issues**, not in this repo. Always reference issues from `plans/*.md`
   and PR bodies.
-- **Three issue kinds only**: tracking (no estimate; rolls up),
-  user-story, task-execution (kind: implementation / design / planning).
-  See `AGENTS.md`.
+- **Five issue types only**: tracking (no estimate; rolls up),
+  user-story, epic (multi-PR), plan (1 PR), spike (research). No roles,
+  no kinds. See `AGENTS.md`.
 - **Plan execution via parallel nested subagents**: ≤5 concurrent
   top-level plan executors; children may also be parallel. Each
   generated plan must fit in a single Claude Code session.
