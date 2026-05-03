@@ -3944,8 +3944,10 @@ the budget cell allows; a `bad_alloc` from inside that arena is a
 build-system / configuration defect and the process is terminated
 with a structured log. This mirrors the editor-UI carve-out's
 deferred decision in `reviews/decisions/error-model.md` open
-question 4 — content commits to terminate, not to map; if a future
-caller needs graceful handling, this becomes a §12 open question.
+question 4 — content commits to terminate, not to map; the gate
+that would re-open this (a `core::Error::OutOfMemory` arm landing
+when the editor module lands) is recorded against §10.7's second
+entry, not as a content-owned §12 question.
 
 #### Why the SDK identity does not ride in the enum
 
@@ -4069,29 +4071,50 @@ from `reviews/decisions/error-model.md` §"Logging / Telemetry"):
   `specs/render/SPEC.md`. Content's manifest publish completes at
   the CPU layer; render's GPU handle re-resolution is its concern.
 
-### 10.7 Open questions (carried into §12)
+### 10.7 Open questions — resolved
 
-- **Per-SDK escalation telemetry.** The §10.5 `importer_kind` field
-  is required, but no §10 contract pins the *retention* horizon for
-  SDK-attributable telemetry. If a per-SDK regression watch becomes
-  load-bearing post-MVP, promote `importer_kind` from a log field
-  to a typed payload on the `ImporterError` enum. Until two
-  consumers need to discriminate, the closed sum stays small per
-  §4.7-style arity discipline.
-- **`bad_alloc` from importer SDKs.** Currently terminates per
-  §10.3. Mirrors `reviews/decisions/error-model.md` open question 4.
-  Will be revisited when the editor module lands and the
-  cross-cutting OOM policy resolves.
-- **Cancellation as `info` vs `debug`.** The editor's stop-button
-  flow logs cancellation at `info` for visibility; the watcher's
-  rapid debounce-induced cancellation logs at `debug`. The two
-  paths share an arm but differ in operational meaning. May warrant
-  splitting into `Cancelled` / `Superseded` post-MVP.
-- **Re-cook escalation on `HashNotInCas` storm.** A workspace move
-  that drops the `cooked/` directory will fire `HashNotInCas` on
-  every load until the next session re-cooks. Today this surfaces
-  one arm per request at `error`; a consolidating storm-detector
-  is post-MVP and will likely live in `obs`, not in content.
+All four questions resolve in place against an existing external gate;
+§12 holds no content-owned residue. Each entry below names the gate
+and the trigger that re-opens the question.
+
+- **Per-SDK escalation telemetry.** Resolved by deferral to the
+  second-consumer rule (PHILOSOPHY principle 10, Occam's razor;
+  §4.7 inv #1 — closed sum, deliberate central edit). The §10.5
+  `importer_kind` log field is sufficient until a second consumer
+  needs to discriminate per SDK; promotion to a typed
+  `ImporterError` payload is a deliberate §5.3 enum amendment, not
+  a silent enrichment. Trigger: a second consumer (production
+  telemetry retention SLA, per-SDK regression watch) lands and
+  needs to branch on `importer_kind`.
+- **`bad_alloc` from importer SDKs.** Resolved as terminate per
+  §10.3 (the `std::bad_alloc` row of the §10.3 classification
+  table) — content commits to terminate; the per-cook arena
+  (§4.1.2 inv #3) is sized to fit the budget cell, so a `bad_alloc`
+  inside it is a build-system / configuration defect, not a runtime
+  recovery situation. Trigger: `reviews/decisions/error-model.md`
+  open question 4 (editor module landing + cross-cutting OOM
+  policy) flips to a `core::Error::OutOfMemory` arm; if it does,
+  content follows the central decision rather than re-deriving.
+- **Cancellation as `info` vs `debug`.** Resolved as a single
+  `ImporterError::Cancelled` arm (§5.3) plus differentiated log
+  levels at the call site (editor stop-button → `info`; watcher
+  debounce → `debug`). The §10.5 structured fields already carry
+  `importer_kind` and the originating cause, so the operational
+  distinction is recoverable from telemetry without inflating the
+  closed sum. Trigger: the same second-consumer rule as OQ #1 —
+  if a third caller needs to branch on cancellation cause (not
+  just log it differently), split into `Cancelled` / `Superseded`
+  in a deliberate §5.3 amendment.
+- **Re-cook escalation on `HashNotInCas` storm.** Resolved at the
+  per-request granularity per §10.1 — content surfaces one
+  `ResidencyError::HashNotInCas` per request at `error` level and
+  does not aggregate. A consolidating storm-detector (e.g. drop
+  the `cooked/` directory → suppress N duplicate `error` lines into
+  one `warn` summary until next session re-cook) is observability
+  policy, not content policy, and lives in the post-MVP `obs`
+  domain. Trigger: the `obs` domain spec lands; until then, content
+  does not collapse arms because the §4.7 inv #1 closed-sum rule
+  forbids inventing arms speculatively.
 
 ## 11. Acceptance Criteria
 
@@ -4148,4 +4171,9 @@ Each must have a Catch2 test by name.
 
 ## 12. Open Questions
 
-- Owner / resolution gate.
+All questions identified during the §1–§11 design passes resolved in
+place under spike #149; this section holds no content-owned residue.
+Resolution records and the gates that re-open each decision live in
+§10.7 (four entries — per-SDK escalation telemetry, importer-SDK
+`bad_alloc`, cancellation log-level, `HashNotInCas` storm). Forward-
+pointers from §10.3 prose route to §10.7 rather than here.
