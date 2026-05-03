@@ -2786,4 +2786,21 @@ Each must have a Catch2 test by name.
 
 ## 12. Open Questions
 
-- Owner / resolution gate.
+Every open question identified in `core/SPEC.md` has been split out
+into a `[SPIKE]` issue parented to sub-epic #19; resolution lands the
+decision record into `reviews/decisions/` and edits the cited section
+in-place. The §12 list below tracks the spikes themselves so a
+reviewer can confirm coverage at a glance.
+
+- #492 — `[SPIKE] core-owned-types-hot-reload-migration-policy`
+  (resolves §4 invariant 5 deferral).
+- #493 — `[SPIKE] schedule-rebuild-bucketed-O-systems-trigger`
+  (resolves §6.11 hot-loop big-O fall-back).
+- #494 — `[SPIKE] chunk-size-per-archetype-tunable`
+  (resolves §6.12.1).
+- #496 — `[SPIKE] per-system-parallelism-seam-foryc-vs-schedule`
+  (resolves §6.12.2).
+- #498 — `[SPIKE] asset-table-compaction-policy`
+  (resolves §6.12.3).
+- #499 — `[SPIKE] hot-reload-migration-arena-grow-vs-refuse`
+  (resolves §6.12.4 + hot-reload protocol "Open Questions" #1).
