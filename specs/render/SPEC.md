@@ -2696,7 +2696,203 @@ amendment-or-fix decision has already had a working window.
 
 ## 10. Failure Modes & Error Model
 
-Typed errors. Recovery.
+`render::Error` is the closed sum returned through every `glibre::Result<T>`
+exported from `specs/render/SPEC.md` §5. The §5 stub already enumerates a
+working subset (`DeviceLost`, `PipelineCompileFailed`, `RenderGraphCycle`,
+…); §10 fixes the *full* closed sum below as the rendering plugin's
+contractual failure surface and binds each variant to a trigger, recovery
+strategy, severity, and capability-fallback path. Adding or removing a
+variant is a render-plugin ABI bump (per `reviews/decisions/error-model.md`
+§"Composition Rules" item 5 and §3.2 collapse #5 of this spec).
+
+### 10.1 The closed sum (eighteen variants)
+
+The §5 stub publishes the canonical enumerator names; §10 names them in
+the documentation form below and notes the §5 spelling in parentheses
+where they differ. Variants whose §5 spelling does not yet appear in the
+header are flagged "ABI add" — landing the §5 implementation header
+adds them in a single ABI bump alongside the §10 acceptance test.
+
+| §10 name                       | §5 enumerator (current / planned)            | Frame-phase origin (§6.2)            |
+|--------------------------------|----------------------------------------------|--------------------------------------|
+| `MetalDeviceUnavailable`       | `DeviceLost` + `DeviceUnsupported` (§5)      | init / phase 6 / phase 7             |
+| `SwapchainAcquireFailed`       | `SwapchainAcquireFailed` (§5)                | phase 7 acquire                      |
+| `ShaderModuleLoadFailed`       | ABI add (`ShaderModuleLoadFailed`)            | init / hot-reload register / phase 7 |
+| `PsoCompileFailed`             | `PipelineCompileFailed` (§5)                 | phase 7 record (lazy compile)        |
+| `ResourceAllocFailed`          | `HeapOutOfMemory` (§5)                       | phase 6 plan / phase 7 record        |
+| `ResourceResidencyExceeded`    | `ResourceResidencyExceeded` (§5)             | phase 6 plan                         |
+| `BarrierViolation`             | `BarrierConflict` (§5)                       | phase 6 graph compile                |
+| `GraphCycle`                   | `RenderGraphCycle` (§5)                      | phase 6 graph compile                |
+| `GraphResourceUnknown`         | `PassUndeclaredAccess` (§5)                  | phase 6 graph compile                |
+| `MeshletCullDispatchFailed`    | ABI add (`MeshletCullDispatchFailed`)         | phase 7 cluster cull                 |
+| `BLASBuildFailed`              | `BlasUnavailable` (§5) + ABI add `BlasBuildFailed` | phase 7 RT build                |
+| `TLASBuildFailed`              | `TlasBuildFailed` (§5)                       | phase 7 RT build                     |
+| `RtCapabilityMissing`          | `CapabilityNotSupported` (§5) + flag bit     | init / hot-reload register           |
+| `MeshShaderCapabilityMissing`  | `CapabilityNotSupported` (§5) + flag bit     | init / hot-reload register           |
+| `FrameSubmitFailed`            | `QueueSubmitFailed` (§5)                     | phase 7 submit                       |
+| `PresentTimeout`               | `FenceTimeout` (§5)                          | phase 9 (platform fence wait)        |
+| `GpuTimeout`                   | `FenceTimeout` (§5) + payload `gpu_fault=false` | phase 9                          |
+| `GpuFault`                     | ABI add (`GpuFault`)                          | phase 9 (Metal `executionStatus`)    |
+
+The four "ABI add" rows are the cumulative diff §5 acquires when this
+spec lands; they are testable today as `static_assert`s against the
+header in `tests/render/spec_§5_§10_consistency.cpp`.
+
+### 10.2 Recovery vocabulary
+
+Every variant resolves to exactly one recovery action drawn from the
+fixed four-element ladder. The ladder is closed; no per-variant ad-hoc
+recovery is permitted.
+
+1. **`lower-tier`** — `RenderSettings.quality_tier` (§4.1, §3.2 collapse
+   #9) drops one step (`HighEnd → Desktop → Switch → Mobile`). The
+   render plugin re-runs phase 6 graph compile on the next frame with
+   the tier-gated pass predicates re-evaluated. No frame is presented
+   for the failing frame; the previous frame is re-presented (`platform`
+   §9 honours the stale fence).
+2. **`disable-feature`** — flip one `Capability` bit off in the live
+   `CapabilitySet` (§5). The graph builder's pass predicates demote any
+   pass guarded by that bit to its fallback path (e.g. `RayQuery → Gtao
+   reflection`, `MeshShaders → vertex+amplification fallback`,
+   `MetalFx → BuiltinFallback` upscaler — §6.6 cross-platform table).
+   The fix is sticky for the process lifetime; the bit only re-enables
+   on hot-reload register if the new plugin redeclares the capability
+   *and* the host still supports it.
+3. **`abort-frame`** — render returns `glibre::unexpected(err)` from its
+   phase 7 entry; `core` skips phases 7..9 for this frame and the
+   previous frame is re-presented. The next frame proceeds normally.
+   The render plugin remains live; no state is dropped.
+4. **`abort-engine`** — render returns `glibre::unexpected(err)` from
+   init or phase 6, and the failure is non-recoverable in the running
+   process. `core` performs an orderly shutdown (drain → release →
+   exit). The editor (when attached) sees the structured error and
+   surfaces it before the process exits.
+
+A fifth modality — **`hot-reload-restart`** — is reserved exclusively
+for `GpuFault` (§10.3 below). It is not part of the closed ladder;
+it is a render-plugin-internal trigger into `core`'s existing
+`HotReloadRequest` queue (§8.1), and §10.3 specifies its full
+mechanics so the four-element ladder above stays intact for every
+other variant.
+
+### 10.3 Per-variant failure-mode rows
+
+Every variant carries five fields:
+
+- **Trigger** — the exact frame-phase event that constructs the
+  `render::Error`. Cited against §6.2 phases.
+- **Recovery** — one entry from §10.2 (`lower-tier` / `disable-feature`
+  / `abort-frame` / `abort-engine`).
+- **Severity** — log level passed to `glibre::log_error` per
+  `reviews/decisions/error-model.md` §"Logging / Telemetry".
+- **Capability-fallback path** — the graph-build-time pass predicate
+  that re-routes work after a `disable-feature` recovery, or `n/a` for
+  variants that do not flip a `Capability` bit.
+- **Test fixture** — the Catch2 file under `tests/render/failure/` that
+  reproduces the trigger and asserts the recovery action.
+
+| Variant                       | Trigger                                                                                                                                    | Recovery          | Severity | Capability-fallback path                                             | Test fixture                          |
+|-------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|-------------------|----------|----------------------------------------------------------------------|---------------------------------------|
+| `MetalDeviceUnavailable`      | `MTLCreateSystemDefaultDevice` returns `nil` at init, or any `MTLCommandBuffer.status == .error` with `.deviceRemoved` reason mid-frame.   | `abort-engine`    | `error`  | n/a — no Metal, no rendering.                                         | `device_unavailable.cpp`              |
+| `SwapchainAcquireFailed`      | `CAMetalLayer.nextDrawable()` returns `nil` after the platform-defined acquire timeout (§9.4 phase 7 acquire budget = 1.5 ms).             | `abort-frame`     | `warn`   | n/a — drawable retried next frame.                                    | `swapchain_acquire_timeout.cpp`        |
+| `ShaderModuleLoadFailed`      | `[MTLDevice newLibraryWithData:]` fails on a metallib pulled from the `shader` cook archive at init *or* during hot-reload register (§8.4).| `abort-engine` (init) / `lower-tier` (hot-reload register — refusal cause). | `error` | n/a — shader bytecode is non-optional.                                | `shader_module_load.cpp`              |
+| `PsoCompileFailed`            | `PSOCache::compile_or_get()` returns failure during phase 7 record (lazy compile path); the `(state_hash, shader_hash)` pair is rejected. | `lower-tier`      | `warn`   | The lower tier's pass predicate selects a different PSO (e.g. drops TAA → FXAA → Off). | `pso_compile_lower_tier.cpp`         |
+| `ResourceAllocFailed`         | `MTLHeap` sub-allocation returns `nil`, or the residency set rejects a commit at phase 7 record because a transient texture exceeds the heap composition (§9.5).| `lower-tier`      | `warn`   | Lower tier's pass predicates use smaller targets (e.g. shadow atlas 4K → 2K, GBuffer half-res). | `resource_alloc_lower_tier.cpp`        |
+| `ResourceResidencyExceeded`   | Phase 6 plan computes a peak-residency footprint > 512 MiB ceiling (§9.5).                                                                 | `lower-tier`      | `warn`   | Re-plan at the lower tier shrinks the working set under 512 MiB.       | `residency_exceeded_lower_tier.cpp`    |
+| `BarrierViolation`            | Phase 6 barrier-emit step detects a writer→reader pair the planner cannot satisfy (e.g. write-after-write on an aliased subresource without an explicit `Pass::declared_use`). | `abort-engine`    | `error`  | n/a — graph is structurally invalid; no fallback rescues a malformed graph. | `barrier_violation.cpp`               |
+| `GraphCycle`                  | `RenderGraph::compile()` topological sort detects a cycle among `Pass` nodes.                                                              | `abort-engine`    | `error`  | n/a — same reasoning as `BarrierViolation`.                           | `graph_cycle.cpp`                      |
+| `GraphResourceUnknown`        | A `Pass::execute` records access to a `VirtualResourceHandle` not in its `declared_use` set (debug-build assertion; release-build returns the error). | `abort-frame` (debug) / `abort-engine` (release CI gate). | `error`  | n/a — the pass body is buggy.                                         | `graph_resource_unknown.cpp`           |
+| `MeshletCullDispatchFailed`   | Phase 7 mesh-shader cull dispatch returns `MTLCommandEncoderError`, or the indirect-arg buffer overflows the cluster pool (§4.1).         | `disable-feature` | `warn`   | `Capability::MeshShaders` cleared → graph builder picks vertex + amplification stage fallback (§6.5). | `meshlet_dispatch_disable.cpp`         |
+| `BLASBuildFailed`             | `[MTLAccelerationStructureCommandEncoder buildAccelerationStructure:descriptor:scratchBuffer:]` fails for a per-mesh BLAS at phase 7 RT build. | `disable-feature` | `warn`   | `Capability::HardwareRayTrace` cleared → §6.4 hybrid-RT path falls back to RT-disabled GTAO/PCF lighting. | `blas_build_disable.cpp`              |
+| `TLASBuildFailed`             | TLAS rebuild fails (instance-count overflow, scratch exhausted, or driver error).                                                          | `disable-feature` | `warn`   | Same as `BLASBuildFailed`.                                            | `tlas_build_disable.cpp`              |
+| `RtCapabilityMissing`         | `CapabilitySet::supports(HardwareRayTrace \| RayQuery)` is `false` at init, but a registered pass declared the bit as required.            | `lower-tier` (init) / `disable-feature` (hot-reload register — refusal cause §8.4). | `warn`   | Same predicate-demotion as `BLASBuildFailed`.                          | `rt_capability_missing.cpp`            |
+| `MeshShaderCapabilityMissing` | `CapabilitySet::supports(MeshShaders)` is `false` at init, but a registered pass declared the bit as required.                             | `lower-tier` (init) / `disable-feature` (hot-reload register — refusal cause §8.4). | `warn`   | Same predicate-demotion as `MeshletCullDispatchFailed`.                | `mesh_shader_missing.cpp`              |
+| `FrameSubmitFailed`           | `[MTLCommandQueue commit]` returns failure (transient driver error, queue overflow); not a device loss.                                    | `abort-frame`     | `warn`   | n/a — retried next frame against the same queue.                       | `frame_submit_retry.cpp`               |
+| `PresentTimeout`              | The `platform` phase 9 fence wait exceeds the 16.6 ms budget (§9.4) by > 2× without a GPU-side completion signal.                          | `abort-frame`     | `warn`   | n/a — tier already at floor would imply `lower-tier` is a no-op; skipping the present is the only relief. | `present_timeout.cpp`                  |
+| `GpuTimeout`                  | `MTLCommandBuffer.status == .completed` is not observed within the per-buffer watchdog (1.5 × budget); no fault payload reported.          | `lower-tier`      | `warn`   | Lower tier's smaller workload typically clears the watchdog.           | `gpu_timeout_lower_tier.cpp`           |
+| `GpuFault`                    | `MTLCommandBuffer.status == .error` with `.faulted` reason, or Metal's residency monitor reports a page fault on a tracked allocation.     | `hot-reload-restart` (see §10.4). | `error`  | n/a — the render plugin is restarted; capability re-probe runs in the new process. | `gpu_fault_restart.cpp`                |
+
+### 10.4 GPU fault — diagnostic capture and HotReload restart
+
+`GpuFault` is the only variant whose recovery escapes the
+four-element ladder. The mechanism preserves PHILOSOPHY §8 (hot-reload
+at frame boundaries) and §9 (ABI hash gating) — the render plugin
+is *restarted*, not patched in place.
+
+1. **Detection (phase 9, on the platform-side fence wait).** When
+   `MTLCommandBuffer.status` resolves to `.error` with a fault reason
+   (`.faulted`, `.outOfMemory`, or `.invalidResource`), `platform`
+   forwards the `MTLCommandBufferError` payload to render via the §5
+   `Result<void> render_report_gpu_fault(...)` entry point.
+2. **Diagnostic capture.** Render's fault handler synchronously writes
+   a fixed-shape diagnostic blob to the per-process diagnostic ring
+   (`DiagnosticOverlay` GPU-timestamp ring, §6.5). The blob carries:
+   - `frame_counter` (§4.2 invariant 6).
+   - `pass_class` and `PSOKey` of the in-flight command at fault.
+   - The `MTLCommandBufferError.userInfo[MTLCommandBufferEncoderInfoErrorKey]`
+     dump (Metal's per-encoder fault map).
+   - The `RenderSettings.quality_tier` and live `CapabilitySet` snapshot.
+   - The four most recent `(frame_counter, pass_class, gpu_ms)`
+     timing rows from the GPU-timestamp ring.
+   The blob format is the existing `glibre::types::render::FaultDiag`
+   middleman type (no new schema; it piggybacks on the §8.5 observer
+   bus typing). The blob is written to `${GLIBRE_DIAG_DIR}/render-fault-${pid}-${frame_counter}.diag`
+   and a single `error`-level `spdlog` line is emitted with the file
+   path as a structured field.
+3. **Signal `core::HotReload`.** Render publishes a
+   `HotReloadRequest { plugin_fqn = "glibre.render", reason =
+   GpuFault, dylib_path = (current loaded dylib) }` onto `core`'s
+   reload queue. The request is **not** a hot-reload to a *new*
+   plugin binary — the same dylib is reloaded. This intentionally
+   exercises the §8 protocol in full: drain → swap → migrate → resume.
+4. **Frame at which the restart occurs.** Per §8.1, the request is
+   honoured at the next phase-8 boundary at which no `RenderFrame`
+   pin is held (§8.5). Until then, render returns
+   `glibre::unexpected(GpuFault)` from each frame's phase 6 entry,
+   driving `abort-frame` for those intervening frames (the previous
+   good frame is re-presented). This bounded "stuck frame" window
+   is part of the contract; the test fixture
+   `tests/render/failure/gpu_fault_restart.cpp` asserts it lasts at
+   most 3 frames.
+5. **Restart semantics.** The reload follows the standard §8.3
+   `migrate(...)` body: the persistent-resource set named in §8.2
+   is preserved (PSO archive, mesh/material handles, TLAS instance
+   topology); transient state (per-frame arenas, swapchain views,
+   GPU-timestamp ring) is dropped and re-allocated. The
+   `CapabilitySet` is re-probed against the host so a fault induced
+   by a now-degraded GPU (eGPU detached, thermal throttle) lands at
+   a lower capability set and the graph builder demotes the
+   offending pass naturally on the next frame.
+6. **Repeat-fault guard.** The reload-on-`GpuFault` path is gated by
+   a per-process counter: if three consecutive restarts each within
+   one second land on `GpuFault`, render escalates to `abort-engine`
+   (a fourth fault is treated as an unrecoverable hardware state and
+   `core` shuts down). The counter resets after one fault-free
+   frame. This guard prevents an infinite restart loop on a wedged
+   device.
+
+### 10.5 Cross-references
+
+- §3.2 collapse #5 — the render::Error closed sum is the §10
+  realisation of "one closed `render::Error` rather than per-subsystem
+  exception types."
+- §5 — header stub publishes the §10.1 enumerator names; landing
+  the four "ABI add" rows is the next render-plugin ABI bump.
+- §6.2 — phase 6 / phase 7 are the only frame-phase origins for
+  every §10.3 trigger.
+- §6.4 / §6.5 / §6.6 — the predicate-demotion paths cited in the
+  capability-fallback column live in these sections.
+- §8.1 — the reload-queue entry point used by §10.4.
+- §8.4 — `RtCapabilityMissing`, `MeshShaderCapabilityMissing`, and
+  `ShaderModuleLoadFailed` all double as hot-reload refusal causes.
+- §8.5 — the observer bus and `FaultDiag` middleman type used by
+  §10.4.
+- §9.4 / §9.5 — the budget thresholds that promote `PresentTimeout`,
+  `GpuTimeout`, `ResourceResidencyExceeded`, and `ResourceAllocFailed`
+  from "slow frame" to a typed render::Error.
+- `reviews/decisions/error-model.md` — §"Composition Rules" governs
+  how render::Error rolls up into `glibre::Error::Variant`; §10 owns
+  the closed sum, the engine-wide alias never edits it.
 
 ## 11. Acceptance Criteria
 
