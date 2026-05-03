@@ -1904,7 +1904,360 @@ LLVM (clang version 19+).
 
 ## 6. Internal Architecture
 
-Non-binding sketch for implementers.
+Non-binding sketch for implementers. Section §4 pins the *what* (the
+ten SRP-bounded aggregates and their cross-aggregate invariants); §5
+pins the *contract surface* (the C++23 header `glibre-content`
+exports); §7 pins the *persistent schemas* (the three Fory types
+under `data/schemas/content/`); §8 pins the *hot-reload contract*
+(manifest-swap and plugin-code paths bound to phase 8). This section
+sketches the *how* — the module layout, the cook pipeline shape, the
+residency worker topology, the watcher bridge, and the
+shipping-vs-build-time split — that together produce the §5 surface
+while preserving the §4 / §7 / §8 invariants.
+
+The split below is binding only insofar as the public-surface
+guarantees in §5 and the persistence guarantees in §7 require it;
+private internals (file names within a module, function signatures
+that never cross a header boundary, algorithmic choices inside a
+single TU) remain implementer's choice. Where this section names a
+directory or symbol, that name is the one the rest of the spec, the
+decision records, and the issue tracker will use; no synonyms.
+
+### 6.1 Module layout
+
+The content context's implementation splits along two orthogonal
+seams: a **lifecycle seam** between code that runs only at build /
+edit time (importers + cook orchestration) and code that ships in
+the runtime dylib (the read-side: CAS, manifest, residency, watch),
+and an **aggregate seam** that lifts the §4 roster directly into
+directories, one reason-to-change per module. The lifecycle seam is
+the source of the shipping-cuts rule (§6.5); the aggregate seam is
+the source of the SRP layout below.
+
+The build system materialises the lifecycle seam by producing two
+artifacts from one source tree:
+
+1. `tools/glibre-cook` — a host executable that links the importer
+   modules, the `cook/` orchestrator, and writes into a workspace's
+   `cooked/` CAS + manifest. **Not shipped.** Runs on developer
+   machines and CI cookers only.
+2. `glibre-content.dylib` — the runtime plugin loaded by `core`.
+   Ships only the read-side modules (`cas/`, `manifest/`,
+   `residency/`, `watch/`, plus the §5 public header surface).
+   Importer modules and cook orchestrator code are excluded by the
+   build profile (§6.5).
+
+Both artifacts share `content/include/glibre/content/` (the §5
+deliverable) and the Fory-codegen'd headers under
+`data/codegen-output/include/glibre/types/content/` (per
+`reviews/decisions/fory-codegen.md`).
+
+```
+content/
+  include/glibre/content/        # §5 surface (compiles standalone).
+    content.hpp                  # Public banner; pulls in the per-aggregate headers.
+    error.hpp                    # ImporterError / ResidencyError / Error variant (§5.1).
+    identity.hpp                 # AssetId, ContentHash, CookKey-as-digest (§5.2).
+    source.hpp                   # SourceAsset, SourceKind, SourceFormat (§5.3).
+    importer.hpp                 # ImporterCapabilities + dispatch (§5.4); host-only impl.
+    cooked.hpp                   # CookedAsset / artifact-tag aliases (§5.5).
+    cas.hpp                      # CAS handle + put/get methods (§5.6).
+    manifest.hpp                 # Manifest snapshot + resolve / dependents_of (§5.7).
+    residency.hpp                # ResidencyManager + LoadRequest (§5.8).
+    handle.hpp                   # AssetHandle<T> + tags::{mesh,texture,font} (§5.9).
+    watch.hpp                    # WatchEdge + RecookRequest + reason discriminant (§5.10).
+    session.hpp                  # CookSession + CookOutcome (§5.11; host-only impl).
+  src/
+    importers/                   # Aggregate §4.1.2; build-time only (§6.5 cut).
+      fbx_importer.{hpp,cpp}     # FBX SDK wrap; -fexceptions carve-out per §4.1.2 inv #2.
+      freeimage_importer.{hpp,cpp}  # PNG/JPEG/EXR/HDR/TIFF decode; -fexceptions carve-out.
+      freetype_importer.{hpp,cpp}   # TTF/OTF glyph + atlas bake; -fexceptions carve-out.
+      dispatch.{hpp,cpp}         # SourceKind → Importer routing.
+      version.{hpp,cpp}          # Per-importer compiled-identity hash (§4.1.3 component 2).
+    cook/                        # Aggregate §4.1.9; build-time only (§6.5 cut).
+      session.{hpp,cpp}          # CookSession orchestrator (§4.1.9 invariants 1–5).
+      cook_key.{hpp,cpp}         # CookKey hashing (§4.1.3); BLAKE3 over the 5 components.
+      cook_step.{hpp,cpp}        # Per-step body: import → normalize → fory → CAS → stage.
+      worker_pool.{hpp,cpp}      # Bounded-parallelism job runner; cancellation token.
+      topology.{hpp,cpp}         # Dependency-edge topo sort (§4.1.9 inv #3).
+      stage_table.{hpp,cpp}      # (AssetId, CookKey, ContentHash) staging table.
+      publish.{hpp,cpp}          # End-of-session staged-blob fsync + temp-write protocol.
+    cas/                         # Aggregate §4.1.5; runtime + build-time.
+      cas.{hpp,cpp}              # Configured cooked/ root + put/get surface.
+      atomic_write.{hpp,cpp}     # Temp-write + fsync + rename(2) primitive (§4.1.5 inv #3).
+      mmap_view.{hpp,cpp}        # Read-only mmap helper consumed by residency.
+      fanout.{hpp,cpp}           # cooked/<prefix>/<hash> path layout (256-way fan-out).
+    manifest/                    # Aggregate §4.1.6; runtime + build-time.
+      snapshot.{hpp,cpp}         # Active Manifest snapshot; resolve / dependents_of.
+      publish.{hpp,cpp}          # Atomic publish protocol — temp file + rename(2).
+      pointer.{hpp,cpp}          # In-RAM active-snapshot pointer + relaxed-store flip.
+      dependency_graph.{hpp,cpp} # DependencyEdge graph + transitive-closure / cycle check.
+      schema_io.{hpp,cpp}        # Fory read/write of cooked/_manifest.fory (§7).
+    residency/                   # Aggregate §4.1.7; runtime + build-time.
+      manager.{hpp,cpp}          # ResidencyManager facade + state machine arbitration.
+      slot.{hpp,cpp}             # Per-ContentHash slot: state + ref-count + mmap region.
+      load_queue.{hpp,cpp}       # Bounded LoadRequest queue (priority-ordered).
+      io_lane.{hpp,cpp}          # Background worker(s) draining the queue; off-frame.
+      eviction.{hpp,cpp}         # (screen_coverage, LRU) eviction policy.
+      budget.{hpp,cpp}           # MemoryBudget accounting; admission control.
+      handle.{hpp,cpp}           # AssetHandle<T> body — view() resolves through manager.
+    watch/                       # Aggregate §4.1.10; runtime + build-time.
+      watch_edge.{hpp,cpp}       # WatchEdge subscription registry + dedup.
+      translator.{hpp,cpp}       # FileEvent → Set<RecookRequest> via dependency graph.
+      bridge.{hpp,cpp}           # Adapter to platform::FileWatcher; subscribe / unsubscribe.
+      reason.{hpp,cpp}           # RecookReason discriminant.
+    plugin.{hpp,cpp}             # Plugin entry: init / drain / migrate / register / shutdown.
+```
+
+The split is the §4 aggregate roster lifted directly into
+directories. Each directory owns one reason to change. Adding a new
+source kind adds one importer file under `importers/` (and a row in
+`dispatch.cpp`); swapping the eviction policy touches
+`residency/eviction.cpp` only; tightening the manifest publish
+protocol touches `manifest/publish.cpp` only.
+
+`importers/` and `cook/` link the third-party SDKs (FBX SDK,
+FreeImage, FreeType) and the `geometry` plugin's cook-step API as
+build-time-only dependencies; neither symbol set is reachable from
+the runtime `.dylib` (§6.5).
+
+### 6.2 Cook pipeline (build-time data flow)
+
+`tools/glibre-cook` drives a six-stage pipeline per `RecookRequest`;
+the stages are sequential, each stage's output is the input to the
+next, and the pipeline is a pure function of its declared inputs
+(§4.1.3 inv #1, §4.1.4 inv #1).
+
+```
+SourceAsset → Importer → normalize → fory-serialize
+                                          ↓
+                         (CAS write: temp + fsync + rename(2))
+                                          ↓
+                              (stage in CookSession table)
+                                          ↓
+                       (end-of-session manifest publish: temp + rename(2))
+```
+
+**Stage 1 — Source resolution.** `cook/session.cpp` consumes a
+`RecookRequest`, looks up the `AssetId`'s `ManifestEntry` in the
+prior snapshot for the recorded `cook_key.digest` (cache-hit
+candidate, §4.1.3 inv #3), and reads the source bytes through
+`platform::FileIo`. The `SourceAsset` value object is constructed
+with `path`, `kind`, `format`, and `source_hash = BLAKE3(bytes)`
+(§4.1.1 inv #3). Failures here lift to
+`ImporterError::SourceNotFound`.
+
+**Stage 2 — CookKey derivation.** `cook/cook_key.cpp` concatenates
+the five components from §4.1.3 (length-prefixed,
+deterministically-canonicalised) and BLAKE3-digests them. If the
+result equals the prior manifest entry's recorded `cook_key.digest`
+**and** the recorded `content_hash` resolves to a CAS file present
+on disk, the stage short-circuits to "cache hit, no re-cook"
+(§4.1.3 inv #3). Otherwise the request proceeds to stage 3.
+
+**Stage 3 — Importer dispatch + normalize.** `cook/cook_step.cpp`
+dispatches via `importers/dispatch.cpp` to one of `FbxImporter`,
+`FreeImageImporter`, `FreeTypeImporter`. Each importer wraps its
+SDK at the unique `-fexceptions` carve-out (§4.1.2 inv #2) and
+yields a normalized in-memory artifact precursor (`MeshArtifact`
+draft, `TextureArtifact` draft, `FontArtifact` draft). Mesh-internal
+processing (meshlet partitioning, LOD chains, BLAS construction) is
+delegated to the `geometry` plugin from inside the cook step
+(§3.3) — content does not own those algorithms.
+
+**Stage 4 — Fory serialise.** The normalized draft is encoded
+through the codegen'd `Envelope<T>::serialize` from
+`data/codegen-output/include/glibre/types/content/<Type>.hpp`
+(`reviews/decisions/fory-codegen.md`). The encoded bytes are the
+`CookedAsset.payload`; `content_hash = BLAKE3(payload)` is computed
+exactly once at the moment the bytes leave the encoder (§4.1.4
+inv #1). Schema-conformance is asserted at this step (§4.1.4 inv #2);
+malformed encodings lift to `ImporterError::MalformedPayload`.
+
+**Stage 5 — CAS write.** `cas/atomic_write.cpp` writes the bytes to
+`cooked/<prefix>/<hash>.tmp.<pid>.<rand>`, fsyncs, then `rename(2)`s
+onto `cooked/<prefix>/<hash>` (§4.1.5 inv #3). The `rename(2)` is
+the atomic publication boundary at the file layer; concurrent
+writes of the same hash collapse to one stored file by §4.1.5
+inv #4. I/O failures lift to `ResidencyError::IoFailure`.
+
+**Stage 6 — Stage triple.** `cook/stage_table.cpp` records the
+`(AssetId, CookKey, ContentHash)` triple plus the post-cook
+`Set<DependencyEdge>` into the session's staging table. Cooks
+within a session execute children-before-parents (§4.1.9 inv #3);
+parents wait on the staging table for their children's triples
+before their own stage 3 runs.
+
+**Manifest publish (end-of-session).** When every queued
+`RecookRequest` has either cache-hit or written its triple into
+the staging table, `cook/publish.cpp` builds the new manifest
+blob (every recooked entry re-mapped, every unchanged entry
+byte-equal, every dependency edge updated, cycle-freedom asserted
+per §4.1.6 inv #4), serialises it through Fory into a temp file
+next to `cooked/_manifest.fory`, fsyncs the temp file, and
+**hands ownership of the temp path + final-path target to the
+loader's phase-8 barrier** for the actual `rename(2)` flip
+(§8.2 step 4). `CookOutcome::Published` is returned to the
+session's caller; the in-RAM active-manifest pointer flip is
+deferred to the next phase 8 (§4.2 inv #8). Failure of any cook
+step rolls back the entire staging table and leaves the prior
+manifest snapshot active (§4.1.9 inv #1) — no half-published
+state.
+
+### 6.3 Residency worker (runtime data flow)
+
+`residency/manager.cpp` owns the in-RAM working set. The worker
+topology is bounded by two rules: I/O is off-frame (§4.2 inv #8),
+and the budget ceiling is hard (§4.1.7 inv #1). The flow is:
+
+1. **Handle access requests bytes.** `AssetHandle<T>::view()`
+   resolves through the active `Manifest` snapshot to a
+   `ContentHash`, then asks the manager for the corresponding slot
+   (`residency/slot.cpp`).
+2. **Slot state branch.** If the slot is `Resident` and ref-count
+   was non-zero on entry, `view()` returns the live
+   `std::span<const std::byte>` immediately — no I/O, no eviction
+   pressure. If `Unloaded` or `Pending`, the manager enqueues a
+   `LoadRequest{content_hash, screen_coverage, deadline}` onto
+   `residency/load_queue.cpp` and returns a pending sentinel; the
+   handle re-tries on the next frame's extract pass.
+3. **I/O lane drains the queue.** A small worker pool
+   (`residency/io_lane.cpp`, sized by
+   `reviews/decisions/perf-budget.md`'s content cell) services
+   `LoadRequest`s in priority order. For each request the lane:
+   - looks up the CAS file at `cooked/<prefix>/<hash>` via
+     `cas/fanout.cpp`;
+   - opens read-only, mmap's the bytes via `cas/mmap_view.cpp`;
+   - admits the new mapping into the resident set, gated by
+     `residency/budget.cpp` — if admission would exceed
+     `MemoryBudget`, eviction (step 4) runs first;
+   - transitions the slot `Pending → Resident` and signals any
+     waiting `view()` calls (next-frame poll).
+4. **Eviction under pressure.** `residency/eviction.cpp`
+   selects the lowest-priority `Resident` slot whose ref-count
+   is zero (`(screen_coverage, LRU)` ordering, §4.1.7 inv #4).
+   Selected slots transition `Resident → Evicting → Unloaded`;
+   their mmap region is unmapped and the byte ceiling is
+   credited. Slots with non-zero ref-counts are excluded
+   regardless of priority (§4.1.7 inv #3 — what makes
+   `view()` safe). If no evictable slot can free enough room,
+   the load request transitions to `Pending` and waits;
+   `ResidencyError::BudgetExceeded` surfaces only when the
+   request's deadline elapses with no admission (§4.1.7 inv #1).
+5. **Hot-reload coexistence.** When the `Manifest` re-points
+   an `AssetId` from `H_old` to `H_new`, both slots can coexist
+   in the residency table (§4.1.7 inv #6, §8.3). The prior
+   slot is held until its outstanding handle ref-count
+   reaches zero, then drains via the standard graph; the new
+   slot is admitted by the next handle access through the
+   above flow.
+
+The I/O lane and the eviction policy run on background threads
+scheduled by `core` outside the frame loop (§4.2 inv #8). The
+on-frame surface is exclusively `view()` reads of already-`Resident`
+slots; any frame-phase that depends on a fresh load tolerates a
+one-frame retry (extract systems use a sentinel + carry-over
+pattern owned by their respective contexts).
+
+### 6.4 Hot-reload bridge (`watch/` → `cook/` → manifest swap)
+
+`watch/` is the seam that turns `platform`'s file watcher firings
+into work for the cook pipeline. Three files cooperate:
+
+1. **`watch/bridge.cpp`** — adapter to `platform::FileWatcher`.
+   Subscribes one watch handle per source-tree subscription
+   recorded in `WatchEdge` (§4.1.10 inv #1). Receives
+   `platform::FileEvent` deliveries on the platform watcher's
+   thread; forwards the path + event kind into the translator
+   without performing any FS I/O of its own (§4.1.10 inv #3).
+2. **`watch/translator.cpp`** — the `FileEvent → Set<RecookRequest>`
+   translator. Reads only the active `Manifest`'s in-RAM
+   `DependencyEdge` graph (§4.1.10 inv #3); for the changed source
+   path, walks transitive dependents (`SourceChanged` for the leaf,
+   `DependentRecook` for each parent, §4.1.10 composition) and
+   emits one `RecookRequest` per affected `AssetId`. Bounded by
+   the dependency graph's transitive closure (§4.1.10 inv #4).
+3. **`watch/watch_edge.cpp`** — the registry. Deduplicates
+   subscriptions at registration; tracks the
+   `(path, debounce_policy)` identity. The actual debounce window
+   is owned by `platform`'s watcher (§3.3); content carries only
+   the policy descriptor.
+
+Translated `RecookRequest`s are enqueued onto a recook channel
+consumed by `cook/session.cpp`; one `CookSession` is begun per
+batch (the session's batching policy is owned by the
+orchestrator — typical heuristic: open a session on first request,
+close it after a debounce window or once the queue drains, never
+keep an unbounded open session). The session runs the pipeline of
+§6.2 and produces a staged manifest blob; the actual swap is
+deferred to the next phase 8 (§8.2 step 4).
+
+The bridge is symmetric on tear-down: when the content plugin
+drains (§8 plugin-code reload), every `WatchEdge` subscription is
+unsubscribed via the bridge and re-registered after the new
+plugin's `glibre_plugin_register` completes. The platform watcher
+is unaware of the plugin swap; only the bridge's subscription
+identities move.
+
+### 6.5 Shipping cuts (build-time vs runtime)
+
+The build profile partitions content's source tree into two
+disjoint sets along the lifecycle seam introduced in §6.1:
+
+| Module                       | `tools/glibre-cook` | `glibre-content.dylib` |
+|------------------------------|---------------------|------------------------|
+| `importers/fbx_importer.*`   | Yes                 | **No** (cut)           |
+| `importers/freeimage_importer.*` | Yes             | **No** (cut)           |
+| `importers/freetype_importer.*`  | Yes             | **No** (cut)           |
+| `importers/dispatch.*`       | Yes                 | **No** (cut)           |
+| `importers/version.*`        | Yes                 | **No** (cut)           |
+| `cook/session.*`             | Yes                 | **No** (cut)           |
+| `cook/cook_key.*`            | Yes                 | **No** (cut)           |
+| `cook/cook_step.*`           | Yes                 | **No** (cut)           |
+| `cook/worker_pool.*`         | Yes                 | **No** (cut)           |
+| `cook/topology.*`            | Yes                 | **No** (cut)           |
+| `cook/stage_table.*`         | Yes                 | **No** (cut)           |
+| `cook/publish.*`             | Yes                 | **No** (cut)           |
+| `cas/*`                      | Yes                 | Yes                    |
+| `manifest/*`                 | Yes                 | Yes                    |
+| `residency/*`                | No                  | Yes                    |
+| `watch/*`                    | No                  | Yes                    |
+| `plugin.*`                   | No                  | Yes                    |
+| `include/glibre/content/*`   | Yes (compile-only)  | Yes                    |
+
+The `importers/` and `cook/` cut is mechanical: those modules are
+the only sites that link FBX SDK / FreeImage / FreeType / the
+`geometry` plugin's cook-step API, and the runtime never invokes
+them. The §5 header surface includes their forward declarations
+(`CookSession`, `Importer`, `SourceAsset`) so callers compile
+uniformly, but the runtime profile elides every TU under those
+two directories from the `glibre-content.dylib` link line. Calling
+any cook-side API from a shipping build is a link-time error
+(undefined symbol), not a runtime branch.
+
+`residency/` and `watch/` are runtime-only by symmetry: the cook
+tool never resolves an `AssetHandle` and never subscribes to a
+file watcher; those modules are elided from the `glibre-cook`
+link line. `cas/` and `manifest/` link into both — the cook tool
+writes them, the runtime reads them.
+
+The `plugin.cpp` entry implements `glibre_plugin_init`,
+`glibre_plugin_drain`, `glibre_plugin_migrate`,
+`glibre_plugin_register`, and `glibre_plugin_shutdown` per the
+engine plugin ABI (`reviews/decisions/plugin-abi.md`). It is
+runtime-only; the cook tool drives the pipeline directly and
+needs no plugin entry. Its body is mechanical: spin up the
+worker pool used by `residency/io_lane.cpp` on init, tear it
+down on drain, hand the survival inventory of §8.3 across the
+swap on migrate, re-register `WatchEdge` subscriptions on
+register, and free the residency table on shutdown.
+
+The split mechanically realises PHILOSOPHY §3 (minimal core,
+plugin-only growth — and within a plugin, the read side is the
+shipping payload) and the §1 commitment that "the runtime needs
+an immutable, hashed, residency-managed view of artist work" —
+the runtime ships only what it needs to read, not what produced
+the bytes.
 
 ## 7. Persistence & Schemas
 
