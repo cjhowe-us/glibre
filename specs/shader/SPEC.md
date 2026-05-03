@@ -912,7 +912,404 @@ that shipping plugins never link DXC subprocess code.
 
 ## 6. Internal Architecture
 
-Non-binding sketch for implementers.
+Non-binding sketch for implementers. Directory layout, subprocess
+topology, reflection parser shape, and shipping-build exclusions —
+nothing here is normative beyond what §3, §4, and §5 already pin.
+The aggregates of §4 each map to exactly one subdirectory under
+`shader/`; cross-aggregate traffic flows along the §4 dataflow diagram
+and never around it.
+
+### 6.1 Module layout
+
+The `shader` plugin source tree (`plugins/shader/src/`) is partitioned
+along aggregate boundaries (§4) — one directory per aggregate, no
+cross-cutting helpers:
+
+```text
+plugins/shader/
+    include/glibre/shader/
+        shader.hpp            # The §5 public header. Sole compileable
+                              #   surface; nothing else in the engine
+                              #   includes a `shader` private header.
+    src/
+        source/               # §4.1 ShaderSource — HLSL frontend
+            preprocessor.hpp/.cpp     # Tokenizer + #include expander.
+                                      #   Build-time only.
+            include_resolver.hpp/.cpp # Project-rooted resolver. Rejects
+                                      #   absolute paths and `..`-escapes
+                                      #   with Error::IncludeEscape.
+            entry_point_scanner.hpp/.cpp # Extracts `[shader("...")]`-tagged
+                                      #   entry points; one stage tag per
+                                      #   function (§4.1 invariant 1).
+            shader_source.cpp         # Aggregate root: ties the three
+                                      #   above into ShaderSource::open().
+        permutation/          # §4.2 PermutationKey — 4-axis codec
+            axes.hpp                  # Closed enums + cardinalities,
+                                      #   mirrors §5 declarations.
+            packed_key.hpp/.cpp       # to_bytes() / from_bytes() — bit-
+                                      #   stable across hosts (§4.2
+                                      #   invariant 1).
+            permutation_index.hpp/.cpp # Dense ordinal across the cross-
+                                      #   product; mixed-radix encode in
+                                      #   tuple-field order.
+            enumeration_table.hpp/.cpp # Build-time enumerator that walks
+                                      #   the resolved (project-pruned)
+                                      #   PermutationKey set; consumed by
+                                      #   the cooker (§6.4).
+        backend/              # §4.7 IShaderBackend impls
+                              #   EXCLUDED from shipping (§4.3 inv 3,
+                              #   §4.8 inv 3). #if !GLIBRE_SHIPPING.
+            dxc_hlsl/                 # The sole production backend today.
+                dxc_argv_builder.hpp/.cpp     # Canonicalized flag list
+                                              #   (sorted, deduped); feeds
+                                              #   the cache key (§4.3 inv 4).
+                dxc_subprocess.hpp/.cpp       # Spawns dxc, captures
+                                              #   stdout/stderr/exit;
+                                              #   translates non-zero exits
+                                              #   into shader::Error.
+                dxil_emitter.hpp/.cpp         # Drives `--target dxil`.
+                spirv_emitter.hpp/.cpp        # Drives `--target spirv`.
+                hlsl_backend.cpp              # IShaderBackend impl wiring.
+            metal_converter/          # DXIL → metallib lowering only.
+                metal_subprocess.hpp/.cpp     # Spawns
+                                              #   metal-shaderconverter;
+                                              #   consumes DXIL bytes,
+                                              #   emits metallib bytes.
+                metallib_backend.cpp          # IShaderBackend MetalLib
+                                              #   target; reflection is
+                                              #   borrowed from upstream
+                                              #   DXIL, NEVER re-extracted
+                                              #   from MSL (§4.4 inv 1).
+        reflection/           # §4.4 ReflectionBlob — DXIL parser
+            dxbc_container.hpp/.cpp   # DXIL is a DXBC container of named
+                                      #   parts; this parser walks the part
+                                      #   table (DXIL, RDAT, ISG1/OSG1,
+                                      #   PSV0, RTS0). Hand-rolled — no
+                                      #   third-party library.
+            dxil_metadata.hpp/.cpp    # LLVM-bitcode-shaped metadata reader
+                                      #   for the `DXIL` part: entry-point
+                                      #   list, signature elements, root
+                                      #   signature flags.
+            psv0_reader.hpp/.cpp      # PSV0 part: pipeline-state-validation
+                                      #   table — bind groups, register
+                                      #   ranges, stage masks.
+            spirv_fallback.hpp/.cpp   # Reflection from SPIR-V binaries
+                                      #   (secondary source per §4.4 inv 1)
+                                      #   when DXIL is unavailable.
+            frequency_tagger.hpp/.cpp # Maps every reflected binding to one
+                                      #   DescriptorFrequencyGroup; refuses
+                                      #   ambiguity with
+                                      #   Error::DescriptorFrequencyAmbiguous
+                                      #   (§4.4 inv 3).
+            descriptor_layout.cpp     # §4.5 — projects ReflectionBlob onto
+                                      #   the four-frequency-table schema.
+        cache/                # §4.6 ShaderCache — CAS + manifest
+            blake3.hpp/.cpp           # BLAKE3 hasher — single source of
+                                      #   the engine's ShaderHash.
+            cas_store.hpp/.cpp        # Content-addressable filesystem
+                                      #   store: artifacts/<aa>/<bb>/<hash>
+                                      #   layout (§7.5). Idempotent insert,
+                                      #   immutable values.
+            manifest.hpp/.cpp         # ShaderCacheManifest reader/writer
+                                      #   (Fory-backed, §7.1). Sole
+                                      #   sidecar; sorted by artifact_hash.
+            cooker.hpp/.cpp           # Walks the permutation enumeration
+                                      #   table; populates CAS; emits the
+                                      #   shipping ShaderLibrary. Sole
+                                      #   writer (§7.5); never invoked at
+                                      #   runtime in shipping builds.
+            integrity.hpp/.cpp        # Cooker-time orphan-blob and
+                                      #   dangling-reference checks
+                                      #   (Error::CacheIntegrity, §4.6
+                                      #   inv 3).
+            library.cpp               # ShaderCache::Library — the shipping
+                                      #   read-only handle (§4.6 inv 2).
+        backend.cpp           # IShaderBackend trait selector + plugin
+                              #   manifest entry point.
+```
+
+**SRP per directory.** Each subdirectory owns exactly one §4 aggregate:
+`source/` ↔ §4.1, `permutation/` ↔ §4.2, `backend/` ↔ §4.3 + §4.7,
+`reflection/` ↔ §4.4 + §4.5, `cache/` ↔ §4.6. No file reaches across
+directory boundaries except through the public types declared in
+`include/glibre/shader/shader.hpp`. There is no cross-cutting
+`shader/util/` directory — utilities (BLAKE3 hasher, subprocess
+launcher) live next to their sole consumer.
+
+**Build-system gating.** The plugin's `CMakeLists.txt` partitions
+sources by shipping eligibility. Only the build system distinguishes
+shipping from tooling builds; no in-tree code branches on
+`GLIBRE_SHIPPING` outside the `#if`-guards of §5 and §4.3 invariant 3.
+
+| Directory | Shipping build | Tooling / dev build |
+|-----------|----------------|---------------------|
+| `source/` | excluded | included |
+| `permutation/` | included (codec only) | included |
+| `backend/` | **excluded entirely** | included |
+| `reflection/` | included | included |
+| `cache/` | included (lookup + Library; cooker excluded) | included |
+
+The shipping `shader` plugin therefore links only:
+`permutation/` + `reflection/` + `cache/{blake3,cas_store,manifest,
+library}.cpp`. DXC, metal-shaderconverter, the include resolver, and
+the cooker are not in the shipping binary at any link layer (§4.3
+invariant 3, §4.8 invariant 3, §3 refusal 3).
+
+### 6.2 Subprocess flow: `glibre-shadercc`
+
+DXC and `metal-shaderconverter` are wrapped by a single offline driver
+binary, **`glibre-shadercc`**, which lives under `tools/shadercc/` and
+is not part of the `shader` plugin. The plugin's `backend/` code spawns
+this driver as a subprocess; the driver in turn spawns DXC and
+`metal-shaderconverter`. The engine never links DXC, never links
+`metal-shaderconverter`, and never invokes them at runtime — only the
+offline cooker, the editor, and tests reach them, and only via this
+driver.
+
+```text
+                       (offline build / editor / tests only)
+
+  CompilationPipeline (§4.3) ──► spawn ──► glibre-shadercc
+                                                │
+                                                ├──► spawn ──► dxc
+                                                │              ├─ --target dxil   (DXIL bytes)
+                                                │              └─ --target spirv  (SPIR-V bytes)
+                                                │
+                                                └──► spawn ──► metal-shaderconverter
+                                                               (consumes DXIL  ──► metallib bytes)
+
+  Outputs ◄── stdout (bytecode bytes, length-prefixed) ──── glibre-shadercc
+           ◄── stderr (structured shader::Error JSON) ────
+           ◄── exit code (0 = success, 1..N = enumerated Error)
+```
+
+**Why a wrapper exists.**
+
+1. **One subprocess hop per artifact.** The plugin spawns
+   `glibre-shadercc` once per `(ShaderSource, PermutationKey,
+   CompileTarget)`; the driver internally chains DXC → metal-converter
+   when the target is `MetalLib`. Without the wrapper, the plugin
+   would need two stat-and-spawn round-trips per Metal artifact and
+   would have to discover both binaries on every invocation.
+2. **One canonicalized argv schema.** The driver normalizes flag order
+   and quoting before invoking DXC, so the cache-key inputs (§4.3
+   invariant 4) come from the driver's stable argv schema, not from
+   the plugin's per-call argv builder. Two callers with semantically
+   equal flag sets produce byte-equal driver argv.
+3. **One error vocabulary.** The driver maps DXC and
+   metal-shaderconverter exit codes onto the closed `shader::Error`
+   enum (§5 / §10). The plugin parses a stable JSON error envelope
+   from stderr; it never inspects DXC- or metal-shaderconverter-native
+   diagnostics directly.
+4. **Sandbox policy in one place.** The driver runs each compiler
+   under macOS `sandbox-exec` (or the platform-equivalent seccomp
+   filter on Linux dev hosts) with read access scoped to the project
+   source root and write access scoped to a per-invocation temp dir.
+   Reproducibility flags (`-Qstrip_debug`, fixed `-O3`,
+   `-Zsb`-disabled time stamps) are pinned in the driver, not the
+   plugin (Occam collapse §3.3).
+
+**Engine never links DXC at runtime.** The runtime read path is
+`ShaderCache::Library::get(ShaderHash)` (§4.6, §4.8 invariant 3).
+There is no fallback path that spawns `glibre-shadercc` from a
+shipping process; the driver binary is not bundled into shipping
+distributions, and the shipping plugin's `backend/` directory is not
+linked in, so calling `IShaderBackend::compile` is unreachable code by
+construction (§5 `#if !GLIBRE_SHIPPING` guard, §4.3 invariant 3).
+
+**Driver location.** `tools/shadercc/` (a `tools` context plugin per
+`specs/tools/SPEC.md`). The `shader` context owns the *contract* with
+the driver — its argv schema, its stderr JSON envelope, its exit-code
+table — but does not own the driver source. This keeps DXC and
+metal-shaderconverter version-pinning out of the `shader` plugin's
+ABI surface (PHILOSOPHY §1, §10).
+
+### 6.3 Reflection: parse the DXIL container directly
+
+`reflection/` does **not** depend on `dxcompiler.dll`'s reflection
+APIs (no `IDxcContainerReflection`, no `ID3D12ShaderReflection`).
+DXIL artifacts are DXBC containers — a small, well-known wire format
+— and the §4.4 `ReflectionBlob` is built by walking the container's
+part table directly:
+
+```text
+DXIL artifact (bytes):
+
+  ┌─ DXBC header (magic "DXBC" + 16-byte hash + version + size) ─┐
+  │                                                                │
+  │  Part 0: ISG1 / "ISGN"  → vertex input signature elements      │
+  │  Part 1: OSG1 / "OSGN"  → output signature elements            │
+  │  Part 2: PSV0           → pipeline state validation table      │
+  │                            (bind ranges, register spaces,      │
+  │                             stage masks, frequency hints)      │
+  │  Part 3: RDAT           → runtime data (RT payloads, lib funcs)│
+  │  Part 4: RTS0           → root signature blob (if present)     │
+  │  Part 5: DXIL           → LLVM bitcode + named metadata        │
+  │                            (entry-point list, push consts)     │
+  │                                                                │
+  └────────────────────────────────────────────────────────────────┘
+```
+
+The parser is split by part:
+
+| Module | Owns | Produces |
+|--------|------|----------|
+| `dxbc_container.hpp/.cpp` | Header validation, part-table walk, bounds-checked slicing of part payloads. | `span<const std::byte>` per part name. Refuses unknown / duplicate parts. |
+| `psv0_reader.hpp/.cpp` | Pipeline-state-validation table parse — the canonical source of bind ranges, register spaces, stage masks, descriptor counts. | Raw `PSV0` records lifted into `BindingSlot`-shaped temporaries (no frequency tag yet). |
+| `dxil_metadata.hpp/.cpp` | Named-metadata walk over the `DXIL` part (LLVM bitcode-shaped). Extracts entry-point list, push-constant root parameters, RT payload sizes. | `EntryPoint` list, `PushConstantRange` list, `rt_payload_bytes`. |
+| `frequency_tagger.hpp/.cpp` | Per-binding frequency assignment from HLSL `[register(..., space=N)]` conventions and from explicit `[frequency(...)]` annotations the engine standardizes. | Each `BindingSlot` annotated with exactly one `DescriptorFrequencyGroup`. |
+| `descriptor_layout.cpp` | Project `ReflectionBlob` onto §4.5 four-frequency tables; sort each table by `(register_space, register_index, stage_mask)`. | `DescriptorLayout` + `RootSignatureSchema`. |
+
+**Determinism.** The container walk uses fixed iteration order (part
+table order on disk); the metadata walk fixes a canonical traversal of
+LLVM named metadata; the frequency tagger is a pure function of its
+inputs. Reflecting the same bytecode twice yields a structurally-equal
+`ReflectionBlob` (§4.4 invariant 2).
+
+**MetalLib reflection.** Never re-extracted from MSL or metallib
+itself. The `metal_converter` backend pairs each emitted metallib
+with the upstream DXIL `ReflectionBlob` and stores both in the
+artifact (§4.4 invariant 1, §3 collapse 4). The shipping plugin
+therefore links only the DXIL+SPIR-V branches of `reflection/`; the
+metallib branch needs no reflection code at all.
+
+**Ship-time presence.** `reflection/` is in the shipping plugin —
+hot-reload (§8) re-runs the parser on freshly compiled bytecode in
+editor / dev builds, and the runtime descriptor-layout consumer in
+`render` reaches into stored `ReflectionBlob` records via the cache.
+The parser code itself is small (the part-table walk plus PSV0/DXIL
+metadata readers), depends on nothing outside `<cstdint>` /
+`<span>` / `<vector>`, and carries no DXC dynamic linkage.
+
+### 6.4 Cache: BLAKE3 keys and the cooker walk
+
+`cache/` is the §4.6 aggregate's implementation. Two responsibilities,
+two clean halves:
+
+**Read path (shipping + tooling).**
+
+1. `ShaderCache::open(root, read_only=true)` memory-maps
+   `manifest.fory` (§7.5) and parses it with the codegen'd Fory reader
+   from the `data` middleman.
+2. `get(ShaderHash)` performs the BLAKE3-keyed lookup:
+   a. Search the manifest's `entries` (sorted ascending by
+      `artifact_hash`, §7.3) via binary search.
+   b. On hit, derive the CAS file path
+      `artifacts/<aa>/<bb>/<hash>` (`<aa><bb>` = first 4 hex chars of
+      the BLAKE3) and memory-map the `ShaderArtifactRecord` blob.
+   c. Parse into an in-memory `ShaderArtifact` value (§5).
+3. Returns `nullptr` on miss — there is no compile-on-miss path in
+   shipping (§4.6 invariant 2).
+
+The shipping plugin exposes only this read path. `ShaderCache::insert`
+and `ShaderCache::cook` are present on the type for tooling builds
+but their implementation TUs are excluded from the shipping link
+target.
+
+**Write path (cooker; tooling only).** The cooker is the sole writer
+to a `ShaderCache` (§7.5) and runs strictly offline. Its algorithm:
+
+```text
+cook(span<const PermutationKey> enumerated_keys):
+    1. enumerated_keys = permutation/enumeration_table.walk(project_pruner)
+       // The 4-axis cross-product is finite (§4.2). Project-level
+       // pruning (e.g. "this game does not ship Skin shading on Mobile")
+       // is a build-system responsibility; the table walks the resulting
+       // resolved set in tuple-field order.
+
+    2. For each key k in enumerated_keys:
+       2a. For each (CompileTarget t) in {DXIL, SPIRV, MetalLib}:
+           2b. source_hash := ShaderSource::preprocessed().total_hash
+           2c. flags_hash  := BLAKE3(canonical_flags(k, t))
+           2d. artifact_hash := BLAKE3(source_hash || k.to_bytes() ||
+                                      flags_hash || u8(t))
+           2e. if cas_store.has(artifact_hash):
+                   continue              // idempotent (§4.6 inv 1)
+           2f. artifact := IShaderBackend::compile(source, k, t)   // §6.2
+           2g. artifact.reflection := IShaderBackend::reflect(artifact) // §6.3
+           2h. artifact.descriptor_layout := DescriptorLayout::derive(
+                                                 artifact.reflection)  // §4.5
+           2i. cas_store.insert(artifact_hash, ShaderArtifactRecord{...})
+
+    3. manifest := ShaderCacheManifest{
+           cache_root_relative: <relative path>,
+           schema_abi_hash:     glibre_types_abi_hash(),
+           entries:             sort_ascending(by artifact_hash, all CAS entries),
+           enumerated_keys:     sort_ascending(by k.to_bytes(), enumerated_keys),
+       }
+
+    4. integrity_check(manifest, cas_store):
+       - Every manifest entry has a CAS file (no dangling refs).
+       - Every CAS file is referenced by the manifest (no orphan blobs).
+       - Both failures raise Error::CacheIntegrity (§4.6 inv 3).
+
+    5. atomic_write(<library_root>/manifest.fory, manifest)
+```
+
+Everything in steps 2f–2h lives behind the `#if !GLIBRE_SHIPPING`
+boundary. Steps 2a–2e + 3–5 live in `cache/cooker.cpp`, which is
+itself excluded from the shipping link target. The shipping plugin
+therefore contains only the §6.4 read path: BLAKE3 hasher + CAS file
+mapper + manifest reader + binary search.
+
+**BLAKE3 source.** A single in-tree BLAKE3 implementation lives at
+`cache/blake3.hpp/.cpp`. The same hasher is used both for cache keys
+(this section) and for include-graph content hashes (§4.1) — one
+hash family across the context, no SHA-/MD-/xxhash drift.
+
+### 6.5 Shipping-build behavior — what survives the cut
+
+Restating the §6.1 build-system table as a runtime contract:
+
+| Surface | Shipping | Justification |
+|---------|----------|----------------------------|
+| `source/` (HLSL frontend) | **excluded** | §3 refusal 3, §4.3 inv 3 — shipping never opens HLSL. |
+| `permutation/` | included | §4.2 — codec is consumed at runtime to map a `PermutationKey` to the cache lookup. Pure value math; no I/O. |
+| `backend/dxc_hlsl/`, `backend/metal_converter/` | **excluded** | §4.3 inv 3, §4.8 inv 3 — DXC and metal-shaderconverter are tooling-only. The whole `IShaderBackend::compile` virtual is `#if`-guarded out of §5, so callers cannot even reference it. |
+| `reflection/` | included | §6.3 — DXIL parser is tiny and dependency-free. Reads stored `ReflectionBlob` records on artifact load; no DXC linkage. |
+| `cache/{blake3, cas_store, manifest, library}.cpp` | included | §4.6 inv 2 — sole runtime read path. Manifest is mmap'd, CAS files are mmap'd, BLAKE3 is the lookup-key codec. |
+| `cache/cooker.cpp`, `cache/integrity.cpp` | **excluded** | Sole writer is offline (§7.5). Shipping is read-only. |
+| `tools/shadercc/` (`glibre-shadercc` driver) | not bundled | §6.2 — the driver binary is a tooling artifact; it is not redistributed in shipping. |
+
+The shipping `shader.dylib` therefore contains: §4.2 (key codec), the
+DXIL/SPIR-V reflection parser, BLAKE3, the CAS read path, the manifest
+reader, and `ShaderCache::Library`. Nothing else. PHILOSOPHY §6
+("zero runtime reflection in shipping") holds for the *engine*: any
+reflection that runs at shipping time is a bounded read of a
+pre-cooked, content-addressed `ReflectionBlob` — never a live DXIL
+parse — but the parser itself ships so the (rare) editor / asset-pipe
+build that wants to re-extract reflection from a bundled artifact
+still has the code.
+
+### 6.6 Dataflow recap (§4 diagram, projected onto §6)
+
+The §4 dataflow:
+
+```text
+ShaderSource ─► PermutationKey ─► CompilationPipeline ─► ReflectionBlob
+                                       │                       │
+                                       ▼                       ▼
+                                ShaderArtifact ─► ShaderCache  DescriptorLayout
+                                       │            (CAS)            │
+                                       └────► IShaderBackend ◄───────┘
+```
+
+Maps onto §6 directories as:
+
+```text
+source/ ─► permutation/ ─► backend/ ──► reflection/
+                              │              │
+                              ▼              ▼
+                            cache/ (cooker, write) ──► reflection/descriptor_layout
+                              │                                  │
+                              └────► backend/ (IShaderBackend) ◄─┘
+
+(shipping link target = permutation/ + reflection/ + cache/{read})
+```
+
+No directory is reachable from another except along the arrows above,
+and the shipping cut removes both `source/` and `backend/` without
+breaking the remaining link.
 
 ## 7. Persistence & Schemas
 
