@@ -300,8 +300,694 @@ frame phase 3" lives in another plugin or another context.
 
 ## 4. Aggregates & Invariants
 
-- Aggregate / entity / value object.
-- Invariants that must hold at every public API boundary.
+This section enumerates physics's aggregates, entities, and value
+objects, and the invariants every public boundary must hold. Aggregates
+are listed in data-flow order (config → mirror in → step → mirror out →
+expose). Each aggregate owns one dimension of "produce a deterministic
+Jolt-backed rigid-body step inside frame phase 3"; per PHILOSOPHY §1
+(SRP) an aggregate is admitted to this list only when its single
+reason-to-change does not collapse into another's. Where two harmonius
+primitives reduce to one glibre primitive the collapse is cited from
+§3.2; cross-context concerns (frame schedule, ECS runtime, asset bytes,
+shape bake, scripting, rendering) are explicitly delegated and never
+re-asserted here (§3.3).
+
+### 4.1 Aggregate roster
+
+#### 4.1.1 `PhysicsWorld` — root entity owning one Jolt instance (aggregate root)
+
+**Reason to change:** what physics owns inside an ECS `World` — one
+Jolt `PhysicsSystem` and the seam around it. Distinct from the
+deterministic configuration that drives it (§4.1.2) and from the
+clock that advances it (§4.1.3).
+
+**Composition.** Owns exactly one Jolt `PhysicsSystem` instance, the
+broadphase + narrowphase + constraint set + contact listener that come
+with it, the `BodyId` allocator, the `ShapeBlob` / `ShapeHandle` table
+(§4.1.6), the active `Joint` registry (§4.1.7), the contact-event
+drain buffers (§4.1.8), and the `JoltMiddleman` (§4.1.13) handle
+through which every Jolt type crosses the plugin ABI. Holds
+back-pointers to `PhysicsConfig` (§4.1.2), `Accumulator` (§4.1.3), and
+`PhysicsQueries` (§4.1.10). Holds **no** ECS-component pointers — the
+ECS↔Jolt mirror is performed at substep entry / exit by the world
+itself (§3.2 collapse #1).
+
+**Identity & lifetime.** One `PhysicsWorld` per ECS `World` (§3.2
+collapse #8); created at world init from a frozen `PhysicsConfig`,
+destroyed at world teardown. Survives hot-reload of the physics plugin
+when the `JoltMiddleman` ABI hash matches (§8); refused otherwise per
+`reviews/decisions/error-model.md`.
+
+**Public-boundary invariants.**
+
+1. **Owns frame phase 3 entirely.** Every byte of work that advances
+   the simulation lives inside phase 3 of the owning `World`'s frame
+   loop (`reviews/decisions/frame-phases.md`). No phase-3 work runs
+   outside phase 3; no phase ≠ 3 calls into Jolt's stepping API.
+2. **One Jolt `PhysicsSystem` per world, period.** The world holds
+   no second simulation kernel and exposes no second Jolt instance.
+   Multi-zone / multi-planet / 2D-vs-3D topology is post-MVP and
+   re-enters as additional `PhysicsWorld` instances on additional
+   `World`s (§3.2 collapse #8).
+3. **No exception path.** Every fallible public method returns
+   `glibre::Result<T>` per `reviews/decisions/error-model.md`;
+   exceptions thrown by Jolt are caught at the `JoltMiddleman` ingress
+   and translated into `physics::Error` arms before crossing the ABI.
+4. **ECS↔Jolt mirror is one-way per substep.** ECS-side writes
+   (`ExternalForce`, `ExternalTorque`, kinematic transform overrides,
+   joint motor targets) are committed into Jolt at substep entry;
+   Jolt-side writes (`Velocity`, `AngularVelocity`, `GlobalTransform`
+   inputs, contact events, sleeping flags) are committed back to ECS
+   at substep exit. There is no mid-substep cross-traffic (§3.2
+   collapse #5).
+
+#### 4.1.2 `PhysicsConfig` — frozen deterministic configuration (value object)
+
+**Reason to change:** the deterministic knob set that makes the
+simulation reproducible across hosts and runs. Distinct from the
+per-body knobs on `RigidBody` (§4.1.5) and the per-collider knobs on
+`Collider` (§4.1.6).
+
+**Composition.** A flat record holding gravity (`Vec3`), fixed
+substep `dt`, `substep_count` per frame, solver `velocity_iters` and
+`position_iters`, `warm_start_factor`, linear + angular sleep
+thresholds and frame counts, CCD enable bit, the `BroadphaseLayer`
+mapping table (`CollisionLayer` → `BroadphaseLayer`), the layer-pair
+interaction matrix (collide / trigger-only / ignore), the RNG seed,
+and the maximum bodies / shapes / contacts / constraints budgets the
+Jolt `PhysicsSystem` is sized against. Authored as a Fory-serialised
+asset by `data` (§7) and consumed at world init.
+
+**Identity & lifetime.** One `PhysicsConfig` per `PhysicsWorld`,
+captured by value at init, **immutable for the lifetime of the
+world**. A new config means a new world.
+
+**Public-boundary invariants.**
+
+1. **Init-time-immutable.** No public API mutates a `PhysicsConfig`
+   after `PhysicsWorld` construction. Runtime tuning is rejected
+   (§3.2 collapse #2) — re-tuning is "build a new world".
+2. **Deterministic by construction.** Every field that influences the
+   stepping math (substep `dt`, iteration counts, warm-start factor,
+   sleep thresholds, layer matrix, RNG seed) is fixed-point or
+   bit-exact float; `PhysicsConfig` carries no host-specific
+   intrinsics path or platform-tier branch (PHILOSOPHY §6, §7).
+3. **Single source of global knobs.** Every init-time-immutable
+   simulation knob (collapse #6) lives on `PhysicsConfig`; per-body
+   knobs (motion type, mass, damping, sleeping flag, CCD flag) live
+   on `RigidBody` (§4.1.5); per-shape knobs (layer, density,
+   material) live on `Collider` (§4.1.6). No knob is duplicated.
+4. **Layer matrix is total.** The `BroadphaseLayer` mapping covers
+   every defined `CollisionLayer`; the layer-pair interaction matrix
+   is fully specified (collide / trigger-only / ignore for every
+   ordered pair). An incomplete matrix at world init returns
+   `physics::Error::ConfigInvalid`.
+
+#### 4.1.3 `Accumulator` — fixed-timestep clock for phase 3 (value object)
+
+**Reason to change:** how wall-clock frame `dt` is converted into a
+deterministic count of fixed substeps. Distinct from what a substep
+does (§4.1.4) and from the config it consumes (§4.1.2).
+
+**Composition.** Holds the carried remainder (`f32` seconds), the
+last-frame stamp, and a pre-resolved pointer to its owning world's
+`PhysicsConfig.dt`. Drained once per frame at phase-3 entry: `acc +=
+core_dt`, then while `acc >= dt && substeps_done < SUBSTEP_CAP_4`,
+runs one `Substep` (§4.1.4) and decrements `acc` by `dt`. Carry is
+preserved across frames so byte-equal trace replay can re-derive the
+substep count.
+
+**Identity & lifetime.** One `Accumulator` per `PhysicsWorld`; lives
+inside the world for its entire lifetime. Serialised into
+`PhysicsSnapshot` (§4.1.12) so a replay restart resumes with the same
+remainder.
+
+**Public-boundary invariants.**
+
+1. **Single owner of phase-3 advancement.** Only the `Accumulator`
+   advances the simulation clock; no plugin, gameplay system, or test
+   harness may call into Jolt's `Step` outside the accumulator's
+   draining loop (§3.2 collapse #2).
+2. **Bounded catch-up.** The substep loop is hard-capped at four
+   substeps per frame; remainder above that is **dropped** (carry
+   reset to zero) and a `physics::Warning::AccumulatorClamped` is
+   logged. The simulation never falls behind by more than four
+   substeps' worth of wall-clock work, and frame-loop pacing never
+   busy-waits inside phase 3 (PHILOSOPHY §7 — determinism over
+   wall-clock fidelity under a stall).
+3. **Carry preserved.** Whatever `acc` remains under `dt` after the
+   draining loop is preserved verbatim into the next frame; it is the
+   determinism unit that makes spike-induced frame-rate variation
+   re-converge to the same trajectory across hosts.
+4. **No re-entry.** Phase 3 is a single barrier per
+   `frame-phases.md`; the accumulator's draining loop is the only
+   loop that re-enters Jolt's `Step` within a frame, and it never
+   re-enters phases 2–5 as a sub-graph.
+
+#### 4.1.4 `Substep` — one fixed `dt` Jolt step (value object)
+
+**Reason to change:** what counts as one deterministic step (the unit
+of byte-equality across hosts). Distinct from how many of them run
+this frame (§4.1.3).
+
+**Composition.** Not a stored object — a logical pipeline executed by
+`PhysicsWorld::step_one(...)` per Jolt step: (1) **commit ECS → Jolt**
+(drain `ExternalForce` / `ExternalTorque`, apply kinematic overrides,
+apply joint motor targets, zero the per-frame accumulator
+components), (2) Jolt's broadphase + narrowphase + constraint solve +
+contact resolution + integration (one call into Jolt — see §3.2
+collapse #1), (3) **commit Jolt → ECS** (write `Velocity` /
+`AngularVelocity` / position back into ECS, drain Jolt's contact
+listener into the contact-event buffers (§4.1.8), update `Sleeping`
+markers (§4.1.14), update `Island` membership read-only).
+
+**Identity & lifetime.** Stack-resident; lives only for the duration
+of one Jolt `Step` call. The number of substeps run in a given frame
+is determined by the `Accumulator` (§4.1.3) and saved into
+`PhysicsSnapshot` (§4.1.12) for trace replay.
+
+**Public-boundary invariants.**
+
+1. **One Jolt `Step` per substep.** A substep maps 1:1 to one Jolt
+   `Step`; there is no partial step, no nested step, no re-entry.
+2. **ECS commit ordering.** ECS writes commit at substep **entry**;
+   Jolt writes commit at substep **exit**. Mid-substep cross-traffic
+   is forbidden (§3.2 collapse #5). Violations are caught by a debug
+   instrumentation hook that asserts no ECS↔Jolt traffic between the
+   two commit barriers.
+3. **External-force drain is total.** `ExternalForce` and
+   `ExternalTorque` components are read in full at substep entry and
+   reset to zero at substep exit; a value left over the boundary is
+   a programming error and a debug-build assertion fires.
+4. **Deterministic given (config, body set, input).** Two substeps
+   with byte-equal `PhysicsConfig`, byte-equal body / collider /
+   joint state, and byte-equal `ExternalForce` / `ExternalTorque` /
+   kinematic overrides produce byte-equal post-substep state. No
+   field on any aggregate observed by a substep depends on host
+   thread count, allocator address, or wall-clock time
+   (PHILOSOPHY §7, R-4.1.NF3).
+
+#### 4.1.5 `RigidBody` — per-entity body component + Jolt mirror (entity)
+
+**Reason to change:** per-body kinematic and dynamic state; the
+ECS-side projection of one Jolt body. Distinct from the shape it
+collides with (§4.1.6) and from joints binding it (§4.1.7).
+
+**Composition.** ECS component carrying `MotionType`
+(`Static` / `Kinematic` / `Dynamic`), mass, inertia tensor (or auto-derived
+flag), linear + angular damping, the `BodyId` (§4.1.5b) of its Jolt
+mirror, the CCD flag, the sleeping flag (§4.1.14), and back-references
+to its `Velocity` / `AngularVelocity` companion components.
+`ExternalForce` and `ExternalTorque` are co-located on the same
+entity as accumulator components; physics drains them on the substep
+boundary (§4.1.4 invariant 3). Per-body knobs that **must** be
+per-body live here; everything else lives in `PhysicsConfig` (§3.2
+collapse #6).
+
+**Identity & lifetime.** One `RigidBody` component per simulating
+entity; created when the entity gains the component, removed when
+the component is dropped. Creation allocates a Jolt `BodyID` via
+the world's deterministic allocator; removal frees it. Survives
+hot-reload of the physics plugin (§8).
+
+##### 4.1.5b `BodyId` — stable handle into Jolt's body table (value object)
+
+**Composition.** A 32-bit stable handle (Jolt `BodyID`) issued by
+`PhysicsWorld`'s deterministic allocator. Allocation order is fixed
+by the order in which `RigidBody` components materialise in the
+world (the ECS materialisation order is itself deterministic —
+PHILOSOPHY §7).
+
+**Public-boundary invariants on `RigidBody` + `BodyId`.**
+
+1. **`BodyId` is stable across reload.** Allocation order is a
+   function of ECS body insertion order, not of host-thread
+   scheduling or allocator address. After a hot-reload swap the same
+   ECS entities resolve to the same `BodyId` values; persisted
+   replays that key on `BodyId` re-bind without rewriting (§3.2
+   collapse #9, PHILOSOPHY §8).
+2. **One `BodyId` per `RigidBody`.** A `RigidBody` component holds
+   exactly one `BodyId`; a `BodyId` resolves to exactly one ECS
+   entity inside its owning world. Cross-world `BodyId` lookups
+   return `physics::Error::BodyNotFound`.
+3. **`MotionType` fixes Jolt body kind.** A body's `MotionType` is
+   established at `RigidBody` creation and pinned for that
+   `BodyId`'s lifetime; switching motion type means destroying the
+   `RigidBody` and re-adding it (which allocates a new `BodyId`).
+4. **Static + Kinematic invariants.** `Static` bodies carry zero
+   `Velocity` / `AngularVelocity` and ignore `ExternalForce` /
+   `ExternalTorque`; `Kinematic` bodies are integrated by the
+   ECS-side script writing transforms + linear/angular targets and
+   are immune to solver impulse. Violating either is a debug-build
+   assertion.
+
+#### 4.1.6 `Collider` / `ShapeHandle` / `ShapeBlob` — collision geometry mirror (entity + value object + value object)
+
+**Reason to change:** what shape an entity collides with and how
+that shape's bytes are sourced. Distinct from body dynamics
+(§4.1.5).
+
+**Composition.**
+
+- **`Collider`** — ECS component carrying one `ShapeHandle`, an
+  offset transform from body to shape, a density override (or
+  default-from-`PhysicsMaterial` flag), the `CollisionLayer`, the
+  `PhysicsMaterial` reference, and an optional `Trigger` marker (see
+  §4.1.9). Per-shape knobs that must be per-shape live here;
+  everything else lives in `PhysicsConfig` (§3.2 collapse #6).
+- **`ShapeHandle`** — opaque, reference-counted handle into the
+  world's shape table. Carries a `ShapeBlob` content hash and a
+  resolved Jolt `Shape` pointer. The handle itself is the only thing
+  that crosses the plugin ABI; Jolt `Shape` pointers never escape
+  the middleman seam.
+- **`ShapeBlob`** — versioned, immutable byte payload (primitive
+  parameters, baked convex hull, baked triangle mesh, baked
+  heightfield, baked compound) authored by `content` / `geometry` at
+  cook time (§3.3). Identified by content hash; never re-bakes at
+  runtime.
+
+**Identity & lifetime.** A `Collider` lives on its entity; its
+`ShapeHandle` is reference-counted by `PhysicsWorld`'s shape table.
+A `ShapeBlob` is loaded into the table at first reference and
+unloaded when its refcount drops to zero. Multiple `Collider`s
+referencing the same `ShapeBlob` content hash share one row of the
+table.
+
+**Public-boundary invariants.**
+
+1. **`ShapeBlob`s are shared by hash.** A given content hash maps to
+   exactly one row of the shape table for the lifetime of the world;
+   a second reference resolves to the same `ShapeHandle`. Two
+   distinct hashes never share a row (§3.2 collapse #4).
+2. **Shape kind invisible at the seam.** `ShapeHandle` carries no
+   kind tag visible to ECS code; primitive vs. convex vs. mesh vs.
+   compound is resolved internally by Jolt. Adding a new kind (2D
+   primitives, SDF voxel, runtime quickhull — all post-MVP per
+   §3.3) introduces a new `ShapeBlob` variant without changing the
+   handle surface.
+3. **`Collider` is a thin mirror.** The component never owns shape
+   bytes; it owns one `ShapeHandle` plus the per-instance metadata
+   (offset, layer, material, trigger flag). Mutating the shape means
+   replacing the `ShapeHandle`, not editing the blob.
+4. **Trigger flag is shape-side.** Whether a contact pair receives
+   solver impulse or only emits trigger events is determined by the
+   `Trigger` marker on `Collider` plus the layer-pair interaction
+   matrix in `PhysicsConfig`; per-frame mutation is forbidden.
+5. **Compound shapes are pre-baked.** Multi-part shapes (vehicle
+   chassis, fractured rubble) ship as a single compound `ShapeBlob`
+   produced by `content` / `geometry`'s V-HACD / authoring path
+   (§3.3); physics never decomposes at runtime.
+
+#### 4.1.7 `Joint` — constraint between two bodies (entity)
+
+**Reason to change:** which constraint topology binds two bodies and
+its tuning. Distinct from the bodies it binds (§4.1.5).
+
+**Composition.** ECS entity (a joint **is** an entity, not a
+component-on-a-body — collapse-aligned with harmonius and SRP) bearing
+a `Joint` component declaring the joint kind (`Fixed` / `Revolute` /
+`Prismatic` / `Distance` / `Generic6Dof`), the two `BodyId` endpoints,
+the anchor frame on each body, a Jolt `ConstraintRef` produced by the
+mirror, and optional companion components: `JointLimits` (bounded
+angular / linear ranges), `JointMotor` (powered drive target), and
+`JointBreakThreshold` (force / torque limit triggering despawn). The
+joint kind set is fixed; specialised joint surfaces (ragdoll, severable
+limbs) are post-MVP plugin work (§3.3).
+
+**Identity & lifetime.** One Jolt constraint per `Joint` entity;
+created at component-add, destroyed at component-remove or when a
+break threshold trips. On break, the entity is despawned by physics
+and a `JointBroken` event is emitted (§4.1.8).
+
+**Public-boundary invariants.**
+
+1. **Joint = ECS entity, not a body component.** Despawning a joint
+   despawns its entity; a body holds no list of joints, only Jolt
+   resolves connectivity. Removing a body that is still referenced
+   by a joint returns `physics::Error::JointDanglingEndpoint` and
+   refuses the body removal until the joint is despawned first.
+2. **Companion components are optional.** Absence of `JointLimits`
+   means unbounded; absence of `JointMotor` means passive; absence
+   of `JointBreakThreshold` means unbreakable. Adding a companion
+   mid-run is permitted (it crosses one substep boundary to commit);
+   the kind itself is fixed at creation.
+3. **Warm-start is config-global.** The warm-start factor lives in
+   `PhysicsConfig` (§3.2 collapse #2), not on the joint; per-joint
+   solver overrides are rejected for determinism.
+4. **`JointBroken` is the only physics-emitted lifecycle event.**
+   Severance, fragment spawn, prosthetic re-attachment are post-MVP
+   plugin work (§3.3); physics's responsibility ends at emitting
+   `JointBroken` on threshold trip and despawning the joint entity
+   (§3.2 collapse #5).
+
+#### 4.1.8 `ContactManifold` / `ContactEvent` — contact data + lifecycle (value object + value object)
+
+**Reason to change:** what contact information crosses the seam and
+how its lifecycle is observed. Distinct from triggers (§4.1.9).
+
+**Composition.**
+
+- **`ContactManifold`** — per-pair value object carrying contact
+  points (positions in world space), per-point separations, the
+  contact normal, the `PhysicsMaterial` at each side, and per-point
+  accumulated normal + friction impulses. Written by Jolt's
+  narrowphase, mirrored across the `JoltMiddleman` seam as plain
+  data, attached as the payload of `CollisionPersisted` /
+  `CollisionStarted` events.
+- **`CollisionStarted` / `CollisionPersisted` / `CollisionEnded`**
+  — ECS event components written into per-pair event buffers by
+  Jolt's `ContactListener` adapter at substep exit (§3.2 collapse
+  #5). Each event carries the two `BodyId` endpoints and (for
+  `Started` / `Persisted`) the `ContactManifold`.
+
+**Identity & lifetime.** A `ContactManifold` is reborn each
+substep; lifetime ends at the next substep that retires the pair.
+Events live in a per-frame ECS buffer and are reclaimed at end of
+phase 8 (after downstream phases 5+ have read them inside the
+same frame).
+
+**Public-boundary invariants.**
+
+1. **Same-frame delivery.** Events emitted by phase 3 are visible to
+   phases 5+ inside the same frame (R-4.2.NF3); no event survives
+   into the next frame's read window. (§3.2 collapse #5.)
+2. **Substep-boundary drain.** Contact events are written at substep
+   **exit**, after Jolt's solver has produced final manifolds. No
+   event is written mid-substep, no event is written outside phase
+   3.
+3. **Plain-data payload.** `ContactManifold` carries no Jolt-internal
+   pointers; the only handles inside it are `BodyId` (§4.1.5b) and
+   `PhysicsMaterial` references. Cross-ABI traffic is by value.
+4. **Lifecycle is monotone.** A pair transitions
+   `Started → Persisted* → Ended`; no `Persisted` without prior
+   `Started`, no `Ended` without prior `Started`. Misorderings are
+   debug-build assertions on the listener adapter.
+
+#### 4.1.9 `Trigger` / `TriggerEvent` — overlap-only volumes + lifecycle (value object + value object)
+
+**Reason to change:** how no-response collision volumes are flagged
+and how their lifecycle becomes ECS visible. Distinct from
+contact-emitting colliders (§4.1.8).
+
+**Composition.**
+
+- **`Trigger`** — marker component on a `Collider` (§4.1.6) clearing
+  the contact-response bit. The pair still goes through narrowphase
+  (so overlaps are detected) but the solver applies no impulse.
+- **`TriggerEnter` / `TriggerStay` / `TriggerExit`** — ECS event
+  components written into per-pair buffers by the same listener
+  adapter that emits contact events, with the response bit cleared.
+
+**Identity & lifetime.** Same as contact events (§4.1.8). The
+`Trigger` marker lives on the `Collider`'s entity for the entity's
+lifetime.
+
+**Public-boundary invariants.**
+
+1. **Trigger pairs never receive solver impulse.** A `Trigger`-marked
+   collider plus any other collider in a layer-pair flagged
+   `trigger-only` in `PhysicsConfig` produces lifecycle events but
+   zero contact impulse. Mutating "is this a trigger?" mid-frame is
+   forbidden (§4.1.6 invariant 4).
+2. **Same-frame delivery.** `TriggerEnter` / `TriggerStay` /
+   `TriggerExit` follow the same substep-exit drain rule as contact
+   events (§4.1.8).
+3. **Lifecycle is monotone.** `Enter → Stay* → Exit`, same shape as
+   contact pairs.
+
+#### 4.1.10 `PhysicsQueries` / `QueryFilter` / `QueryHit` — synchronous spatial query surface (entity + value object + value object)
+
+**Reason to change:** what spatial questions plugins ask of physics
+and how they cross the ABI. Distinct from the broadphase that backs
+them (§4.1.11).
+
+**Composition.**
+
+- **`PhysicsQueries`** — ECS resource (one per `PhysicsWorld`)
+  exposing the synchronous query surface: `ray_cast`,
+  `shape_cast` (oriented), `overlap`, `closest_point`. Backed by
+  Jolt's broadphase via `JoltMiddleman` (§4.1.13) — the very same
+  broadphase phase 3 stepping uses (§3.2 collapse #3).
+- **`QueryFilter`** — value object combining `CollisionLayer` mask,
+  ECS-component-presence requirements, and an optional callback
+  predicate; passed by value to every query call.
+- **`QueryHit`** — plain-data result row carrying entity,
+  `BodyId`, world-space hit point, normal, distance, hit
+  `CollisionLayer`, and `PhysicsMaterial` reference. Returned by
+  value (or as a span); never references Jolt internals.
+
+**Identity & lifetime.** `PhysicsQueries` lives for the lifetime of
+its `PhysicsWorld`. A `QueryFilter` is constructed and consumed
+at the call site. `QueryHit` rows are owned by the caller's
+buffer (caller-supplied span for batched queries).
+
+**Public-boundary invariants.**
+
+1. **Shared broadphase.** Queries hit the same Jolt broadphase that
+   phase 3 stepping uses; there is no second spatial structure
+   (§3.2 collapse #3). Results reflect the post-phase-3 body state
+   of the current frame for queries called in phases 5+, and the
+   pre-phase-3 state for queries called in phase 1 (the only legal
+   pre-step query window).
+2. **Plain-data results.** `QueryHit` carries no Jolt-internal
+   pointer; cross-ABI traffic is by value (§3.2 collapse #1).
+3. **No physics broadphase outside this surface.** Render owns its
+   own HZB / cull (`render`'s spec); navigation will own its own
+   nav BVH when it lands. Cross-domain "shared spatial index" is
+   refused (PHILOSOPHY anti-pattern; §3.2 collapse #3).
+4. **Synchronous semantics.** Queries return inside the calling
+   frame; there is no async / streaming query in MVP. A query
+   issued during phase 3 is rejected with
+   `physics::Error::QueryDuringStep` — phase 3 is single-owner.
+5. **Filter is pure.** `QueryFilter`'s callback is read-only over
+   ECS state; mutating ECS during a filter callback is undefined
+   and a debug-build assertion fires.
+
+#### 4.1.11 `BroadphaseLayer` — coarse Jolt broadphase bucket (value object)
+
+**Reason to change:** how `CollisionLayer`s are coarsened for fast
+static-vs-dynamic culling. Distinct from the per-body layer
+(§4.1.5) and from the layer-pair interaction matrix (§4.1.2).
+
+**Composition.** A small enum (typically `NonMoving` / `Moving` /
+`Trigger` for MVP — exact set frozen by `PhysicsConfig`) plus the
+mapping table `CollisionLayer → BroadphaseLayer` carried in
+`PhysicsConfig`. The mapping is consumed by Jolt's broadphase at
+world init.
+
+**Identity & lifetime.** Compile-time-finite; lives for the
+world's lifetime. Membership of a body in a broadphase layer is
+fixed by its `Collider`'s `CollisionLayer` plus the config mapping;
+it does not change at runtime.
+
+**Public-boundary invariants.**
+
+1. **Mapping is total and frozen.** Every `CollisionLayer` has a
+   `BroadphaseLayer`; the mapping is captured in `PhysicsConfig`
+   at world init and is immutable thereafter (§4.1.2 invariant 1).
+2. **Broadphase membership follows collision layer.** A body's
+   broadphase bucket is derived from its `Collider`'s
+   `CollisionLayer` via the config mapping; no second membership
+   path exists.
+
+#### 4.1.12 `PhysicsSnapshot` — Fory-serialised determinism unit (value object)
+
+**Reason to change:** what counts as the persisted physics state
+(replay, golden trace, post-MVP rollback). One schema, one writer
+(§3.2 collapse #9).
+
+**Composition.** A Fory-serialised dump (schema authored by
+physics, codegen by `data` per `reviews/decisions/fory-codegen.md`)
+keyed by `BodyId` (§4.1.5b), carrying for each body: `MotionType`,
+position, orientation, linear + angular velocity, sleep frame
+counter, accumulated impulses on every joint that touches it, the
+`Accumulator` carry, the active `ShapeBlob` content hashes
+(reference, not bytes), and the `PhysicsConfig` content hash. The
+schema is the byte-equality unit for cross-host determinism gates.
+
+**Identity & lifetime.** Produced on demand by
+`PhysicsWorld::snapshot()`; consumed by the determinism gate
+(byte-compare across hosts), by golden-trace replay, and by the
+post-MVP rollback path. Survives across worlds and across
+hot-reload.
+
+**Public-boundary invariants.**
+
+1. **One schema for all "persisted physics state" needs.** Replay,
+   golden-trace, post-MVP rollback all write into and read out of
+   the same `PhysicsSnapshot` schema (§3.2 collapse #9).
+2. **`BodyId`-keyed.** Stable across hosts and reloads (§4.1.5
+   invariant 1); consumers may re-bind without rewriting payload.
+3. **Byte-equal across hosts.** Two `PhysicsSnapshot`s captured at
+   the same logical tick on two different hosts running with the
+   same `PhysicsConfig` content hash are byte-identical
+   (PHILOSOPHY §7, R-4.1.NF3). Field iteration order is fixed by
+   the Fory schema, not by host hash-table order.
+4. **References, not bytes.** Snapshots reference `ShapeBlob`s and
+   `PhysicsMaterial`s by content hash; the bytes themselves live
+   in the asset bundle and are loaded by `data` / `content` (§3.3).
+
+#### 4.1.13 `JoltMiddleman` — ABI-gated Jolt-derived type carrier (entity)
+
+**Reason to change:** the Jolt version glibre links against (§3.2
+collapse #1). One seam, one ABI hash.
+
+**Composition.** A middleman dylib (per PHILOSOPHY §9) carrying the
+Jolt-derived ABI types both `physics` and the engine link against:
+`BodyId`, `ConstraintRef`, opaque `Shape*` token, `ContactManifold`
+plain-data layout, broadphase layer enum, `Step` entry point. The
+middleman is the only place Jolt headers are visible across the
+plugin ABI; its content hash gates plugin load.
+
+**Identity & lifetime.** One per process, loaded at engine init,
+unloaded at engine teardown. Survives `physics` plugin hot-reload
+when its hash matches; reload is **refused** on hash mismatch with
+`core::Error::PluginAbiHashMismatch` per
+`reviews/decisions/error-model.md` (§3.2 collapse #1, PHILOSOPHY §9).
+
+**Public-boundary invariants.**
+
+1. **Single ABI seam for Jolt.** No physics-internal type derived
+   from Jolt headers crosses the plugin boundary except via
+   `JoltMiddleman`. Direct Jolt header inclusion outside
+   `physics` and `JoltMiddleman` is a build error.
+2. **Hash-gated load.** Refuse on hash mismatch; the previously
+   loaded `physics` plugin keeps running (PHILOSOPHY §9). The
+   refusal is the **only** legal failure path for hot-reload's
+   ABI step.
+3. **Exception ingress wrapper.** Jolt is exception-tolerant
+   internally; `JoltMiddleman` is the lone wrapper compiled with
+   `-fexceptions` (`reviews/decisions/error-model.md`); thrown
+   exceptions translate to `physics::Error` arms before crossing
+   the ABI.
+
+#### 4.1.14 `Sleeping` / `Island` — rest-state markers (value object + value object)
+
+**Reason to change:** how rest-state is detected and exposed for
+diagnostics. Distinct from the dynamics state (§4.1.5).
+
+**Composition.**
+
+- **`Sleeping`** — marker component added by physics to a
+  `RigidBody`'s entity when the body's island has been below the
+  `PhysicsConfig` linear + angular thresholds for the configured
+  frame count. Removed on external force, external torque, new
+  contact, or kinematic transform override. The marker is set /
+  cleared at substep exit (§4.1.4 invariant 2).
+- **`Island`** — Jolt-internal connected component of bodies
+  coupled by contacts or constraints. Exposed read-only via
+  `RigidBody::island_id() -> u32` for diagnostics (profiler
+  overlay, debug draw); never written by ECS code.
+
+**Identity & lifetime.** `Sleeping` lives on the body's entity
+between sleep-detect and wake. `Island` membership is rebuilt by
+Jolt every substep; the exposed id is valid only for the current
+frame (read by phases 5+ inside the same frame).
+
+**Public-boundary invariants.**
+
+1. **Sleep wake is total.** Any `ExternalForce` / `ExternalTorque`
+   write, any incoming contact pair, or any kinematic transform
+   override on a sleeping body removes the `Sleeping` marker by
+   end of the next substep. No body remains sleeping while it has
+   nonzero pending solver inputs.
+2. **`Island` is read-only across the seam.** ECS code may read
+   `island_id` for grouping / debug draw but may not write to it
+   or rely on it across substep boundaries.
+3. **Threshold bounded by config.** Linear and angular sleep
+   thresholds and the frame count are `PhysicsConfig` fields
+   (§3.2 collapse #6); per-body overrides are rejected.
+
+#### 4.1.15 `CCD` flag — continuous-collision body bit (value object)
+
+**Reason to change:** which bodies opt into swept-volume narrowphase
+to prevent tunneling for fast movers. Distinct from the global CCD
+enable on `PhysicsConfig` (§4.1.2).
+
+**Composition.** A boolean field on `RigidBody` (§4.1.5) combined
+with the global CCD enable on `PhysicsConfig`; both must be true for
+Jolt to take the swept path for that body. Swept narrowphase is
+opt-in per body to avoid budget blow-up on slow movers (§3.2
+collapse #6 — per-body knob lives on the body).
+
+**Public-boundary invariants.**
+
+1. **Per-body opt-in.** A `RigidBody.ccd = true` body uses Jolt's
+   swept narrowphase only when `PhysicsConfig.ccd_enabled` is also
+   true; either bit false → discrete narrowphase. No global
+   "always-on" CCD.
+2. **No runtime swap of swept/discrete inside a substep.** The
+   choice is made per body at substep entry and is stable across
+   the substep; mid-substep mutation is refused.
+
+### 4.2 Cross-aggregate invariants
+
+Invariants that span more than one aggregate and must hold at every
+public boundary at the seams between them:
+
+1. **Phase-3 ownership is total.** Every aggregate above is mutated
+   only inside frame phase 3 of the owning `World`. `RigidBody`,
+   `Collider`, `Joint`, `ExternalForce`, `ExternalTorque`,
+   `Velocity`, `AngularVelocity`, `Sleeping`, contact events,
+   trigger events — all are written by phases that physics owns
+   (phase 3) or by phases physics permits to feed it (phase 2 for
+   intents, phase 1 for kinematic input). No phase ≠ 3 calls into
+   Jolt's `Step`. (`reviews/decisions/frame-phases.md`,
+   §4.1.1 invariant 1, §4.1.3 invariant 1.)
+2. **ECS↔Jolt mirror is one-way per substep.** ECS-side writes
+   commit at substep entry; Jolt-side writes commit at substep
+   exit. There is no mid-substep cross-traffic. The two commit
+   barriers are the only legal transit points (§4.1.1 invariant 4,
+   §4.1.4 invariants 2 + 3, §3.2 collapse #5).
+3. **Determinism by construction.** A frame run twice with byte-equal
+   `PhysicsConfig`, byte-equal body / collider / joint set, byte-equal
+   `ExternalForce` / `ExternalTorque` / kinematic overrides, and
+   byte-equal `Accumulator` carry produces a byte-equal
+   `PhysicsSnapshot` on every supported host (PHILOSOPHY §7,
+   R-4.1.NF3). Field iteration order is fixed; allocator addresses
+   never leak into the snapshot; no platform-tier branch runs in the
+   stepping math (PHILOSOPHY §6).
+4. **Accumulator never falls behind by more than four substeps.**
+   The per-frame substep loop is hard-capped at four; remainder
+   above that is dropped (carry reset to zero) and a warning is
+   logged. The simulation's logical clock may diverge from
+   wall-clock under a stall, but never by more than `4 * dt` of
+   buffered work, and phase 3 never busy-waits (§4.1.3
+   invariant 2).
+5. **`BodyId` is stable across reload.** A given ECS entity that
+   carries a `RigidBody` resolves to the same `BodyId` after a
+   physics-plugin hot-reload swap (when the `JoltMiddleman` ABI
+   hash matches). `PhysicsSnapshot`s persisted before reload re-bind
+   to the post-reload world without payload rewrite (§4.1.5
+   invariant 1, §4.1.12 invariant 2, §3.2 collapse #9).
+6. **`ShapeBlob`s are shared by content hash.** A given content hash
+   maps to one row of the world's shape table for the lifetime of
+   the world; every `Collider` referencing that hash resolves to the
+   same `ShapeHandle` (§4.1.6 invariant 1, §3.2 collapse #4).
+7. **Single Jolt seam.** No Jolt-derived type crosses the plugin
+   ABI except through `JoltMiddleman`; load is refused on ABI hash
+   mismatch (PHILOSOPHY §9, §4.1.13 invariants 1 + 2). Render does
+   not read physics broadphase; navigation will own its own; no
+   second physics broadphase exists (§3.2 collapse #3).
+8. **Same-frame event delivery.** `CollisionStarted` /
+   `CollisionPersisted` / `CollisionEnded` / `TriggerEnter` /
+   `TriggerStay` / `TriggerExit` / `JointBroken` events emitted at
+   substep exit are visible to phases 5+ inside the same frame and
+   reclaimed at end of phase 8; none survive into the next frame's
+   read window (§4.1.8 invariants 1 + 2, §4.1.9 invariant 2,
+   §4.1.7 invariant 4, R-4.2.NF3, §3.2 collapse #5).
+9. **Spatial-query results reflect declared phase.** A query
+   issued in phases 5+ returns post-phase-3 state of the current
+   frame; a query issued in phase 1 returns pre-phase-3 state
+   (the previous frame's terminal state); a query issued in phase
+   3 is rejected with `physics::Error::QueryDuringStep`
+   (§4.1.10 invariants 1 + 4).
+10. **Per-context error model honoured.** Every aggregate's public
+    fallible operation returns `glibre::Result<T, glibre::Error>`
+    per `reviews/decisions/error-model.md`; physics's enum lives in
+    the `physics::Error` arm cited there and is the only physics-
+    internal error surface. No exception leaves a public boundary
+    (§4.1.1 invariant 3, §4.1.13 invariant 3).
 
 ## 5. Public Interface
 
