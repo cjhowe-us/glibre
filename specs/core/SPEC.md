@@ -1131,7 +1131,307 @@ Non-binding sketch for implementers.
 
 ## 7. Persistence & Schemas
 
-Fory schemas. Migration rules.
+The `core` context persists exactly the state required to (a) admit a
+plugin across the ABI seam and (b) carry process-wide bookkeeping
+across the frame-8 hot-reload barrier. Everything else core touches —
+`World` storage (entities, archetypes, chunks, columns), `Resource`
+slots, `ChangeTick` clocks, `Schedule` DAGs, `CompiledFrame`s,
+`CommandBuffer` arenas, the `TypeRegistry` lookup, the `AssetHandle`
+table — is **runtime-only**: rebuilt from plugin registration on every
+process start, never written to bytes core owns. The persistence
+surface below is the closed set of types core itself authors as
+`.fory` schemas; component bytes are owned by the plugins that declare
+the components (per §1 and §3.3, R-1.4.* refusals routed to `data`).
+
+Every schema below lives under `data/schemas/core/<Type>.fory`,
+authored to the format defined in `reviews/decisions/fory-codegen.md`
+§"Schema File Format" and consumed by `glibre-foryc` exactly as any
+other persistent type. The `data` context owns the codegen pipeline,
+the registry, the migration dispatcher, the `glibre_types_abi_hash`
+gate value, and the byte-level round-trip guarantee (`specs/data/SPEC.md`
+§4.10); `core` only authors the `.fory` files and writes the matching
+migration bodies as pure free functions.
+
+### 7.1 Schemas Core Owns
+
+The core context authors the following persistent types. Each is
+materialized into `glibre-types.dylib` by `glibre-foryc` and exposed
+as a generated POD at `glibre/types/core/<Type>.hpp`. The C++ projection
+of each lives already in §5 (see `glibre::types::PluginManifest` and
+the `HotReload*Event` triplet); the schemas here are the authoritative
+wire form, the C++ structs are derived.
+
+| Schema file | FQN | Aggregate (§4) | Purpose |
+|---|---|---|---|
+| `data/schemas/core/PluginManifest.fory` | `glibre.core.PluginManifest` | `Plugin / PluginLoader` (§4.5) | Per-plugin manifest blob baked into each plugin's `.rodata` and re-read by the loader at step 3 of the load sequence. |
+| `data/schemas/core/SemVer.fory` | `glibre.core.SemVer` | `Plugin` (§4.5) | Three-`u16` SemVer triple. Consumed by `PluginManifest.version` and `PluginManifest.min_engine_version`. |
+| `data/schemas/core/ComponentDecl.fory` | `glibre.core.ComponentDecl` | `Plugin` (§4.5) | Per-component declaration inside a manifest: `(fqn, schema_hash, storage_hint)`. |
+| `data/schemas/core/SystemDecl.fory` | `glibre.core.SystemDecl` | `Plugin` (§4.5) | Per-system declaration: `(name, phase, reads, writes, after, before)`. |
+| `data/schemas/core/PassDecl.fory` | `glibre.core.PassDecl` | `Plugin` (§4.5) | Per-render-pass declaration: `(name, render_phase, inputs, outputs)`. |
+| `data/schemas/core/PanelDecl.fory` | `glibre.core.PanelDecl` | `Plugin` (§4.5) | Per-editor-panel declaration: `(id, title, area)`. |
+| `data/schemas/core/HotReloadCheckpoint.fory` | `glibre.core.HotReloadCheckpoint` | `HotReloadBarrier` (§4.6) | Carry-over state captured at barrier step `Drain → Swap`, consumed by per-component `migrate(...)` hooks at step `Migrate`, and either committed at `Resume` or rolled back on refusal. |
+| `data/schemas/core/LoadedPluginRecord.fory` | `glibre.core.LoadedPluginRecord` | `PluginLoader` (§4.5) | Loader-side bookkeeping: which plugin dylib is currently mapped at which path, with the manifest hash captured at load time. Persisted across process boundaries only for diagnostic replay (e.g. crash reports embedding the prior load set); not consulted for runtime semantics. |
+
+The first six rows are the `PluginManifest` family already required by
+`reviews/decisions/plugin-abi.md` §"Plugin Manifest Schema". The seventh
+and eighth are introduced by this section; each is justified by an
+aggregate invariant in §4 and rationalized below in §7.2.
+
+`PluginManifest.fory` (canonical form, reproduced from
+`reviews/decisions/plugin-abi.md` §"Plugin Manifest Schema" so the spec
+is self-contained):
+
+```fory
+schema glibre.core.PluginManifest {
+  version 1
+  since   "0.1.0"
+
+  field name              : string             tag 1 since 1
+  field version           : SemVer             tag 2 since 1
+  field abi_hash          : string             tag 3 since 1
+  field min_engine_version: SemVer             tag 4 since 1
+  field components        : list<ComponentDecl> tag 5 since 1
+  field systems           : list<SystemDecl>    tag 6 since 1
+  field passes            : list<PassDecl>      tag 7 since 1
+  field panels            : list<PanelDecl>     tag 8 since 1
+  field depends_on        : list<string>        tag 9 since 1
+}
+```
+
+`HotReloadCheckpoint.fory` (new):
+
+```fory
+schema glibre.core.HotReloadCheckpoint {
+  version 1
+  since   "0.1.0"
+
+  field plugin_fqn        : string             tag 1 since 1
+  field old_abi_hash      : string             tag 2 since 1
+  field new_abi_hash      : string             tag 3 since 1
+  field frame_index       : u64                tag 4 since 1
+  field current_tick      : u64                tag 5 since 1
+  field migrated_types    : list<string>       tag 6 since 1
+  field carryover_payload : bytes              tag 7 since 1
+}
+```
+
+The `carryover_payload` is an opaque, plugin-shaped blob the outgoing
+plugin emits at `Drain` and the incoming plugin consumes at `Migrate`.
+Core does not interpret it; it is the per-component migration arena's
+serialized snapshot, dispatched by the data context's
+`MigrationChain`. The remaining fields are pure metadata: what plugin
+swapped, what hashes were involved, which frame the swap landed in,
+and which type FQNs participated — sufficient to reconstruct the swap
+in a crash-report replay without exposing component bytes.
+
+`LoadedPluginRecord.fory` (new):
+
+```fory
+schema glibre.core.LoadedPluginRecord {
+  version 1
+  since   "0.1.0"
+
+  field plugin_fqn        : string             tag 1 since 1
+  field manifest_version  : SemVer             tag 2 since 1
+  field abi_hash          : string             tag 3 since 1
+  field dylib_path        : string             tag 4 since 1
+  field load_frame_index  : u64                tag 5 since 1
+  field depends_on        : list<string>       tag 6 since 1
+}
+```
+
+`LoadedPluginRecord` is the persisted projection of one entry in the
+`PluginLoader::list()` snapshot (§5.9). It is written exclusively by
+the loader, never by plugins, and its lifetime is process-bound for
+runtime semantics — persistence exists only so crash dumps and editor
+session-restore can name what was loaded when something went wrong.
+Core does not reload from `LoadedPluginRecord` at startup; `dylib_path`
+is informational, not a re-load instruction. (Re-load is always driven
+by configuration in `tools` / config layer per §3.3.)
+
+### 7.2 What Core Does Not Persist
+
+This list is closed and load-bearing; pull requests adding any of the
+following to a core-owned `.fory` file should be rejected.
+
+1. **Component data.** Every component type is declared by the plugin
+   that owns it; its `.fory` schema lives under
+   `data/schemas/<owning-plugin>/`, not `core/`. Core only routes the
+   bytes through `World::set_component` / `get_component` (§5.5);
+   the bytes never become a core-authored schema.
+2. **`World` snapshots.** A "world snapshot" — the union of every
+   archetype's chunk bytes plus the entity allocator's slot vector —
+   is itself a serialization concern owned by the future `data` /
+   `content` context's snapshot format, composed *out of* per-component
+   schemas, not authored by core (per §3.3, R-1.4.* refusals).
+3. **`Schedule` DAGs.** A compiled `CompiledFrame` is a pure function
+   of the registered `(SystemDesc, ComponentDecl)` set; recomputed at
+   load time and on every `Schedule::compile()` (§5.6 invariant 3).
+   Persisting a compiled DAG would be a cache, not a contract.
+4. **`TypeRegistry` contents.** The registry is populated at static
+   init from `glibre-types.dylib`'s codegen output; plugins extend it
+   through `glibre_plugin_register`. The registry is never written
+   back; the `.fory` files plus the middleman binary are the only
+   sources of truth (§4.9 invariant 1).
+5. **`AssetHandle` payloads.** The asset handle table records opaque
+   payload pointers maintained by the resolving plugin (§4.7
+   invariant 2). The byte layout of what an `AssetHandle` denotes is
+   the resolving plugin's schema concern, never core's.
+6. **`ChangeTick` history.** `ChangeTick` is a `u64` advanced at every
+   frame and every mutable access; it is process-local and meaningless
+   across runs. Snapshots that need to carry change-tracking
+   information embed their own per-payload tick (a domain decision),
+   never core's.
+7. **`CommandBuffer` arenas.** Per-system, per-frame, ephemeral
+   (§4.8 invariant 4). Never persisted.
+8. **`PluginContext` shape.** The struct passed to
+   `glibre_plugin_register` (`reviews/decisions/plugin-abi.md`
+   §"Registration Entry-Point Signature") is engine-internal C++;
+   plugins read it once and let it die at the call boundary. It is
+   not a persistent type and has no `.fory` schema.
+
+### 7.3 Migration Rules
+
+Core obeys the full migration discipline defined in
+`reviews/decisions/fory-codegen.md` §"Migration Mechanic" and
+`specs/data/SPEC.md` §4.6 / §4.7. The rules below are the
+core-specific instances of that contract; nothing here weakens or
+contradicts the data context's invariants.
+
+**Function signature.** For every `(FQN, N → N+1)` pair across the
+schemas in §7.1, the core context provides one pure migration body:
+
+```cpp
+// Lives under glibre/core/migrations/<Type>_v<N>_to_v<N+1>.cpp.
+// Registered via the codegen-emitted GLIBRE_REGISTER_MIGRATION macro
+// (glibre-types.dylib §4.6) at static-init time inside the core TU
+// that links glibre-types.
+
+namespace glibre::core::migrations {
+
+[[nodiscard]] auto
+migrate_PluginManifest_v1_to_v2(
+    const glibre::types::PluginManifestV1& src,
+    glibre::types::PluginManifestV2&       dst,
+    glibre::types::Arena&                  arena) noexcept
+    -> std::expected<void, glibre::Error>;
+
+[[nodiscard]] auto
+migrate_HotReloadCheckpoint_v1_to_v2(
+    const glibre::types::HotReloadCheckpointV1& src,
+    glibre::types::HotReloadCheckpointV2&       dst,
+    glibre::types::Arena&                       arena) noexcept
+    -> std::expected<void, glibre::Error>;
+
+// ... one per (FQN, N → N+1) pair core owns.
+
+}  // namespace glibre::core::migrations
+```
+
+The signature is fixed by `data` (`specs/data/SPEC.md` §5
+`MigrationFn<VN, VNplus1>`). Core authors only the body. The macro
+expansion that wires the body into the dispatcher's per-type chain is
+emitted by `glibre-foryc` into the matching
+`glibre/types/core/<Type>_migrations.hpp` companion header.
+
+**Per-rule constraints** (each maps to one §4.6 invariant):
+
+1. **Pure.** No reads of wall clock, RNG state, environment, locale,
+   or filesystem (§4.6 inv. 1). Migration bodies are mechanically
+   verifiable as pure by inspection — they only touch their `src` and
+   `dst` parameters and the supplied `Arena&`.
+2. **Arena-only allocation.** Every byte the migration writes lives in
+   the `Arena&` passed in; no global heap calls, no STL containers
+   that default-construct allocators, no I/O (§4.6 inv. 2).
+3. **Total over the prior version.** The function returns `unexpected`
+   only for *defective* payloads (e.g. a `ComponentDecl.schema_hash`
+   that fails Blake3 form), never for domain-valid `VN` instances
+   (§4.6 inv. 3). Logical translation between versions is always
+   defined.
+4. **Local.** Migration bodies do not consult the `SchemaRegistry`,
+   do not call into `World`, and do not read or mutate global state
+   (§4.6 inv. 4). They are plain in/out functions over their two POD
+   arguments.
+5. **Single-step.** Core never authors a `vN → vN+2` migration. Multi-
+   version translation composes through `MigrationChain` (§4.7);
+   per-step coverage is verified at codegen time and the build fails on
+   a missing step (§4.7 inv. 1).
+
+**Additive-only ABI rule.** Per `fory-codegen.md` §"ABI Stability
+Rules" #1 and #3 plus `specs/data/SPEC.md` §4.2 inv. 3, every change
+to a core-owned schema must be a *layout-additive append*. New fields
+are introduced as new `tag` numbers strictly greater than every
+previously-shipped tag in the schema, with `since == new_version`,
+and either an `option<T>` type or a declared `default` so older
+payloads materialize the new field deterministically. Concretely for
+the schemas in §7.1:
+
+- **`PluginManifest`**: extending the manifest with a new declaration
+  list (e.g. a future `routes : list<RouteDecl>`) is permitted as a
+  new tag (10, 11, …) at the next version; the migration body
+  default-constructs an empty list. Reordering existing fields is
+  forbidden — `glibre-foryc` rejects a `.fory` change that violates
+  tag-sort layout (§4.2 inv. 3).
+- **`SemVer`** is closed at three `u16` fields. Any change is a major
+  break and would require a new `glibre.core.SemVerV2` schema rather
+  than an in-place revision; the migration would be a
+  `SemVerV1 → SemVerV2` shape change owned by core.
+- **`ComponentDecl` / `SystemDecl` / `PassDecl` / `PanelDecl`**:
+  additive only. New fields append at the next free tag with a
+  default; new optional fields default to `option<T>::none()`.
+- **`HotReloadCheckpoint`**: additive only. The `carryover_payload`
+  is intentionally typed as `bytes` so per-plugin migration shape
+  changes do not require a checkpoint schema bump — only a checkpoint
+  *envelope* shape change (e.g. adding a new metadata tag like
+  `wall_clock_ns`) bumps the checkpoint version.
+- **`LoadedPluginRecord`**: additive only. New diagnostic fields
+  (e.g. `plugin_build_id : option<string>`) append at fresh tags.
+
+**Reserved-tag enforcement.** Removed fields convert their tag
+number into `reserved` immediately; reuse is rejected by `glibre-foryc`
+at codegen time (`specs/data/SPEC.md` §4.1 inv. 3, §4.2 inv. 4). Core
+ships with zero reserved tags at v1 of every schema in §7.1.
+
+**ABI hash effect.** Every additive bump of a schema in §7.1 triggers
+a recomputation of `glibre_types_abi_hash` in `glibre-types.dylib`
+(`reviews/decisions/plugin-abi.md` §"Versioning Rules" #1). Plugins
+compiled against the prior hash will refuse to load at the next
+process start with `core::Error::PluginAbiHashMismatch` — the
+single, intended consequence. SONAME of `glibre-types.dylib` does
+**not** bump on additive-only schema changes; SONAME bumps only on
+layout-breaking changes, which the additive-only rule above forbids
+for core-owned schemas (§"Versioning Rules" #2).
+
+**Round-trip test obligation.** Per `fory-codegen.md` §"Consequences",
+every persistent schema ships with at least one Catch2 round-trip
+golden under `tests/data/schemas/core/<Type>.cpp`. Core's tests cover
+each schema in §7.1 at v1 (round-trip), and starting at v2 of any
+schema, an additional golden replays a v(N-1) payload through the
+`MigrationChain` and asserts the resulting `VN` is byte-equal to the
+hand-authored expected value. Tests are referenced by name from §11's
+acceptance-criteria mapping.
+
+### 7.4 Note: ECS World State Is Plugin-Owned
+
+This restates §7.2 #1 emphatically because it is the single largest
+refusal in this section: a `World` (§4.1) is the storage shape for
+*plugin-declared* component bytes. Core never authors the schema for
+the bytes living in any archetype column. Each plugin's components
+have their own `.fory` files under `data/schemas/<plugin>/`, written
+by the plugin author, hashed into `glibre_types_abi_hash`, and
+migrated by the plugin author's own pure free functions. The core
+loader runs `deserialize<T>` against the snapshot at
+`HotReloadBarrier`'s migrate step (§4.6, §5.8); the migration *body*
+for any component type belongs to the originating plugin's context,
+not to core (PHILOSOPHY §3, §6; `fory-codegen.md` §"Migrations owned
+by the originating context").
+
+The smallest concrete consequence: a `plugins/render/` directory
+authoring a `Mesh` component owns
+`data/schemas/render/Mesh.fory` and `glibre::render::migrate_Mesh_v1_to_v2`.
+`core` knows the FQN and the schema source hash through
+`ComponentDecl.schema_hash` (§7.1) but never reads or writes the
+component's bytes itself.
 
 ## 8. Hot-Reload Contract
 
