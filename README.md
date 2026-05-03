@@ -18,3 +18,5 @@ User stories and tasks live in **GitHub Issues**, not in this repo. See
 
 Status: pre-implementation. Specs + stories + 3 review iterations gate
 any code.
+
+Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE).
