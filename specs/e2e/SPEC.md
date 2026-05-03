@@ -1093,11 +1093,844 @@ public boundary at the seams between them:
 
 ## 5. Public Interface
 
+The header stub below is the §5 deliverable: every symbol that crosses
+the e2e context's public boundary, declared in one C++23 header and
+verified with `clang++ -std=c++23 -fsyntax-only -Wall -Wextra
+-Wpedantic`. Bodies live inside the e2e dylib; this header is the
+contract every caller (CI's `ClosureGate` step, the developer-side
+`glibre-trace run` command, downstream consumers of `TraceReport`)
+compiles against. Cross-context invariants enforced here:
+
+- Every fallible operation returns `glibre::Result<T>` per
+  `reviews/decisions/error-model.md`. The e2e-internal `Error` closed
+  sum (§4.1.13) is the only failure surface; it rolls into the
+  engine-wide `glibre::Error` variant as one arm.
+- Aggregates listed in §4 (`Trace`, `TraceManifest`, `TraceRunner`,
+  `ReplayDriver`, `GoldenStore`, `TraceReport`, `DivergenceReport`,
+  `ClosureGate`) are forward-declared classes whose layout is owned
+  inside the e2e dylib. Callers manipulate them only through the
+  methods exposed below.
+- `ReplayDriver` is the e2e context's only implementation of
+  `platform::InputDriver` (§3.3, §4.2 cross-aggregate inv 5). The
+  seam itself is owned by `platform`; e2e supplies one impl and
+  exposes it via `as_platform_driver()`.
+- `TraceFile` is read-only on the e2e side. The `TraceWriter` lives
+  in `tools` (§3.3, §4.2 cross-aggregate inv 6) — no `open_for_write`
+  symbol exists below.
+- `EnvHash` gates replay before any op runs (§4.1.3 inv 1, §4.2
+  cross-aggregate inv 2). The runner refuses to advance a frame
+  before the live `EnvHash` matches `manifest.env_hash`.
+- `InjectionLayer` choice is `RunnerHost`-gated by one policy table
+  (§4.1.9 inv 2, §4.2 cross-aggregate inv 3). Selecting an unlisted
+  pair returns `Error::InjectionRefused` at gate time.
+- `ClosureGate` is a pure function of `TraceReport.status == Passed`
+  for every cited trace (§4.1.14 inv 1, §4.2 cross-aggregate inv 4);
+  no manual override, no developer-host green substitute.
+
+The header has no Fory schemas in its public surface — `.glibre-trace`
+is a versioned binary the parser consumes (§7 owns the schema), and
+the runner's per-run artefact bundle is delivered as `ArtefactRef`
+paths into a runner-private directory. Event types are the `TraceOp`
+sealed sum (§4.1.4), the `FileEvent`-style `report_status` sub-sum
+(§4.1.12), and the `Error` closed sum (§4.1.13). The e2e context
+contributes one new arm to the engine-wide `glibre::Error` variant:
+the closed sum `e2e::Error` defined below.
+
 ```cpp
-// header-only stub goes here
+// SPDX-License-Identifier: Apache-2.0
+// glibre — e2e public interface (header-only stub).
+//
+// This file is the §5 deliverable of `specs/e2e/SPEC.md`. It declares
+// every symbol crossing the e2e context's public boundary: the
+// `.glibre-trace` consumer surface (parse → gate → replay → assert →
+// report → close) cited by every `type:user-story` issue. The bodies
+// live inside the e2e dylib; this header is the contract every caller
+// (CI, the developer-side `glibre-trace run` command, the `ClosureGate`
+// step) compiles against.
+//
+// Cross-context invariants embedded here:
+//   * Every fallible call returns `glibre::Result<T>` per
+//     `reviews/decisions/error-model.md`. `-fno-exceptions` is enforced
+//     globally; this header obeys.
+//   * Aggregates are opaque — `Trace`, `TraceRunner`, `ReplayDriver`,
+//     `GoldenStore` are forward-declared classes whose layout is owned
+//     inside the e2e dylib; callers traffic only in handles + value
+//     objects.
+//   * `ReplayDriver` is the e2e context's only implementation of
+//     `platform::InputDriver`; the seam itself is owned by `platform`
+//     (§3.3, §4.2 cross-aggregate inv 5). The `InputEvent` carried by
+//     `InputOp` is forward-declared from `<glibre/platform/platform.hpp>`.
+//   * The `e2e::Error` closed sum is one arm of the engine-wide
+//     `glibre::Error` variant per the error-model record; e2e never
+//     translates another context's error into its own automatically.
+//   * `TraceFile` is read-only on the e2e side. The `TraceWriter` lives
+//     in `tools` (§3.3) — no `open_for_write` symbol exists below.
+//
+// This stub compiles standalone with
+// `clang++ -std=c++23 -fsyntax-only -Wall -Wextra -Wpedantic`.
+
+#pragma once
+
+#include <array>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <optional>
+#include <span>
+#include <string_view>
+#include <type_traits>
+#include <variant>
+
+// Engine-wide error type, declared in core/include/glibre/error.hpp.
+// Forward-declared here so this header is self-contained for syntax
+// checking; the real header pulls in <glibre/error.hpp>.
+namespace glibre {
+struct ErrorContext;
+class  Error;
+template <class T> using Result = std::expected<T, Error>;
+}  // namespace glibre
+
+// Platform context — e2e wraps `platform::InputEvent` byte-equal inside
+// `InputOp` (§4.1.5 inv 1) and uses `platform::CanonicalPath` as its
+// only path key (§4.1.2 inv 2). The full definitions live in
+// <glibre/platform/platform.hpp>; minimal shape declarations are
+// reproduced here so this header is self-contained for syntax checking.
+namespace glibre::platform {
+
+class CanonicalPath {
+public:
+    [[nodiscard]] static auto from_absolute(std::string_view utf8_abs) noexcept
+        -> ::glibre::Result<CanonicalPath>;
+    [[nodiscard]] auto view() const noexcept -> std::string_view { return view_; }
+    constexpr bool operator==(const CanonicalPath&) const noexcept = default;
+private:
+    constexpr explicit CanonicalPath(std::string_view v) noexcept : view_{v} {}
+    std::string_view view_{};
+};
+
+class InputEvent;   // sealed sum from platform §4.2; opaque at the e2e seam.
+class InputDriver;  // seam from platform §4.2; e2e supplies one impl.
+
+}  // namespace glibre::platform
+
+namespace glibre::e2e {
+
+// ---------------------------------------------------------------------------
+// 5.1  Closed sum of typed failures (§4.1.13)
+// ---------------------------------------------------------------------------
+//
+// `Error` is a `std::variant` so payload-bearing arms (`AssertFailed`,
+// `BinaryCrash`) survive without losing the closed-sum shape. Each
+// payload-free arm is a zero-sized tag struct. The engine-wide
+// `glibre::Error` variant rolls this whole sum into one of its arms
+// per `reviews/decisions/error-model.md`. Each variant is mapped to a
+// stable non-zero process exit code by `TraceRunner` (§4.1.13 inv 4);
+// the mapping table is the public CI contract.
+
+struct FrameIndex {
+    std::uint64_t value{0};
+    constexpr bool operator==(const FrameIndex&) const noexcept = default;
+    constexpr auto operator<=>(const FrameIndex&) const noexcept = default;
+};
+
+struct AssertOpId {
+    std::uint64_t value{0};  // monotonic per-trace, assigned at parse.
+    constexpr bool operator==(const AssertOpId&) const noexcept = default;
+};
+
+struct ArtefactRef {
+    // Non-owning view into the runner's per-run artefact bundle.
+    // Resolved against `TraceReport::artefact_root` by the consumer.
+    std::string_view relative_path{};
+    constexpr bool operator==(const ArtefactRef&) const noexcept = default;
+};
+
+enum class AssertKind : std::uint8_t {
+    State,      // AssertState
+    Screenshot, // AssertScreenshot
+    EcsSnapshot,// AssertEcsSnapshot
+    LogContains // AssertLogContains
+};
+
+struct TraceParse        { constexpr bool operator==(const TraceParse&)        const noexcept = default; };
+struct EnvDrift          { constexpr bool operator==(const EnvDrift&)          const noexcept = default; };
+struct DriverInstall     { constexpr bool operator==(const DriverInstall&)     const noexcept = default; };
+struct InjectionRefused  { constexpr bool operator==(const InjectionRefused&)  const noexcept = default; };
+struct GoldenMissing     { constexpr bool operator==(const GoldenMissing&)     const noexcept = default; };
+struct Timeout           { constexpr bool operator==(const Timeout&)           const noexcept = default; };
+
+struct AssertFailed {
+    AssertOpId  op_id{};
+    FrameIndex  frame{};
+    AssertKind  kind{};
+    ArtefactRef artefact{};  // diff image, snapshot diff, log slice.
+    constexpr bool operator==(const AssertFailed&) const noexcept = default;
+};
+
+struct BinaryCrash {
+    std::int32_t exit_code{0};
+    ArtefactRef  dump{};     // path to OS crash dump; aggregation in `diagnostics`.
+    constexpr bool operator==(const BinaryCrash&) const noexcept = default;
+};
+
+using Error = std::variant<
+    TraceParse,
+    EnvDrift,
+    AssertFailed,
+    DriverInstall,
+    InjectionRefused,
+    GoldenMissing,
+    Timeout,
+    BinaryCrash>;
+
+// Convenience: every public fallible function returns Result<T>.
+template <class T>
+using Result = ::glibre::Result<T>;
+
+// ---------------------------------------------------------------------------
+// 5.2  Hashes, identifiers, value objects
+// ---------------------------------------------------------------------------
+
+struct Blake3Hash {
+    std::array<std::uint8_t, 32> bytes{};
+    constexpr bool operator==(const Blake3Hash&) const noexcept = default;
+};
+
+// EnvHash gates replay before any op runs (§4.1.3 inv 1, §4.2 inv 2).
+struct EnvHash {
+    Blake3Hash digest{};
+    constexpr bool operator==(const EnvHash&) const noexcept = default;
+};
+
+// GoldenStore-relative path identifying a reference blob (§4.1.10 inv 2).
+struct GoldenRef {
+    std::string_view relative_path{};  // e.g. "render/cube/frame_42.png"
+    constexpr bool operator==(const GoldenRef&) const noexcept = default;
+};
+
+struct WorldId {
+    std::uint32_t value{0};  // named ECS world / sub-aggregate tag.
+    constexpr bool operator==(const WorldId&) const noexcept = default;
+};
+
+// AssertState predicate target — component path inside a named world.
+struct ComponentPath {
+    std::string_view view{};  // e.g. "world/player/Health.value"
+    constexpr bool operator==(const ComponentPath&) const noexcept = default;
+};
+
+// ---------------------------------------------------------------------------
+// 5.3  PixelTolerance (§4.1.11)
+// ---------------------------------------------------------------------------
+//
+// Per-`AssertScreenshot` policy: max per-pixel ΔE (CIEDE2000), max %
+// differing pixels, optional rectangular region mask. `tier` selects
+// a default triple from the engine-wide table; per-assert overrides
+// are permitted (§4.1.11 inv 2). Policy is data, not code (inv 1) —
+// no per-assert custom comparator is permitted.
+
+struct RegionMask {
+    // Inclusive rectangles inside which the comparison is enforced.
+    // Empty span = whole-frame comparison.
+    std::int32_t x{0};
+    std::int32_t y{0};
+    std::uint32_t width{0};
+    std::uint32_t height{0};
+    constexpr bool operator==(const RegionMask&) const noexcept = default;
+};
+
+enum class PixelTier : std::uint8_t { Strict, Default, Lenient };
+
+struct PixelTolerance {
+    PixelTier             tier{PixelTier::Default};
+    float                 max_delta_e{0.0f};        // CIEDE2000.
+    float                 max_diff_fraction{0.0f};  // [0, 1].
+    std::span<const RegionMask> mask{};             // empty = whole frame.
+    constexpr bool operator==(const PixelTolerance& rhs) const noexcept {
+        // Spans compare by data+size; sufficient for value-object equality
+        // in the same translation-unit context.
+        return tier == rhs.tier
+            && max_delta_e == rhs.max_delta_e
+            && max_diff_fraction == rhs.max_diff_fraction
+            && mask.data() == rhs.mask.data()
+            && mask.size() == rhs.mask.size();
+    }
+};
+
+// ---------------------------------------------------------------------------
+// 5.4  TraceOp sealed sum (§4.1.4)
+// ---------------------------------------------------------------------------
+//
+// Closed `std::variant`; adding a variant is a deliberate central edit
+// (§4.1.4 inv 1). Each variant is data; the runner is the dispatcher
+// (§4.1.4 inv 4). No embedded executable expression in any variant.
+
+struct InputOp {
+    // Carries one platform::InputEvent by reference into the trace's
+    // arena (decoded once at parse). The wrapper is byte-equal on
+    // re-emit (§4.1.5 inv 1); FrameIndex is held by the enclosing tuple.
+    const ::glibre::platform::InputEvent* event{nullptr};
+};
+
+struct AssertState {
+    AssertOpId    id{};
+    WorldId       world{};
+    ComponentPath path{};
+    // Fory-encoded expected value blob; parsed once into the trace arena.
+    std::span<const std::byte> expected_fory{};
+};
+
+struct AssertScreenshot {
+    AssertOpId     id{};
+    GoldenRef      golden{};
+    PixelTolerance tolerance{};
+};
+
+struct AssertEcsSnapshot {
+    AssertOpId id{};
+    WorldId    world{};
+    GoldenRef  reference{};  // .ecs-snapshot blob in the GoldenStore.
+};
+
+struct AssertLogContains {
+    AssertOpId       id{};
+    bool             is_regex{false};
+    std::string_view needle{};  // substring or ECMAScript regex.
+};
+
+struct End {
+    constexpr bool operator==(const End&) const noexcept = default;
+};
+
+using TraceOp = std::variant<
+    InputOp,
+    AssertState,
+    AssertScreenshot,
+    AssertEcsSnapshot,
+    AssertLogContains,
+    End>;
+
+// One frame may carry zero, one, or many ops; intra-frame order
+// preserved (§4.1.1 inv 1, 2).
+struct FramedOp {
+    FrameIndex frame{};
+    TraceOp    op{};
+};
+
+// ---------------------------------------------------------------------------
+// 5.5  TraceManifest (§4.1.3)
+// ---------------------------------------------------------------------------
+//
+// All eight fields participate in EnvHash (§4.1.3 inv 2). Read-only
+// post-parse (inv 4); golden refs resolved at gate time (inv 3).
+
+enum class RunnerHostKind : std::uint8_t {
+    DevHeadless,
+    DevInteractive,
+    CiHeadless,
+    CiIsolated,
+};
+
+struct EngineVersion {
+    std::uint16_t major{0};
+    std::uint16_t minor{0};
+    std::uint16_t patch{0};
+    Blake3Hash    git_sha{};  // first 32 bytes of the engine build commit.
+    constexpr bool operator==(const EngineVersion&) const noexcept = default;
+};
+
+// platform::LogicalSize / DpiScale equivalents — held by-value here so
+// the manifest is self-contained. The runner cross-checks these against
+// platform's live values at gate time.
+struct ManifestLogicalSize {
+    std::uint32_t width{0};
+    std::uint32_t height{0};
+    constexpr bool operator==(const ManifestLogicalSize&) const noexcept = default;
+};
+
+struct ManifestDpiScale {
+    float value{1.0f};
+    constexpr bool operator==(const ManifestDpiScale&) const noexcept = default;
+};
+
+struct RngSeed {
+    std::uint64_t value{0};  // engine-wide deterministic seed (R-X.5.2).
+    constexpr bool operator==(const RngSeed&) const noexcept = default;
+};
+
+// Frame budget = recorded length × safety multiplier; enforced by
+// TraceRunner (§4.1.7 inv 6).
+struct FrameBudget {
+    std::uint64_t max_frames{0};
+    constexpr bool operator==(const FrameBudget&) const noexcept = default;
+};
+
+class TraceManifest {
+public:
+    [[nodiscard]] auto engine_version() const noexcept -> EngineVersion;
+    [[nodiscard]] auto plugin_abi_hash() const noexcept -> Blake3Hash;     // middleman dylib hash.
+    [[nodiscard]] auto asset_pack_hash() const noexcept -> Blake3Hash;     // BLAKE3 over cooked bundle.
+    [[nodiscard]] auto locale()          const noexcept -> std::string_view;  // BCP-47.
+    [[nodiscard]] auto window_size()     const noexcept -> ManifestLogicalSize;
+    [[nodiscard]] auto dpi_scale()       const noexcept -> ManifestDpiScale;
+    [[nodiscard]] auto rng_seed()        const noexcept -> RngSeed;
+    [[nodiscard]] auto target_driver()   const noexcept -> RunnerHostKind;
+
+    // Canonical Blake3 of the manifest's Fory encoding.
+    [[nodiscard]] auto env_hash() const noexcept -> EnvHash;
+
+    // Frame budget (§4.1.7 inv 6).
+    [[nodiscard]] auto frame_budget() const noexcept -> FrameBudget;
+
+    // Every GoldenStore-relative path the trace references.
+    // Checked for existence at gate time (§4.1.3 inv 3).
+    [[nodiscard]] auto golden_refs() const noexcept -> std::span<const GoldenRef>;
+
+    TraceManifest(const TraceManifest&)            = delete;
+    TraceManifest& operator=(const TraceManifest&) = delete;
+    TraceManifest(TraceManifest&&) noexcept;
+    TraceManifest& operator=(TraceManifest&&) noexcept;
+    ~TraceManifest();
+
+private:
+    friend class Trace;
+    TraceManifest() noexcept = default;
+    struct Impl;
+    Impl* impl_{nullptr};
+};
+
+// ---------------------------------------------------------------------------
+// 5.6  Trace + TraceFile (§4.1.1, §4.1.2)
+// ---------------------------------------------------------------------------
+//
+// `Trace` is the aggregate root: immutable post-parse, owns the
+// manifest by-value, owns the ordered op stream. Loaded from a
+// `.glibre-trace` file via `Trace::load`; bytes never re-open for
+// write on the e2e side (§4.1.2 inv 1).
+
+class Trace {
+public:
+    // Read-only load. Validates magic + schema + footer Blake3
+    // (§4.1.1 inv 4); rejects monotonicity / variant / End-uniqueness
+    // violations with Error::TraceParse (§4.1.1 inv 2, 3, 5).
+    [[nodiscard]] static auto load(const ::glibre::platform::CanonicalPath& path) noexcept
+        -> Result<Trace>;
+
+    Trace(Trace&&) noexcept;
+    Trace& operator=(Trace&&) noexcept;
+    Trace(const Trace&)            = delete;
+    Trace& operator=(const Trace&) = delete;
+    ~Trace();
+
+    [[nodiscard]] auto manifest()    const noexcept -> const TraceManifest&;
+    [[nodiscard]] auto footer_hash() const noexcept -> Blake3Hash;
+    [[nodiscard]] auto file_path()   const noexcept -> const ::glibre::platform::CanonicalPath&;
+
+    // Total ordered op count (including the terminating End).
+    [[nodiscard]] auto op_count() const noexcept -> std::size_t;
+
+    // Iterate the full ordered (FrameIndex, TraceOp) stream in record order.
+    [[nodiscard]] auto ops() const noexcept -> std::span<const FramedOp>;
+
+    // Slice ops whose frame == `frame`. Returned span is contiguous;
+    // intra-frame order preserved (§4.1.1 inv 1, §4.1.5 inv 3).
+    [[nodiscard]] auto ops_at(FrameIndex frame) const noexcept
+        -> std::span<const FramedOp>;
+
+private:
+    Trace() noexcept = default;
+    struct Impl;
+    Impl* impl_{nullptr};
+};
+
+// ---------------------------------------------------------------------------
+// 5.7  GoldenStore + GoldenImage (§4.1.10)
+// ---------------------------------------------------------------------------
+//
+// Read-only at run time (inv 1). Address by trace path + assert id
+// (inv 2). Updates land through the explicit `golden-update` workflow,
+// which does not appear here (inv 3).
+
+struct GoldenImage {
+    // 8-bit-per-channel sRGB; rows are tightly packed, BGRA order in
+    // memory to match Metal swapchain readback. Pointer is non-owning;
+    // lifetime tied to the GoldenStore that vended it.
+    std::span<const std::byte> bytes{};
+    std::uint32_t              width{0};
+    std::uint32_t              height{0};
+};
+
+struct EcsSnapshotRef {
+    // Non-owning Fory-encoded reference blob (§4.1.10 reference shape).
+    std::span<const std::byte> bytes{};
+};
+
+class GoldenStore {
+public:
+    // Open a GoldenStore rooted at `tests/e2e/<ctx>/golden/`.
+    [[nodiscard]] static auto open(const ::glibre::platform::CanonicalPath& root) noexcept
+        -> Result<GoldenStore>;
+
+    GoldenStore(GoldenStore&&) noexcept;
+    GoldenStore& operator=(GoldenStore&&) noexcept;
+    GoldenStore(const GoldenStore&)            = delete;
+    GoldenStore& operator=(const GoldenStore&) = delete;
+    ~GoldenStore();
+
+    // Lookup a reference by GoldenStore-relative path. Missing returns
+    // Error::GoldenMissing (consumed at gate time per §4.1.3 inv 3).
+    [[nodiscard]] auto load_image(GoldenRef)    noexcept -> Result<GoldenImage>;
+    [[nodiscard]] auto load_snapshot(GoldenRef) noexcept -> Result<EcsSnapshotRef>;
+
+    // Existence-only probe used by the gate to enumerate manifest refs
+    // without loading them; returns Error::GoldenMissing on absence.
+    [[nodiscard]] auto probe(GoldenRef) noexcept -> Result<void>;
+
+private:
+    GoldenStore() noexcept = default;
+    struct Impl;
+    Impl* impl_{nullptr};
+};
+
+// ---------------------------------------------------------------------------
+// 5.8  ReplayDriver (§4.1.6)
+// ---------------------------------------------------------------------------
+//
+// Frame-locked `platform::InputDriver` implementation. Reads a `Trace`
+// and emits its `InputOp`s at their recorded `FrameIndex`. Non-input
+// `TraceOp`s are skipped here — they are dispatched by the
+// `TraceRunner`. The driver holds no wall-clock state.
+
+class ReplayDriver {
+public:
+    // Construct a driver bound to `trace`. The driver does not own the
+    // trace; the caller (TraceRunner) keeps it alive for the run.
+    [[nodiscard]] static auto bind(const Trace& trace) noexcept
+        -> Result<ReplayDriver>;
+
+    ReplayDriver(ReplayDriver&&) noexcept;
+    ReplayDriver& operator=(ReplayDriver&&) noexcept;
+    ReplayDriver(const ReplayDriver&)            = delete;
+    ReplayDriver& operator=(const ReplayDriver&) = delete;
+    ~ReplayDriver();
+
+    // Advance to `frame`. Yields every InputOp recorded at that frame
+    // in recorded order (§4.1.6 inv 1, 4); never re-yields, never reads
+    // wall-clock. Empty span when the frame has no inputs.
+    [[nodiscard]] auto advance(FrameIndex frame) noexcept
+        -> std::span<const ::glibre::platform::InputEvent* const>;
+
+    // Adapts this driver to the platform::InputDriver seam (§3.3,
+    // §4.2 cross-aggregate inv 5). The returned reference is valid
+    // for the driver's lifetime.
+    [[nodiscard]] auto as_platform_driver() noexcept -> ::glibre::platform::InputDriver&;
+
+private:
+    ReplayDriver() noexcept = default;
+    struct Impl;
+    Impl* impl_{nullptr};
+};
+
+// ---------------------------------------------------------------------------
+// 5.9  InjectionLayer + RunnerHost (§4.1.8, §4.1.9)
+// ---------------------------------------------------------------------------
+//
+// Sealed sums; closed at compile time. Selecting a layer outside its
+// host's permitted set returns Error::InjectionRefused at gate time
+// (§4.1.9 inv 2, 4).
+
+namespace injection {
+
+struct InProcess {
+    constexpr bool operator==(const InProcess&) const noexcept = default;
+};
+
+struct PerProcess {
+    std::uint32_t target_pid{0};
+    std::uint64_t target_window_id{0};  // OS-specific window handle.
+    constexpr bool operator==(const PerProcess&) const noexcept = default;
+};
+
+struct OsAutomation {
+    // CI-isolated only (§4.1.8 inv 3).
+    constexpr bool operator==(const OsAutomation&) const noexcept = default;
+};
+
+}  // namespace injection
+
+using InjectionLayer = std::variant<
+    injection::InProcess,
+    injection::PerProcess,
+    injection::OsAutomation>;
+
+namespace host {
+
+struct DevHeadless    { constexpr bool operator==(const DevHeadless&)    const noexcept = default; };
+struct DevInteractive { constexpr bool operator==(const DevInteractive&) const noexcept = default; };
+struct CiHeadless     { constexpr bool operator==(const CiHeadless&)     const noexcept = default; };
+struct CiIsolated     { constexpr bool operator==(const CiIsolated&)     const noexcept = default; };
+
+}  // namespace host
+
+using RunnerHost = std::variant<
+    host::DevHeadless,
+    host::DevInteractive,
+    host::CiHeadless,
+    host::CiIsolated>;
+
+// Detect the live RunnerHost from environment markers; conservative —
+// ambiguous environments downgrade (§4.1.9 inv 3). The runner never
+// silently widens permissions.
+[[nodiscard]] auto detect_runner_host() noexcept -> RunnerHost;
+
+// Policy table — single source of truth (§4.1.9 inv 2). Returns
+// Error::InjectionRefused if the pair is not permitted.
+[[nodiscard]] auto check_injection_permitted(const InjectionLayer&,
+                                             const RunnerHost&) noexcept -> Result<void>;
+
+// ---------------------------------------------------------------------------
+// 5.10 TraceReport + DivergenceReport (§4.1.12)
+// ---------------------------------------------------------------------------
+//
+// One TraceReport per run (inv 1). DivergenceReport requires two runs
+// and a `--compare <prior-report>` invocation (inv 2). Wall-clock is
+// informational only (inv 3).
+
+namespace report_status {
+
+struct Passed {
+    constexpr bool operator==(const Passed&) const noexcept = default;
+};
+
+struct Failed {
+    AssertOpId failing_op{};
+    FrameIndex frame{};
+    Error      error{TraceParse{}};  // the e2e::Error arm matching the failure.
+};
+
+struct Aborted {
+    Error reason{TraceParse{}};
+};
+
+}  // namespace report_status
+
+using ReportStatus = std::variant<
+    report_status::Passed,
+    report_status::Failed,
+    report_status::Aborted>;
+
+class TraceReport {
+public:
+    [[nodiscard]] auto status()         const noexcept -> const ReportStatus&;
+    [[nodiscard]] auto trace_path()     const noexcept -> const ::glibre::platform::CanonicalPath&;
+    [[nodiscard]] auto env_hash()       const noexcept -> EnvHash;
+    [[nodiscard]] auto layer()          const noexcept -> const InjectionLayer&;
+    [[nodiscard]] auto host()           const noexcept -> const RunnerHost&;
+    [[nodiscard]] auto frames_observed()const noexcept -> std::uint64_t;
+    [[nodiscard]] auto wall_duration()  const noexcept -> std::chrono::nanoseconds;
+    [[nodiscard]] auto artefacts()      const noexcept -> std::span<const ArtefactRef>;
+    [[nodiscard]] auto artefact_root()  const noexcept -> const ::glibre::platform::CanonicalPath&;
+
+    TraceReport(TraceReport&&) noexcept;
+    TraceReport& operator=(TraceReport&&) noexcept;
+    TraceReport(const TraceReport&)            = delete;
+    TraceReport& operator=(const TraceReport&) = delete;
+    ~TraceReport();
+
+private:
+    friend class TraceRunner;
+    TraceReport() noexcept = default;
+    struct Impl;
+    Impl* impl_{nullptr};
+};
+
+struct DivergenceSite {
+    FrameIndex first_diff{};
+    AssertOpId diverging_op{};  // zero-id when divergence is on input.
+    ArtefactRef left;
+    ArtefactRef right;
+};
+
+class DivergenceReport {
+public:
+    [[nodiscard]] auto site()  const noexcept -> DivergenceSite;
+    [[nodiscard]] auto left()  const noexcept -> const TraceReport&;
+    [[nodiscard]] auto right() const noexcept -> const TraceReport&;
+
+    DivergenceReport(DivergenceReport&&) noexcept;
+    DivergenceReport& operator=(DivergenceReport&&) noexcept;
+    DivergenceReport(const DivergenceReport&)            = delete;
+    DivergenceReport& operator=(const DivergenceReport&) = delete;
+    ~DivergenceReport();
+
+private:
+    friend class TraceRunner;
+    DivergenceReport() noexcept = default;
+    struct Impl;
+    Impl* impl_{nullptr};
+};
+
+// ---------------------------------------------------------------------------
+// 5.11 TraceRunner (§4.1.7)
+// ---------------------------------------------------------------------------
+//
+// Orchestration boundary. Gate-before-drive (inv 1); frame-step
+// deterministic (inv 2); single-binary per run (inv 3); fail-fast on
+// assert (inv 4); always emits a report (inv 5); frame-budget enforced
+// (inv 6); no exceptions cross the boundary (inv 7).
+
+// Host services the runner needs from the binary under test. The
+// concrete adapter is injected by the caller — for in-process runs
+// the adapter is the engine's frame-loop façade; for per-process /
+// os-automation runs the adapter is a thin shim over the OS injection
+// API. The runner does not depend on any specific binary topology.
+class RunnerHostAdapter {
+public:
+    virtual ~RunnerHostAdapter() = default;
+
+    // Launch / attach to the binary under test; returns an opaque
+    // handle the runner uses for subsequent calls. Fails with
+    // Error::DriverInstall if the binary does not expose the seam.
+    [[nodiscard]] virtual auto launch(const Trace&,
+                                      const InjectionLayer&) noexcept
+        -> Result<void> = 0;
+
+    // Compute the live EnvHash from the running process's environment.
+    [[nodiscard]] virtual auto live_env_hash() noexcept -> Result<EnvHash> = 0;
+
+    // Install the ReplayDriver at the platform::InputDriver seam.
+    // Called after the EnvHash gate passes (§4.1.3 inv 1).
+    [[nodiscard]] virtual auto install_driver(ReplayDriver&) noexcept
+        -> Result<void> = 0;
+
+    // Advance one engine frame. Returns Error::Timeout if the engine
+    // failed to advance within the runner's safety window.
+    [[nodiscard]] virtual auto advance_frame() noexcept -> Result<FrameIndex> = 0;
+
+    // Evaluate a single AssertOp against the live process state.
+    // Failure returns Error::AssertFailed populated by the adapter.
+    [[nodiscard]] virtual auto evaluate(const AssertState&)        noexcept -> Result<void> = 0;
+    [[nodiscard]] virtual auto evaluate(const AssertScreenshot&,
+                                        GoldenStore&)              noexcept -> Result<void> = 0;
+    [[nodiscard]] virtual auto evaluate(const AssertEcsSnapshot&,
+                                        GoldenStore&)              noexcept -> Result<void> = 0;
+    [[nodiscard]] virtual auto evaluate(const AssertLogContains&)  noexcept -> Result<void> = 0;
+
+    // Gracefully end the run on End op; non-zero exit before End
+    // surfaces as Error::BinaryCrash with the dump reference.
+    [[nodiscard]] virtual auto shutdown() noexcept -> Result<void> = 0;
+};
+
+struct TraceRunnerConfig {
+    InjectionLayer layer{injection::InProcess{}};
+    // Optional override; when unset the runner calls detect_runner_host().
+    std::optional<RunnerHost> host{};
+    // Path to a prior TraceReport for divergence-mode runs (§4.1.12 inv 2).
+    std::optional<::glibre::platform::CanonicalPath> compare_to{};
+};
+
+class TraceRunner {
+public:
+    [[nodiscard]] static auto create(RunnerHostAdapter& adapter,
+                                     GoldenStore&       store,
+                                     TraceRunnerConfig  config = {}) noexcept
+        -> Result<TraceRunner>;
+
+    TraceRunner(TraceRunner&&) noexcept;
+    TraceRunner& operator=(TraceRunner&&) noexcept;
+    TraceRunner(const TraceRunner&)            = delete;
+    TraceRunner& operator=(const TraceRunner&) = delete;
+    ~TraceRunner();
+
+    // Drive `trace` to completion. Always emits a TraceReport
+    // (§4.1.7 inv 5) — pass, fail, parse, drift, golden-missing,
+    // driver-install, injection-refused, timeout, binary-crash.
+    [[nodiscard]] auto run(const Trace& trace) noexcept -> Result<TraceReport>;
+
+    // Divergence-mode run: compares against `config.compare_to` and
+    // emits a DivergenceReport when the two runs diverge. Returns the
+    // single-run TraceReport when they agree.
+    [[nodiscard]] auto run_with_compare(const Trace& trace) noexcept
+        -> Result<std::variant<TraceReport, DivergenceReport>>;
+
+    // Stable non-zero exit codes — the public CI contract (§4.1.13 inv 4).
+    [[nodiscard]] static constexpr auto exit_code(const Error& e) noexcept
+        -> std::int32_t {
+        return std::visit(
+            [](auto const& arm) noexcept -> std::int32_t {
+                using T = std::remove_cvref_t<decltype(arm)>;
+                if constexpr (std::is_same_v<T, TraceParse>)        return 10;
+                else if constexpr (std::is_same_v<T, EnvDrift>)     return 11;
+                else if constexpr (std::is_same_v<T, AssertFailed>) return 12;
+                else if constexpr (std::is_same_v<T, DriverInstall>)return 13;
+                else if constexpr (std::is_same_v<T, InjectionRefused>) return 14;
+                else if constexpr (std::is_same_v<T, GoldenMissing>) return 15;
+                else if constexpr (std::is_same_v<T, Timeout>)      return 16;
+                else if constexpr (std::is_same_v<T, BinaryCrash>)  return 17;
+                else                                                return 1;
+            },
+            e);
+    }
+
+private:
+    TraceRunner() noexcept = default;
+    struct Impl;
+    Impl* impl_{nullptr};
+};
+
+// ---------------------------------------------------------------------------
+// 5.12 ClosureGate (§4.1.14)
+// ---------------------------------------------------------------------------
+//
+// The CI step that flips a `type:user-story` from "in progress" to
+// "qa-ready". Pure function of the TraceReports a story cites; no
+// human override, no developer-host green substitute (§4.1.14 inv 1,
+// 2, 4). All-green-or-no-flip rule reified at the spec level.
+
+struct UserStoryRef {
+    // GitHub issue number of the user-story whose closure this gate
+    // evaluates. Resolution to the trace set lives in CI policy.
+    std::uint64_t issue_number{0};
+    constexpr bool operator==(const UserStoryRef&) const noexcept = default;
+};
+
+enum class ClosureDecision : std::uint8_t {
+    QaReady,    // every cited trace reported Passed.
+    Withhold,   // at least one trace reported Failed/Aborted; story stays open.
+};
+
+class ClosureGate {
+public:
+    // Evaluate the gate for `story` against `reports`. Returns
+    // QaReady iff every report's status is Passed (§4.1.14 inv 1, 4).
+    [[nodiscard]] static auto evaluate(UserStoryRef                       story,
+                                       std::span<const TraceReport* const> reports) noexcept
+        -> Result<ClosureDecision>;
+
+    ClosureGate()                              = delete;
+    ClosureGate(const ClosureGate&)            = delete;
+    ClosureGate& operator=(const ClosureGate&) = delete;
+};
+
+}  // namespace glibre::e2e
 ```
 
-Event types, serialized schemas (Fory), error types.
+Event types listed above are the `TraceOp` sealed sum (§4.1.4), the
+`InputOp` thin wrapper around `platform::InputEvent` (§4.1.5), the
+`AssertOp` family (`AssertState`, `AssertScreenshot`,
+`AssertEcsSnapshot`, `AssertLogContains`, plus the terminating
+`End`), the `report_status` sub-sum (`Passed | Failed | Aborted`),
+and the `e2e::Error` closed sum (§4.1.13). Schemas: e2e exposes no
+Fory-serialised schema in this surface — `.glibre-trace` files are
+parsed by `Trace::load` into the in-memory aggregate and `TraceReport`
+is consumed in-process by `ClosureGate`; the on-disk Fory schemas for
+both live in §7 below. Error type: `glibre::e2e::Error`, the closed
+sum from §4.1.13, contributed as one arm of the engine-wide
+`glibre::Error` variant per `reviews/decisions/error-model.md`. CI
+maps each variant to the stable non-zero exit codes returned by
+`TraceRunner::exit_code` — the published contract `ClosureGate` and
+external reviewers gate on.
 
 ## 6. Internal Architecture
 
