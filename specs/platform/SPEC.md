@@ -69,8 +69,171 @@ Terms used unchanged in code.
 
 ## 3. Derived From
 
-Harmonius requirement IDs / file paths cited as research input. Note any
-collapse decisions (multiple harmonius concepts → one glibre primitive).
+Harmonius is unreliable prior art — every conclusion below was
+independently re-derived per `PHILOSOPHY.md`. The following harmonius
+files were consulted as research input only.
+
+### Citations (research input)
+
+Requirements:
+
+- `docs/requirements/platform/window-display.md` — R-14.1.1 …
+  R-14.1.12 (window lifecycle, fullscreen, multi-monitor, DPI,
+  presentation, HDR, raw handle, event delivery, logical/physical
+  size types).
+- `docs/requirements/platform/os-integration.md` — R-14.2.1 …
+  R-14.2.9 (clipboard, file dialogs, notifications, drag/drop, IME,
+  layout query, structured errors, console fallback).
+- `docs/requirements/platform/threading-async.md` — R-14.3.1 …
+  R-14.3.17 (thread pool, fibers, async runtime, scoped tasks,
+  game-loop graph, GCD bridging on macOS).
+- `docs/requirements/platform/crash-reporting.md` — R-14.4.1 …
+  R-14.4.11 (crash dumps, symbol upload, structured logs, perf
+  counters, GPU breadcrumbs, OOP capture, platform-native log /
+  profiler sinks).
+- `docs/requirements/platform/platform-services.md` — R-14.5.1 …
+  R-14.5.12 (achievements, leaderboards, rich presence, voice, cloud
+  saves, entitlements, preferences, asset cache, PSO cache, temp
+  files, console certification).
+- `docs/requirements/platform/filesystem.md` — R-14.6.1 … R-14.6.11
+  (async I/O, lifecycle ops, stat, list, file watching, BLAKE3
+  dedup, canonical paths, hash cache, throughput target).
+- `docs/requirements/platform/sdk-integration.md` — R-14.7.* (Steam,
+  Apple, console SDK shapes; cited only to confirm scope refusals
+  below).
+
+Designs:
+
+- `docs/design/platform/windowing.md` (+ `windowing-test-cases.md`)
+  — main-thread sole-owner of OS APIs; bounded-channel event
+  delivery; surface handle abstraction.
+- `docs/design/platform/threading.md` (+ `threading-test-cases.md`)
+  — worker pool topology; main-thread I/O polling; worker I/O
+  request/handle pattern.
+- `docs/design/platform/crash-reporting.md` (+
+  `crash-reporting-test-cases.md`) — out-of-process monitor stub;
+  signal-safe fault path; minidump format.
+- `docs/design/platform/console-integration.md` (+
+  `console-integration-test-cases.md`) — abstract trait + no-op
+  stub + private-fork pattern for proprietary SDKs.
+- `docs/design/platform/platform-services.md` (+
+  `platform-services-test-cases.md`) — vendor-agnostic services
+  facade over Steamworks / Game Center / GDK / PSN.
+- `docs/design/platform/telemetry.md` (+
+  `telemetry-test-cases.md`) — opt-in scope, offline buffer,
+  batched HTTP/3 upload.
+
+### Occam collapses (multiple harmonius concepts → one glibre primitive)
+
+- **Windowing back-ends → SDL3-only.** Harmonius split per-OS code
+  across Win32 (`windows-rs`), `objc2-app-kit` on macOS, and
+  `x11rb` / `wayland-client` / `wp_fractional_scale_v1` on Linux,
+  with a `cfg`-gated module per platform (`windowing.md` § Module
+  Layout). Glibre collapses all of that into a single SDL3 backend.
+  SDL3 already encapsulates fullscreen mode transitions, multi-
+  monitor enumeration, hot-plug, DPI events, IME, drag-drop, and
+  clipboard across Windows / macOS / Linux. The only Objective-C
+  translation unit we keep is the `SDL_Metal_CreateView` →
+  `CAMetalLayer*` bridge file, exposed as
+  `metal_cpp::MTL::Layer*`. Engine code stays pure C++23/26.
+- **`raw-window-handle` trait → opaque `Surface` value.** The
+  multi-platform-handle abstraction (R-14.1.8) collapses to a
+  single typed `Surface` returned by `Window::surface()`. macOS is
+  the only target this MVP supports; render consumes the layer
+  pointer directly.
+- **Window-event channel + input-event channel + surface-event
+  channel → typed `EventQueue<T>` per family.** Harmonius
+  `windowing.md` defined three separate bounded channels with
+  different types. Glibre keeps the family separation but unifies
+  them under one bounded SPSC ring primitive (`EventQueue`)
+  templated on the event sum type, drained once per frame by the
+  `Pump`.
+- **Filesystem watcher ports (kqueue / inotify /
+  ReadDirectoryChangesW / FSEvents) + BLAKE3 hash cache +
+  canonicalization → `FileWatcher` emitting deduplicated
+  `(canonical_path, kind)`.** Harmonius split path canonicalization
+  (R-14.6.7), watch delivery (R-14.6.5, R-14.6.8), and content-hash
+  dedup (R-14.6.6, R-14.6.9) into separate primitives. Glibre folds
+  them into one watcher whose only public output is already
+  deduped, hashed, canonicalized events. Backend choice (SDL3
+  filesystem events on macOS; native APIs on other targets) is an
+  implementation detail behind that seam.
+- **`LogicalSize` + `PhysicalSize` + `Point` + `Rect` (R-14.1.12)
+  → `LogicalSize` / `PhysicalSize` only.** Glibre keeps the two
+  load-bearing types and refuses the geometry pair. `Point` and
+  `Rect` belong in the `geometry` context, not at the OS seam.
+- **Tokio `current_thread` runtime + GCD bridge + IOCP / io_uring
+  job-system bridge (R-14.3.5 / .6 / .12) → not in this context.**
+  Harmonius placed the I/O completion bridge in
+  `harmonius_platform::threading`. Glibre routes that to a sibling
+  job-system context; platform exposes only the underlying OS
+  primitives (`Process`, `Clock`, blocking + bounded async
+  `FileIo`, threads / TLS / atomics).
+- **`async fn` everywhere (R-14.2.7, R-14.6.1, R-14.6.8) →
+  bounded async via small typed handles.** Glibre's C++23/26 stack
+  has no Rust-style `Future` / `.await`. The platform exposes
+  blocking primitives plus a small bounded I/O thread pool used
+  internally; public API returns `std::expected<T,
+  PlatformError>` synchronously or `IoToken` for the bounded
+  async path. No public callbacks, no cross-boundary coroutines.
+- **OS-toast / system-tray / drag-drop / IME / clipboard
+  (R-14.2.x) → input + window event sums, no first-class APIs.**
+  IME composition + commit, drag-drop, layout change, and DPI
+  change all surface as `InputEvent` / `WindowEvent` variants from
+  the SDL3 pump. Clipboard read/write is a thin synchronous
+  helper; tray icons and OS toasts are deferred (refusal — see
+  below).
+- **Multi-OS log sinks (`OutputDebugString` / `os_log` /
+  `sd_journal_sendv`) → crash-dump *capture* primitive only.**
+  Harmonius bound these into `harmonius_platform::diagnostics`
+  (R-14.4.10). Glibre exposes only the macOS crash-dump capture
+  hook here (signal-safe minidump write); aggregation, filtering,
+  channel routing, sink composition (R-14.4.4, .9, .10, .11) all
+  belong to a future `diagnostics` context, not platform.
+
+### Refusals (routed to peer contexts, not platform)
+
+- **GPU rendering, command encoding, swapchain scheduling, shader
+  compilation, HDR color-space conversion, presentation modes
+  (R-14.1.5, R-14.1.6).** → `render`. Platform owns only the
+  surface handle.
+- **ECS / system scheduling / archetype storage.** → `core` (the
+  archetype ECS) and `data` (Fory schemas).
+- **Job system, fiber scheduler, task graph, scoped tasks,
+  GameLoopGraph, async I/O completion routing
+  (R-14.3.3 … R-14.3.17).** → sibling job-system context. Platform
+  exposes only OS thread / TLS / atomics + the `Process` and
+  `Clock` primitives needed to build it.
+- **Console certification (R-14.5.7, R-14.5.12), Steamworks /
+  StoreKit / Game Center / GDK / PSN integration
+  (R-14.5.1 … R-14.5.6, R-14.7.*).** → a separate
+  `platform-services` context behind its own seam, with abstract
+  trait + private-fork pattern as harmonius
+  `console-integration.md` already sketched. The MVP does not
+  open this context.
+- **Logging, structured records, channel filtering, telemetry
+  upload, GDPR export / delete, perf counters, GPU breadcrumbs
+  (R-14.4.4 … R-14.4.6, R-14.4.9 … R-14.4.11, R-14.5.1 …
+  R-14.5.6 in `telemetry.md`).** → `diagnostics` context (not yet
+  opened). Platform owns crash-dump *capture* primitives only.
+- **Asset bundle cache, PSO cache, temp directory manager, mod
+  download cache (R-14.5.9 … R-14.5.12).** → `content` and
+  `render` (PSO) and a future build-cache layer. Platform owns
+  only the `FileIo` primitive they sit on top of.
+- **Player preferences (TOML, atomic write, conflict dialog —
+  R-14.5.8).** → `tools` / editor or a dedicated user-prefs
+  context. Platform owns only the canonical-path + atomic file IO
+  primitives.
+- **File dialogs, drag-drop validation, notifications, system
+  tray (R-14.2.2, R-14.2.3, R-14.2.4).** → `tools` (editor UI).
+  Platform exposes the underlying SDL3 events; user-facing dialog
+  policy lives in the editor.
+- **Symbol upload, server-side symbolication, crash clustering,
+  out-of-process monitor binary lifecycle (R-14.4.2, R-14.4.3,
+  R-14.4.7).** → `diagnostics` and the build / CI pipeline. The
+  in-process signal-safe stub is the only platform surface.
+- **Anti-cheat (R-14.7.6 VAC integration).** → out of MVP scope
+  entirely.
 
 ## 4. Aggregates & Invariants
 
