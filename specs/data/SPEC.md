@@ -2183,7 +2183,142 @@ originating contexts.
 
 ## 9. Performance Budget
 
-Cycles / frame, memory ceiling, allocation rules.
+Quotes the `data` row of the engine-wide per-context budget locked in
+`reviews/decisions/perf-budget.md` and refines it into per-aggregate
+ceilings that sum into the row. Numbers are the contract; CI gates
+enforce them per Allocator Rules and the per-context unit benchmarks
+required by the decision record.
+
+### 9.1 Context row
+
+| Quantity            | Budget    | Source / phase ownership                                                    |
+|---------------------|-----------|-----------------------------------------------------------------------------|
+| CPU sim (per frame) | 0.20 ms   | persistence spine; per-frame work is migration handoff + handle bookkeeping |
+| CPU submit          | 0.00 ms   | data does not record GPU work                                                |
+| GPU                 | n/a       | data owns no Metal heaps or encoders                                         |
+| Heap ceiling        | 32 MiB    | resident middleman tables + active migration scratch                         |
+| Phase ownership     | none      | participates inside phase 8 (hot-reload barrier) on reload frames only       |
+
+The 0.20 ms sim cell is reserved so a schema-migration that lands on a
+hot-reload frame (Scenario S2 from `perf-budget.md`) does not blow out
+the budget; steady-state cost in S1 is near zero. `data` records no
+CPU-submit, no GPU, and owns no phase outright — the migration step it
+performs is invoked by `core` from inside phase 8 and accounted under
+`data`'s tag via `glibre::PerContextAllocator`.
+
+### 9.2 Per-aggregate budget
+
+Aggregates are the nine SRP-bounded units defined in §4. Each row
+quotes a CPU per-call cost (or per-frame, where the work is per-frame),
+a heap sub-ceiling, and the invocation site. Sub-ceilings sum to the
+32 MiB row above; CPU per-frame contributions sum into the 0.20 ms cell.
+
+| Aggregate             | CPU cost                                                                | Heap sub-ceiling | Invocation site                                              |
+|-----------------------|-------------------------------------------------------------------------|------------------|--------------------------------------------------------------|
+| `Schema`              | 0 (host-only authoring; not in runtime)                                 | 0                | not loaded in shipping build                                 |
+| `Foryc`               | 0 (host build-tool, not in runtime budget)                              | 0                | build graph only; no runtime presence                        |
+| `Middleman` (dylib)   | 0 per frame (link-time presence; init at process start)                 | 0 sub-ceiling    | static-init populates `SchemaRegistry`; no per-frame work    |
+| `AbiHash`             | 0 (`O(1)` static string return; called once at plugin load)             | 0                | plugin-loader handshake; not on the hot path                 |
+| `SchemaRegistry`      | ~10 ns per lookup (read-only static `flat_map` over `(fqn, version)`)   | 8 MiB            | called from `Envelope` deserialize; bounded by call count    |
+| `Migration` (single)  | invoked at hot-reload only; 0 on the hot path                           | counted in `MigrationDispatcher` 4 MiB                       | one call per migrated payload during phase 8                 |
+| `MigrationChain`      | composition only; cost folds into `MigrationDispatcher`                 | counted in `MigrationDispatcher` 4 MiB                       | composed once at registry init; replayed per dispatch        |
+| `Envelope`            | per-call cost varies by schema; sample-scene fixture target 0.1 ms total per frame | 16 MiB scratch | every serialize / deserialize call site                      |
+| `ReflectionBlob`      | 0 in shipping build (editor / tools only)                               | 4 MiB (tools build); 0 (shipping)                            | inspector and dump tools                                     |
+| `MigrationDispatcher` | invoked at hot-reload only; 0 on hot path                               | 4 MiB            | phase 8 hot-reload barrier (`core` calls into `data`)        |
+
+Heap sub-ceilings sum: 8 (`SchemaRegistry`) + 16 (`Envelope` scratch) +
+4 (`MigrationDispatcher`) + 4 (`ReflectionBlob`, tools build only) =
+32 MiB. The shipping build does not carry the `ReflectionBlob`
+sub-ceiling; the 4 MiB it would occupy is reserved as `data`-context
+slack within the 32 MiB row and is not counted against any other
+aggregate.
+
+### 9.3 Sample-scene fixture target
+
+Under the `S1` fixture defined in `reviews/decisions/perf-budget.md`
+(1 character + 200 props + 8 dynamic lights at 1920x1080), the
+`Envelope` aggregate is the only `data` aggregate with measurable
+per-frame cost. Steady-state S1 frames perform zero `Envelope`
+serialize / deserialize operations on the hot path: persistent state
+moves through `core`'s ECS storage, not through Fory wire form. The
+per-frame Envelope budget is therefore reserved for incidental
+serializations (e.g. snapshot capture for the editor's time-rewind
+scrubber, save-on-checkpoint events) and capped at **0.1 ms total per
+frame** across all call sites. Steady-state: ~0 ms; budget: 0.1 ms.
+
+The remaining 0.10 ms of the 0.20 ms cell absorbs the migration
+handoff cost on a reload frame (S2): a single plugin's component
+storage migrates through `MigrationDispatcher` inside phase 8, and
+`data`'s portion of that 0.40 ms phase-8 budget is the
+deserialize-with-migration over the world snapshot. This is one frame
+per reload, not per frame.
+
+### 9.4 CI gate — round-trip benchmarks
+
+The `perf-budget.yml` workflow described in
+`reviews/decisions/perf-budget.md` runs Catch2 `BENCHMARK` blocks under
+`data/runtime/test/perf/` on every PR touching this context. Required
+benchmarks:
+
+1. **`envelope_round_trip_s1.bench.cpp`** — serializes then
+   deserializes one of every persistent aggregate type registered for
+   the S1 fixture, asserting wall-clock total `<= 0.10 ms` per
+   1000-iteration window. Verifies the per-frame `Envelope` ceiling.
+2. **`schema_registry_lookup.bench.cpp`** — looks up a representative
+   set of `(fqn, version)` pairs from `SchemaRegistry`, asserting per-
+   lookup `<= 10 ns` over a 100k-iteration window. Verifies the
+   `SchemaRegistry` per-call invariant.
+3. **`migration_dispatch_v_minus_1.bench.cpp`** — deserializes a
+   one-version-old payload through `MigrationDispatcher` for every
+   registered single-step migration in the build, asserting per-call
+   `<= 50 us`. Establishes a dispatch-cost ceiling so a future schema
+   change does not silently grow phase-8 cost beyond its 0.40 ms slot.
+4. **Heap ceiling.** A diagnostic build with
+   `GLIBRE_ALLOC_STRICT=1` exercises the same fixtures and asserts
+   that resident bytes under the `data` `ContextTag` never exceed 32
+   MiB. Per Allocator Rules in `perf-budget.md`, exceeding the
+   ceiling is an `OutOfBudget` `std::expected` arm, not a soft
+   warning, in the gate-build configuration.
+
+Round-trip identity (round-trip preserves bytes) is already a §7.5
+acceptance criterion; the perf gate adds the *time* and *space*
+contracts on top of it.
+
+### 9.5 Allocation rules
+
+`data` allocates exclusively through the `glibre::PerContextAllocator`
+handle stamped at `glibre_plugin_register` time, tagged `data`. Per
+the engine-wide rules:
+
+1. `SchemaRegistry`'s 8 MiB is a static-init allocation: live for the
+   entire process lifetime, freed at process exit. It does not pass
+   through the per-frame transient arena.
+2. `Envelope`'s 16 MiB scratch is a per-frame transient arena drained
+   at phase 9; allocations leaking past the drain are an
+   `OutOfBudget` "leak" arm per the engine allocator rules.
+3. `MigrationDispatcher`'s 4 MiB is a phase-8-only arena, allocated
+   from the migration arena owned by `core` (16 MiB ceiling inside
+   `core`'s 64 MiB row); `data`'s 4 MiB sub-ceiling counts against
+   `data`'s tag, not `core`'s.
+4. `Foryc` is a host build tool. Its memory consumption is not in the
+   runtime budget; it is governed by build-graph CI runner limits
+   (separate concern).
+5. The `AbiHash` export returns a pointer to a `constexpr` string
+   embedded in `glibre-types.dylib` — zero runtime allocation, zero
+   heap accounting.
+
+### 9.6 Headroom posture
+
+`data` does not own a slice of the engine-wide 1.5 ms sim headroom
+locked in `perf-budget.md`. Future per-frame work in this context (for
+example, a `data`-side snapshot ring for time-rewind that runs every
+frame instead of on demand) consumes the existing 0.20 ms cell first;
+once that is full, an amendment to this section and to the engine
+decision record is required before extending into headroom. The 4 MiB
+of heap that the shipping build does not spend on `ReflectionBlob` is
+not slack to be silently consumed; it is reserved against future
+growth of `Envelope` scratch or a still-undecided lazy-migration cache
+(see §12 open question).
 
 ## 10. Failure Modes & Error Model
 
