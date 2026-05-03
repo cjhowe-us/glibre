@@ -2952,4 +2952,6 @@ ladder + capability-fallback paths exercised across stories #381,
 
 ## 12. Open Questions
 
-- Owner / resolution gate.
+None. All concerns raised during §1–§11 authoring (spikes #88–#97) were
+either resolved in place by §1–§10 or converted into the §11 user-story
+backlog (#379–#402). Closed by spike #98.
