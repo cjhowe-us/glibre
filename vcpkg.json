@@ -7,7 +7,6 @@
   "supports": "osx & arm64",
   "dependencies": [
     "sdl3",
-    "entt",
     "joltphysics",
     "meshoptimizer",
     "draco",

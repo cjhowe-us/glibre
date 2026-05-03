@@ -25,7 +25,7 @@ data (Fory schemas + reflection)        │
    ↓                                    │
 shader (DXC + msc + reflection)         │
    ↓                                    │
-render (graph + Metal + mesh-shader gbuffer + RT shadow)
+render (graph + Metal 4 + mesh-shader gbuffer + RT shadow)
    ↓
 geometry (meshlets) → content (FBX import) → physics (Jolt)
    ↓
@@ -48,7 +48,7 @@ in once GitHub repo is provisioned.
 | 3 | platform | SDL3 window/input + metal-cpp surface + watcher   | TBD   |
 | 4 | data     | Apache Fory schemas + reflection + migration      | TBD   |
 | 5 | shader   | HLSL → DXC → metal-shaderconverter + reflection   | TBD   |
-| 6 | render   | Render graph + Metal backend + mesh-shader gbuffer| TBD   |
+| 6 | render   | Render graph + Metal 4 backend + mesh-shader gbuffer | TBD |
 | 7 | render   | Hybrid-RT shadow pass                             | TBD   |
 | 8 | geometry | meshoptimizer meshlets + Draco compression + pak  | TBD   |
 | 9 | content  | FBX SDK + FreeImage + FreeType + CAS              | TBD   |

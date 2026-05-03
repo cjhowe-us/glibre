@@ -12,14 +12,14 @@ mesh-shader gbuffer + asset import + standalone runtime. macOS only.
 
 MVP contexts (each = one plugin + one spec + one epic):
 
-- `core` — ECS (entt wrapper), plugin loader, hot-reload barrier, frame
-  loop, type registry, asset handle table.
-- `platform` — SDL3 window/input, file watcher, Metal surface (via
+- `core` — custom codegen-driven archetype ECS, plugin loader,
+  hot-reload barrier, frame loop, type registry, asset handle table.
+- `platform` — SDL3 window/input, file watcher, Metal 4 surface (via
   metal-cpp).
 - `data` — Apache Fory schemas, reflection, migration.
 - `shader` — HLSL → DXC → metal-shaderconverter; HLSL reflection.
-- `render` — declarative render graph, Metal backend (metal-cpp), mesh
-  shader gbuffer, deferred lighting, hybrid-RT shadows, present.
+- `render` — declarative render graph, Metal 4 backend (metal-cpp),
+  mesh shader gbuffer, deferred lighting, hybrid-RT shadows, present.
 - `geometry` — meshoptimizer meshlets + Draco mesh(let) compression
   (cooked-asset side), BLAS build for static meshes.
 - `physics` — Jolt rigid bodies, deterministic config.

@@ -9,16 +9,20 @@
    contexts with clean seams; each context complete within its scope.
    Reject the false trade-off that asks us to ship half-built modules
    for the sake of breadth.
-3. **Minimal core, plugin-only growth**. Core hosts ECS, plugin loader,
-   hot-reload barrier, frame loop, type registry, asset handles. Every
-   domain (render, physics, audio, scripting, editor UI) is a plugin
-   `.dylib`.
+3. **Minimal core, plugin-only growth**. Core hosts the codegen-driven
+   archetype ECS, plugin loader, hot-reload barrier, frame loop, type
+   registry, asset handles. Every domain (render, physics, audio,
+   scripting, editor UI) is a plugin `.dylib`.
 4. **Spec → story → test → code**. Stories are testable acceptance
    criteria; tests come from stories; code comes from tests.
 5. **Greatly reduced MVP scope**. A fraction of the long-term horizon,
    designed end-to-end before any feature creep.
-6. **Static codegen, zero runtime reflection** in shipping builds.
-   Visual graphs (logic, material, effects) compile to C++ / HLSL.
+6. **Static codegen everywhere it fits, zero runtime reflection** in
+   shipping builds. ECS archetype storage, component access, schema
+   serialization, plugin manifest types, visual graphs (logic,
+   material, effects), shader permutations all emit hand-written-shape
+   C++ / HLSL at build time. No third-party ECS library; the engine
+   owns its archetype layout end-to-end.
 7. **Determinism by default**. Physics + ECS world snapshots byte-equal
    across hosts and runs. No platform intrinsics in simulation. Fixed
    container iteration order.

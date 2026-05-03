@@ -3,7 +3,8 @@
 ## Project
 
 Glibre — C++23/26 no-code game engine. macOS-first. Plugin-based.
-SDL3 + Metal (via metal-cpp) + HLSL (DXC + metal-shaderconverter).
+SDL3 + Metal 4 (via metal-cpp) + HLSL (DXC + metal-shaderconverter).
+macOS 26 / Apple Silicon baseline.
 
 ## Workflow
 
@@ -45,8 +46,8 @@ SDL3 + Metal (via metal-cpp) + HLSL (DXC + metal-shaderconverter).
 ## Tech Stack (locked)
 
 C++23, CMake ≥ 3.28 + Ninja, vcpkg manifest mode, clang ≥ 18, SDL3,
-Metal via metal-cpp (no Obj-C++ in engine code), HLSL via DXC +
-metal-shaderconverter, entt, Jolt, meshoptimizer, Apache Fory,
+Metal 4 via metal-cpp (no Obj-C++ in engine code), HLSL via DXC +
+metal-shaderconverter, Jolt, meshoptimizer, Draco, Apache Fory,
 FreeImage, FreeType, FBX SDK, Dear ImGui, Catch2, spdlog.
 
 ## Repo Layout
