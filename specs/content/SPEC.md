@@ -2308,7 +2308,582 @@ never as byte payloads.
 
 ## 8. Hot-Reload Contract
 
-What survives swap, what `migrate(...)` must do, what triggers refusal.
+This section specialises the engine-wide hot-reload protocol
+(`reviews/decisions/hot-reload-protocol.md` — drain → swap → migrate →
+resume) to **content**, whose primary hot-reload event is **not** a
+plugin `.dylib` swap but a **source-asset file change** that re-cooks
+one or more `AssetId`s and atomically replaces the active `Manifest`
+snapshot. This path fires far more often in development than the
+plugin-code path: every save in a DCC, every paint stroke that lands
+through the watcher, every editor "reimport" command. Content's
+contract therefore has two layers, both anchored to the engine's
+phase-8 frame-boundary barrier:
+
+1. **Manifest-swap (the dominant path)** — a `CookSession` produced
+   new `(AssetId → ContentHash)` rows; the loader's barrier publishes
+   them via the existing atomic-`rename(2)` protocol (§4.1.6 inv #2);
+   `AssetHandle<T>` consumers transparently re-resolve on their next
+   `view()` (§4.1.8 inv #4). No vtables move. No middleman ABI hash
+   changes.
+2. **Plugin-code reload (the rare path)** — the `glibre.content`
+   plugin dylib itself swaps under the engine-wide protocol (drain →
+   swap → migrate → resume). Engine-wide concerns (per-plugin
+   atomicity, observer bus event shapes, error wrapping rules, the
+   `enqueue_hot_reload` E2E hook) are not re-stated; see the protocol
+   record. Content adds the four pluggable points the protocol leaves
+   to each plugin: drain side-effects, survival inventory, migrate
+   body, and register-time rehydration.
+
+The §3.2 collapse #3 ("multiple hot-reload pipelines → one re-cook +
+atomic handle swap") is realised by §8: the manifest-swap path is the
+single mechanism through which textures, meshes, and fonts hot-reload
+at the content boundary. Domain semantics of swap (descriptor-heap
+updates, PSO swap, shader-permutation invalidation, logic-graph state
+preservation) are routed to the owning context (§3.3) and are not
+content's concern; content's concern ends at "the active manifest now
+maps `AssetId` to a new `ContentHash`, and `view()` returns the new
+bytes."
+
+### 8.1 Reload point — phase 8, never mid-frame
+
+The engine schedule (`reviews/decisions/frame-phases.md`) places the
+hot-reload barrier at phase 8, between `render-submit` (phase 7) and
+`present` (phase 9). Both content paths are anchored to that one
+slot and refuse any other.
+
+At phase 8 entry, content's in-flight state is:
+
+1. **No `AssetHandle::view()` is being dereferenced.** All ECS
+   systems that consume cooked bytes finished writing their per-frame
+   extracts in phases 1–6; phase 7 already returned. Phase 8 sees no
+   live `view()` call and no `LoadRequest` mid-flight on the synchronous
+   path (§4.2 invariant 8 anchors content's I/O lane to background
+   threads off the frame loop; the manifest pointer is read on-frame
+   but only at extract time, never under the loader's exclusive
+   ownership).
+2. **The active `Manifest` snapshot pointer is stable.** The
+   in-RAM swap of the manifest pointer (§4.1.6 inv #2) is itself the
+   atomic publish — a single relaxed store under the loader's
+   exclusive phase-8 ownership — and is invisible to phases 1–7 of
+   frame N because they have already completed.
+3. **No `CookSession` mutates the active snapshot mid-frame.**
+   `CookSession::commit()` runs entirely off the frame loop on a
+   background thread (§4.2 inv #8); it stages results into a worker-
+   private table and parks them on a queue. The queue is drained
+   exactly at phase 8 entry by the loader, which then executes the
+   manifest-swap path described in §8.3.1. A `CookSession` whose
+   `commit()` returns at any other phase does **not** publish — its
+   `CookOutcome` value is captured, but the manifest pointer flip is
+   deferred to the next phase 8.
+4. **`ResidencyManager` ref-count tables are stable.** I/O-lane
+   operations on the residency state machine (§4.1.7 inv #2) are
+   suspended between phase 7 exit and phase 9 entry by the engine's
+   exclusive-ownership rule; ref-count adjustments queued during
+   phases 1–7 have all been applied. (Ref-count *reads* during phase
+   8 are safe; the loader is single-threaded inside the barrier.)
+
+These four conditions are content's half of the protocol's "drain"
+postcondition (protocol §"Step 1 — Drain"). The
+`glibre_plugin_drain` body therefore has nothing to flush on the
+runtime side — its only work is the worker-pool teardown described
+in §8.3.
+
+**Mid-frame reload is refused.** Any `CookSession::commit()` that
+completes during phases 1–7 enqueues its staged results; the
+manifest pointer flip is consumed only at phase 8 entry. Inside
+phase 8, content does not yield to the I/O lane or to recook
+workers — the loader holds exclusive ownership for the duration of
+drain → swap → migrate → resume per protocol §"Decision". A
+runtime caller that observes a partially-swapped manifest pointer
+is treated as a contract violation by the loader, not a refusal —
+content's spec contributes no new refusal arm here, but states the
+invariant explicitly so consumers cannot expect mid-frame swap
+semantics.
+
+### 8.2 Manifest-swap path (the dominant hot-reload)
+
+The vast majority of content hot-reloads are **manifest-only** — no
+plugin code moves, no ABI hash changes, no migrate functions run.
+The trigger chain is mechanical:
+
+1. **`platform` watcher fires.** A `FileEvent` for a path under
+   `assets/source/` is delivered through the `WatchEdge` subscription
+   (§4.1.10 composition).
+2. **Content translates to recook requests.** The `WatchEdge`
+   translator reads the active manifest's in-RAM `DependencyEdge`
+   graph and produces a `Set<RecookRequest>` whose closure is
+   bounded by the transitive dependents of the changed source
+   (§4.1.10 inv #4). The set may include multiple `AssetId`s when a
+   leaf source has fan-out (e.g. a normal-map source feeding two
+   materials); each `RecookRequest` carries a `SourceChanged` /
+   `DependentRecook` reason discriminant for telemetry.
+3. **`CookSession` runs the requests.** A session is begun
+   (`CookSession::begin`), the requests are enqueued
+   (`CookSession::enqueue`), and `commit()` runs the cooks in
+   topological order (children before parents, §4.1.9 inv #3). Each
+   cook step:
+   - computes the `CookKey` digest (§4.1.3) from the new source
+     bytes plus the unchanged importer / params / downstream tool
+     versions;
+   - on cache hit (digest matches the manifest's recorded
+     `cook_key.digest` and the corresponding `ContentHash` is
+     present in the CAS), skips the cook entirely (§4.1.3 inv #3);
+   - on cache miss, dispatches the importer (§4.1.2), produces a
+     new `CookedAsset`, computes its `ContentHash`
+     (`BLAKE3(payload)`, §4.1.4 inv #1), writes the bytes to the
+     CAS via the temp-write + `rename(2)` protocol (§4.1.5 inv #3),
+     and stages a new `(AssetId, CookKey, ContentHash)` triple.
+4. **Atomic manifest publish at phase 8.** When `commit()` returns
+   `CookOutcome::Published`, the staged manifest blob has been
+   written to a temp path and fsync'd, but the canonical
+   `cooked/_manifest.fory` rename is **deferred** to the next phase
+   8 (§4.2 inv #8: "the only on-frame artifact is the in-RAM
+   manifest swap"). At phase 8 entry the loader executes:
+   - `rename(2)` of the staged manifest blob onto the canonical
+     path — atomic at the filesystem layer (§4.1.6 inv #2);
+   - relaxed-store of the in-RAM active-manifest pointer to the new
+     snapshot — atomic at the runtime layer (§4.2 inv #5);
+   - emission of one `AssetReloaded` event per affected `AssetId`
+     (§8.5).
+5. **`AssetHandle<T>` consumers re-resolve transparently.** On the
+   next `view()` after phase 8 exit, each handle's `asset_id`
+   resolves through the new manifest snapshot to the new
+   `ContentHash`. Because handle identity is `(asset_id, slot
+   generation, content_hash_at_acquire)` (§4.1.8 lifetime), the
+   handle observes the change as a generation bump and a fresh byte
+   span; consumers that have cached a `view()` span from a prior
+   frame must re-call `view()` (§4.1.8 inv #4).
+
+This path is **the** content hot-reload. Steps 1–4 produce no
+changes to plugin code, vtables, or middleman ABI hashes; they are
+not a "reload" in the protocol's drain → swap → migrate → resume
+sense. They are a **manifest pointer flip** under the engine's
+existing phase-8 ownership, sharing the loader's barrier but not
+the protocol's machinery.
+
+### 8.3 Survival across the manifest swap
+
+The engine-wide survival rule is mechanical: **state with a
+`.fory` schema in `glibre-types.dylib` survives across the swap;
+state without one does not** (protocol §"State Survival Rules";
+PHILOSOPHY collapse: one check, not a per-aggregate manifest).
+Content owns three persistent fory-schema'd types
+(§7.1.1 `ManifestEntry`, §7.1.2 `CookKey`, §7.1.3 `DependencyEdge`)
+and a collection of host-side runtime state. The table classifies
+every content aggregate against that rule and adds the
+content-specific reasoning for each survival decision.
+
+| Content-owned state                                                          | Persistence path                | Survives swap? | Reasoning                                                                                                                                                                                                                                                                                                                                  |
+|------------------------------------------------------------------------------|---------------------------------|----------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `ManifestEntry` rows (§7.1.1)                                                | `.fory` schema, middleman       | Yes — the active manifest snapshot **is the swap**. Old rows for re-cooked `AssetId`s are replaced by new rows in the same atomic publish; rows for unchanged `AssetId`s are byte-equal in the new snapshot (deterministic encoding, §4.1.6 inv #6 / §7.1.1 round-trip golden). Per-row migration runs only when the `ManifestEntry` schema itself bumped (additive-only, §7.2.1) — the manifest-swap path does not invoke migrate functions. |
+| `CookKey` records (§7.1.2)                                                   | `.fory` schema, middleman       | Yes — embedded inside `ManifestEntry`. A re-cooked entry carries a freshly-derived `cook_key`; an unchanged entry retains the prior key byte-equal. Schema bumps on `CookKey` itself force full re-cook (§7.2.2) — never a live migration of recorded keys. |
+| `DependencyEdge` lists (§7.1.3)                                              | `.fory` schema, middleman       | Yes — embedded inside `ManifestEntry.edges`. The new manifest snapshot's edges reflect the post-cook dependency graph; cycle-freedom is asserted at publish (§4.1.6 inv #4). Schema bumps on `DependencyEdge` are additive on `child_kind` (§7.2.3) and require no migration body. |
+| **CAS files at `cooked/<prefix>/<hash>` (§4.1.5)**                           | Append-only filesystem          | **Yes — never rewritten in place.** Old `ContentHash` files remain on disk after the manifest pointer moves to a new hash; they are addressed by their digest, not by `AssetId`, so re-pointing the manifest does not orphan their bytes for handles that captured them. **Garbage collection of orphaned hashes is post-MVP** (§4.1.5 inv #2); the swap leaves orphaned bytes on disk to be reclaimed later. |
+| **Active `Manifest` pointer (§4.1.6)**                                       | In-RAM only; on-disk `cooked/_manifest.fory` is the persistent backing | Yes — pointer flip is **the** swap. The prior snapshot remains live for any thread that captured it before the flip (§4.1.6 inv #2: "Concurrent runtime queries see exactly one of the two snapshots"). Outstanding handles whose prior `view()` returned bytes from the prior snapshot keep those bytes valid until they re-resolve. |
+| **`AssetHandle<T>` instances (§4.1.8)**                                      | None (in-process)               | **Yes — handle identity survives**. A handle's `asset_id` is stable across cook revisions (§4.1.8 composition); the handle's `slot.generation` increments on each manifest swap that re-pointed its `AssetId`, so the next `view()` re-resolves through the new snapshot to a fresh `(slot, content_hash)` tuple. **Generation tagging makes use-after-swap a `ResidencyError::ManifestStale`, never UB** (§4.1.8 inv #4). |
+| `ResidencyManager` ref-count table (§4.1.7)                                  | None (in-process)               | Yes. The table is keyed by `ContentHash`; when the manifest re-points an `AssetId` from `H_old` to `H_new`, both slots can coexist — the prior slot is held until its outstanding handle ref-count reaches zero, then naturally drains (§4.1.7 inv #6). The new slot is admitted via the standard `LoadRequest` path on the next handle access. The swap **adjusts ref-counts only by the rules of slot transitions**, not by any out-of-band mutation. |
+| `ResidencyManager` mmap regions (§4.1.7 inv #5)                              | None (in-process)               | Yes for held mappings (refcount > 0); released for evicted mappings via the standard `Resident → Evicting → Unloaded` graph. Mapping bytes themselves are owned by the kernel; the manager only holds the descriptor (§4.1.7 composition). |
+| `MemoryBudget` ceiling (§4.1.7)                                              | Configured (process arg)        | Yes — set once at content init from `perf-budget.md`; not perturbed by any swap. A swap that would temporarily double-pin (old hash held by extant handles + new hash being admitted) MUST still respect the ceiling: progressive eviction runs first, deferring the new admission per §4.1.7 inv #1 if no slot can free room. |
+| `WatchEdge` subscriptions (§4.1.10)                                          | None (rebuilt at startup)       | No — owned by `platform`'s watcher (§3.3). Content's translator state (the in-RAM mapping from path → `Set<AssetId>`) is rebuilt from the `DependencyEdge` graph on startup and is otherwise stable across swaps; a manifest swap that changes the dependency graph updates the translator's in-RAM cache as part of the publish protocol. |
+| In-flight `RecookRequest` queues / `CookSession` worker pools                | None                            | No — destroyed by content's `glibre_plugin_drain`, re-spawned by the new plugin's `glibre_plugin_register` (plugin-code reload only; the manifest-swap path does not touch them). |
+| `SourceAsset` debounced cache, `Importer` per-cook arenas                    | None                            | No — stateless across cook sessions (§4.1.1, §4.1.2 lifetime). No survival concern. |
+
+The rule mechanically applied: every row marked "Yes" has either a
+`.fory` schema or is owned by `core` / `platform` / `data` /
+`glibre-types`; every "No" row is private to content with no
+on-disk format and no migration contract — exactly what
+PHILOSOPHY §3 + protocol §"State Survival Rules" require.
+
+The dominant manifest-swap path touches only the first six rows;
+the plugin-code reload path additionally tears down and re-spawns
+the last two row groups.
+
+### 8.4 `migrate(...)` body — content's responsibilities
+
+Two `migrate(...)` surfaces exist; both follow the protocol's pure
+migrate signature (`hot-reload-protocol.md` §"Migrate Function
+Contract").
+
+**Manifest-row re-resolution (manifest-swap path).** This is **not**
+a protocol-level migrate function — no schema version moves and no
+ABI hash changes. It is content's per-row republish action, executed
+inside the loader's phase-8 ownership immediately after the manifest
+pointer flip:
+
+1. For each `AssetId` whose new `ManifestEntry.content_hash` differs
+   from the prior snapshot's `content_hash`, content walks the
+   `ResidencyManager` table and, if the `AssetId` has any
+   outstanding `AssetHandle` references:
+   - Bumps the handle's `slot.generation` so the next `view()`
+     re-resolves (§4.1.8 inv #4); the prior slot is **not**
+     evicted — it is held until its ref-count drains naturally
+     (§4.1.7 inv #6).
+   - Issues a `LoadRequest` for the new `ContentHash` if it is
+     not already `Resident`. The request flows through the standard
+     priority queue (§4.1.7 inv #4); the manifest swap does **not**
+     bypass the eviction policy or the `MemoryBudget` ceiling.
+2. For each `AssetId` whose `ContentHash` is unchanged in the new
+   snapshot (cache-hit cooks, untouched siblings of a leaf change),
+   no work is required — the old slot, the old generation, and the
+   old `view()` bytes remain valid.
+3. Content emits one `AssetReloaded` event per affected
+   `AssetId` (those whose `ContentHash` actually changed) carrying
+   `{asset_id, old_content_hash, new_content_hash}` on the engine's
+   observer bus (§8.5). Consumers (render, geometry, audio, editor)
+   subscribe and react synchronously inside phase 8 per the
+   protocol's atomicity rule.
+
+**Persistent-type schema migration (plugin-code reload path).** The
+protocol's step 3 (`migrate`) runs pure per-row functions for every
+persistent-component-type schema bump on the engine's behalf.
+Content owns three of those bodies, all governed by §7.2:
+
+- `ManifestEntry` migrations (§7.2.1) — additive-only; codegen
+  synthesises defaults at deserialise time per data SPEC §7.4 rule
+  #6. **No body** is required at MVP horizon. Schema bumps that
+  append a defaulted field (e.g. `last_published_at_unix_ms : u64
+  default 0` at tag 5) flow through the engine's standard
+  additive-defaulted-field migration with no per-row code.
+- `CookKey` migrations (§7.2.2) — **forbidden by construction**.
+  `CookKey.fory` ships with no `migration` clause; the codegen tool
+  refuses to emit a dispatcher (data SPEC §7.4 rule #5 / §7.6
+  parallel pattern). A schema bump on `CookKey` is therefore a full
+  re-cook on next workspace open: the manifest is treated as cold
+  cache and rebuilt by the next `CookSession`. **No live migration
+  of `CookKey` records is permitted**, ever. The CAS contents survive
+  the re-cook because they are addressed by `ContentHash`, not by
+  `CookKey` (§4.1.5 inv #2).
+- `DependencyEdge` migrations (§7.2.3) — additive variants on
+  `child_kind` only; codegen treats this as an identity mapping.
+  **No body** is required.
+
+The plugin-code reload path therefore runs **zero** content-authored
+migrate functions across MVP. Any future schema bump that would
+require a body is rejected at review under §7.2.4 — the correct
+operation is always invalidate-and-recook, never live-rewrite. The
+contract is testable: `tests/data/schemas/content/<Type>.cpp` round-
+trip goldens (§7.1.1, §7.1.2, §7.1.3 round-trip contracts) cover
+every shipped schema version.
+
+What content's `glibre_plugin_register` (resume step) **does** do
+on a plugin-code reload:
+
+1. **Re-acquires the active `Manifest` snapshot pointer** from the
+   middleman registry. The pointer survives the swap (§8.3 row 5);
+   the new plugin reads it and seeds its own in-RAM dispatch tables
+   from the snapshot's contents.
+2. **Re-spawns the cook worker pool** sized from `perf-budget.md`'s
+   content-context cell. The pool's previous lifetime ended in
+   `glibre_plugin_drain`.
+3. **Re-registers the `WatchEdge` subscriptions** with `platform`'s
+   watcher by walking the active manifest's `DependencyEdge` graph
+   (§4.1.10 inv #1). Subscriptions are idempotent; re-subscribing
+   to a path already watched is a no-op at the platform layer.
+4. **Re-binds the `ResidencyManager` I/O lane** to the engine's
+   background-thread scheduler. Outstanding `Resident` slots and
+   their mmap regions survive (§8.3) and are re-attached to the
+   resumed I/O lane without re-mapping.
+5. **Does not rebuild `Manifest` snapshots, does not re-cook, does
+   not invalidate the CAS.** All persistent state survives by
+   construction; the resume step is bounded by O(active subscriptions
+   + worker pool size), which is sub-millisecond in practice.
+
+The total work in content's resume step is therefore bounded by
+**O(subscriptions) re-registrations + O(workers) thread spawns +
+zero CAS or manifest churn**, fitting the protocol's "reload path
+bounded by drain + swap + Σ migrate + register" budget
+(`hot-reload-protocol.md` §Consequences).
+
+### 8.5 Refusal cases (content-specific)
+
+Content contributes no new umbrella refusal arm; every refusal is
+expressed as the engine-wide `core::Error::HotReloadRefused` with a
+nested cause chosen from the protocol's existing arms, **or** as a
+local `glibre::content::Error` returned from the manifest-swap path
+which is not a protocol-level refusal but a publish failure (the
+prior manifest snapshot remains active, identical to the protocol's
+"prior plugin remains live" semantics).
+
+Three classes of refusal exist; each maps to a documented inner
+cause and a specified operator action.
+
+**Class A — Cooker version mismatch (manifest-swap path, refused as
+publish failure).** Detected during `CookSession::commit()` when the
+`CookKey.digest` for any input changes due to a non-source ingredient
+moving (importer rebuild, `glibre-foryc` bump, downstream tool
+version change, `glibre-types` ABI hash bump per §3.2 collapse #2 /
+§7.1.2 component 6). This is **not a refusal** — it is the **expected
+re-cook trigger** (§7.2.2 / §7.2.4). Every recorded `cook_key.digest`
+mismatches the freshly-computed key for its asset; the session
+re-cooks every dependent and publishes a fresh manifest. The
+engine-wide protocol is not invoked. Operator action: none — the
+re-cook is automatic and may take longer than usual on the first
+session after the version bump.
+
+**Class B — Importer / cook step failure (manifest-swap path,
+refused as publish failure).** Detected during `CookSession::commit()`
+on any of the §4.1.2 / §4.1.4 / §4.1.6 invariants. The session
+returns `CookOutcome::RolledBack` and the prior manifest snapshot
+remains active (§4.1.9 inv #1). The four cases:
+
+| Refusal cause                                                                          | Detected by                                                                                                       | Returned error                                              | Operator action                                                                                  |
+|----------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------|--------------------------------------------------------------------------------------------------|
+| Importer cannot read source (path escape, missing file)                                | `Importer::ingest()` per §4.1.2 inv #1, lifted from `SourceAsset` constructor (§4.1.1 inv #1).                    | `ImporterError::SourceNotFound`                             | Restore the source file to a path under `assets/source/`; re-trigger the watch event.            |
+| Importer SDK rejects the source (magic mismatch, unsupported version, malformed)       | Importer's `-fexceptions` carve-out (§4.1.2 inv #2); SDK exception is translated at first ingress.                | `ImporterError::MagicMismatch` / `UnsupportedVersion` / `MalformedPayload` | Re-export the source from the DCC at a supported version; verify the file is not corrupt.       |
+| Cook output fails Fory schema validation (wrong artifact class FQN, version not in registry) | `CookSession::commit()` validates each staged `CookedAsset.payload` against `data`'s `glibre-types` registry per §4.1.4 inv #2. | `ImporterError::MalformedPayload`                           | This is a producer-side defect — file a bug against the cook step's owning context; the cook is rejected and the prior manifest remains. |
+| Dependency cycle detected at publish                                                   | Manifest publish protocol per §4.1.6 inv #4 / §4.1.10 inv #4.                                                     | `ImporterError::MalformedPayload`                           | Resolve the cycle in the source tree (e.g. break a circular material reference); re-trigger the cook. |
+
+In all four Class-B cases, **the prior `CookedAsset` and its
+`ContentHash` remain referenced** by the active manifest. The
+in-flight session's CAS writes (if any) succeeded onto the file
+system but are **never published** — the manifest pointer never
+moves. Orphaned CAS bytes await post-MVP garbage collection
+(§4.1.5 inv #2). The diagnostic surface logs each refusal once at
+`warn` level (mirroring the engine protocol's refusal logging
+discipline) with structured fields `asset_id`, `source_path`,
+`importer_kind`, `cause`.
+
+**Class C — Plugin-code reload refusal.** Detected during the
+engine-wide protocol's steps 2–4 when the `glibre.content` dylib
+itself is being swapped. Three cases roll up to the protocol's three
+named arms:
+
+| Plugin-code refusal cause                                       | Detected at protocol step               | Inner-error arm                                | What the operator must do                                                                                  |
+|-----------------------------------------------------------------|-----------------------------------------|------------------------------------------------|------------------------------------------------------------------------------------------------------------|
+| New plugin's `glibre_types_abi_hash()` ≠ host                   | Step 2.1 (engine-wide ABI gate)          | `core::Error::PluginAbiHashMismatch`           | Rebuild the plugin against the current `glibre-types.dylib`. PHILOSOPHY §9 case.                           |
+| New plugin's manifest declares a `(fqn, schema_version)` set that drops a content-owned persistent type the prior plugin registered | Step 2.2 (engine-wide manifest gate)     | `core::Error::HotReloadRefused` with cause `core::Error::SchemaMigrationFailed` | Restore the dropped type or accept a fresh workspace (post-MVP); content's manifest layer is additive-only (§7.2.1) so this case is unexpected. |
+| New plugin's `glibre_plugin_register` returns an error (worker-pool spin-up failure, watcher re-registration failure)                  | Step 4.1 (engine-wide register gate)     | `core::Error::PluginInitFailed` carrying `content::Error`   | Inspect the plugin's structured log; resolve the inner cause; re-attempt. The prior plugin remains live. |
+
+Each refusal is logged exactly once at `warn` level (protocol
+§"Refusal Cases") with the structured fields `plugin_fqn=glibre.content`,
+`attempted_dylib_path`, `host_abi_hash`, `plugin_abi_hash`, and the
+inner cause's enumerator name.
+
+### 8.6 Observer notification — `AssetReloaded`
+
+`AssetReloaded` is content's single hot-reload event type, emitted
+**per affected `AssetId`** during the manifest-swap path (§8.4). It
+is the seam through which sibling contexts (render, geometry,
+audio, editor) react to a content change without polling the
+manifest themselves. Its shape:
+
+```cpp
+namespace glibre::content {
+
+struct AssetReloaded {
+    AssetId     asset_id;          // §2 — `glibre.<ctx>.<slug>`
+    ContentHash old_content_hash;  // 32-byte BLAKE3, the prior bytes
+    ContentHash new_content_hash;  // 32-byte BLAKE3, the new bytes
+    // No SchemaVersion field — manifest swap never moves schema versions
+    // (§8.4 "manifest-row re-resolution"). Schema bumps go through the
+    // plugin-code reload path and surface as the engine's standard
+    // `HotReloadCompleted { migrated_types }` instead.
+};
+
+}
+```
+
+The event is itself a middleman type
+(`glibre.types.content.AssetReloaded`, layout owned by data SPEC
+§7), so its byte layout survives any plugin-code reload (engine
+protocol §"Observer Notification" mirror).
+
+**Emission contract:**
+
+1. **One event per `AssetId` whose `ContentHash` actually changed
+   in the published manifest.** Cache-hit cooks (digest match,
+   `ContentHash` unchanged) emit no event — the bytes are
+   byte-equal to what consumers already see.
+2. **Synchronous emission inside phase 8.** Subscribers are called
+   on the loader thread, after the manifest pointer flip and
+   before phase 9 begins (mirrors engine protocol §"Observer
+   Notification" atomicity). Subscribers see a fully-swapped
+   manifest snapshot; they never observe a half-swapped state.
+3. **Subscriber failure is non-fatal.** A subscriber that returns
+   an error is logged at `warn` level with `subscriber_fqn`,
+   `asset_id`, `cause`; the manifest swap proceeds and other
+   subscribers are still notified. (Rationale: the manifest
+   pointer is already flipped; refusing the swap retroactively is
+   not coherent. The dev-time editor / e2e harness path is
+   tolerant of subscriber bugs by design.)
+4. **No `AssetReloaded` is emitted on the plugin-code reload path.**
+   That path uses the engine's `HotReloadCompleted { migrated_types }`
+   event (protocol §"Observer Notification") which already carries
+   the schema-bump information. Emitting `AssetReloaded` for every
+   active `AssetId` on a plugin-code reload would be redundant —
+   the manifest pointer **survives** unchanged through the
+   plugin-code swap (§8.3 row 5), so no `ContentHash` mapping
+   moves.
+
+Consumer responsibilities (each owning context's hot-reload §8 cell
+spells these out concretely; this is the cross-reference):
+
+- **`render`** (specs/render/SPEC.md §8.5): treats `AssetReloaded`
+  on a `glibre.<ctx>.<slug>.texture` `AssetId` as a descriptor-heap
+  rebind trigger; the new `ContentHash` resolves to new pixel bytes
+  on the next `RenderFrame` extract.
+- **`geometry`**: re-issues meshlet / BLAS imports for affected
+  meshes; existing GPU resources are torn down on the next phase 6.
+- **`audio`** (post-MVP): re-decodes the affected `AssetId` into
+  the mixer's sample bank.
+- **`editor`** (post-MVP): refreshes its asset-browser thumbnail
+  and any open inspector for the affected `AssetId`.
+
+The event types added by content — exactly one
+(`AssetReloaded`) — piggyback on the engine bus. No second event is
+permitted; new observability needs flow into existing arms or
+graduate to a SPEC bump.
+
+### 8.7 Test hooks — file-touch + manual recook + replay assertion
+
+Content's hot-reload contract is verified end-to-end by three
+fixture layers under `tests/content/hot_reload/`. All fixtures use
+the loader's existing `enqueue_hot_reload` E2E entry point (protocol
+§"Test Hooks") only for the plugin-code reload path; the manifest-
+swap path uses **content-private E2E hooks** described below, which
+trigger the same in-process state machine without touching the
+filesystem watcher.
+
+**Content-private E2E hooks (`#if defined(GLIBRE_E2E)`):**
+
+```cpp
+namespace glibre::content::test {
+
+// Drops a synthesized FileEvent into the WatchEdge translator
+// without touching the filesystem. The event is treated as if it
+// came from `platform`'s watcher; the next CookSession picks it up.
+RecookRequestId enqueue_synthetic_file_event(
+    std::filesystem::path source_path,
+    std::span<const std::byte> new_source_bytes
+) noexcept;
+
+// Forces a CookSession to commit at the next phase 8 entry.
+// Used to deterministically interleave a recook with a frame.
+[[nodiscard]] auto force_commit_at_next_phase8(
+    CookSessionId session
+) noexcept -> Result<CookOutcome>;
+
+// Blocks the calling thread until the referenced recook has
+// reached terminal state (Published / RolledBack / Cancelled).
+// Used by E2E goldens; never linked into runtime.
+[[nodiscard]] auto await_recook(RecookRequestId) noexcept
+    -> Result<CookReport>;
+
+}
+```
+
+**Three test scenarios:**
+
+1. **File-touch happy path** (`Hot-reload re-cooks on source change`).
+   Fixture writes a synthetic `.png` source under
+   `tests/data/content/source/`, opens a workspace, and runs the
+   engine for `K = 8` frames. At frame `K/2` the harness calls
+   `enqueue_synthetic_file_event` with new bytes, then
+   `force_commit_at_next_phase8`. Assertions:
+   - `CookSession::commit()` returns `CookOutcome::Published`;
+   - the active `Manifest` snapshot at frame `K/2 + 1` resolves
+     the affected `AssetId` to the new `ContentHash`;
+   - exactly one `AssetReloaded` event was emitted with
+     `{old_content_hash, new_content_hash}` matching the cook
+     output;
+   - the `AssetHandle<Texture>` held by the harness's render-stub
+     observes the new bytes on its next `view()` (the prior
+     `view()` span is still valid because the prior slot is held
+     until ref-count drains, §4.1.7 inv #6);
+   - the `ResidencyManager` ref-count for the prior `ContentHash`
+     is exactly 1 immediately after the swap (the harness's still-
+     captured prior `view()`), and drops to 0 once the harness
+     drops its captured span;
+   - the prior CAS file at `cooked/<prefix>/<old_hash>` remains
+     on disk (no in-place rewrite, no GC at MVP).
+
+2. **Manual recook + replay assertion** (`Hot-reload preserves
+   manifest determinism`). Fixture cooks a deterministic source
+   asset, captures the resulting manifest blob bytes (after
+   `rename(2)`) as a golden, then replays the same cook from a
+   fresh workspace and asserts the manifest blob is byte-equal to
+   the golden. This exercises §4.1.4 inv #1 (`(source_bytes,
+   cooker_version) → content_hash` is total) end-to-end through
+   the publish protocol; if the manifest layer or any importer
+   leaks non-determinism, the golden mismatch surfaces immediately.
+
+3. **Cooker version mismatch → re-cook all dependents** (`Hot-reload
+   re-cooks on cooker version bump`). Fixture cooks a source under
+   importer-version-A, persists the manifest, then re-opens the
+   workspace under importer-version-B (simulated by bumping
+   `importer_version` in the fixture importer's compiled identity).
+   Assertions:
+   - the next `CookSession` re-cooks **every** asset whose
+     `cook_key.digest` mismatched the freshly-computed key (the
+     entire fixture's dependency graph in this scenario);
+   - the published manifest's `cook_key` records reflect
+     importer-version-B for every entry;
+   - one `AssetReloaded` event fires per re-cooked `AssetId` whose
+     resulting `ContentHash` actually changed (cache-hit cooks
+     under the new key, where the new bytes happen to round-trip
+     byte-equal, emit no event);
+   - the prior CAS files survive (no GC).
+
+A fourth fixture exercises **importer failure**:
+(`Hot-reload refuses on malformed source`). The harness writes a
+malformed `.fbx` source byte sequence; `enqueue_synthetic_file_event`
+fires; the next `CookSession::commit()` returns
+`CookOutcome::RolledBack` carrying `ImporterError::MalformedPayload`;
+the active manifest is unchanged; no `AssetReloaded` is emitted; the
+prior `CookedAsset` and its `ContentHash` remain referenced by the
+active manifest (§8.5 Class B). The diagnostic log records exactly
+one `warn`-level entry with the structured refusal fields.
+
+A fifth fixture (`Hot-reload accepts plugin-code swap`) drives the
+engine-wide protocol path: `enqueue_hot_reload("glibre.content",
+tests/e2e/plugins/content-v2.dylib)` with v2 byte-identical to v1
+(modulo build timestamp). Assertions:
+- `HotReloadCompleted { migrated_types: [] }` fires exactly once
+  (no schema change);
+- the active `Manifest` pointer survives unchanged through the
+  swap (§8.3 row 5);
+- no `AssetReloaded` events are emitted (manifest mappings
+  unchanged, §8.6 emission contract item 4);
+- the worker pool's thread count after the swap matches the
+  pre-swap count (re-spawned by `glibre_plugin_register`).
+
+All five scenarios run inside a single CI job using the in-process
+trigger; no real filesystem watcher is involved (mirrors protocol
+§"Test Hooks"). The Catch2 case names listed above are the exact
+acceptance criteria entries in §11.
+
+### 8.8 Cross-references
+
+- Engine protocol: `reviews/decisions/hot-reload-protocol.md`
+  (drain → swap → migrate → resume; refusal arms; observer bus;
+  E2E hook).
+- Frame slot: `reviews/decisions/frame-phases.md` (phase 8 entry /
+  exit guarantees; `CookSession::commit()` parking off-frame).
+- Persistence rules invoked: §7.1.1 / §7.2.1 (`ManifestEntry`
+  additive-only), §7.1.2 / §7.2.2 (`CookKey` schema-bump = full
+  re-cook), §7.1.3 / §7.2.3 (`DependencyEdge` additive variants),
+  §7.2.4 (no live migration of manifest entries — re-cook is the
+  authoritative fallback).
+- Aggregates touched: §4.1.1 `SourceAsset` (file-touch trigger),
+  §4.1.4 `CookedAsset` (immutable byte payload), §4.1.5 `CAS`
+  (append-only, never rewritten), §4.1.6 `Manifest` (atomic
+  pointer flip = the swap), §4.1.7 `ResidencyManager` (ref-count
+  drain across swap), §4.1.8 `AssetHandle<T>` (transparent
+  re-resolve via generation tag), §4.1.9 `CookSession` (commit
+  parked until phase 8), §4.1.10 `WatchEdge` / `RecookRequest`
+  (pure file-event → recook fan-out), §4.2 invariant 5
+  (hot-reload = re-cook + atomic Manifest swap).
+- Errors used: `ImporterError::SourceNotFound`,
+  `ImporterError::MagicMismatch`, `ImporterError::UnsupportedVersion`,
+  `ImporterError::MalformedPayload`, `ImporterError::Cancelled`,
+  `ResidencyError::ManifestStale` (§5.3), each surfacing through
+  `CookOutcome::RolledBack` for the manifest-swap path or wrapped
+  by `core::Error::PluginInitFailed` for the plugin-code reload
+  path per protocol §"Refusal Cases".
+- Sibling §8 cells that consume `AssetReloaded`: render §8.5
+  (descriptor-heap rebind), geometry §8 (BLAS re-import), audio
+  §8 (post-MVP — sample-bank re-decode), editor §8 (post-MVP —
+  inspector refresh).
 
 ## 9. Performance Budget
 
