@@ -4557,9 +4557,51 @@ regex-scraping prose.
 
 ## 11. Acceptance Criteria
 
-GitHub `type:user-story` issues this spec closes:
+GitHub `type:user-story` issues this spec closes (18 stories,
+total 63 pts; parent sub-epic #155, parent epic #151):
 
-- #TBD — `<title>`
+| #    | Title                                                                                                  | Pts |
+|------|--------------------------------------------------------------------------------------------------------|-----|
+| #420 | tools: editor opens with default LayoutProfile materialised                                            | 3   |
+| #422 | tools: save and switch named LayoutProfiles atomically                                                 | 3   |
+| #424 | tools: SceneTree click drives Selection with coalesced events                                          | 3   |
+| #426 | tools: SceneTree drag-reparent routed through CommandStack                                             | 3   |
+| #428 | tools: translate gizmo drag commits one EditCommand per drag                                           | 5   |
+| #430 | tools: rotate + scale gizmos share frame/constraint/snap pipeline                                      | 3   |
+| #432 | tools: Inspector auto-generates rows from Fory reflection                                              | 5   |
+| #433 | tools: Inspector multi-edit groups via single Transaction                                              | 3   |
+| #436 | tools: AssetBrowser lists project tree with thumbnail previews                                         | 3   |
+| #438 | tools: AssetBrowser drag-drop produces EditCommand on Inspector or Viewport                            | 3   |
+| #440 | tools: PlayPauseStep is the sole EditorMode writer; Step advances one frame                            | 3   |
+| #442 | tools: CommandStack monotonic O(1) undo/redo; new push truncates redo                                  | 3   |
+| #444 | tools: Transaction commits atomically or aborts cleanly                                                | 3   |
+| #446 | tools: TraceRecorder captures non-perturbingly into .glibre-trace                                      | 5   |
+| #447 | tools: Shortcuts user override layer stacks over default ring                                          | 2   |
+| #450 | tools: game-plugin reload re-resolves Selection; SelectionRevalidated fires only on scrub              | 5   |
+| #452 | tools: tools-plugin self-reload restores layout + journal; refuses on unsaved or recording            | 5   |
+| #453 | tools: editor frame stays inside §9 budget cell with one ImGui extract                                 | 3   |
+
+Coverage map (target topics from spike #165 brief):
+
+- **Editor open + dock layout** — #420, #422.
+- **Scene tree edit** — #424, #426.
+- **Transform gizmo** — #428, #430.
+- **Inspector reflection** — #432, #433.
+- **Asset browser drag** — #436, #438.
+- **Play / pause / step** — #440.
+- **Command stack undo/redo** — #442, #444.
+- **Trace recorder save** — #446.
+- **Hot-reload across edit** — #450, #452.
+- **Cross-cutting (shortcuts, frame budget)** — #447, #453.
+
+Each story's E2E `.glibre-trace` lives under `tests/e2e/tools/`;
+each acceptance criterion has at minimum one Catch2 fixture under
+`tests/tools/` (named in the story's E2E plan). Aggregate roll-up:
+18 stories × pts → 63 pts. The §10 closed-sum failure-mode coverage
+is asserted by the per-variant test fixtures cited in §10.3
+(`LayoutLoadFailed` → #420 + #422 + #452; `TraceWriteFailed` →
+#446; `InspectorUnknownType` → #432 + #450; `CommandConflict` →
+#426 + #442 + #450 + #452; `Refused` → #438 + #440 + #447 + #452).
 
 Each must have a Catch2 test by name.
 
