@@ -55,8 +55,122 @@ Terms used unchanged in code, schema files, status comments, and tests.
 
 ## 3. Derived From
 
-Harmonius requirement IDs / file paths cited as research input. Note any
-collapse decisions (multiple harmonius concepts → one glibre primitive).
+Harmonius prior art is treated as research input only; every conclusion is
+re-derived against PHILOSOPHY (`/Users/cjhowe/Code/glibre/PHILOSOPHY.md`)
+and the engine-wide decision in
+`reviews/decisions/fory-codegen.md`. The harmonius `data-systems/` corpus
+is not requirements truth for the glibre `data` context — most of what it
+calls "data systems" is *domain* matter that the glibre `data` context
+explicitly **refuses** (see refusals below). What survives the re-derivation
+is the single cross-cutting concern that every harmonius data-system shares:
+*every persistent type wants a schema, a serializer, and a forward-migration
+story*. That concern collapses into glibre's Apache Fory codegen pipeline,
+producing the `glibre-types.dylib` middleman and the ABI-hash gate
+(§1, §2; `reviews/decisions/fory-codegen.md`).
+
+### 3.1 Files cited (input only)
+
+Requirements (`/Users/cjhowe/Code/harmonius/docs/requirements/data-systems/`):
+
+- `attributes-effects.md` — `R-16.1.1`–`R-16.1.x` (Meters, Attributes,
+  Modifier Stacks, Effects).
+- `containers-slots.md` — `R-16.2.1`–`R-16.2.x` (Containers, Grid layout,
+  Stacking, Sockets).
+- `data-tables.md` — `R-16.3.1`–`R-16.3.x` (Schemas, Rows, Foreign Keys,
+  Indices, Locale).
+- `directed-graphs.md` — `R-16.4.1`–`R-16.4.x` (Topology, Conditional /
+  Ordered variants, Queries, Tree ops).
+
+Design (`/Users/cjhowe/Code/harmonius/docs/design/data-systems/`):
+
+- `attributes-effects.md` (and `-test-cases.md`) — informs the *shape* of a
+  schema-driven definition, not the runtime semantics.
+- `containers-slots.md` (and `-test-cases.md`) — informs the *shape* of
+  bounded-collection persistent state, not container behavior.
+- `data-tables.md` (and `-test-cases.md`) — informs the *shape* of typed
+  row schemas with constraints and FK references; **table evaluation,
+  joins, indices, and inheritance are out of scope here**.
+- `directed-graphs.md` (and `-test-cases.md`) — informs the *shape* of
+  graph topology persistence; **graph algorithms, traversal, conditional
+  evaluation, and tree operations are out of scope here**.
+- `composition.md` (and `-test-cases.md`) — referenced for the cross-cutting
+  binding between immutable definitions and ECS components, which in glibre
+  is split: the *binding* belongs to `core` (ECS storage + plugin loader),
+  the *type and schema* belong here.
+
+### 3.2 What is borrowed (the cross-cutting collapse)
+
+A single concern — and only this concern — is fused from harmonius into the
+glibre `data` context, replacing the `rkyv`-based archive scheme used across
+every cited design doc:
+
+- **Schema-driven serialization with monotonically-versioned types and
+  forward migrations.** Harmonius scattered this concern across `rkyv`
+  archive derivations on `MeterDefinition`, `AttributeSchema`,
+  `EffectDefinition`, container row types, data-table row types, and graph
+  node/edge types — each domain rolling its own
+  `Archive`/`Serialize`/`Deserialize` discipline (cf.
+  `attributes-effects.md` §"Serialization and Replication";
+  `directed-graphs.md` §"All types derive rkyv …"; `data-tables.md` row
+  schemas; `containers-slots.md` definitions). Glibre collapses every one
+  of those scattered serialization disciplines into **one** pipeline: the
+  Apache Fory codegen flow whose schema files live at
+  `data/schemas/<ctx>/<Type>.fory`, whose generated types compile into the
+  single `glibre-types.dylib` middleman, and whose hot-reload migrations
+  run at the frame-8 barrier (`reviews/decisions/fory-codegen.md` §Pipeline,
+  §Migration Mechanic). The glibre rationale is PHILOSOPHY §6 (zero
+  runtime reflection in shipping builds), §7 (deterministic byte-equal
+  snapshots), §9 (ABI-hash refusal at plugin load), and §10 (one collapsed
+  primitive per Occam pass).
+
+The Occam collapse, stated as a single sentence:
+> N domain-specific harmonius `rkyv` archive derivations → 1 glibre
+> Fory-codegen pipeline producing 1 middleman dylib gated by 1 ABI hash.
+
+### 3.3 What is explicitly refused (sent elsewhere)
+
+The harmonius `data-systems/` package mostly describes **domain logic**
+that glibre's `data` context refuses to host. These responsibilities
+belong to the future *game-framework* layer (a plugin family that *uses*
+the data spine, not part of the engine core), and their `R-16.x` IDs are
+**not** in scope for this spec:
+
+- **Attributes / Effects (`R-16.1.1`–`R-16.1.x`).** Meter ticking,
+  threshold event firing, modifier-stack evaluation, effect
+  type/duration/period semantics, stacking rules — all reject. The `data`
+  context only owns the *bytes* a future `Meter` or `AttributeSet` schema
+  would round-trip through; the runtime behavior belongs in a
+  game-framework plugin context (or an even higher-level title plugin).
+- **Containers / Slots / Sockets (`R-16.2.1`–`R-16.2.x`).** Capacity and
+  weight enforcement, grid bin-packing, stacking and merge rules, nesting
+  depth validation, sort operations, socket compatibility tags, modifier
+  propagation, visual override binding — all reject. None of these are
+  serialization concerns.
+- **Data Tables (`R-16.3.1`–`R-16.3.x`).** Typed table evaluation, load-time
+  constraint validation, prototype-chain row inheritance, foreign-key
+  resolution, cross-table joins, hash and BTree indices, locale tables —
+  all reject. Authored data lives in schemas and assets owned by
+  `content` / `platform`; *queries against* that data live in domain
+  contexts. The `data` spine only ensures the row bytes round-trip
+  deterministically through generated types.
+- **Directed Graphs (`R-16.4.1`–`R-16.4.x`).** `DirectedGraph<N,E>`
+  primitive, cycle detection, topological sort, conditional / ordered
+  variants, weighted shortest-path / reachability, BFS / DFS traversal,
+  tree operations (LCA, subtree, ancestor path) — all reject. Graph
+  topology *as persisted bytes* is a schema concern; graph *evaluation*
+  is a domain plugin concern (quest, dialogue, talent, ability).
+- **Transport / network framing.** Out of scope; a future `net` context
+  may wrap Fory blobs, but no transport policy lives here (per §1).
+- **IO routing / file-format negotiation.** Out of scope; `platform` /
+  `content` own loaders. The `data` context only defines the byte layout
+  those loaders read and write (per §1).
+- **Domain logic of any kind.** No invariants beyond byte-equal round-trip
+  through a versioned, ABI-hashed type live in `data`.
+
+This refusal list is the load-bearing claim of §3: harmonius's "data
+systems" is mostly *not* what glibre calls `data`. The glibre `data`
+context is intentionally smaller — exactly the type-and-schema spine
+described in §1.
 
 ## 4. Aggregates & Invariants
 
