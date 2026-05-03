@@ -4361,9 +4361,28 @@ spdlog.
 
 ## 11. Acceptance Criteria
 
-GitHub `type:user-story` issues this spec closes:
+GitHub `type:user-story` issues this spec closes (drafted under spike
+#131; each carries a Catch2 test name plus the story-required E2E
+`.glibre-trace`):
 
-- #TBD — `<title>`
+- #421 — physics: PhysicsWorld init creates one Jolt instance per ECS world (§4.1.1 inv 1+2; §3.2 collapse #8) — pts:3
+- #423 — physics: deterministic phase-3 step byte-equal across hosts (§4.1.1 inv 1; §6.4) — pts:5
+- #425 — physics: fixed-timestep accumulator with bounded catch-up + carry preserved (§4.1.3 inv 2+3) — pts:3
+- #427 — physics: refuse step calls outside phase 3 (§4.1.1 inv 1; §4.1.3 inv 1) — pts:2
+- #429 — physics: insert RigidBody allocates BodyId, body simulates next substep (§4.1.5; §4.1.5b inv 1+2) — pts:3
+- #431 — physics: remove RigidBody destroys Jolt body, refuses if joint references it (§4.1.5; §4.1.7 inv 1) — pts:3
+- #434 — physics: BodyId stable across hosts and across hot-reload (§4.1.5b inv 1; PHILOSOPHY §7+§8) — pts:5
+- #435 — physics: create Joint entity materialises Jolt constraint with limits/motor/break (§4.1.7) — pts:5
+- #437 — physics: refuse joints with invalid or cross-world endpoints (§4.1.7 inv 1) — pts:2
+- #439 — physics: PhysicsQueries::ray_cast against shared broadphase (§4.1.10 inv 1+2+5) — pts:3
+- #441 — physics: PhysicsQueries::shape_cast and overlap surfaces (§4.1.10) — pts:3
+- #443 — physics: contact events drained at substep exit, same-frame visible (§4.1.8 inv 1+2+3+4) — pts:5
+- #445 — physics: trigger volumes emit Enter/Stay/Exit events with no impulse (§4.1.9; §4.1.6 inv 4) — pts:3
+- #448 — physics: PhysicsSnapshot save/restore round-trip byte-equal (§4.1.12; §7.1.4) — pts:5
+- #449 — physics: hot-reload preserves world state across snapshot at phase 8 (§8.1, §8.3.1, §8.3.2) — pts:5
+- #451 — physics: ShapeBlob deduplicated by content hash, refcounted ShapeHandle (§4.1.6 inv 1+3) — pts:3
+
+Total: 16 stories, 58 pts roll up into sub-epic #121.
 
 Each must have a Catch2 test by name.
 
