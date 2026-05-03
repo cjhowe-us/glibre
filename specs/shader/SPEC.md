@@ -2086,7 +2086,34 @@ the first place.
 
 GitHub `type:user-story` issues this spec closes:
 
-- #TBD — `<title>`
+- #319 — Author and validate an HLSL translation unit
+  (Catch2: `shader_source_open_validates_entry_points`)
+- #321 — Resolve HLSL include closure with escape and cycle detection
+  (Catch2: `shader_source_include_closure_rejects_escape_and_cycle`)
+- #323 — Encode and enumerate the 4-axis `PermutationKey` deterministically
+  (Catch2: `permutation_key_encoding_is_total_injective_and_bit_stable`)
+- #325 — Compile HLSL to DXIL via DXC subprocess
+  (Catch2: `compilation_pipeline_emits_dxil_via_subprocess`)
+- #327 — Compile HLSL to SPIR-V via DXC subprocess
+  (Catch2: `compilation_pipeline_emits_spirv_via_dxc_subprocess`)
+- #330 — Lower DXIL to MetalLib via `metal-shaderconverter` subprocess
+  (Catch2: `compilation_pipeline_lowers_dxil_to_metallib_via_subprocess`)
+- #332 — Extract canonical `ReflectionBlob` from compiled DXIL
+  (Catch2: `reflection_blob_extracts_canonical_metadata_from_dxil`)
+- #334 — Derive `DescriptorLayout` partitioned by frequency group
+  (Catch2: `descriptor_layout_derive_partitions_bindings_by_frequency`)
+- #336 — Cook the resolved permutation set into a content-addressable
+  `ShaderLibrary`
+  (Catch2: `shader_cache_cook_walks_permutations_idempotently`)
+- #339 — Resolve a cached `ShaderArtifact` by hash without invoking
+  any compiler
+  (Catch2: `shader_cache_get_resolves_artifact_without_compiling`)
+- #341 — Hot-reload swap on HLSL source edit via
+  `ShaderArtifactReplaced` event
+  (Catch2: `shader_hot_reload_publishes_artifact_replaced_for_affected_set_only`)
+- #342 — Refuse shader compilation in shipping builds at link and
+  runtime
+  (Catch2: `shader_shipping_build_refuses_compilation_at_link_and_runtime`)
 
 Each must have a Catch2 test by name.
 
