@@ -1934,7 +1934,527 @@ external reviewers gate on.
 
 ## 6. Internal Architecture
 
-Non-binding sketch for implementers.
+Non-binding sketch for implementers. The §4 aggregates and the §5
+public header are binding; the file/directory layout, the per-frame
+replay loop, the CLI subcommand surface, and the editor↔runner split
+below are illustrative — they exist so the plan-leaf author has one
+obvious place to start. Reviewers should reject deviations only when
+they violate a §4 invariant, the §5 header, the §7 on-disk schemas, or
+the §8 hot-reload contract. Cross-context concerns (the
+`platform::InputDriver` seam, the `.glibre-trace` *writer*, render
+correctness deeper than `PixelTolerance`, perf benchmarking, asset
+cooking, gameplay-side networked replay, crash-dump aggregation) are
+delegated and never re-asserted here (§3.3).
+
+### 6.1 Module layout
+
+The e2e context compiles to a single plugin `.dylib`
+(`glibre.e2e.dylib`) per PHILOSOPHY §1 / §3, plus one tiny CLI binary
+(`glibre-trace`) that delegates everything to the dylib. Inside, source
+is split by SRP — one directory per "reason to change", one directory
+per §4 aggregate cluster. Public headers (the §5 deliverable + an
+`internal/` tree the rest of the plugin consumes) live under
+`engine/e2e/include/glibre/e2e/`; implementation under
+`engine/e2e/src/`.
+
+```
+engine/e2e/
+  include/glibre/e2e/            # §5 surface (compiles standalone).
+    e2e.hpp                      # The single header from §5.
+  src/
+    trace/                       # Aggregates §4.1.1 / §4.1.2 / §4.1.3 / §4.1.4 / §4.1.5.
+      trace.{hpp,cpp}            # `Trace::load`; arena-backed aggregate.
+      file.{hpp,cpp}             # `TraceFile` reader (Fory pull-decoder; §7.1.1).
+      manifest.{hpp,cpp}         # `TraceManifest` parse + `EnvHash` recipe (§7.1.2).
+      op.{hpp,cpp}               # `TraceOp` / `InputOp` sealed-sum dispatch tables.
+      cursor.{hpp,cpp}           # Per-frame slice helper backing `Trace::ops_at`.
+      arena.{hpp,cpp}            # Per-Trace bump arena (Fory blobs + InputEvent decodes).
+    driver/                      # Aggregate §4.1.6.
+      replay_driver.{hpp,cpp}    # `ReplayDriver`; the only `platform::InputDriver` impl.
+      adapter.{hpp,cpp}          # `as_platform_driver()` shim — no extension of the seam.
+    assert/                      # Aggregate §4.1.4 evaluators + §4.1.11 comparator.
+      state.{hpp,cpp}            # AssertState evaluator (component-path → Fory blob compare).
+      screenshot.{hpp,cpp}       # AssertScreenshot orchestrator (readback + diff + capture).
+      ecs_snapshot.{hpp,cpp}     # AssertEcsSnapshot evaluator (Fory byte-equal).
+      log_contains.{hpp,cpp}     # AssertLogContains evaluator (substring + ECMAScript regex).
+      pixel_tolerance.{hpp,cpp}  # CIEDE2000 + max-%-differing comparator (§5.3).
+    golden/                      # Aggregate §4.1.10.
+      store.{hpp,cpp}            # `GoldenStore::open` + `load_image` / `load_snapshot` / `probe`.
+      index.{hpp,cpp}            # `GoldenStoreIndex` lookup (§7.1.3) — Fory-decoded.
+      png.{hpp,cpp}              # PNG decode (sRGB 8-bit; BGRA-on-readback parity).
+      content_hash.{hpp,cpp}     # Blake3-256 of payload at gate time (§7.1.2 inv 2).
+      golden_update.{hpp,cpp}    # The `golden-update` CLI body — separate writer.
+    injection/                   # Aggregate §4.1.8 + §4.1.9.
+      layer.{hpp,cpp}            # `InjectionLayer` selection + policy table.
+      runner_host.{hpp,cpp}      # `detect_runner_host`; conservative downgrade.
+      in_process.{hpp,cpp}       # Layer impl: install ReplayDriver via the seam.
+      per_process_macos.{hpp,cpp}    # CGEventPostToPid (PerProcess on macOS).
+      per_process_windows.{hpp,cpp}  # PostMessage + PostThreadMessage (PerProcess on Windows).
+      per_process_linux.{hpp,cpp}    # xdotool --window IPC (PerProcess on Linux).
+      os_automation_macos.{hpp,cpp}    # CGEventPost (OsAutomation; ci-isolated only).
+      os_automation_windows.{hpp,cpp}  # SendInput (OsAutomation; ci-isolated only).
+      os_automation_linux.{hpp,cpp}    # XTest / uinput (OsAutomation; ci-isolated only).
+    runner/                      # Aggregate §4.1.7 + §4.1.12 + §4.1.14.
+      runner.{hpp,cpp}           # `TraceRunner::create` / `run` / `run_with_compare`.
+      gate.{hpp,cpp}             # EnvHash gate + golden-presence probe (one site).
+      loop.{hpp,cpp}              # The frame-locked replay loop body (§6.2).
+      report.{hpp,cpp}           # `TraceReport` builder; not persisted (§7.4).
+      divergence.{hpp,cpp}       # `DivergenceReport` builder; `--compare` mode.
+      artefact.{hpp,cpp}         # Per-run artefact-bundle directory + `ArtefactRef` minting.
+      exit_code.{hpp,cpp}        # `TraceRunner::exit_code` table (§4.1.13 inv 4).
+      closure_gate.{hpp,cpp}     # `ClosureGate::evaluate`; pure function (§4.1.14 inv 4).
+    binary_under_test/           # `RunnerHostAdapter` implementations for each launch shape.
+      in_process_adapter.{hpp,cpp}  # Linked-into-engine adapter (the default).
+      child_process_adapter.{hpp,cpp}  # spawn-and-attach adapter (PerProcess / OsAutomation).
+      readback.{hpp,cpp}         # Swapchain readback bridge (§6.4) — opaque to the runner.
+      world_inspect.{hpp,cpp}    # ECS resource / component readback for AssertState.
+    plugin.{hpp,cpp}             # Plugin entry: register / drain — ties §8.3 / §8.4.
+  cli/glibre-trace/
+    main.cpp                     # Subcommand dispatcher (§6.5).
+    cmd_record.cpp               # `record` subcommand — delegates to `tools::TraceWriter`.
+    cmd_replay.cpp               # `replay` subcommand — drives `TraceRunner`.
+    cmd_golden_update.cpp        # `golden-update` subcommand — drives `golden_update.cpp`.
+```
+
+The split lifts the §4 aggregate roster directly into directories.
+Each directory owns one reason to change: adding a new injection
+backend touches `injection/` only; adding a new `AssertOp` variant
+edits `trace/op.cpp` (parser dispatch) and adds one file under
+`assert/` (evaluator); adding a new `RunnerHost` tag is one central
+edit in `injection/runner_host.cpp` plus one row in the policy table
+(§4.1.9 inv 2). The `binary_under_test/` directory holds the
+`RunnerHostAdapter` (§5.11) implementations — the runner depends on
+that abstract interface, not on any concrete launch topology, which
+is what lets one runner core cover in-process / per-process /
+os-automation runs without a layer-specific runner subclass.
+
+The build system compiles `engine/e2e/src/` into the one plugin
+archive plus one CLI binary. Per-OS source files (`per_process_*`,
+`os_automation_*`) are selected by the build system at configure time;
+the unselected ones never compile. There is **no** runtime virtual
+dispatch on the OS axis past plugin construction — each `InjectionLayer`
+arm calls into exactly one OS-specific TU compiled in for the current
+host. The CLI is a thin shim: every command body lives in the dylib
+behind the §5 surface, and `cli/glibre-trace/main.cpp` only routes argv
+to it.
+
+`OsAutomation` may use platform-specific synthesis APIs that on macOS
+require Cocoa / Foundation; per `platform` §6.2 the engine's lone
+Objective-C++ TU is `engine/platform/src/surface/bridge.mm`. The e2e
+plugin therefore does **not** introduce a second `.mm` — the macOS
+`OsAutomation` body links against `CoreGraphics` (which exposes
+`CGEventPost` as a pure-C API) and never includes `<AppKit/AppKit.h>`.
+If a future need pulls in AppKit, that surface routes through a new
+`platform`-side bridge function rather than a second e2e-side `.mm`.
+
+### 6.2 Replay loop — the frame-locked driver
+
+The replay loop is the `TraceRunner`'s body and is the structural
+realisation of §4.1.1 inv 1, §4.1.6 inv 1, and §4.2 cross-aggregate
+inv 1. It runs after the EnvHash + golden-presence gate (§4.1.7 inv 1)
+and only ever advances the engine in lockstep with the trace's
+`FrameIndex` axis. Wall-clock is read once at run start (for the
+report's `wall_duration` only — informational per §4.1.12 inv 3) and
+otherwise never consulted. The loop body, sketched:
+
+```text
+// runner/loop.cpp — driver thread; called by TraceRunner::run.
+auto frame  = FrameIndex{0};
+auto cursor = trace.ops().begin();        // ordered (FrameIndex, TraceOp) stream.
+const auto end = trace.ops().end();
+
+while (cursor != end) {
+    // 1. Yield this frame's InputOps into the ReplayDriver event queue.
+    driver.advance(frame);                // §4.1.6 inv 1, 4 — yields exactly the
+                                          // frame's bucket once, never re-yields.
+
+    // 2. Advance the engine by one frame. The adapter pumps phases 1-9 once.
+    const auto observed = TRY(adapter.advance_frame());     // §5.11.
+    if (observed != frame) return Aborted{Timeout{}};       // §4.1.7 inv 6.
+
+    // 3. End-of-frame: dispatch every AssertOp recorded at this frame.
+    for (const auto& framed : trace.ops_at(frame)) {        // §5.6.
+        const auto rc = std::visit(overloaded{
+            [&](const InputOp&)            -> Result<void> { return {}; },          // already yielded.
+            [&](const AssertState& a)      -> Result<void> { return adapter.evaluate(a); },
+            [&](const AssertScreenshot& a) -> Result<void> { return adapter.evaluate(a, store); },
+            [&](const AssertEcsSnapshot& a)-> Result<void> { return adapter.evaluate(a, store); },
+            [&](const AssertLogContains& a)-> Result<void> { return adapter.evaluate(a); },
+            [&](const End&)                -> Result<void> { return {}; },          // handled below.
+        }, framed.op);
+        if (!rc) return Failed{ assert_op_id_of(framed), frame, rc.error() };       // §4.1.7 inv 4.
+    }
+
+    // 4. Walk cursor to the next frame's first op; if End, exit.
+    cursor = advance_cursor_past(cursor, end, frame);
+    if (cursor != end && std::holds_alternative<End>(cursor->op)) break;
+    frame = next_frame_after(cursor, frame);
+}
+
+return Passed{};
+```
+
+Five properties this body makes structural rather than checked:
+
+1. **Frame-locked emission.** `driver.advance(frame)` is the *only*
+   call that surfaces `InputOp`s, and it is the *only* place the
+   driver cursor advances. Wall-clock is never read inside the loop.
+   The §3.2 #1 collapse is reified: there is one time axis, and the
+   driver and the runner both use the engine `FrameIndex`.
+2. **End-of-frame asserts.** Asserts run *after* `adapter.advance_frame()`
+   returns, so they observe the post-phase-9 engine state — the same
+   state any external observer would see on a real run. Inputs at
+   frame N are visible to the simulation that produces frame N's
+   state; asserts at frame N read that state.
+3. **Fail-fast.** The first failing assert returns immediately;
+   subsequent ops on the same frame are skipped. §4.1.7 inv 4 is
+   structural (the early `return Failed{…}`), not a runtime flag.
+4. **No re-yield.** The cursor is monotonic (`advance_cursor_past`
+   never walks backward), so an `InputOp` is yielded at most once
+   per run — §4.1.6 inv 4 is structural.
+5. **Bounded run time.** The loop's only termination conditions are
+   `End` (graceful) and the `Timeout` arm of `adapter.advance_frame`
+   (which honours `manifest.frame_budget()` per §4.1.7 inv 6). There
+   is no `while(true)` and no unbounded retry.
+
+Multi-op frames are handled by `trace.ops_at(frame)` returning the
+contiguous slice in recorded intra-frame order (§4.1.5 inv 3). The
+loop never looks at `frame_index` on individual ops inside that
+slice; the slice's contiguity is the parser's responsibility (§7.1.1
+inv 4).
+
+### 6.3 `ReplayDriver` ↔ `platform::InputDriver` seam
+
+`ReplayDriver` is e2e's only implementation of `platform::InputDriver`
+(§4.2 cross-aggregate inv 5). `driver/replay_driver.cpp` holds the
+cursor `(next_op_index, current_frame_index)` and the per-frame
+yielded slice. `driver/adapter.cpp` is a tiny shim that exposes the
+driver via `as_platform_driver()` (§5.8) and conforms exactly to the
+`platform::InputDriver` shape declared in `platform`'s §5 surface.
+
+The shape conformance is structural: `ReplayDriver` writes
+`platform::InputEvent` values into the queue handle the
+`platform::InputDriver` seam vends. It does **not** allocate, does
+**not** touch SDL3, does **not** drain the OS event pump, and does
+**not** read wall-clock. On `InjectionLayer::InProcess`, the
+`platform::InputDriver` registry slot
+(`glibre::types::e2e::ReplayDriverRegistry` per §8.3.1) is populated
+with the e2e-side factory; the engine's input pump observes the
+substitution at the existing seam and proceeds normally. On
+`InjectionLayer::PerProcess` and `InjectionLayer::OsAutomation`, the
+runner does *not* substitute the live binary's driver — it instead
+posts events through the OS into the binary's normal event pump (§6.6)
+and the binary keeps its real `platform::InputDriver`. The frame-lock
+discipline is preserved on those layers by the runner only posting at
+the recorded `FrameIndex` boundary; per-OS post latency is bounded
+empirically (see §9 budget), and the runner refuses to run a trace
+whose recorded frame budget cannot accommodate the worst-case post
+latency for the selected layer.
+
+`ReplayDriver` holds no wall-clock state — §4.1.6 inv 1 made
+structural — and its destructor does no I/O. A `~ReplayDriver()` simply
+releases its arena handle into the parent `Trace`'s arena (§6.7); the
+binary under test sees the cursor disappear when the runner installs
+the next driver (or shuts the binary down) at `RunnerHostAdapter::shutdown()`.
+
+### 6.4 `AssertOp` evaluators
+
+Each `AssertOp` variant has one evaluator file under `assert/`. The
+evaluator's job is to run on the driver thread at end-of-frame N (§6.2
+step 3) and return `glibre::Result<void>` whose error arm carries the
+`E2eError::AssertFailed` payload populated with the captured artefact
+reference (§4.1.13). Evaluators never advance the engine, never
+re-enter the runner, and never mutate the `Trace` aggregate.
+
+`assert/state.cpp` evaluates `AssertState` by:
+1. Asking the `RunnerHostAdapter` (`world_inspect.cpp` on the binary
+   side) for the named component path's live Fory-encoded value.
+2. Comparing the live blob byte-equal against `op.expected_fory` (the
+   parser already decoded it into the trace arena).
+3. Failure → `AssertFailed{ id, frame, kind=State, artefact=<diff blob>}`.
+
+`assert/screenshot.cpp` evaluates `AssertScreenshot` by:
+1. Asking the adapter (`readback.cpp`) for a swapchain readback at
+   end-of-frame N. The readback is BGRA8-sRGB, tightly packed, in
+   `LogicalSize × DpiScale` extents — the same shape as
+   `GoldenImage::bytes` (§5.7 comment). Per §3.3 e2e refuses
+   `ScreenCaptureKit` / `DXGI` / `PipeWire` and goes straight through
+   the swapchain.
+2. Loading the named `GoldenImage` from the `GoldenStore` via
+   `golden/png.cpp`.
+3. Running `assert/pixel_tolerance.cpp` over the two buffers under
+   the op's `PixelTolerance`. The comparator is CIEDE2000 ΔE +
+   max-%-differing-pixels + optional region mask, exactly the §5.3
+   surface; PSNR is *not* used (§3.2 #4 collapse: PSNR was a
+   harmonius render-effects metric, replaced engine-wide by ΔE).
+4. On failure, the comparator emits the structured payload
+   (max-ΔE-found, %-differing-found, masked-region diagnosis per
+   §4.1.11 inv 4) into the artefact bundle and returns
+   `AssertFailed{ id, frame, kind=Screenshot, artefact=<diff PNG> }`.
+
+`assert/ecs_snapshot.cpp` evaluates `AssertEcsSnapshot` by:
+1. Asking the adapter for a Fory-encoded snapshot of the named
+   `WorldId` (or named sub-aggregate).
+2. Loading the reference blob via `golden/store.cpp`.
+3. Byte-equal comparison; failure writes both blobs into the artefact
+   bundle and returns `AssertFailed{ id, frame, kind=EcsSnapshot, … }`.
+
+`assert/log_contains.cpp` evaluates `AssertLogContains` by:
+1. Asking the adapter for the slice of structured-log entries written
+   between the previous assert (or run start) and this frame.
+2. Substring or `std::regex_search` (ECMAScript flavour, §5.4
+   `is_regex` field) over the slice.
+3. Failure writes the slice into the artefact bundle and returns
+   `AssertFailed{ id, frame, kind=LogContains, … }`.
+
+The evaluators share `runner/artefact.cpp` for artefact-bundle
+construction: each failing evaluation mints a fresh `ArtefactRef`
+under the runner's per-run artefact root (§5.10), writes the bytes
+through `platform::FileIo::write_atomic`, and returns the ref by
+value. The artefact bundle is ephemeral — written under
+`<artefact_root>/<run_id>/` — and is referenced by the `TraceReport`
+emitted at run end. CI uploads the bundle as a job artifact; nothing
+in e2e knows or cares about that step.
+
+`runner/loop.cpp` does **not** know which evaluator runs for which
+variant — `std::visit` on the closed `TraceOp` sum (§5.4) keeps the
+dispatch table compile-checked. Adding a new `AssertOp` variant is a
+central edit (§4.1.4 inv 1): add the file under `assert/`, extend the
+parser dispatch in `trace/op.cpp`, extend the visitor in
+`runner/loop.cpp`. The compiler refuses missing-arm visitors.
+
+### 6.5 `glibre-trace` CLI
+
+`cli/glibre-trace/` produces one binary, `glibre-trace`, with three
+subcommands. The binary is a thin argv→dylib router; every command
+body lives in the e2e plugin behind the §5 surface.
+
+| Subcommand            | Body                              | Surface used (§5)                                       |
+|-----------------------|-----------------------------------|---------------------------------------------------------|
+| `glibre-trace record` | `cli/cmd_record.cpp`              | None on the e2e side — delegates to `tools::TraceWriter` (§3.3). |
+| `glibre-trace replay` | `cli/cmd_replay.cpp` + `runner/`  | `Trace::load` → `GoldenStore::open` → `TraceRunner::create` → `TraceRunner::run` (or `run_with_compare`). |
+| `glibre-trace golden-update` | `cli/cmd_golden_update.cpp` + `golden/golden_update.cpp` | Bypasses the runner. Re-runs the trace with capture-on-mismatch enabled, writes new reference payloads into the `GoldenStore` working tree, and exits. The PR review step (§4.1.10 inv 3) is human, outside e2e. |
+
+`record` is documented here for completeness only — its body lives in
+`tools/` per §3.3 and the CLI subcommand is a one-line `exec` into the
+editor's record-mode entry point. e2e refuses to own the writer
+(§4.2 cross-aggregate inv 6).
+
+`replay` is the load-bearing command. `cmd_replay.cpp`:
+1. Parses argv (`--trace <path>`, `--layer <inproc|perproc|osauto>`,
+   `--compare <prior-report>` for divergence mode, `--artefacts <dir>`,
+   `--budget-mult <float>`).
+2. Constructs `platform::CanonicalPath` from `--trace`.
+3. Calls `Trace::load`, `GoldenStore::open`, `detect_runner_host`.
+4. Constructs the appropriate `RunnerHostAdapter` from
+   `binary_under_test/` (in-process by default; the per-process /
+   os-automation adapters are selected by `--layer`).
+5. Calls `TraceRunner::create` then `run` (or `run_with_compare`),
+   propagates `Result<TraceReport>` to the process exit code via
+   `TraceRunner::exit_code` (§4.1.13 inv 4 / §5.11).
+6. Writes the `TraceReport` to the runner-private artefact directory
+   for `ClosureGate` consumption (the report is not persisted as a
+   Fory-encoded standalone artefact per §7.4; its structured fields
+   live alongside the captured artefacts in the run's artefact root).
+
+`golden-update` is a write-side command and is the **only** path that
+mutates the `GoldenStore` working tree (§4.1.10 inv 3). Its body:
+1. Parses argv (`--trace <path>`, `--accept-deltas`,
+   `--write-store <root>` defaulting to the trace's adjacent
+   `golden/`).
+2. Replays the trace with `assert/screenshot.cpp` and
+   `assert/ecs_snapshot.cpp` instructed to *capture* rather than
+   compare on mismatch.
+3. Writes the captured payloads into a staging directory under the
+   working tree, recomputes `GoldenRef.content_hash` per §7.1.2 inv 2,
+   and rewrites the `GoldenStoreIndex` (§7.1.3) sidecar.
+4. Emits a human-readable diff summary on stdout for the PR-author to
+   inspect; the actual PR creation is not e2e's concern (the human
+   reviews the diff per §4.1.10 inv 3).
+
+The CLI never defines a public C++ symbol; everything it imports is in
+`<glibre/e2e/e2e.hpp>` (§5). A future second front-end (e.g. an
+in-editor "run trace" button) reuses the same dylib without any
+duplicate logic — the CLI is one consumer among potentially several.
+
+### 6.6 Editor↔runner split — separate processes typical
+
+The editor is the *author* of `.glibre-trace` files (§3.3:
+`tools::TraceRecorder` lives in the editor's record mode). The runner
+is the *consumer* (this context). They typically run in **separate
+processes**:
+
+```text
+                               ┌────────────────────────────────────┐
+                               │ editor process (glibre-editor)     │
+                               │   tools::TraceRecorder ── writes ──┤──> .glibre-trace bytes
+                               │   (record mode)                    │      under tests/e2e/<ctx>/
+                               └────────────────────────────────────┘
+                                               │
+                                          (PR + review)
+                                               │
+                                               v
+            ┌─────────────────────────────────────────────────────────────┐
+            │ runner process (glibre-trace replay)                        │
+            │   Trace::load ── ReplayDriver ── TraceRunner ── reports ────┤──> ClosureGate
+            │   (replay mode)                                             │
+            └─────────────────────────────────────────────────────────────┘
+                                               │
+                            adapter axis (which `RunnerHostAdapter`?):
+                                               │
+                ┌──────────────────────────────┼──────────────────────────────┐
+                │                              │                              │
+   InProcess (default)             PerProcess (interactive)         OsAutomation (ci-isolated)
+   ───────────────────────         ───────────────────────────      ─────────────────────────
+   The runner *is* the binary      Runner spawns / attaches to       Runner posts global
+   under test — `glibre-trace      a pre-running editor or game      mouse/keyboard via the OS
+   replay` links the engine        binary; events go via              automation API (§4.1.8);
+   plugins in-process and          CGEventPostToPid (macOS) /         restricted to ci-isolated
+   substitutes the                 PostMessage (Windows) /            runners by §4.1.9 inv 2.
+   `platform::InputDriver` at      xdotool --window (Linux);          The binary keeps its
+   the seam (§4.1.6 inv 2).        the binary keeps its real          real `platform::InputDriver`.
+   No IPC; no OS events.           `platform::InputDriver`.
+```
+
+The choice of adapter is `(InjectionLayer × RunnerHost)`-gated by the
+§4.1.9 inv 2 policy table. The runner side never looks at the editor
+process's internals — every cross-process probe (`AssertState`,
+`AssertEcsSnapshot`, log slice for `AssertLogContains`, swapchain
+readback for `AssertScreenshot`) routes through the
+`RunnerHostAdapter` and its concrete implementation in
+`binary_under_test/`. For `PerProcess` / `OsAutomation` the adapter
+opens a small RPC channel to the binary under test exposing exactly
+the `evaluate(...)` set declared in §5.11; the channel is a Unix
+domain socket on macOS / Linux and a named pipe on Windows. The RPC
+encoding is Fory; the schemas are declared by §7 (the
+`world_inspect` queries reuse the engine's own component-snapshot
+Fory schemas, owned by `data`).
+
+The split keeps the editor's authoring loop independent of the
+runner's reproducibility loop: the editor may iterate on UX freely,
+and only the byte-equal round-trip through `.glibre-trace`
+(§7.1.1 inv 7) connects the two contexts.
+
+### 6.7 Allocation & arena discipline
+
+Every heap allocation in the e2e plugin happens inside a constructor
+or static factory, with one named exception — `runner/artefact.cpp`'s
+artefact-bundle writes — which the §9 budget accounts for. After
+construction:
+
+- `Trace::load` allocates one arena per loaded trace; that arena
+  backs every `InputEvent` decode, every `expected_fory` blob, and
+  every `GoldenRef` string. The `Trace` destructor releases the
+  arena (`trace/arena.cpp`).
+- `Trace::ops()` / `ops_at(frame)` returns spans into the same
+  arena; no copying.
+- `ReplayDriver::advance(frame)` returns a span of pointers into the
+  arena; no allocation.
+- `TraceRunner::run`'s loop body (`runner/loop.cpp`) does not
+  allocate — every assert evaluator routes its captures through
+  `runner/artefact.cpp`, which writes through `platform::FileIo`
+  and adds one path entry to the report's per-run vector (which
+  reserves capacity at `TraceRunner::create` time from the manifest's
+  `golden_refs.size()`).
+- `GoldenStore::load_image` / `load_snapshot` returns spans into a
+  per-store cache; the cache is a fixed-capacity LRU sized at
+  `open()` from a `GoldenStoreConfig` constant.
+- `assert/screenshot.cpp`'s comparator allocates one scratch buffer
+  per comparison (the diff PNG); the buffer is a member of the
+  `assert/screenshot.cpp` evaluator, reused across calls within one
+  run.
+
+The arena discipline makes the runner amenable to the §9 budget and
+to the §8.7 "no per-frame allocation" expectation that hot-reload
+tests gate on. It also avoids cross-process heap traffic: the
+`PerProcess` / `OsAutomation` RPC channel writes Fory blobs into
+fixed-capacity ring buffers in `binary_under_test/child_process_adapter.cpp`,
+not into a heap-backed std::vector<std::byte>.
+
+### 6.8 Threading topology
+
+The e2e plugin owns at most three OS threads at any time per run:
+
+| Thread                    | Owner                                  | Producer for                                         | Lifetime                  |
+|---------------------------|----------------------------------------|------------------------------------------------------|---------------------------|
+| Driver (main)             | `TraceRunner`                          | (consumer of every queue)                            | one run                   |
+| Screenshot encoder        | `assert/screenshot.cpp`                | PNG diff bytes                                       | one run                   |
+| RPC reader (PerProcess /  | `binary_under_test/child_process_…`    | Fory-decoded `evaluate(...)` results                 | one run                   |
+| OsAutomation only)        |                                        |                                                      |                           |
+
+The driver thread runs the §6.2 loop. The screenshot encoder is a
+single worker (not a pool — encoding cost is small enough at the §9
+budget that a pool is overkill) consuming a fixed-capacity SPSC ring
+of `(left_bytes, right_bytes, output_path)` triples produced by
+`assert/screenshot.cpp` on the driver thread. The RPC reader exists
+only on cross-process layers and decodes Fory-encoded
+`evaluate(...)` results from the binary under test; on `InProcess`
+runs there is no RPC reader thread because the adapter is a direct
+function call.
+
+There is **no** plugin-private thread pool, no fiber scheduler, no
+job-graph dispatcher — those are sibling-context concerns. The
+threads above are joined deterministically by `~TraceRunner()`
+(driver thread is the runner's own thread, screenshot encoder
+joins on completion of all queued tasks, RPC reader joins on adapter
+shutdown). The §8.3.2 "drain joins every e2e worker thread" clause
+is structural: there are exactly two non-driver threads per run
+(or one on `InProcess`), and they are owned by named members of
+the runner.
+
+The driver thread is the only writer to the `TraceReport` builder
+(`runner/report.cpp`); the encoder and RPC reader threads
+communicate exclusively through SPSC rings the driver consumes at
+end-of-frame. There are no cross-thread mutex acquisitions inside
+the §6.2 loop.
+
+### 6.9 Failure-translation seam
+
+Every backend call funnels its error through one of three
+translators in `src/detail/error/`:
+
+- `parse_to_error(parser_state)` — Fory parser state →
+  `e2e::Error::TraceParse`. Used by `trace/file.cpp`, `trace/op.cpp`,
+  and `golden/index.cpp`.
+- `platform_to_error(glibre::Error)` — the engine-wide error type's
+  `platform::Error` arm → e2e's matching arm
+  (`Error::DriverInstall` for `InputDriver` install failures,
+  `Error::GoldenMissing` for path-not-found, `Error::Timeout` for
+  the OS-bounded `advance_frame` timer, `Error::BinaryCrash` for
+  child-process exit). Used by every adapter.
+- `comparator_to_error(diff_payload)` — `PixelTolerance` /
+  `EcsSnapshot` byte-equal / log substring → `Error::AssertFailed`
+  with the artefact ref. Used by every evaluator.
+
+Per §4.2 cross-aggregate inv 7 / §4.1.13 inv 3, errors are
+constructed at the failure site; no aggregate translates another's
+error implicitly. The translators above are private to e2e and
+exist only so the failure sites have one obvious helper to reach
+for; they do not appear in the §5 surface.
+
+### 6.10 What §6 does *not* do
+
+- §6 introduces no new public type, function, or invariant.
+  Everything visible to the engine is in §5; everything enforced is
+  in §4; everything persisted is in §7; every reload boundary is in
+  §8. This section's job is to make the implementation faithful to
+  those four sources of truth.
+- §6 does not pin any specific Fory implementation, PNG decoder,
+  Blake3 implementation, or per-OS automation library version. Those
+  are vendor decisions recorded under `reviews/decisions/` when the
+  implementation PR lands. The MVP working assumptions are
+  `glibre-foryc` (per `reviews/decisions/fory-codegen.md`), an
+  in-tree libpng wrapper, an in-tree BLAKE3 (already used by
+  `platform`'s watcher per platform §6.4), and per-OS automation as
+  enumerated in §6.1.
+- §6 does not specify the build system. CMake is the working
+  assumption; a future move would change a few sentences here and
+  nothing in §4 / §5 / §7 / §8.
+- §6 does not specify CI step ordering. `ClosureGate` consumes
+  `TraceReport`s (§5.12 / §4.1.14); how the CI workflow walks a
+  user-story's referenced traces and aggregates their reports is a
+  policy concern in `.github/workflows/`, not an e2e implementation
+  concern.
 
 ## 7. Persistence & Schemas
 
