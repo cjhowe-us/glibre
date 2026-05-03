@@ -73,12 +73,12 @@ Aggregators carry no estimate; leaves do; estimates roll up.
   plan (replay trace + assertions). Closure rule: E2E green in CI
   before manual testing; story closes only after manual PASS recorded.
   Has its own `pts:*` estimate.
-- **Plan** — `type:plan`. Leaf; closes with **exactly one PR**.
-  Conventional Commit subject pre-declared on the issue. Carries a
-  unit test plan (≥1 Catch2 test name).
+- **Plan** — `type:plan`. Leaf implementation unit. Carries a unit
+  test plan (≥1 Catch2 test name). Closed by one or more granular
+  Conventional Commit PRs.
 - **Spike** — `type:spike`. Time-boxed research / design. Output =
   doc, decision record, or prototype branch.
 - **Story Point** — Fibonacci 1/2/3/5/8 relative effort. > 8 splits.
   Rolls up from leaves; aggregators never carry one.
 - **Pull Request** — granular, single-purpose, Conventional Commit
-  subject. A `type:plan` closes with exactly one PR.
+  subject. A `type:plan` may have one or more PRs.

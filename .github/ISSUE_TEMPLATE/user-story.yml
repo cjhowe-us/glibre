@@ -1,7 +1,7 @@
 name: User Story
 description: Persona-grounded testable acceptance criterion.
 title: "[STORY] "
-labels: ["type:user-story"]
+labels: [ "type:user-story" ]
 body:
   - type: dropdown
     id: domain
@@ -33,12 +33,6 @@ body:
       label: Phase
       options: [ "phase:mvp", "phase:post-mvp", "phase:long-term" ]
     validations: { required: true }
-  - type: dropdown
-    id: points
-    attributes:
-      label: Story Points (Fibonacci)
-      options: [ "pts:1", "pts:2", "pts:3", "pts:5", "pts:8" ]
-    validations: { required: true }
   - type: input
     id: persona
     attributes:
@@ -56,7 +50,8 @@ body:
     id: acceptance
     attributes:
       label: Acceptance Criteria (Gherkin)
-      description: One or more Given/When/Then blocks. Each must be exercised by both a manual test and an E2E test.
+      description: One or more Given/When/Then blocks. Each must be exercised by both
+        a manual test and an E2E test.
       placeholder: |
         Given ...
         When ...
@@ -67,7 +62,8 @@ body:
     id: manual-test
     attributes:
       label: Manual Test Script
-      description: Step-by-step actions a human reviewer performs in the editor / runtime to verify acceptance.
+      description: Step-by-step actions a human reviewer performs in the editor /
+        runtime to verify acceptance.
       placeholder: |
         1. Open editor with sample-scene.glibre
         2. Drag X onto Y
@@ -77,7 +73,8 @@ body:
     id: e2e-test
     attributes:
       label: E2E Test Plan
-      description: Path to `.glibre-trace` file (or planned name) that asserts each acceptance criterion via the InputDriver replay harness.
+      description: Path to `.glibre-trace` file (or planned name) that asserts each
+        acceptance criterion via the InputDriver replay harness.
       placeholder: "tests/e2e/<context>/<topic>.glibre-trace + assertions"
     validations: { required: true }
   - type: checkboxes

@@ -1,5 +1,5 @@
 name: Plan
-description: Leaf unit that closes with exactly one PR.
+description: Leaf implementation unit. Carries a unit test plan.
 title: "[PLAN] "
 labels: ["type:plan"]
 body:
@@ -37,8 +37,8 @@ body:
   - type: dropdown
     id: points
     attributes:
-      label: Story Points (Fibonacci, > 5 should split — 1 PR target)
-      options: [ "pts:1", "pts:2", "pts:3", "pts:5" ]
+      label: Story Points (Fibonacci, > 8 must split)
+      options: [ "pts:1", "pts:2", "pts:3", "pts:5", "pts:8" ]
     validations: { required: true }
   - type: textarea
     id: stories
@@ -56,13 +56,7 @@ body:
     id: scope
     attributes:
       label: Scope
-      description: Single SRP slice. Closes with exactly one PR.
-    validations: { required: true }
-  - type: input
-    id: pr-subject
-    attributes:
-      label: Conventional Commit Subject
-      placeholder: "feat(core): add Plugin manifest type"
+      description: Single SRP slice. What changes; what does not.
     validations: { required: true }
   - type: textarea
     id: unit-tests
@@ -82,3 +76,6 @@ body:
     id: agent-notes
     attributes:
       label: Agent Execution Notes
+      description: |
+        Subagents post status comments here in English.
+        PRs use Conventional Commit subjects (feat / fix / test / refactor / etc.).

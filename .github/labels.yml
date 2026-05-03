@@ -3,7 +3,7 @@
 #   tracking    — non-leaf aggregator; no estimate; rolls up
 #   user-story  — testable acceptance criterion (leaf for testing)
 #   epic        — multi-PR work item under a tracking issue
-#   plan        — leaf; closes with exactly one PR
+#   plan        — leaf implementation unit; carries unit test plan
 #   spike       — time-boxed research/design; output = doc/decision
 - { name: "type:initiative",   color: "5319e7" }
 - { name: "type:epic",         color: "5319e7" }

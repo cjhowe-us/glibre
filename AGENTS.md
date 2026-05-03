@@ -23,9 +23,9 @@ Aggregators carry **no estimate**; leaves carry estimates that roll up.
       manual testing begins.
    2. Manual test must be executed; PASS recorded as an issue comment.
    3. Story may not be closed until both (1) and (2) hold.
-5. **Plan** (`type:plan`) — leaf; closes with **exactly one PR**.
-   Conventional Commit subject pre-declared on the issue.
-   **Tests required: unit tests (Catch2).** Has estimate.
+5. **Plan** (`type:plan`) — leaf implementation unit.
+   **Tests required: unit tests (Catch2).** Has estimate. Closed by
+   one or more granular Conventional Commit PRs.
 6. **Spike** (`type:spike`) — time-boxed research / design. Output =
    doc, decision record, or prototype branch. No tests required.
    Has estimate.
