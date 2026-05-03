@@ -1447,7 +1447,278 @@ Non-binding sketch for implementers.
 
 ## 7. Persistence & Schemas
 
-Fory schemas. Migration rules.
+Render's persistence surface is intentionally narrow: only **operational
+state** that must survive across process lifetimes is persisted. Per-frame
+artefacts (`RenderFrame`, `ExecutionPlan`, `RenderGraph`, transient
+allocations, `RenderProxy` SoA, `LightCluster`, `HZB`, ring slices, GPU
+timestamp rings) are runtime-only and never serialised, per the
+PHILOSOPHY anti-pattern "serialised render-graph files" and the §5
+"Serialised schemas (Fory) — None at this layer" boundary statement.
+Render does **not** own shader bytecode persistence — that is `shader`'s
+cook-time artefact (§3.3); render owns the **device-resident** pipeline
+archive that warms the runtime `PSOCache`.
+
+All schemas below are authored as `data/schemas/render/<Type>.fory`
+files per `reviews/decisions/fory-codegen.md` and compile into the
+`glibre-types` middleman dylib. FQNs are `glibre.render.<Type>`. Each
+schema ships with at least one Catch2 round-trip test under
+`tests/data/schemas/render/<Type>.cpp` per the data SPEC §7 mandate.
+
+### 7.1 Persistent types
+
+#### 7.1.1 `RenderSettings` — per-view feature configuration
+
+**File:** `data/schemas/render/RenderSettings.fory`
+**FQN:** `glibre.render.RenderSettings`
+**Lifetime scope:** per-user, per-view; written by the editor / settings
+UI, read at view-creation time inside the render plugin.
+
+```fory
+schema glibre.render.RenderSettings {
+  version  1
+  since    "0.1.0"
+
+  field aa_mode              : u8   tag 1 since 1                  // AntiAliasMode
+  field upscaler             : u8   tag 2 since 1                  // UpscalerMode
+  field shadows              : u8   tag 3 since 1                  // ShadowTier
+  field ao                   : u8   tag 4 since 1                  // AmbientOcclusionTier
+  field ray_tracing_enable   : u8   tag 5 since 1   default 0
+  field hdr_output           : u8   tag 6 since 1   default 0
+  field dyn_res_min_scale    : f32  tag 7 since 1   default 0.5
+  field dyn_res_max_scale    : f32  tag 8 since 1   default 1.0
+  field per_view_draw_budget : u32  tag 9 since 1   default 0      // 0 = unbounded
+}
+```
+
+The Fory enum-as-`u8` encoding is intentional: the `AntiAliasMode` /
+`UpscalerMode` / `ShadowTier` / `AmbientOcclusionTier` enumerator lists
+declared in §5 are **closed sums** (§10 ABI bump rule). A loaded value
+outside the current closed set decodes to `Error::SchemaMigrationFailure`
+rather than silently saturating to a neighbour, so settings authored by
+a future build cannot smuggle unknown effect chains into an older render
+plugin.
+
+**Invariants** (echoing §4.x where the runtime aggregate enforces them):
+
+1. `dyn_res_min_scale ∈ (0, 1]` and `dyn_res_min_scale ≤ dyn_res_max_scale ≤ 1`.
+2. `ray_tracing_enable` ⇒ host capability set (§7.1.3) contains
+   `HardwareRayTrace` or `RayQuery` at view creation; otherwise the
+   loader downgrades to `false` and emits a `DiagnosticOverlay`
+   warning. The loader **does not** fail; capability mismatches between
+   the persisted settings document and the current host are an expected
+   steady-state condition (e.g. moving a settings file between
+   machines).
+3. `upscaler == MetalFx` ⇒ host capability set contains `MetalFx`;
+   otherwise downgrade to `BuiltinFallback` with the same diagnostic.
+4. `(aa_mode, upscaler, shadows, ao)` combinations refused by the graph
+   builder's pass predicates (§4.1.2 / §4.1.3) trigger
+   `Error::PassUnsupportedConfig` at the first frame after load — not
+   at deserialise time, because the graph builder is the single seam
+   that knows which pass topologies are reachable on the current host.
+
+#### 7.1.2 `PSOCacheRecord` — device-resident pipeline archive entry
+
+**File:** `data/schemas/render/PSOCacheRecord.fory`
+**FQN:** `glibre.render.PSOCacheRecord`
+**Lifetime scope:** per-host, per-glibre-version, per-GPU-driver.
+Written by the render plugin at clean shutdown; read at startup to
+warm the runtime `PSOCache`. Stored under
+`<user-data>/render/pso-archive/<host-id>/<glibre-version>/<gpu-id>/`.
+
+**Distinction vs. `shader`'s cook output.** `shader` produces the
+**source** AIR/metallib bytecode (the `shader_hash` half of `PSOKey`).
+Render's `PSOCacheRecord` persists the **device-compiled** result of
+binding that bytecode to a specific `(state_hash, GPU driver)` pair —
+i.e. the `MTL::BinaryArchive` blob produced by Metal's pipeline
+compiler. This is render's responsibility because the artefact is
+device-, driver-, and OS-version-specific; `shader`'s cook is platform-
+agnostic by construction (§3.3).
+
+```fory
+schema glibre.render.PSOCacheRecord {
+  version  1
+  since    "0.1.0"
+
+  // Identity — must be byte-equal to the in-memory PSOKey for warm.
+  field shader_hash           : u64    tag 1 since 1
+  field state_hash            : u64    tag 2 since 1
+
+  // Provenance — used to invalidate the record on host / driver change.
+  field gpu_id                : u64    tag 3 since 1   // MTLDevice registryID
+  field metal_feature_set     : u32    tag 4 since 1   // MTLGPUFamily ordinal
+  field os_build_hash         : u64    tag 5 since 1   // hash of `kern.osversion`
+  field glibre_types_abi_hash : u64    tag 6 since 1   // mirrors data §7
+
+  // Payload — opaque MTL::BinaryArchive blob.
+  field archive_blob          : bytes  tag 7 since 1
+  field archive_blob_blake3   : u64    tag 8 since 1   // truncated blake3
+}
+```
+
+**Invariants:**
+
+1. **Self-authenticating payload.** `archive_blob_blake3` MUST equal the
+   first 8 bytes of `blake3(archive_blob)`. Mismatch → discard the
+   record; do NOT propagate as a deserialise error (corrupt PSO records
+   are a steady-state condition after crashes during shutdown writes,
+   not a programming defect).
+2. **Provenance gating.** A record is admissible to the runtime
+   `PSOCache` only when **all** of `(gpu_id, metal_feature_set,
+   os_build_hash, glibre_types_abi_hash)` match the current host's
+   `CapabilityMask` (§7.1.3) and the current `glibre_types_abi_hash`
+   exported by the middleman dylib (`reviews/decisions/fory-codegen.md`).
+   Mismatched records are **silently discarded**, never migrated. PSO
+   archives are **not** migrated across glibre or driver versions; they
+   are recompiled from scratch (rebuilds in seconds, vs. minutes for
+   the cook).
+3. **Whole-archive replacement, not field migration.** Any breaking
+   schema change to `PSOCacheRecord`, any change to render's PSO
+   state-hash function, any change to `shader`'s cook, any host driver
+   upgrade, or any glibre middleman ABI hash bump invalidates **the
+   entire archive directory** wholesale. Render's startup warmer treats
+   the directory as ephemeral cache and rebuilds on miss.
+4. **Eviction is filesystem-driven.** Total on-disk size is capped by
+   a fixed 256 MiB budget for MVP (post-MVP wires this to a
+   `RenderSettings` sibling field). Eviction uses LRU on record
+   `mtime`; the warmer's miss path tolerates an absent record at any
+   time without surfacing an error.
+
+#### 7.1.3 `CapabilityMask` — per-host capability record
+
+**File:** `data/schemas/render/CapabilityMask.fory`
+**FQN:** `glibre.render.CapabilityMask`
+**Lifetime scope:** per-host. Probed once at first run (or on hardware
+change), stored at
+`<user-data>/render/capability-mask/<host-id>.fory`. Read at startup
+**before** any `RenderSettings` is loaded; produces the gating signal
+used by §7.1.1 invariants 2-3 and §7.1.2 invariant 2.
+
+```fory
+schema glibre.render.CapabilityMask {
+  version  1
+  since    "0.1.0"
+
+  field host_id            : u64    tag 1  since 1   // hash of (machine UUID, OS install id)
+  field probed_at_unix_ms  : u64    tag 2  since 1
+  field gpu_id             : u64    tag 3  since 1
+  field gpu_name           : string tag 4  since 1
+  field metal_feature_set  : u32    tag 5  since 1
+  field os_build_hash      : u64    tag 6  since 1
+
+  // Mirrors the `Capability` bitset (§5). Persisted as a single u32
+  // so future capability bits flow in via additive bumps, not new
+  // fields — see migration rules below.
+  field capabilities       : u32    tag 7  since 1
+
+  // Optional richer probes — null until §11 user stories add them.
+  field max_argument_buffer_tier : u8  tag 8  since 1   default 0
+  field hdr_max_nits             : u16 tag 9  since 1   default 0
+  field timestamp_period_ns      : f32 tag 10 since 1   default 0.0
+}
+```
+
+**Invariants:**
+
+1. **Single-writer.** Exactly one host process writes the
+   `CapabilityMask` for a given `host_id`; concurrent writes from a
+   second instance refuse with `Error::CapabilityNotSupported` (post-MVP
+   refines this to a file-lock seam owned by `platform`).
+2. **Capability bits are append-only.** New `Capability` enumerators
+   may be defined; existing bit positions are immutable once shipped
+   (mirrors the `data` SPEC §7 reserved-tag rule, applied to bit
+   positions inside the `capabilities` u32).
+3. **Stale records are revalidated, not migrated.** When the record's
+   `(gpu_id, metal_feature_set, os_build_hash)` no longer matches the
+   live device, the loader treats it as absent and re-probes; it does
+   not decode-and-mutate stale records. Probing is the only writer of
+   capability bits.
+
+### 7.2 Migration rules
+
+Per `reviews/decisions/fory-codegen.md` §"Migration Mechanic", every
+schema-version bump emits a generated dispatcher hookup. Render owns the
+migration *bodies* for the types above; their *plumbing* is generated.
+
+#### 7.2.1 `RenderSettings` migrations — additive only
+
+The settings type follows the **additive defaulted-field** pattern:
+
+1. **N → N+1 adds a field at a new tag.** Default value defined in the
+   schema; codegen synthesises the default at deserialise time when the
+   payload omits the new field (Fory's `since` clause). No migration
+   body required; the codegen tool emits
+   `migrate_RenderSettings_v<N>_to_v<N+1>` as the identity mapping with
+   default-fill.
+2. **N → N+1 changes the meaning of an existing enumerator.** Treated
+   as breaking. Bump the schema to a new major (post-MVP — render
+   commits to no breaking settings changes inside MVP). Migration body
+   lives in `src/render/migrations/render_settings_v<N>_to_v<N+1>.cpp`
+   and is owned by render, not by `data`.
+3. **N → N+1 removes a field.** Tag becomes `reserved`; never reused.
+   Codegen rejects reuse at generation time per data SPEC §7.
+
+Round-trip golden test contract: for every shipped schema version `N`,
+`tests/data/schemas/render/RenderSettings.cpp` includes a recorded `vN`
+payload and asserts `migrate(vN) == defaults_for_v_current()` modulo
+the explicitly-set fields in the recorded payload.
+
+#### 7.2.2 `PSOCacheRecord` — invalidate, never migrate
+
+Any breaking change — including a new field whose absence the runtime
+cannot synthesise (e.g. a new identity component of `PSOKey`), a change
+to render's `state_hash` function, a change to `shader`'s metallib
+encoding, a libc++ ABI bump that perturbs `MTL::BinaryArchive` layout,
+or a glibre middleman ABI hash bump — **invalidates the entire
+PSO-archive directory**. Implementation: the warmer compares the loaded
+record's `glibre_types_abi_hash` to the live middleman's hash; a single
+mismatch at startup triggers `rmtree(<pso-archive-dir>)` and the runtime
+proceeds with an empty cache. There is no partial-validity middle state.
+
+This rule is enforced in code by **omitting** any `migration` block
+from `PSOCacheRecord.fory` entirely. The Fory codegen tool refuses to
+emit a migration dispatcher for a type whose schema declares no
+migrations; any future schema bump therefore forces the author to
+either add an explicit migration (rejected by review per this rule) or
+accept the whole-archive invalidation (the only allowed path).
+
+#### 7.2.3 `CapabilityMask` — additive bits, immutable positions
+
+1. **Adding a `Capability` bit position.** Reserve the next free bit in
+   the `capabilities` u32 in-source and rebuild the dylib; the `.fory`
+   schema is unchanged. The probe writes the bit only when the current
+   driver / device reports support; older masks read on a newer build
+   simply present a zero in the new position, which the gating rules
+   in §7.1.1 / §7.1.2 already treat as "feature unavailable".
+2. **Promoting `capabilities` from u32 to u64.** Treated as a breaking
+   schema bump (new tag, defaulted to zero, old field marked
+   reserved). Migration body provided by render under
+   `src/render/migrations/`; round-trip test is mandatory.
+3. **Adding a probe field (e.g. `vrr_min_refresh_hz`).** Additive
+   defaulted-field pattern, identical to §7.2.1 case 1. Default
+   represents "not probed"; loader re-probes opportunistically rather
+   than treating the default as a reading.
+
+### 7.3 What is NOT persisted
+
+To make the boundary explicit (in line with §5 "None at this layer"):
+
+| Artefact            | Why not persisted                                                                                |
+|---------------------|--------------------------------------------------------------------------------------------------|
+| `RenderFrame`       | Per-frame arena snapshot; rebuilt every frame from the ECS.                                      |
+| `ExecutionPlan`     | In-memory structural-hash cache; rebuilt when the pass set or capability set changes (§4.1.5).   |
+| `RenderGraph`       | C++ code, not data (PHILOSOPHY anti-pattern).                                                    |
+| `RenderProxy` SoA   | Lives inside `RenderFrame`'s arena.                                                              |
+| `AliasPlan`         | Output of the alias planner per recompile of `ExecutionPlan`.                                    |
+| `LightCluster`      | Compute-built each frame from the unified light buffer.                                          |
+| `HZB`               | GPU-side per-frame depth pyramid.                                                                |
+| `RingBuffer` slices | CPU-write / GPU-read; rebuilt per frame-in-flight.                                               |
+| `GpuTimestamp` ring | Debug-only; one-frame latency by construction.                                                   |
+| `DiagnosticOverlay` | Build-gated debug surface; never persisted.                                                      |
+| Shader bytecode     | Owned by `shader`'s cook (§3.3); render consumes by hash.                                        |
+
+These appear in the persistence surface only as **identifiers**
+(`shader_hash`, `state_hash`, `gpu_id`) referenced from §7.1, never as
+byte payloads.
 
 ## 8. Hot-Reload Contract
 
