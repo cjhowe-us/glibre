@@ -1435,7 +1435,482 @@ component's bytes itself.
 
 ## 8. Hot-Reload Contract
 
-What survives swap, what `migrate(...)` must do, what triggers refusal.
+The `core` context **is the orchestrator** of hot-reload. The
+`HotReloadBarrier` aggregate (§4.6) and its supporting types
+(`ReloadRequestId`, `ReloadOutcome`, `ReloadStatus`, the
+`HotReload*Event` triplet — §5.8, §5.12) are the entire engine-side
+surface that drives the four-step state machine **drain → swap →
+migrate → resume** at frame phase 8 (`Phase::HotReload`, §5.3). No
+other context schedules a swap; no other context owns the barrier.
+This section is the load-bearing distillation of
+`reviews/decisions/hot-reload-protocol.md` mapped onto core's
+aggregate, public-interface, and persistence surface; everything below
+is binding for an implementer of `HotReloadBarrier::step` (§5.8) and
+referenced verbatim by §11's acceptance criteria.
+
+The barrier is a true no-op when no reload is pending: `step` performs
+exactly one relaxed atomic load against the pending-reload queue and
+returns `Result<std::size_t>{0}` without taking the world lock or
+publishing any event. Phase 8's idle budget (§9, frame-phases decision
+record §Consequences ≤0.1 ms) is preserved by construction.
+
+When `step` observes a non-empty queue it processes each pending
+reload as an **independent transaction**: per-plugin atomicity, not
+phase-wide. One plugin's refusal does not block another plugin's swap
+in the same phase 8 tick. The four steps for a single transaction
+are detailed in §8.3–§8.6; cross-cutting state-survival, migrate-body,
+refusal, and rollback rules are §8.1–§8.2 and §8.7–§8.9.
+
+### 8.1 What Survives a Swap
+
+Surviving state is exactly the state owned by `core` or by
+`glibre-types.dylib`. The invariant is mechanical: **a value
+survives the swap iff its type has a `.fory` schema** (and therefore
+appears in `glibre-types.dylib`'s registry). No per-plugin survival
+manifest, no per-component opt-in flag, no second source of truth.
+
+Concretely the loader guarantees the bytes of the following are
+unchanged across the four steps (or migrated in place per §8.5):
+
+1. **`PluginManifest` registry** — the loader's per-plugin record
+   (`LoadedPlugin` snapshot, §5.9 `PluginLoader::list()`; persisted
+   projection `LoadedPluginRecord`, §7.1) is owned by `core` and
+   amended in place. The outgoing plugin's `PluginId` is **stable**:
+   the registry slot is updated with the replacement dylib path and
+   ABI hash, not freed and reissued. Re-loads do not rotate IDs;
+   handles cached by editor UI / e2e harness remain valid.
+2. **`World` handles** — `Entity` value objects (§4.3) keep their
+   `(index, generation)` bits unchanged. No archetype is rebuilt on
+   account of a plugin reload; the `World` aggregate's slot map and
+   chunk storage (§4.1, §4.2) are byte-stable across the swap. A
+   handle valid at phase 7 of frame N is valid at phase 1 of frame
+   N+1 with no re-resolution. (§4.11 invariant 3.)
+3. **`Schedule` structure** — the per-`Phase` topological order is
+   re-derived after step 4 from the union of every loaded plugin's
+   `(reads, writes, after, before)` declarations (§5.6
+   invariant 3, §4.4 invariant 2). System *function pointers* re-
+   resolve through the new plugin's vtable; the schedule's *shape*
+   (phases 1..=9, system identities by FQN, ordering edges) is
+   recomputed deterministically and is byte-equal to a fresh-process
+   compile against the same loaded set.
+4. **`AssetHandle` table** — the per-process handle slots (§4.7) keep
+   their `(index, generation)` bits. The opaque payload pointer for
+   any handle resolved by the *outgoing* plugin is invalidated at
+   step 1 (drain) and re-resolved by the *incoming* plugin at step 4
+   (resume); the handle bits do not change. Cross-plugin code holding
+   an `AssetHandle<T>` continues to address the same logical asset.
+5. **`TypeRegistry`** — the immutable-after-init descriptor map
+   (§4.9) is append-only across a session. A reload extends the
+   registry only with types that pass schema-hash equality against
+   the surviving entries; replacing a type's layout is a refusal
+   (§8.7 row "schema_hash drift"), not a registry mutation.
+6. **`ChangeTick` clock and frame counter** — the `World`'s
+   monotonic `ChangeTick` (§4.1, §5.5) and `FrameLoop::frame_index()`
+   (§5.7) are unchanged across the swap. Phase 8 does not advance
+   either; phase 9 (`Present`) advances them as it would on any
+   frame.
+
+State that **does not survive** — and which the incoming plugin
+re-derives in `glibre_plugin_register` at step 4 — covers everything
+without a `.fory` schema: GPU resource handles internal to the
+plugin, plugin-private caches, JIT-derived dispatch tables, plugin-
+owned worker pools (drained and joined at step 1), and any plugin-
+private singleton not declared via a middleman type. Resolution of
+an `AssetHandle` returned by the outgoing plugin's resolver may
+re-look-up against the incoming plugin's resource table; the handle
+identity is stable, the cached payload pointer is not.
+
+### 8.2 The `migrate(...)` Contract
+
+For every persistent component / singleton type T owned by the
+incoming plugin Q whose `schema_version` exceeds the version
+recorded in the surviving storage's header (§4.2 invariant 3, §7.1
+`ComponentDecl.schema_hash`), the loader invokes the **per-type
+migration chain** registered with the data context's `MigrationChain`
+dispatcher (per `reviews/decisions/fory-codegen.md` §"Migration
+Mechanic" and `specs/data/SPEC.md` §4.6 / §4.7).
+
+Each chain step is a pure free function with a fixed signature
+already constrained by core's own §7.3 contract — restated here as
+the binding contract for **every plugin author** (the originating
+context owns the body; core owns the call site):
+
+```cpp
+// Authored by the plugin that owns the component type T.
+// Lives under <plugin>/migrations/<Type>_v<N>_to_v<N+1>.cpp.
+// Registered at static-init via the codegen-emitted
+// GLIBRE_REGISTER_MIGRATION macro inside the plugin TU that links
+// glibre-types.dylib.
+
+namespace glibre::<plugin_ctx>::migrations {
+
+[[nodiscard]] auto
+migrate_<Type>_v<N>_to_v<N+1>(
+    const glibre::types::<plugin_ctx>::<Type>V<N>& src,
+    glibre::types::<plugin_ctx>::<Type>V<N+1>&     dst,
+    glibre::types::Arena&                          arena) noexcept
+    -> std::expected<void, glibre::Error>;
+
+}  // namespace glibre::<plugin_ctx>::migrations
+```
+
+The loader supplies the three arguments (`src`, `dst`, `arena`) and
+**nothing else**: no `World&`, no `Registry&`, no `LogSink&`, no
+clock. This is what makes the function relocatable into the
+data context's static migration table and what makes its purity
+mechanically verifiable.
+
+Per-row execution order at step 3 (Migrate, §8.5):
+
+1. The loader queries `MigrationChain` for
+   `(stored_version → current_version)` of T. A missing chain →
+   `core::Error::SchemaMigrationFailed`, abort, rollback (§8.8
+   #4).
+2. For each row in the surviving storage, the loader allocates
+   `sizeof(T_current)` from a per-phase migration arena (a
+   loader-owned `glibre::types::Arena`; the budget is set in §9, the
+   arena is reset between rows, never grown across plugins in the
+   same phase) and invokes the chain step-by-step:
+   `migrate_T_vN_to_vNplus1(src, dst, arena)`,
+   `migrate_T_vNplus1_to_vNplus2(src, dst, arena)`, ...
+3. On success of the **full chain for that row**, the resulting
+   bytes overwrite the storage row in place (size is bounded by the
+   new struct's compile-time `sizeof`, per `fory-codegen.md` §"ABI
+   Stability"). On any chain-step `unexpected`, the partially-
+   migrated bytes living in the arena are discarded (the arena is
+   reset, never published) and the loader rolls back the entire
+   transaction (§8.8).
+4. After all rows of all types Q owns have migrated successfully,
+   the storage header for each migrated type is bumped to the new
+   `schema_version`. The header bump is the commit point of step 3.
+
+The contract obligations on the migrate body itself are the §7.3
+list extended uniformly to every plugin: **pure**, **deterministic**,
+**arena-only allocation**, **total over the prior version's domain**
+(returning `unexpected` is reserved for *defective* payloads, not
+"I don't know how to migrate this value"), **single-step** (chain
+composition is the dispatcher's job, never the body's), **local**
+(no global reads, no `World` access, no logger). The rules and
+their motivation are restated identically to §7.3 #1–#5; §8.2 adds
+no new constraints, only widens the scope from core-owned schemas
+to plugin-owned components.
+
+`HotReloadCheckpoint` (§7.1, `data/schemas/core/HotReloadCheckpoint.fory`)
+captures the cross-step metadata for the in-flight transaction: the
+plugin FQN, the old/new ABI hashes, the frame index, the world tick,
+the list of migrated type FQNs, and the opaque `carryover_payload`
+bytes the outgoing plugin emitted at drain. The checkpoint is the
+sole vehicle that crosses the four steps; nothing else of plugin
+origin is in scope at the migrate boundary.
+
+### 8.3 Step 1 — Drain
+
+Trigger: `pending_reloads > 0` observed by `HotReloadBarrier::step`
+(§5.8) at `Phase::HotReload` entry. For each pending reload of plugin
+P (the outgoing plugin):
+
+1. The loader takes the `World`'s exclusive write lock (already held
+   from the perspective of any system, since no system runs in phase
+   8; this is documentation, not contention).
+2. The loader invokes the outgoing plugin's `glibre_plugin_drain`
+   (an entry point added by `reviews/decisions/hot-reload-protocol.md`
+   §"Step 1 — Drain"; ABI shape `extern "C" std::expected<void,
+   glibre::Error> glibre_plugin_drain(World&) noexcept`). The plugin
+   must:
+   - Flush any internal per-frame queues into ECS components owned
+     by middleman types (so the bytes survive into step 3).
+   - Emit any `carryover_payload` it wishes to hand to its
+     replacement, written into the loader-supplied arena and
+     attached to the in-flight `HotReloadCheckpoint` envelope
+     (§7.1, §8.2).
+   - Release any GPU resource handles it owns; the incoming plugin
+     re-acquires equivalents at step 4.
+   - Cancel any worker tasks it spawned and join them.
+3. **Drain completeness budget.** If `glibre_plugin_drain` does not
+   return within the loader's drain budget (concrete value set by
+   §9), the loader refuses the reload with
+   `core::Error::HotReloadDrainTimeout` (§4.6 invariant 2,
+   §5.1 enum) and skips steps 2–4 for *this* plugin. Other
+   pending plugins in the same phase 8 are processed independently.
+
+Postcondition of step 1: every byte of plugin-survivable state
+lives in middleman-typed ECS storage or in the
+`HotReloadCheckpoint` carry-over arena; no thread other than the
+loader is inside the outgoing plugin's code; every
+`CommandBuffer` recorded by the outgoing plugin has either flushed
+or been `clear()`-ed (§5.10).
+
+### 8.4 Step 2 — Swap
+
+Per outgoing plugin P, incoming candidate dylib Q (already
+`dlopen`-ed and manifest-validated by `PluginLoader::load` per
+`reviews/decisions/plugin-abi.md` §"Loader Sequence" steps 1–7):
+
+1. **ABI hash recheck** (§4.6 invariant 3). Verify
+   `Q::glibre_types_abi_hash() == host_glibre_types_abi_hash` and
+   that the manifest's `abi_hash` agrees. Mismatch refuses with
+   `core::Error::HotReloadAbiHashMismatch` (§5.1) wrapped under
+   `core::Error::HotReload`. Q's mapped image is `dlclose`-ed; P
+   is undisturbed. This is the second hash check (the first ran at
+   `PluginLoader::load`); the recheck catches the case where Q's
+   on-disk image was rewritten between load and barrier.
+2. **Schema-coverage check.** Q's `PluginManifest.components`
+   (§7.1) must be a superset of P's surviving component-storage
+   types. A *subset* — meaning Q dropped a type P registered —
+   is a major-version change requiring a fresh world, refused with
+   `core::Error::HotReload` wrapping
+   `core::Error::PluginManifestInvalid`. A `schema_hash` *drift* on
+   an existing FQN is refused with the same umbrella wrapping
+   `core::Error::PluginAbiHashMismatch`.
+3. **Vtable swap.** The loader atomically replaces P's vtable
+   pointer in the `PluginRegistry` with Q's. The vtable is one
+   pointer indirection from every system call site; the swap is
+   one relaxed store guarded by the loader's exclusive ownership
+   of phase 8. After this point, every system call site dispatches
+   to Q.
+4. **Type-registry append.** Q's component type registrations are
+   appended to the `TypeRegistry` (§4.9) for any *new* type FQNs Q
+   declares; pre-existing FQNs are validated via
+   `ComponentDecl.schema_hash` equality (§7.1) — a hash drift on
+   an existing FQN is the refusal at step 2.2 above, not a silent
+   re-registration. The registry remains immutable-after-init in
+   the sense that the *closed* set of types reachable to any
+   already-running system is unchanged across the swap; new types
+   are only visible to systems Q registers at step 4 (resume).
+
+`PluginId` stability (§8.1 #1) is enforced here: the registry slot
+is mutated, not freed.
+
+### 8.5 Step 3 — Migrate
+
+Run the §8.2 chain over every persistent component / singleton
+type T that bumped versions between P and Q. The migrations execute
+on the loader thread, sequentially, in `TypeRegistry` registration
+order (a stable order since the registry is append-only). Failure
+of any chain step on any row triggers full rollback (§8.8 #4); the
+migration arena is reset before the cause is returned to the caller
+of `HotReloadBarrier::step`.
+
+The `HotReloadCheckpoint` envelope (§7.1) is finalized at the end
+of step 3: `migrated_types` is populated with the FQNs whose
+storage headers were bumped, and the checkpoint is the payload
+attached to every observer event published in §8.6.
+
+### 8.6 Step 4 — Resume and Observer Notification
+
+1. The loader invokes `Q::glibre_plugin_register(PluginContext&
+   ctx)` (§5.9, `reviews/decisions/plugin-abi.md` §"Registration
+   Entry-Point Signature"). The plugin must:
+   - Re-acquire any GPU resources it released at step 1.
+   - Register its systems into the `Schedule` (§4.4, §5.6).
+     Re-registration of an already-known `(phase, system_fqn)` is
+     idempotent.
+   - Register its render-graph passes / editor panels.
+   - Rebuild caches keyed off middleman state.
+2. **Schedule rebuild.** After `glibre_plugin_register` returns, the
+   loader re-derives the per-`Phase` topological order over the
+   union of every loaded plugin's `(reads, writes, after, before)`
+   set. A cycle refuses the swap with
+   `core::Error::SystemScheduleCycle` (§4.4 invariant 4, §5.1) and
+   triggers full rollback (§8.8 #5).
+3. **Observer notification (success path).** The loader publishes
+   `HotReloadCompletedEvent { plugin_fqn, old_abi_hash, new_abi_hash,
+   migrated_types }` (§5.12) **synchronously** on the loader thread,
+   between the schedule rebuild's commit point and the next pending
+   reload's step 1. Subscribers always observe a fully-swapped,
+   fully-migrated world; they never observe a half-state. Subscribers
+   that cache plugin-derived state (the editor's panel registry, the
+   e2e harness's golden-snapshot recorder, any plugin that listens
+   for cross-plugin reloads) **invalidate those caches off this
+   event**; the caches are re-derivable from middleman state by
+   construction (§8.1).
+4. The pending-reload counter is decremented. When it reaches zero,
+   `HotReloadBarrier::step` returns `Result<std::size_t>{N}` (the
+   count of processed requests) and `Phase::HotReload` exits;
+   `Phase::Present` (phase 9) begins.
+
+`HotReloadStartedEvent` is published at phase 8 entry, **once per
+pending reload**, before that transaction's step 1 begins (§5.12,
+`reviews/decisions/hot-reload-protocol.md` §"Observer Notification").
+Subscribers that need to invalidate caches do so off this event;
+they are guaranteed by step 4 atomicity that the next event they
+see for the same `plugin_fqn` will be either `HotReloadCompletedEvent`
+or `HotReloadRefusedEvent` (§5.12), never an interleaving of the
+two and never a half-state.
+
+The observer surface is itself a middleman type
+(`glibre.core.HotReloadEvent` family, projected as the §5.12
+structs); its layout survives any future core-runtime reload by
+construction.
+
+### 8.7 Refusal Cases (mapping to `core::Error`)
+
+Every refusal site in the four-step state machine maps to **exactly
+one** `core::Error` arm wrapped under the umbrella
+`core::Error::HotReload` (§4.6 invariant 7, §5.1). Consumers see
+both the umbrella ("a hot-reload was refused") and the specific
+cause via `glibre::Error`'s detail payload (per the error-model
+decision record). The closed table below is binding; adding a
+fourth refusal class requires a PHILOSOPHY amendment and a new
+enumerator.
+
+| Step | Detection point                                            | Inner cause arm                                | Operator action                                                |
+|------|------------------------------------------------------------|------------------------------------------------|----------------------------------------------------------------|
+| 1    | `glibre_plugin_drain` does not return within drain budget  | `core::Error::HotReloadDrainTimeout`           | Investigate the outgoing plugin's drain implementation.        |
+| 1    | `glibre_plugin_drain` returns `unexpected(...)`             | `core::Error::PluginInitFailed` (drain arm)    | Read the plugin's reported inner error.                        |
+| 2.1  | ABI hash mismatch (recheck)                                 | `core::Error::HotReloadAbiHashMismatch`        | Rebuild the candidate plugin against current `glibre-types.dylib`. |
+| 2.2  | Q drops a component FQN P registered                        | `core::Error::PluginManifestInvalid`           | Treat as major version; restart with a fresh world.            |
+| 2.2  | Q changes layout of an existing FQN (`schema_hash` drift)   | `core::Error::PluginAbiHashMismatch`           | Bump the schema's `version` and ship a migration body.         |
+| 3    | Missing chain `(stored → current)` for some type            | `core::Error::SchemaMigrationFailed`           | Author the missing migration step or restore from a snapshot.  |
+| 3    | A migrate-chain step returns `unexpected(...)`              | `core::Error::SchemaMigrationFailed`           | Fix the migration body or the originating defective payload.   |
+| 4.1  | `glibre_plugin_register` returns `unexpected(...)`          | `core::Error::PluginInitFailed` (register arm) | Read the plugin's reported inner error.                        |
+| 4.2  | Schedule cycle in the rebuilt DAG                           | `core::Error::SystemScheduleCycle`             | Resolve the cyclic `(after, before)` declarations.             |
+| any  | Self-reload of `core` requested                             | `core::Error::HotReloadSelfReference`          | Restart the process; core self-reload is out of MVP scope.     |
+
+Each refusal logs **exactly once** at `warn` level via
+`glibre::log_error` (per the error-model decision record's logging
+rule for hot-reload refusals), with the structured fields
+`plugin_fqn`, `attempted_dylib_path`, `host_abi_hash`,
+`plugin_abi_hash`, and the inner cause arm's enumerator name.
+Refusals do **not** escalate to `error` — the engine continues on
+the previous-good plugin, which is always a tolerable steady state.
+
+### 8.8 Failure & Rollback (atomic, all-or-nothing)
+
+The atomicity guarantee is **per-plugin transaction**: rollback of
+plugin P↔Q is all-or-nothing; concurrent transactions in the same
+phase 8 are independent. Old plugin P is kept live on **any**
+failure step; the new plugin Q's mapped image is `dlclose`-ed and
+its `PluginRegistry` slot is reverted to P's. The per-step
+discipline:
+
+1. **Step 1 (Drain) failure.** No state changed. Mark the request
+   refused, log per §8.7, continue to the next pending reload.
+2. **Step 2.1 / 2.2 failure** (hash recheck or coverage check).
+   Detected before any vtable mutation. `dlclose` Q, mark refused,
+   continue.
+3. **Step 2.3 / 2.4 failure.** By construction these cannot fault
+   (a single relaxed atomic store and a registry append under
+   exclusive ownership). If observed, the loader **terminates the
+   process** — this is a contract violation, not a recoverable
+   error, and silent recovery would mask a bug the
+   deterministic-snapshot contract (§4.1, PHILOSOPHY §7) cannot
+   tolerate.
+4. **Step 3 (Migrate) failure.** Migrated bytes live exclusively in
+   the per-phase migration arena until the row's chain commits in
+   step 3.3; on any chain-step `unexpected`, the arena is reset
+   before any in-place storage overwrite, so **at most one row is
+   half-overwritten at any moment** and the loader's exclusive
+   phase-8 lock guarantees no observer sees the intermediate.
+   Rollback unwinds the step 2.4 type-registry append (Q's new
+   types are removed), restores P's vtable pointer (§8.4 step 2.3),
+   and re-invokes `P::glibre_plugin_register` to rebuild any caches
+   P dropped at step 1 (which is why P's `register` is required to
+   be idempotent — it may run a second time after a failed swap).
+5. **Step 4.1 / 4.2 failure.** Treated identically to step 3
+   failure: full rollback of swap + migrate, P remains live.
+   Migrated bytes are reverted by running the **inverse migrate
+   chain** when one exists (per `reviews/decisions/hot-reload-
+   protocol.md` §"Failure & Rollback"); when no inverse exists for
+   some chain step the originating context declared, the loader
+   terminates the process — non-invertible migrations force a
+   step-4 failure to a hard-fail, loud and immediate, exactly
+   because deterministic replay cannot accept a silently
+   half-rolled-back world.
+6. **Refusal logging.** Every rollback path publishes
+   `HotReloadRefusedEvent { plugin_fqn, cause }` (§5.12) on the
+   observer bus exactly once, between the failure detection and
+   the next pending reload's step 1. Subscribers that received
+   `HotReloadStartedEvent` for the same `plugin_fqn` see exactly
+   one terminal event per transaction.
+
+The **terminate-on-contract-violation** cases (step 2.3/2.4 fault,
+non-invertible step-4 rollback) are deliberately loud. They
+indicate the loader's own invariants were broken; the only
+acceptable response is a process kill so CI surfaces the bug
+immediately.
+
+### 8.9 Test Hooks
+
+The barrier exposes a deterministic E2E trigger so the test harness
+can exercise hot-reload without touching the filesystem and without
+racing a development-build watcher. The trigger is the same public
+surface that production uses — `HotReloadBarrier::request_reload`
+(§5.8) — wrapped under a `#if defined(GLIBRE_E2E)` namespace that
+adds blocking-await on the matching terminal event:
+
+```cpp
+// Visible under -DGLIBRE_E2E only. Production builds link only
+// the plain HotReloadBarrier surface from §5.8.
+
+namespace glibre::core::test {
+
+// Blocks the calling thread until the referenced request reaches
+// a terminal state (Completed or Refused). Returns ok on Completed,
+// the §8.7 inner Error on Refused.
+[[nodiscard]] std::expected<void, glibre::Error>
+await_reload(HotReloadBarrier&  barrier,
+             ReloadRequestId    id) noexcept;
+
+}  // namespace glibre::core::test
+```
+
+The harness drives the contract through three CI scenario classes,
+each backed by Catch2 cases referenced by name from §11:
+
+1. **Happy-path reload, no schema bump.** Assert
+   `HotReloadCompletedEvent` fires; assert `frame_index` advances
+   by exactly 1 between `request_reload` return and
+   `await_reload` return (the swap happens at the immediately-
+   next phase 8); assert `Entity` and `AssetHandle` bits cached
+   before the swap remain valid after it (§8.1).
+2. **Each refusal case.** One Catch2 case per row of the §8.7
+   table. Each fixture ships a malformed plugin (`bad-abi-hash`,
+   `failing-init`, `failing-drain`, `cycle-induced-by-register`,
+   `dropped-component-type`) that triggers the matching refusal;
+   asserts `HotReloadRefusedEvent` fires with the expected `cause`
+   inner arm and that the prior plugin still ticks at frame
+   N+1 (§8.8 #1, #2, #4, #5).
+3. **Schema migration round-trip.** A `v1-to-v2-migration` fixture
+   plugin bumps a component schema; the harness records a frame N
+   golden with the v1 storage, requests the reload, and asserts
+   that the migrated v2 bytes round-trip byte-equal to a hand-
+   authored expected payload (per the §7.3 round-trip obligation,
+   widened here to plugin-owned schemas). A companion
+   `migrate_T_v1_to_v2_force_fail` injects a step-3 failure and
+   asserts full rollback **including the type-registry revert**
+   (§8.8 #4).
+
+All scenarios run in-process on a single deterministic frame
+sequence; the filesystem-watcher path used in development builds
+is a thin wrapper that calls `request_reload`, so testing the
+in-process path covers the loader's own state machine.
+
+### 8.10 Cross-References
+
+- Aggregate invariants: §4.6 `HotReloadBarrier` (#1–#7), §4.5
+  `Plugin / PluginLoader` (#1–#3), §4.11 cross-aggregate invariants
+  #3 (entity stability across reload), #4 (self-reload refusal).
+- Public interface: §5.1 `core::Error` enum (`HotReload`,
+  `HotReloadDrainTimeout`, `HotReloadAbiHashMismatch`,
+  `HotReloadSelfReference`, `SchemaMigrationFailed`, the
+  `Plugin{...}` family); §5.3 `Phase::HotReload`; §5.8
+  `HotReloadBarrier`, `ReloadRequestId`, `ReloadOutcome`,
+  `ReloadStatus`; §5.9 `PluginLoader`; §5.12 the `HotReload*Event`
+  triplet.
+- Persistence: §7.1 `HotReloadCheckpoint`, `LoadedPluginRecord`;
+  §7.3 migration-body contract (extended to plugin authors at §8.2);
+  §7.4 the load-bearing refusal that ECS world bytes are
+  plugin-owned, never core's.
+- Decision records: `reviews/decisions/hot-reload-protocol.md`
+  (the source of the four-step state machine and the refusal-cause
+  table); `reviews/decisions/frame-phases.md` (the pinning of phase
+  8 as the only barrier position); `reviews/decisions/plugin-abi.md`
+  (the load-time half of the loader sequence and the
+  `core::Error::Plugin{...}` arms reused by §8.7);
+  `reviews/decisions/fory-codegen.md` (the `MigrationChain`
+  dispatcher §8.2 calls into); `reviews/decisions/error-model.md`
+  (the `glibre::Error` umbrella and the warn-level logging rule).
 
 ## 9. Performance Budget
 
