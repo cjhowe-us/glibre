@@ -2442,7 +2442,484 @@ These appear in the persistence surface only as **identifiers**
 
 ## 8. Hot-Reload Contract
 
-What survives swap, what `migrate(...)` must do, what triggers refusal.
+This section specialises the engine-wide hot-reload protocol
+(`reviews/decisions/hot-reload-protocol.md` — drain → swap → migrate →
+resume) to the **physics plugin**. It defines exactly which
+physics-owned state survives a `physics.dylib` swap, what
+`migrate(...)` must do to re-apply `RigidBody` mass / velocity /
+position bytes, rebuild `Joint` topology, and drain `ContactManifold`
+queues, and which conditions cause physics's reload attempt to be
+refused with the engine's standard `core::Error::HotReloadRefused`
+arm. Engine-wide concerns (per-plugin atomicity, observer bus event
+shapes, error wrapping rules, the `enqueue_hot_reload` E2E hook,
+ABI-hash gating) are not re-stated here — see the protocol record
+and the `JoltMiddleman` invariants in §4.1.13. Physics adds nothing to
+that machinery; it only fills in the four pluggable points the
+protocol leaves to each plugin: drain side-effects, survival
+inventory, migrate body, and register-time rehydration.
+
+### 8.1 Reload point — phase 8, never mid-frame
+
+The engine schedule (`reviews/decisions/frame-phases.md`) places the
+hot-reload barrier at phase 8, **after `render-submit` (phase 7) and
+before `present` (phase 9)**. Physics's reload protocol is anchored
+to that one slot and refuses any other.
+
+At phase 8 entry, physics's in-flight state is:
+
+1. **Phase 3 already returned for frame N.** Phase 3 owns Jolt's
+   `Step` (§4.2 invariant 1); by the time phase 8 begins, every
+   substep the `Accumulator` owed has been drained through Jolt's
+   barrier and committed back to ECS storages (§4.1.4 invariants 2
+   and 3). No solver thread is mid-iteration; no narrowphase pair is
+   half-resolved.
+2. **Substep ECS↔Jolt commit has flushed.** The two commit barriers
+   (§4.2 invariant 2) ran inside phase 3; ECS-side intents
+   (`ExternalForce`, `ExternalTorque`, kinematic transform overrides)
+   were drained into Jolt at substep entry, and Jolt-side outputs
+   (positions, rotations, linear / angular velocities, sleep flags)
+   were written back to their middleman-typed `RigidBody` companion
+   components at substep exit. Phase 8 sees no straddling write.
+3. **Contact / trigger / joint-broken events for frame N are
+   drainable.** Per §4.2 invariant 8, all seven event types
+   (`CollisionStarted` / `CollisionPersisted` / `CollisionEnded` /
+   `TriggerEnter` / `TriggerStay` / `TriggerExit` / `JointBrokenEvent`)
+   are written at substep exit (phase 3) and reclaimed at end of
+   phase 8 (after phases 5+ of frame N have read them). The "drained
+   on swap" bullet in §8.3 below makes that reclamation the loader's
+   single point of clearance for the swap, eliminating any chance a
+   manifold from the old solver's coordinate space leaks into the
+   new plugin's first step.
+4. **Spatial query results from frame N are static.** The query
+   surface is read-only after phase 3 (§4.2 invariant 9); phase 8
+   makes no fresh queries and the previous frame's hits are owned
+   by their callers (downstream contexts hold them by value, not by
+   reference into Jolt's broadphase).
+
+These four conditions are the physics-half of the protocol's "drain"
+postcondition (protocol §"Step 1 — Drain"). Physics's
+`glibre_plugin_drain` body therefore has nothing to flush from the
+solver side; its work is the snapshot capture + worker-pool teardown
+described in §8.3.
+
+**Mid-frame reload is refused.** Any reload request that arrives
+during phases 1–7 is queued, never applied; the loader's
+`pending_reloads` counter is consumed only at phase 8 entry per
+protocol step 1. Inside phase 8, physics does not yield to phase 3
+or to query consumers — the loader holds exclusive ownership for the
+duration of drain → swap → migrate → resume per protocol
+§"Decision". A request that would force phase 3 to observe a
+partially-swapped Jolt vtable is treated as a contract violation by
+the loader, not a refusal — physics's spec contributes no new
+refusal arm here, but states the invariant explicitly so consumers
+cannot expect mid-frame swap semantics. The trigger contemplated by
+§11 acceptance — a physics-plugin `.dylib` swap at frame 8 — is the
+only legal entry path.
+
+### 8.2 Survival inventory
+
+The engine-wide survival rule is mechanical: **state with a `.fory`
+schema in `glibre-types.dylib` survives across the swap; state
+without one does not** (protocol §"State Survival Rules"; PHILOSOPHY
+collapse: one check, not a per-aggregate manifest). Physics owns
+four persistent fory-schema'd records (§7.1.1–§7.1.4) and a large
+collection of host-side runtime state owned either by `physics`
+itself or by `JoltMiddleman` (§4.1.13). The table below classifies
+every physics aggregate against that rule and records the
+physics-specific reasoning for each survival decision.
+
+| Physics-owned state                                                                                  | Persistence path             | Survives swap? | Reasoning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+|------------------------------------------------------------------------------------------------------|------------------------------|----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `PhysicsConfigRecord` (§7.1.1) — frozen deterministic configuration                                  | `.fory` schema, middleman    | Yes — bytes are owned by `glibre-types`; physics only reads them. Per §7.2.1 a schema bump flows through the standard additive-defaulted-field migration. Physics's `migrate(...)` does not touch these bytes; the live `PhysicsConfig.content_hash` is recomputed by the new plugin from the surviving record (§4.1.2 invariant 2) and matched against the snapshot's `physics_config_hash` (§7.1.4 invariant 3). Mismatch is a refusal, not a silent re-derivation.                                                            |
+| `ShapeBlobRecord` (§7.1.2) — cooked collision-geometry payload                                       | `.fory` schema, middleman    | Yes — blobs are content-addressed (§4.1.6 invariant 1); the shape table's keys are the immutable `content_hash` values, and the bytes themselves live in the asset bundle owned by `data` / `content` (§3.3). The new plugin re-resolves Jolt `Shape*` pointers from the surviving blobs in `register`; no re-cook happens at reload.                                                                                                                                                                                          |
+| `JointDescriptorRecord` (§7.1.3) — constraint topology + tuning                                      | `.fory` schema, middleman    | Yes — joint-record bytes (kind, endpoints, anchors, limits, motor, break threshold) survive verbatim; the new plugin rebuilds Jolt `Constraint` objects from the descriptors during `register` (§8.3.2). Per §7.2.3 a schema bump flows through standard additive-sealed-sum migration; physics's `migrate(...)` body for this record is the §7.2.3 path, not the snapshot path.                                                                                                                                                |
+| `PhysicsSnapshot` (§7.1.4) — deterministic replay artefact                                           | `.fory` schema, middleman    | **Yes — and it is the carrier for every per-body / per-joint runtime byte that crosses the swap.** §8.3 below specifies that the outgoing plugin captures one `PhysicsSnapshot` at drain time, the loader keeps the bytes in its phase-8 arena, and the incoming plugin restores them inside `register`. This is the only state carrier the physics protocol uses for runtime body / joint state — a deliberate single seam (§3.2 collapse #9, PHILOSOPHY §7).                                                                  |
+| `RigidBody` ECS component (§4.1.5) — `MotionType`, mass, inertia, damping, `BodyId`, CCD bit         | Middleman ECS storage        | Yes — the component bytes are middleman-typed (`glibre.types.physics.RigidBody`) and live in core's archetype storage; the loader owns them. The runtime `Velocity` / `AngularVelocity` companion components survive the same way. Their values are re-applied to Jolt's body table during the snapshot restore in §8.3 (the snapshot is the single carrier; the ECS bytes are the surviving anchor that snapshot rows key to).                                                                                                  |
+| `BodyId` (§4.1.5b) — stable handle into Jolt's body table                                            | Middleman value type          | Yes — **stability across reload is a §4.2 invariant 5 promise**. Allocation order is fixed by ECS body insertion order, not by Jolt's allocator address; the new plugin re-inserts bodies in the same order during `register` and the deterministic allocator yields the same 32-bit handle for the same ECS entity. Persisted snapshots that key on `BodyId` re-bind without payload rewrite (§4.1.12 invariant 2). A reload that does **not** reproduce the same `BodyId` for a given entity is a contract violation, not a refusal — the loader terminates per protocol §"Failure & Rollback". |
+| `Collider` ECS component (§4.1.6) — `ShapeHandle`, offset, layer, material, trigger flag             | Middleman ECS storage        | Yes — component bytes survive in middleman storage. The held `ShapeHandle` is re-resolved against the surviving shape table during `register` (§8.3.2); the resolved Jolt `Shape*` pointer that lives inside the handle is **not** part of the middleman ABI (§4.1.13 invariant 1) and is rebuilt by the new plugin.                                                                                                                                                                                                          |
+| `ShapeHandle` resolved Jolt `Shape*` pointer                                                          | None (in-process)             | No — pointers into Jolt's `Shape` table belong to the outgoing plugin's image. The new plugin rebuilds the shape table from the surviving `ShapeBlobRecord` content hashes; refcount survives because it is middleman-typed.                                                                                                                                                                                                                                                                                                  |
+| `Joint` ECS entity + `Joint` / `JointLimits` / `JointMotor` / `JointBreakThreshold` components       | Middleman ECS storage        | Yes — the joint-as-entity model (§4.1.7 invariant 1) means the joint's components are in middleman storage and the entity itself is owned by core. The Jolt `ConstraintRef` held by the `Joint` component is **not** a middleman type — it is rebuilt during `register` by replaying `add_joint(...)` for every surviving joint entity in deterministic ECS order, which mirrors the post-snapshot `joint_normal_impulses` / `joint_friction_impulses` columns (§7.1.4 schema).                                                |
+| `ContactManifold` per-pair payload (§4.1.8)                                                          | None (transient)              | No — manifolds are reborn each substep (§4.1.8 identity & lifetime). The pre-swap manifolds for frame N's last substep are written into the per-frame ECS event buffer and are reclaimed at end of phase 8 alongside the contact / trigger / joint-broken events. Physics's drain explicitly clears that buffer so the new plugin's first frame N+1 step starts with no stale pair history (§8.3); pairs that should be reported for frame N+1 will fire fresh `CollisionStarted` events at the next substep exit.            |
+| `CollisionStarted` / `CollisionPersisted` / `CollisionEnded` event buffers                           | Middleman ECS event storage   | No — drained as part of the manifold drain above. The buffer's storage is middleman-owned, but its **contents** are not; clearing the buffer is a per-frame ECS operation that physics performs as the closing act of `glibre_plugin_drain` (§8.3). Subscribers in phases 5+ of frame N have already read them; reclamation at end of phase 8 is canonical (§4.2 invariant 8). The new plugin re-emits started events for any pair whose pre-swap state was `Persisted` because Jolt's contact listener treats the pair as fresh on reload. |
+| `TriggerEnter` / `TriggerStay` / `TriggerExit` event buffers                                          | Middleman ECS event storage   | No — same reasoning as contact events. Drained on swap; the new plugin re-emits `TriggerEnter` for every overlapping trigger pair at the first post-reload substep exit. (Subscribers must be prepared for one extra `TriggerEnter` per pre-existing overlap; this is the only behavioural difference observable across reload, surfaced via the `PhysicsWorldReplaced` event in §8.5.)                                                                                                                                       |
+| `JointBrokenEvent` buffer                                                                            | Middleman ECS event storage   | No — drained on swap. A joint that broke in frame N's substep is reflected in the surviving entity having been despawned; no re-emit is required because the entity is already gone (§4.1.7 invariant 1).                                                                                                                                                                                                                                                                                                                     |
+| `Sleeping` / `Island` markers (§4.1.14)                                                              | Middleman ECS storage         | Yes for `Sleeping` (the marker bit travels with the body's middleman-typed `RigidBody` row); `Island` ids are recomputed by Jolt every substep so "survival" is moot. The snapshot carries `body_sleep_frames` + `body_sleeping_flags` (§7.1.4 schema), so the new plugin restores sleep state byte-for-byte.                                                                                                                                                                                                                  |
+| `Accumulator` (§4.1.3) — fixed-timestep clock                                                        | Middleman value object        | Yes — `accumulator_carry` is a `f32` field on `PhysicsSnapshot` (§7.1.4 schema tag 4); restored verbatim. `world_tick` (tag 3) survives the same way. The Jolt-internal sub-tick state is reset to a fresh start because the deterministic-stepping math is stateless across substeps (§4.1.4 invariants 1 + 4).                                                                                                                                                                                                                |
+| `PhysicsConfig` runtime view (§4.1.2)                                                                 | Derived from `PhysicsConfigRecord` | Yes by re-derivation. The new plugin reconstructs the runtime view from the surviving `PhysicsConfigRecord` bytes during `register`; the `content_hash` is recomputed and asserted byte-equal to the snapshot's `physics_config_hash` (§7.1.4 invariant 3) before any body is restored.                                                                                                                                                                                                                                       |
+| Internal Jolt `PhysicsSystem`, `BodyManager`, `BroadPhase`, `NarrowPhase`, `ContactConstraintManager`, `IslandBuilder`, temporary allocators | None (in-process)             | No — these are private to the outgoing plugin's image. Drained via the snapshot capture, then reconstructed from scratch by the new plugin's `register` against the same `PhysicsConfig` budgets. Allocator addresses **never** appear in the snapshot (§4.1.12 invariant 3), so the rebuild does not perturb determinism.                                                                                                                                                                                                    |
+| Per-plugin worker thread pool (Jolt's `JobSystem`)                                                   | None                          | No — destroyed by `glibre_plugin_drain`, re-spawned by `glibre_plugin_register` against the budgets in `PhysicsConfig` (§4.1.2). Worker count and seeded scheduling order are deterministic per `PhysicsConfig.content_hash` (PHILOSOPHY §7); a reload that re-derives identical workers yields identical task ordering.                                                                                                                                                                                                       |
+| `PhysicsQueries` surface (§4.1.10)                                                                   | None — declarative only       | N/A — the query surface is a function table; the **table** survives because it is middleman-typed, but the function pointers are repointed during `register` per the protocol's vtable swap (protocol §"Step 2 — Swap"). No query state crosses frames (§4.1.10 invariant 1).                                                                                                                                                                                                                                                |
+| `JoltMiddleman` itself (§4.1.13)                                                                     | None — process-resident dylib | Yes — one per process, loaded at engine init, unloaded at engine teardown (§4.1.13 identity & lifetime). It is the gate-keeper, not a payload, and physics-plugin reload is **refused** on hash mismatch (§4.1.13 invariant 2 + §8.4 below). Its bytes never change during a physics reload.                                                                                                                                                                                                                                  |
+
+The rule mechanically applied: every row marked "Yes" has either a
+`.fory` schema or is a middleman-typed ECS component / value object;
+every "No" row is private to the outgoing plugin's image with no
+on-disk format and is reconstructed by the incoming plugin from
+surviving state — exactly what PHILOSOPHY §3 + protocol §"State
+Survival Rules" require. The single carrier across the swap that
+combines surviving ECS bytes with the live Jolt residue (impulses,
+sleep counters, accumulator carry) is **`PhysicsSnapshot`**, the
+fory-serialised type already specified at §4.1.12 / §7.1.4 — physics
+introduces no new on-the-wire format for hot-reload (§3.2 collapse #9).
+
+### 8.3 `migrate(...)` body — physics's responsibilities
+
+The protocol's `migrate` step (protocol §"Step 3 — Migrate") runs
+*pure* per-row migrate functions for every persistent-component-type
+schema bump on the engine's behalf. Physics owns four of those
+bodies: `PhysicsConfigRecord` (§7.2.1), `ShapeBlobRecord` (§7.2.2),
+`JointDescriptorRecord` (§7.2.3), and `PhysicsSnapshot` (§7.2.4). The
+function signatures are the standard pure migrate signature
+(`reviews/decisions/hot-reload-protocol.md` §"Migrate Function
+Contract"); nothing here changes them.
+
+What this section adds is the **physics-plugin-specific portion of
+steps 1 + 4 (drain + resume)** — the work the outgoing plugin's
+`glibre_plugin_drain` and the incoming plugin's `glibre_plugin_register`
+must do to capture every Jolt-internal byte that the surviving
+`.fory`-typed bytes do not already cover, transport it across the
+swap inside a `PhysicsSnapshot`, and rebuild Jolt's body table /
+shape table / joint constraint graph against the same deterministic
+inputs. Three operations matter; they happen in the order listed.
+
+#### 8.3.1 Drain — capture `PhysicsSnapshot`, drain event buffers, tear down workers
+
+The outgoing plugin's `glibre_plugin_drain` body, called by the
+loader at the start of phase 8, performs three steps in order:
+
+1. **Capture a `PhysicsSnapshot` of the live world.** Calls
+   `PhysicsWorld::snapshot()` (§5, §4.1.12). The snapshot is the
+   §7.1.4 schema: header (`schema_version`, `physics_config_hash`,
+   `world_tick`, `accumulator_carry`, `middleman_abi_hash`) plus
+   parallel-list body and joint columns (`body_ids`,
+   `body_motion_types`, `body_positions`, `body_rotations`,
+   `body_linear_velocities`, `body_angular_velocities`,
+   `body_sleep_frames`, `body_sleeping_flags`,
+   `body_shape_blob_hashes`, `joint_ids`, `joint_kinds`,
+   `joint_body_a`, `joint_body_b`, `joint_normal_impulses`,
+   `joint_friction_impulses`). Per §7.1.4 invariant 5, columns are
+   parallel-list; per §4.1.12 invariant 3, iteration is
+   `BodyId`-ascending and `JointId`-ascending so the bytes are
+   byte-equal across hosts. The serialised buffer (`to_bytes()`) is
+   handed to the loader's per-phase migration arena
+   (`reviews/decisions/hot-reload-protocol.md` §Consequences); the
+   arena keeps it alive through swap + migrate + resume.
+2. **Drain event buffers and ContactManifold residue.** Empties the
+   per-frame ECS event buffers for `CollisionStarted` /
+   `CollisionPersisted` / `CollisionEnded` / `TriggerEnter` /
+   `TriggerStay` / `TriggerExit` / `JointBrokenEvent`. By §4.2
+   invariant 8 those buffers are cleared at end of phase 8 in
+   normal operation; the drain step performs that clearance one
+   beat earlier so no stale event payload from the outgoing
+   plugin's coordinate space leaks into the incoming plugin's first
+   substep. The drained events are not re-emitted — phases 5+ of
+   frame N have already read them, and frame N+1's first substep
+   will produce fresh `CollisionStarted` / `TriggerEnter` events
+   for any persisting overlap (the incoming Jolt instance has no
+   pair history; §8.2 row "TriggerEnter").
+3. **Release Jolt-internal allocations and tear down the worker
+   pool.** Frees Jolt's `PhysicsSystem`, `BodyManager`, broadphase /
+   narrowphase / island / contact-constraint managers, and the
+   `JobSystem` workers. The temporary allocator is reset; no Jolt
+   pointer outlives drain. The middleman-typed `RigidBody` /
+   `Collider` / `Joint` / `Sleeping` / `Velocity` / `AngularVelocity`
+   ECS storages are untouched — they survive in core's archetype
+   storage by §8.2.
+
+After drain, the loader runs the protocol's swap step (vtable
+replacement + type-registry append; protocol §"Step 2 — Swap") and
+then the migrate step (per-record schema-version chains; protocol
+§"Step 3 — Migrate"). Neither step touches Jolt or the snapshot bytes
+themselves — they touch only the surviving `.fory`-typed records'
+schema versions if any have bumped.
+
+#### 8.3.2 Resume — rebuild PhysicsWorld + restore PhysicsSnapshot
+
+The incoming plugin's `glibre_plugin_register` body, called by the
+loader at step 4 of the protocol, performs five steps in order:
+
+1. **Verify `JoltMiddleman` ABI hash.** Calls `JoltMiddleman::
+   require_hash(host_abi_hash)` per §4.1.13 invariant 2. Mismatch
+   short-circuits to refusal (§8.4 row 1). On success, the new
+   plugin's symbol table now resolves every Jolt-derived public type
+   through the same middleman the outgoing plugin used.
+2. **Reconstruct `PhysicsWorld` from the surviving
+   `PhysicsConfigRecord`.** Calls
+   `PhysicsWorld::create(world, PhysicsConfig{record})` (§5).
+   `PhysicsWorld::create` builds a fresh Jolt `PhysicsSystem`, sizes
+   broadphase + body / contact pools from the config's caps, spawns
+   the worker pool, and constructs the empty body / joint / shape
+   tables. The new world's `PhysicsConfig.content_hash` is computed
+   and compared against `PhysicsSnapshot.physics_config_hash`
+   (header tag 2); mismatch returns
+   `physics::Error::SnapshotConfigDrift` (§7.1.4 invariant 3),
+   which routes to refusal §8.4 row 4.
+3. **Re-intern surviving `ShapeBlobRecord`s into the shape table.**
+   Walks every distinct `content_hash` referenced from
+   `body_shape_blob_hashes` (snapshot tag 14) plus any
+   `Collider::shape_blob_hash` cited on a surviving `Collider`
+   component, calls `PhysicsWorld::intern_shape(...)` for each, and
+   re-binds the resolved Jolt `Shape*` pointer back into the
+   surviving `ShapeHandle`. The handle's refcount survives because
+   it is middleman-typed (§8.2 row "Collider"); only the resolved
+   pointer is rebuilt. Pinning is read-only against the
+   `ShapeBlobRecord` table; a missing hash returns
+   `physics::Error::ShapeBlobMissing` and routes to refusal §8.4
+   row 4.
+4. **Restore bodies + joints + accumulator from the snapshot.**
+   Calls `PhysicsWorld::restore(snapshot)` (§5). The restore body
+   walks `body_ids` (tag 6) in ascending order and calls
+   `add_body(entity, RigidBody{...}, Collider{...})` for each;
+   because allocation order is deterministic (§4.1.5 invariant 1),
+   the allocator yields the same `BodyId` for the same ECS entity
+   that owned it before the swap (§4.2 invariant 5). Mass / inertia
+   / motion-type / damping come from the surviving middleman-typed
+   `RigidBody` ECS row; position / rotation / linear-velocity /
+   angular-velocity / sleep-frames / sleeping-flag come from the
+   snapshot columns (tags 8–13). After every body is in place, the
+   loader walks `joint_ids` (tag 15) in ascending order and calls
+   `add_joint(...)` for each, sourcing kind + endpoints + anchors
+   from the surviving `JointDescriptorRecord` and re-applying the
+   accumulated `joint_normal_impulses` / `joint_friction_impulses`
+   (tags 19–20) so the next substep's warm-start is byte-equal to
+   what the outgoing plugin would have produced (§4.2 invariant 3).
+   The `Accumulator` is reseeded from `accumulator_carry` (tag 4).
+5. **Re-link triggers, contact listener, and query surface.** The
+   incoming plugin re-installs its `ContactListener` adapter
+   (§4.1.8) into Jolt's `ContactConstraintManager`, walks every
+   surviving `Collider` component carrying the `Trigger` marker
+   (§4.1.9) and registers it with Jolt's overlap-only contact path,
+   and re-publishes the `PhysicsQueries` function pointers into the
+   query-surface registry. None of this rebuilds frame state —
+   triggers fire fresh `TriggerEnter` events at the next substep
+   exit per §8.2.
+
+The total work in physics's resume step is bounded by **O(bodies)
+`add_body` calls + O(joints) `add_joint` calls + O(unique shape
+blobs) `intern_shape` calls + O(1) world / allocator / worker-pool
+rebuild + a single `PhysicsSnapshot::from_bytes` decode**, fitting
+the protocol's "reload path bounded by drain + swap + Σ migrate +
+register" budget (`hot-reload-protocol.md` §Consequences). A
+deterministic snapshot taken before drain and a snapshot taken after
+resume on the same world tick are byte-equal (§4.2 invariant 3,
+§7.1.4 invariant 1) — the round-trip is the canonical correctness
+proof and the §8.6 acceptance test.
+
+### 8.4 Refusal cases (physics-specific)
+
+Physics contributes no new umbrella refusal arm; every refusal is
+expressed as the engine-wide `core::Error::HotReloadRefused` with a
+nested cause chosen from the protocol's existing arms (protocol
+§"Refusal Cases"). Physics does introduce four **inner cases** that
+the loader sees because physics inspects the new plugin's
+middleman / snapshot / shape / joint state during steps 2–4; they
+are enumerated here so the test matrix and the diagnostic surface
+can name them. All four roll up to `core::Error::PluginAbiHashMismatch`,
+`core::Error::SchemaMigrationFailed`, or `core::Error::PluginInitFailed`
+per protocol §"Refusal Cases".
+
+| Physics refusal cause                                                                                              | Detected by                                                                                                                                                       | Inner-error arm                                                                                                                          | What the operator must do                                                                                                                                                                                                                                                                                          |
+|--------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| New plugin's `JoltMiddleman` ABI hash differs from the host's `glibre_types_abi_hash` for the physics-typed surface | Protocol step 2.1 (`Q::glibre_types_abi_hash() == host_glibre_types_abi_hash`); also re-asserted by physics's `register` step 1 (`JoltMiddleman::require_hash`).   | `core::Error::HotReloadRefused` with cause `core::Error::PluginAbiHashMismatch`. Maps to `physics::Error::JoltMiddlemanHashMismatch` at the physics surface (§5 enum). | Rebuild the physics plugin against the current `JoltMiddleman` (i.e. rebuild against the same Jolt version + type list the host shipped). The previously-loaded physics plugin keeps stepping; this is the PHILOSOPHY §9 case. (§4.1.13 invariant 2.)                                                              |
+| `PhysicsSnapshot.schema_version` greater than the new plugin's reader-side current version, with no migration chain | Protocol step 3.1 (`glibre-types.dylib` migration table query for `PhysicsSnapshot`). Detected before any byte is overwritten in the surviving storage.            | `core::Error::HotReloadRefused` with cause `core::Error::SchemaMigrationFailed`. Maps to `physics::Error::HotReloadStateUnmigratable` at the physics surface (§5 enum).                | Author the missing `vN → vN+1` migration body under `src/physics/migrations/` per §7.2.4, ship it in the new plugin, and re-trigger the swap. Alternatively restore from a snapshot taken at the prior schema version. The migration arena is reset before the cause is returned (no partial bytes published).    |
+| `PhysicsSnapshot.physics_config_hash` mismatches the new world's recomputed `PhysicsConfig.content_hash`            | Physics's `register` step 2 (snapshot restore precondition; §7.1.4 invariant 3).                                                                                  | `core::Error::HotReloadRefused` with cause `core::Error::PluginInitFailed` carrying inner `physics::Error::SnapshotSchemaMismatch`.       | Either revert the `PhysicsConfigRecord` change (a `PhysicsConfig` change is a fresh-world event by §4.1.2 invariant 2; not a hot-reload event), or restore from a snapshot whose hash matches the new config. Cross-config restore is forbidden because `PhysicsConfig` decides what counts as deterministic.      |
+| `PhysicsSnapshot` references a `body_shape_blob_hashes` entry that no longer resolves in the surviving `ShapeBlobRecord` table | Physics's `register` step 3 (`PhysicsWorld::intern_shape` against the missing hash). Also the `Collider`-bearing-entity case if a surviving collider's shape was dropped. | `core::Error::HotReloadRefused` with cause `core::Error::PluginInitFailed` carrying inner `physics::Error::ShapeBlobMissing`.             | Restore the dropped `ShapeBlobRecord` (asset-pipeline drift between cook output and the running world), or re-cook the affected body's shape, or accept a fresh world. The reload is refused; the prior physics plugin remains live.                                                                                |
+
+Each refusal is logged exactly once at `warn` level (protocol
+§"Refusal Cases") with the structured fields
+`plugin_fqn=glibre.physics`, `attempted_dylib_path`, `host_abi_hash`,
+`plugin_abi_hash`, the inner cause's enumerator name, and (for
+snapshot-related causes) the snapshot's `world_tick` so the
+diagnostic surface can correlate the refusal with the determinism
+gate's trace corpus. The previously-loaded physics plugin keeps
+stepping; phase 3 of frame N+1 dispatches through the same vtable
+it used in frame N. No body / collider / joint state is mutated by a
+refusal.
+
+### 8.5 Observers — `PhysicsWorldReplaced` and render BLAS invalidation
+
+Physics adds **one** plugin-specific event arm to the engine
+observer bus (the same bus that carries `HotReloadStarted` /
+`HotReloadCompleted` per protocol §"Observer Notification"):
+
+```
+PhysicsWorldReplaced {
+    world_tick:           u64,    // §4.1.12 / §7.1.4 header tag 3
+    bodies_restored:      u32,    // count of body_ids in the carrier snapshot
+    joints_restored:      u32,    // count of joint_ids in the carrier snapshot
+    triggers_relinked:    u32,    // count of Collider components carrying the Trigger marker
+    middleman_abi_hash:   u64,    // §4.1.13 — equal across old + new by step 2.1
+    snapshot_byte_size:   u64,    // size of the carrier snapshot in the migration arena
+}
+```
+
+The event is middleman-typed (`glibre::types::physics::HotReloadEvent`,
+arm `PhysicsWorldReplaced`) so its layout survives any future
+core-runtime reload. It is published synchronously by the loader
+between protocol steps 4.2 and 4.3 — i.e. after the new plugin has
+restored bodies + joints + triggers and rebuilt its caches but
+before phase 9 begins, matching the engine bus's atomicity guarantee
+(protocol §"Observer Notification"). Subscribers see a fully-swapped,
+fully-migrated world; they never observe a half-restored state.
+
+The required subscribers and their reactions:
+
+1. **`render` plugin — BLAS invalidation for static bodies.** Render
+   imports per-body BLAS handles for static `RigidBody` entities via
+   the `RTAccelStructures` aggregate (render SPEC §4.1.8); those
+   imports are read-only by render but their **identity** depends on
+   the static body's position / rotation matching what render
+   recorded at its last extract. After `PhysicsWorldReplaced`,
+   render must mark every BLAS for a body whose `BodyId` appears in
+   the carrier snapshot as **invalidated for re-build at the next
+   frame's phase 6** (render SPEC §4.1.8 invariant 3 forbids
+   silently reusing a BLAS whose source geometry's transform
+   changed). The trigger is mechanical: the render-side subscriber
+   walks the surviving static-body archetype, compares each body's
+   position / rotation against the BLAS's recorded transform, and
+   posts the BLAS to its rebuild queue if they differ. In the
+   round-trip identity case (§8.6 happy-path), all transforms are
+   byte-equal and zero BLAS entries are queued — the invalidation
+   is idempotent.
+2. **`e2e` harness — trace-replay anchor.** The harness consumes
+   `PhysicsWorldReplaced` to mark the post-swap snapshot capture
+   point. The byte-equal acceptance test (§8.6) keys off the
+   `world_tick` and `snapshot_byte_size` fields.
+3. **`tools` profiler / `editor` (post-MVP)** — diagnostic display
+   of the swap. Optional; not in MVP.
+
+No half-swapped world is ever observable: the bus's atomicity
+guarantee (protocol §"Observer Notification") means subscribers see
+either a pre-swap-fully-completed-world or a post-swap-fully-restored
+world. Subscribers that hold long-lived `PhysicsSnapshot` references
+across reload (only the e2e harness, in MVP) keep them by value — the
+snapshot is a `unique_ptr`-owned standalone byte buffer (§5
+`PhysicsSnapshot::from_bytes`), not a pointer into Jolt's tables, so
+the swap does not invalidate them.
+
+No second event arm is permitted; new observability needs flow into
+`PhysicsWorldReplaced` field additions or graduate to a SPEC bump
+(§3.2 collapse #5 — single physics event family).
+
+### 8.6 Test hooks — deterministic snapshot byte-equal verification
+
+Physics's reload contract is verified end-to-end by a single test
+fixture under `tests/physics/hot_reload/` that uses the loader's
+existing `enqueue_hot_reload` E2E entry point (protocol §"Test
+Hooks"). The fixture has three layers, each producing one Catch2
+test case listed in §11 acceptance criteria.
+
+1. **Trace capture.** A fixture plugin
+   `tests/e2e/plugins/physics-v1/` runs the engine for `K = 16`
+   frames against a deterministic scene (50 dynamic boxes stacked
+   into a tower, 5 distance joints binding a ragdoll, 2 trigger
+   volumes; fixed PRNG seed; `PhysicsConfig` from the canonical
+   §4.1.2 fixture). At frame 7 (one before the swap) the harness
+   captures `snapshot_pre = PhysicsWorld::snapshot()` and stores its
+   byte form under `tests/data/snapshots/physics/cornell-tower-pre.
+   fory.bin`. The harness records, per frame for `K` frames, the
+   structured trace `(world_tick, BodyId-keyed positions, contact-
+   event list, trigger-event list, JointBroken list)`; the trace is
+   canonical-ordered (`reviews/decisions/determinism-canonical-
+   iteration.md`) and stored at `tests/data/traces/physics/cornell-
+   tower-vN.bin`.
+2. **Reload trigger at frame 8.** At frame 8 (matching §11
+   acceptance "trigger: physics-plugin .dylib swap at frame 8"),
+   the harness calls `enqueue_hot_reload("glibre.physics",
+   tests/e2e/plugins/physics-v2.dylib)`. The `v2` plugin is
+   byte-identical to `v1` for the happy-path test (same Jolt
+   version, same `JoltMiddleman` ABI hash, same migration table)
+   but has a different `__file__` timestamp embedded so the loader
+   treats it as a real swap. This exercises the **identity
+   round-trip**: a swap that is semantically a no-op.
+3. **Post-reload assertion.** The harness records a second trace
+   for frames `8..K-1` under the new plugin and asserts:
+   - `snapshot_pre.to_bytes()` (captured before swap) is byte-equal
+     to `PhysicsWorld::snapshot().to_bytes()` captured on the new
+     plugin at the same `world_tick = 8` (the first instruction
+     the new plugin executes inside `register` after `restore`
+     returns). This is the **byte-equal verification across reload**
+     (§11 acceptance);
+   - the per-frame trace for frames `9..K-1` is byte-equal to the
+     pre-swap reference trace at the same indices (post-reload
+     determinism is preserved, §4.2 invariant 5);
+   - the `HotReloadCompleted` event was fired exactly once with
+     `migrated_types = []` (no schema change in this scenario);
+   - the `PhysicsWorldReplaced` event reports
+     `bodies_restored == 50`, `joints_restored == 5`,
+     `triggers_relinked == 2`, `middleman_abi_hash` unchanged;
+   - the contact-event buffer was empty at the start of frame 9
+     (drain reclaimed every pre-swap manifold; §8.3.1 step 2);
+   - `TriggerEnter` events fired exactly once for each of the 2
+     overlapping trigger pairs at frame 9's first substep exit
+     (the re-emit case in §8.2 row "TriggerEnter");
+   - render's BLAS rebuild queue length on the
+     `PhysicsWorldReplaced` callback was zero (transforms
+     byte-equal in the identity round-trip).
+
+A second fixture pair (`physics-v1` → `physics-v2-bad-abi`)
+exercises the ABI refusal path: `v2-bad-abi` is built against a
+different `JoltMiddleman` hash. The post-reload trace asserts
+`HotReloadRefused { cause: PluginAbiHashMismatch }` with the prior
+plugin still ticking (frames `8..K-1` byte-equal to the pre-swap
+reference trace).
+
+A third fixture (`physics-v1-snapshot-vN` → `physics-v2-snapshot-vN+1`)
+exercises the schema-migration refusal path: `v2` declares
+`PhysicsSnapshot.schema_version = N+1` with no `vN → vN+1`
+migration body shipped. The harness asserts
+`HotReloadRefused { cause: SchemaMigrationFailed }` mapping to
+`physics::Error::HotReloadStateUnmigratable` (§5 enum), with the
+prior plugin still ticking. A companion case ships the migration
+body and asserts the round-trip continues to byte-equal under the
+migrated schema.
+
+A fourth fixture (`physics-v1` → `physics-v2-good-abi`, but with
+the `physics_config_hash` changed in the new plugin's record)
+exercises the config-drift refusal: the harness asserts
+`HotReloadRefused { cause: PluginInitFailed { inner:
+SnapshotSchemaMismatch } }` and that the prior plugin keeps ticking.
+
+All four scenarios run inside a single CI job using the in-process
+trigger; no filesystem watcher is involved (protocol §"Test Hooks").
+The Catch2 cases are listed in §11 acceptance criteria as
+`Hot-reload preserves snapshot byte-equal`,
+`Hot-reload refuses ABI hash mismatch`,
+`Hot-reload refuses schema migration without body`,
+`Hot-reload refuses physics-config drift`.
+
+### 8.7 Cross-references
+
+- Engine protocol: `reviews/decisions/hot-reload-protocol.md`
+  (drain → swap → migrate → resume; refusal arms; observer bus;
+  E2E hook).
+- Frame slot: `reviews/decisions/frame-phases.md` (phase 8 entry /
+  exit guarantees; phase 3 single-owner).
+- Pilot specialisation: `specs/render/SPEC.md` §8 (the render-side
+  template this section follows; inter-plugin observability via
+  `PhysicsWorldReplaced` ↔ render BLAS invalidation is consistent
+  with render's `RenderFrameDropPending` shape).
+- Persistence rules invoked: §7.1.1 / §7.2.1
+  (`PhysicsConfigRecord`), §7.1.2 / §7.2.2 (`ShapeBlobRecord`),
+  §7.1.3 / §7.2.3 (`JointDescriptorRecord`), §7.1.4 / §7.2.4
+  (`PhysicsSnapshot`).
+- Aggregates touched: §4.1.1 `PhysicsWorld` (root rebuild),
+  §4.1.2 `PhysicsConfig` (re-derived), §4.1.3 `Accumulator`
+  (carry restored), §4.1.5 / §4.1.5b `RigidBody` / `BodyId`
+  (snapshot restore + stable allocation), §4.1.6 `Collider` /
+  `ShapeHandle` (re-intern), §4.1.7 `Joint` (topology rebuild),
+  §4.1.8 `ContactManifold` (drained), §4.1.9 `Trigger` (re-linked),
+  §4.1.10 `PhysicsQueries` (vtable repointed), §4.1.12
+  `PhysicsSnapshot` (the carrier), §4.1.13 `JoltMiddleman` (ABI
+  gate), §4.1.14 `Sleeping` / `Island` (sleep state restored),
+  §4.2 invariants 1, 2, 3, 5, 7, 8 (phase-3 ownership, mirror
+  one-way, determinism, BodyId stability, single Jolt seam,
+  same-frame events).
+- Errors used: `physics::Error::JoltMiddlemanHashMismatch`,
+  `physics::Error::HotReloadStateUnmigratable`,
+  `physics::Error::SnapshotSchemaMismatch`,
+  `physics::Error::ShapeBlobMissing` (§5 enum), each wrapped by
+  `core::Error::HotReloadRefused` per protocol §"Refusal Cases".
 
 ## 9. Performance Budget
 
