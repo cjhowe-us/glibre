@@ -1100,7 +1100,121 @@ Non-binding sketch for implementers.
 
 ## 7. Persistence & Schemas
 
-Fory schemas. Migration rules.
+Platform owns very little persistent state. The collapse rule in §1 +
+PHILOSOPHY §10 plus the "Persistence ⇔ Schema" biconditional in
+`specs/data/SPEC.md` §4.10 inv. 1 force the question down to a single
+predicate: *does this aggregate's value cross a save, hot-reload, or
+plugin-dylib boundary?* Apply that predicate to each §4 aggregate and
+the answer is **no for almost all of them**. The aggregates are
+ephemeral views of OS-owned state — recreated from scratch on each
+process bring-up, never carried across a hot-reload swap, never written
+to disk by platform code.
+
+### 7.1 Aggregate-by-aggregate disposition
+
+| §4 aggregate                        | Persistent? | Rationale                                                                                                                                                                |
+|-------------------------------------|-------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Window` / `Display` / `Surface`    | No          | OS handles. `Display` is a re-queried snapshot (§4.1 inv #5); `Surface`'s `CAMetalLayer*` is process-local UB to serialize; `Window` reopens from `WindowDesc` defaults. |
+| `EventQueue<T>` / `Pump`            | No          | In-flight ring buffers. Drained every frame; cross-process or cross-run replay is an `e2e` trace concern (`specs/e2e/SPEC.md`), not a platform schema.                   |
+| `FileWatcher`                       | No          | Subscriptions are reseated by the consuming context after a hot-reload; the watcher itself owns no value the engine needs to round-trip.                                 |
+| `Clock` / `Instant` / `WallTime`    | No          | `Instant` is explicitly non-serializable (§4.4 inv #2). `WallTime` is sourced fresh; `Clock` is a process-singleton accessor.                                            |
+| `Process`                           | No          | argv / env / cwd / exit code / signal table are OS-owned process state, captured fresh at startup (§4.5 inv #1). The aggregate has no value the engine writes back.      |
+| `FileIo` / `IoToken`                | No          | Bounded-async tokens are single-consumer in-flight handles (§4.6 inv #3); cancelling on drop is the load-bearing rule. Persisting an `IoToken` would violate it.         |
+| `PlatformError` (closed sum, §4.7)  | No          | A by-value error returned through `std::expected`; never crosses a save boundary. Loggers stringify; they do not Fory-encode.                                            |
+
+The platform context therefore ships **zero** `data/schemas/platform/`
+files for the MVP. The `data` context's "Persistence ⇔ Schema"
+biconditional holds vacuously: there are no persistent aggregates here,
+so there are no schemas, and `Foryc` enumerating
+`data/schemas/platform/**/*.fory` finds nothing. Schema file paths
+follow the `data/schemas/platform/<Type>.fory` convention if and when a
+future addition crosses a persistence boundary; until then the
+directory is intentionally absent (an empty directory would lie about
+the spine's shape).
+
+### 7.2 Migration rules
+
+There is nothing to migrate. The single-file-per-aggregate migration
+discipline from `specs/data/SPEC.md` §4.6 / §4.7 applies if and when a
+schema is added; today the migration ledger for the platform context
+is empty.
+
+If §7.3's deferred candidates (window placement, input bindings) are
+later promoted into platform, they will follow the standard rules
+without exception:
+
+- Each schema gets a monotonically-increasing `SchemaVersion`
+  (`specs/data/SPEC.md` §4.1 inv #2).
+- Tag numbers are immutable once shipped; removed fields move to the
+  reserved set (§4.1 inv #3).
+- Per `(N → N+1)` migration is a pure free function authored by
+  platform and registered via the codegen-emitted macro
+  (`reviews/decisions/fory-codegen.md` §"Migration Mechanic"),
+  allocating only inside the supplied arena and reading no I/O.
+- The migration chain is total — every step from 1 to current must
+  exist, enforced at codegen time.
+
+### 7.3 Deferred candidates (refusals routed elsewhere)
+
+Three pieces of state superficially look like platform persistence but
+are explicitly **refused** here. Each is recorded so a future re-read
+of this spec does not re-relitigate the boundary.
+
+- **Window placement / size memory across launches.** A "remember last
+  position and size" feature is user-preferences state, not OS-seam
+  state. Routed to a future user-preferences context (sketched as a
+  `tools` / editor responsibility in §3 refusals). The platform
+  context's `WindowDesc` already accepts a `LogicalSize`; the
+  preferences context is responsible for reading the persisted
+  placement and constructing the `WindowDesc` at bring-up.
+  Schema lives at `data/schemas/<that-context>/<…>.fory`, not under
+  `data/schemas/platform/`.
+- **Input bindings (key → action mapping).** A binding map is a
+  domain concept (a particular key chord means *jump*), not an OS
+  fact. Platform's input vocabulary is the closed `InputEvent` sum
+  (§4.2); turning an event into an action is owned by a future
+  input-binding context (or the editor's settings UI), and the schema
+  for the binding table lives there. Platform refuses to host the
+  schema because the SRP test (one OS facet → one reason to change)
+  rejects it: the binding table changes when the *game* changes, not
+  when *SDL3* changes.
+- **File-watcher canonical-path subscription list (cache).** A naive
+  reading of §4.3 would persist "the set of paths I am watching" to
+  warm-start the watcher across runs. Refused: subscriptions are
+  reseated by the consumer (asset / content / editor) on every
+  startup; persisting them in platform would (a) duplicate what
+  `content` already authoritatively owns and (b) break the
+  determinism property — a re-run with a stale persisted list emits
+  a different event stream than a fresh run. The
+  `CanonicalPath`-keyed BLAKE3 hash cache mentioned by harmonius
+  R-14.6.6 / R-14.6.9 (collapsed in §3) is, where it survives at all,
+  a `content` build-cache concern, not a platform schema.
+
+### 7.4 Adjacent non-Fory artefacts (refusals)
+
+The following platform-touching artefacts are **never** Fory-serialized
+and are called out so reviewers do not accidentally route them through
+this section:
+
+- **Log files** are line-oriented text written by the future
+  `diagnostics` context. The platform contributes only the file IO
+  primitive and the wall-time source; line schemas, rotation policy,
+  and log levels are owned downstream.
+- **Crash dumps / minidumps** are a fixed OS-defined binary format
+  (the Mach minidump produced from the signal-safe capture path,
+  §3 collapse "Multi-OS log sinks → crash-dump *capture* primitive
+  only"). They are not Fory payloads and have no `.fory` schema; the
+  `diagnostics` context owns post-capture symbolication and upload.
+- **PSO caches, asset bundles, plugin manifests.** Owned by `render`,
+  `content`, and `core` respectively. Platform's only contribution is
+  the `FileIo` byte stream they sit on top of (`specs/data/SPEC.md`
+  §1 — the data spine routes these elsewhere).
+
+The net effect of §7: the platform context contributes **nothing** to
+`AbiHash` (`specs/data/SPEC.md` §4.4) — its schema-source-hash list is
+empty — so a platform-only edit can never be the cause of a plugin
+ABI-hash mismatch. That is the load-bearing reason this section is
+short.
 
 ## 8. Hot-Reload Contract
 
