@@ -874,7 +874,504 @@ Non-binding sketch for implementers.
 
 ## 7. Persistence & Schemas
 
-Fory schemas. Migration rules.
+The `data` context owns the persistence spine itself; it does not own
+domain payloads. What the spine itself persists is a **meta-schema
+layer** — the byte-level representation of `Schema` (§4.1), the
+`SchemaRegistry` table (§4.5), the per-`FQN` `MigrationChain` records
+(§4.7), and the construction inputs to `AbiHash` (§4.4). Those
+meta-schemas are the only schemas this section enumerates; every
+other persistent type (a `Transform`, a `PluginManifest`, a `Mesh`)
+is owned by the originating context's `specs/<ctx>/SPEC.md` §7.
+
+### 7.1 The `.fory` schema-file format
+
+A `.fory` file is the authoring artifact that defines exactly one
+`Schema` (§4.1). The file format is the load-bearing input to
+`Foryc` (§4.2) and, transitively, to every byte the spine emits.
+This subsection pins its bytes; `glibre-foryc` is the only writer
+(via test fixtures) and the only reader.
+
+**Storage shape.** `.fory` files are UTF-8 text with LF line
+endings, NFC-normalized, no BOM. The canonicalization rule that
+feeds `schema_source_hash` (§4.4 inv. 2) operates on the *parsed*
+form — see §7.3 — so trailing whitespace and reorder of optional
+clauses do not perturb the hash. The text form below is the
+authored grammar, not the canonical form.
+
+**Header.** Every file opens with a single `schema` declaration
+naming the `FQN` and braces:
+
+```fory
+schema glibre.core.Transform {
+  version 3
+  since   "0.1.0"
+  ...
+}
+```
+
+The opening token `schema` is the file's magic; a file whose first
+non-whitespace, non-comment token is not `schema` is rejected with
+`ReservedTagViolation` (re-used here as the codegen-front-end's
+generic syntactic-error arm — see §10) before any further parsing.
+There is no separate magic number because `.fory` is text; the
+file *extension* and the leading `schema` keyword together form the
+identifier. Binary headers live on the wire (`Envelope`, §4.8 / §7.5),
+not in source files.
+
+**Field declarations.** Inside the braces, an ordered sequence of
+clauses describes the schema. Field clauses use the form:
+
+```fory
+field <name> : <type> tag <N> since <V>
+field <name> : <type> tag <N> since <V> default <expr>
+field <name> : <type> tag <N> since <V> reserved
+```
+
+with the following grammar (BNF-shape; whitespace insensitive):
+
+```text
+SchemaFile  := SchemaDecl
+SchemaDecl  := "schema" FQN "{" Header Clause* "}"
+Header      := VersionLine SinceLine?
+VersionLine := "version" UINT
+SinceLine   := "since" STRING                  # advisory SemVer
+Clause      := FieldClause | ReservedClause
+              | MigrationClause | CommentClause
+FieldClause := "field" Ident ":" TypeRef
+              "tag" UINT "since" UINT
+              ("default" DefaultExpr)?
+ReservedClause := "reserved" "tag" UINT
+                  ("removed_in" UINT)?
+                  ("comment" STRING)?
+MigrationClause := "migration" "v" UINT "_to_v" UINT
+                   "{" "provider" STRING "}"
+TypeRef     := Builtin | FQN | "list" "<" TypeRef ">"
+              | "map" "<" Builtin "," TypeRef ">"
+              | "option" "<" TypeRef ">"
+Builtin     := "u8" | "u16" | "u32" | "u64"
+              | "i8" | "i16" | "i32" | "i64"
+              | "f32" | "f64" | "bool"
+              | "string" | "bytes"
+              | "vec3f" | "quatf" | "entity"
+DefaultExpr := Number | "true" | "false"
+              | StringLit | "{" DefaultExpr ("," DefaultExpr)* "}"
+              | "none"
+CommentClause := "#" rest-of-line
+```
+
+Names follow §4.1 inv. 1: lowercased dotted-context path with a
+PascalCase leaf for `FQN`; `[a-z][a-z0-9_]*` for field `Ident`s.
+
+**Field-set rules** (each enforced at `Foryc` parse time):
+
+1. Every active `tag` integer is unique across the file. The same
+   number space covers active and reserved tags (§4.1 inv. 3).
+2. `since <V>` on every field satisfies `1 ≤ V ≤ version`
+   (§4.1 inv. 5).
+3. A `field` whose type is non-`option<T>` and whose `since` is
+   greater than `1` must carry a `default` clause. Codegen-time
+   error otherwise.
+4. Every `TypeRef` resolves either to a `Builtin` (audited in
+   `glibre/types/_builtins.hpp`) or to another `FQN` whose `.fory`
+   file is present in the same `Foryc` invocation; cross-schema
+   cycles are detected and rejected (§4.1 inv. 4).
+5. `default` expressions are typed against their `TypeRef`:
+   numeric literals must fit the integer/float width; `{a, b, c}`
+   composites must match a struct's tag-sorted field shape;
+   `none` is the only legal default for `option<T>`. The expression
+   is a build-time constant — no function calls, no other-field
+   references.
+
+**Reserved clauses.** A removed field becomes a `reserved tag`
+line. The optional `removed_in <V>` records the schema version at
+which the field disappeared; the optional `comment` is a free-form
+string for human readers. The `removed_in` field is parsed and
+written into the canonical form so `Foryc` can produce stable
+diagnostics, but it has no effect on `schema_source_hash` (the
+hash is computed over the parsed form including `removed_in`,
+matching invariant §4.1 inv. 6 — the canonicalization is a pure
+function of the schema's declared content).
+
+**Migration clauses.** An optional `migration vN_to_vN+1 { provider
+"<symbol>" }` clause names the originating context's free-function
+symbol for that step (§4.6). There is exactly one clause per
+`(N → N+1)` pair the file declares, and the union of clauses
+covers `1→2, 2→3, …, version-1→version` (§4.7 inv. 1). Codegen
+emits the dispatcher hookup; the body lives in the owning
+context's translation unit.
+
+**Comments.** `#` introduces a line comment; comments are stripped
+before canonicalization. There are no block comments.
+
+#### 7.1.1 Worked example (domain payload)
+
+```fory
+schema glibre.core.Transform {
+  version 3
+  since   "0.1.0"
+
+  field translation : vec3f  tag 1 since 1
+  field rotation    : quatf  tag 2 since 1
+  field scale       : vec3f  tag 3 since 1   default { 1.0, 1.0, 1.0 }
+  field flags       : u32    tag 4 since 2   default 0
+  field parent      : entity tag 5 since 3   default none
+  reserved tag 6  removed_in 3  comment "old `lod_bias`"
+
+  migration v1_to_v2 { provider "glibre::core::migrate_Transform_v1_to_v2" }
+  migration v2_to_v3 { provider "glibre::core::migrate_Transform_v2_to_v3" }
+}
+```
+
+This is the same shape used in `reviews/decisions/fory-codegen.md`
+§"Schema File Format", lifted to spec-precision and with reserved
++ migration clauses spelled out.
+
+### 7.2 Meta-schemas owned by `data`
+
+The `data` context's own persistent records — the rows of the
+`SchemaRegistry`, the dispatcher's per-`FQN` migration tables, and
+the inputs to `AbiHash` — are themselves authored as `.fory`
+schemas, but they are **bootstrap meta-schemas**: they describe
+the spine and so cannot use the spine's runtime migration to
+evolve. Their evolution rule is documented in §7.6.
+
+Files owned by `data`:
+
+- `data/schemas/meta/SchemaSourceRecord.fory` — one row per
+  registered `FQN`: the schema source hash, version, source path,
+  and migration-chain length. Persisted as the byte form of one
+  `RegistryEntry` (§4.5) minus the runtime function pointers.
+- `data/schemas/meta/MigrationTableRecord.fory` — one row per
+  registered `(FQN, N → N+1)`: the provider symbol name, the
+  source schema FQN, the from/to versions, and a content hash of
+  the migration's input/output type pair.
+- `data/schemas/meta/AbiHashManifest.fory` — the
+  `(blake3_hex, count, [SchemaSourceRecord*])` triple `Foryc`
+  emits as the input log to `AbiHash`. This is the build-time
+  artifact that lets reviewers reproduce the hash from sources.
+
+The `EnvelopeHeader` (§4.8) is *not* one of these files: per §5.2,
+the envelope is Fory-defined — its bytes are produced by Fory's
+own header encoder rather than by a glibre-authored schema.
+§7.2.4 below describes the byte shape the spine pins on top of
+that Fory-defined header, but no `.fory` source file exists for it.
+
+These files compile to POD records under `glibre::types::data::*`
+(emitted into `glibre-types.dylib`), the same way every other
+generated type does — they ride the same codegen pipeline,
+participate in the registry, and contribute to `AbiHash`. What
+makes them *meta* is the **bootstrap rule** in §7.6, not their
+file format.
+
+#### 7.2.1 `SchemaSourceRecord`
+
+```fory
+schema glibre.data.SchemaSourceRecord {
+  version 1
+  since   "0.1.0"
+
+  field fqn          : string                     tag 1 since 1
+  field version      : u32                        tag 2 since 1
+  field source_hash  : bytes                      tag 3 since 1
+  field source_path  : string                     tag 4 since 1
+  field migration_count : u32                     tag 5 since 1
+  field reflection_present : bool                 tag 6 since 1
+}
+```
+
+- `source_hash` is exactly 32 bytes (Blake3-256 of the canonical
+  schema form per §7.3); shorter or longer sequences are
+  `DeserializeError`.
+- `source_path` is the workspace-relative path of the originating
+  `.fory` file, sorted by canonical Unicode code-point order
+  before `AbiHash` ingests the table (§4.4 inv. 1).
+- `migration_count` matches `version - 1` exactly (§4.7 inv. 1);
+  any other value is a `SchemaRegistryConflict` at static-init.
+- `reflection_present` mirrors §4.9 inv. 5; the runtime path
+  never branches on this value, but tools and the editor do.
+
+#### 7.2.2 `MigrationTableRecord`
+
+```fory
+schema glibre.data.MigrationTableRecord {
+  version 1
+  since   "0.1.0"
+
+  field fqn           : string  tag 1 since 1
+  field from_version  : u32     tag 2 since 1
+  field to_version    : u32     tag 3 since 1
+  field provider_name : string  tag 4 since 1
+  field source_hash_from : bytes tag 5 since 1
+  field source_hash_to   : bytes tag 6 since 1
+}
+```
+
+- `to_version == from_version + 1` is required (§4.6 inv. 5);
+  multi-step records are illegal at codegen.
+- `source_hash_from`/`source_hash_to` are the Blake3-256 hashes of
+  the two endpoint schemas. They make the migration's input/output
+  contract content-addressable: a migration is defined relative to
+  fixed schema-versions of its endpoint types and `Foryc` rejects
+  re-binding a provider symbol against a different `(from, to)`
+  pair (§4.7 inv. 1, §4.6 inv. 4).
+- `provider_name` is the fully-qualified C++ symbol name codegen
+  emits the dispatcher hookup against. The symbol must resolve at
+  link time; missing symbols are a `glibre-types.dylib` link error,
+  not a runtime `SchemaMigrationFailure`.
+
+#### 7.2.3 `AbiHashManifest`
+
+```fory
+schema glibre.data.AbiHashManifest {
+  version 1
+  since   "0.1.0"
+
+  field abi_hash_hex  : string                     tag 1 since 1
+  field foryc_version : SemVer                     tag 2 since 1
+  field entries       : list<SchemaSourceRecord>   tag 3 since 1
+}
+```
+
+- `abi_hash_hex` is a 64-character lowercase hex Blake3-256 string
+  (§4.4 inv. 1) computed exactly as
+  `blake3( concat( sort_by_fqn( source_hash(s) for s in entries ) ) )`.
+- `foryc_version` is the `glibre-foryc` SemVer that produced this
+  manifest. It exists for diagnostic reproducibility — two builds
+  with byte-identical entries but different `foryc_version` must
+  still produce the same `abi_hash_hex`, so the field is **not**
+  an input to the digest (§4.4 inv. 4).
+- `entries` is sorted by `fqn` ascending (lexicographic byte order)
+  before serialization. Out-of-order lists produce
+  `DeserializeError` so the file's bytes are a faithful audit
+  artifact.
+- `SemVer` here is the `glibre.core.SemVer` schema declared in
+  `reviews/decisions/plugin-abi.md` §"Plugin Manifest Schema".
+
+#### 7.2.4 `EnvelopeHeader` (Fory-defined; byte-shape note)
+
+The wire-form prefix every persistent payload carries (§4.8) is
+emitted by Fory's own header encoder, not by a glibre-authored
+`.fory` schema. The spine pins its observable byte shape here so
+the per-version goldens in §7.5 and the dispatcher logic in §4.8
+inv. 5 have a single source of truth:
+
+```text
+EnvelopeHeader (logical layout, Fory-encoded):
+  fqn            : string   # FQN of the payload's Generated Type
+  schema_version : u32      # SchemaVersion encoded little-endian
+  payload_length : u32      # body byte count, little-endian
+  flags          : u32      # reserved; current builds emit 0
+```
+
+- This is the same logical record that surfaces as
+  `glibre::types::EnvelopeHeader` in §5; the C++ projection is the
+  authoritative API, the listing above is the read-only byte
+  shape.
+- `flags` is reserved-by-name. Adding a flag bit forces a
+  Fory-defined header version bump that the spine treats as a
+  meta-schema change subject to §7.6's bootstrap rule (release-time
+  migration via `glibre-foryc`, not in-process `MigrationChain`).
+- The header is *not* listed in `AbiHashManifest.entries`; it
+  rides Fory's own version handling. Changes to its layout still
+  force a `glibre-foryc` release and therefore a rebuilt
+  middleman with a new `AbiHash` value, but via meta-schema
+  release notes rather than the per-schema source-hash path.
+
+### 7.3 The schema-source canonicalization rule
+
+The `schema_source_hash` of a `.fory` file is `blake3(canonical(s))`
+where `canonical` is the deterministic byte serialization defined
+below. Identical schemas in source must produce byte-identical
+canonical forms regardless of authoring whitespace, comment
+placement, or clause order.
+
+The canonical form is a single UTF-8 byte sequence built by
+emitting the *parsed* schema in the following fixed shape:
+
+```text
+schema <fqn>\n
+version <V>\n
+since "<semver>"\n                # if present; else absent
+[for each active field, sorted by ascending tag:]
+  field <name> : <type-canonical> tag <N> since <V>[ default <expr-canonical>]\n
+[for each reserved tag, sorted by ascending tag:]
+  reserved tag <N>[ removed_in <V>][ comment "<...>"]\n
+[for each migration, sorted by ascending from-version:]
+  migration v<N>_to_v<N+1> { provider "<symbol>" }\n
+\n
+```
+
+Rules feeding the byte form:
+
+1. **Sort by tag** for active fields and reserved entries (§4.1
+   inv. 3). Sort by `from_version` for migration clauses
+   (§4.7 inv. 1).
+2. **Single-space separators** — no double spaces, no tabs.
+3. **LF line endings** — never CR or CRLF.
+4. **Type canonicalization** — `list`/`map`/`option` use no
+   internal whitespace: `option<u32>`, not `option< u32 >`.
+   Generic-type generic argument's canonicalization is recursive.
+5. **Default-expression canonicalization** — integer literals
+   normalize to base-10, no leading zeros, no underscores; float
+   literals normalize to round-trippable shortest form
+   (`std::to_chars` `chars_format::shortest`); composite defaults
+   `{...}` use `, ` (comma-space) separators.
+6. **String escaping** — `"` and `\` only; control characters
+   reject at parse time (canonical form never sees them).
+7. **No comments** — `#` lines are stripped entirely; their
+   positions and contents are not part of identity.
+8. **Trailing single empty line** — every canonical form ends
+   with `\n\n`. This makes concatenation in §4.4 unambiguous.
+
+The hash is `blake3(canonical_bytes)`; the result is a 32-byte
+digest stored as the `source_hash` of `SchemaSourceRecord`
+(§7.2.1) and as input to `AbiHash` (§4.4 inv. 1).
+
+### 7.4 Migration rules (engine-wide)
+
+Migrations are owned per-type by the originating context (§4.6),
+but the rules they obey are owned here:
+
+1. **Stepwise only.** A migration is `vN → vN+1`. There is no
+   `vN → vN+2`. The dispatcher composes chains (§4.7); writers
+   never short-circuit. (`Foryc` rejects a `migration v1_to_v3`
+   clause as a `SchemaMigrationFailure`-shaped codegen error.)
+2. **Pure and deterministic.** The provider function must satisfy
+   §4.6 inv. 1–4: no clock, no RNG, no global state, no I/O,
+   no allocation outside the supplied `Arena&`.
+3. **Total over its prior-version domain.** For every `VN`
+   produced by `deserialize_v<N>`, the provider yields a `VNplus1`.
+   `std::unexpected` is reserved for *defective* payloads — e.g.
+   a foreign-key tag pointing to an absent sibling — never for a
+   missing default that the schema authors should have declared.
+4. **Compositional.** Hot-reload migration runs every step in
+   ascending order against a single per-payload arena reset
+   between steps (§4.7 inv. 5); cross-step retention is forbidden.
+5. **Complete coverage.** For every `FQN` whose current version
+   is `M`, exactly `M-1` migration providers exist; the build
+   fails at codegen otherwise (§4.7 inv. 1). The data context
+   never ships a partial chain.
+6. **Adding a field is not always a migration.** Per §4.2 inv. 3,
+   appending a new tag past the prior version's last offset is
+   ABI-additive: codegen synthesizes the default at deserialize
+   time and the schema bumps without authoring a provider. A
+   new tag whose sorted position is not append-past-end forces a
+   migration. Authors do not choose which case applies; `Foryc`
+   does.
+7. **Tag reuse is forbidden — forever.** Reserved tags (§4.1
+   inv. 3) carry forward across versions; `Foryc` errors with
+   `ReservedTagViolation` on any reuse. There is no migration
+   shape for rebinding a tag to a new field.
+
+### 7.5 Wire format and round-trip identity
+
+Every persistent payload is the byte concatenation of the
+`EnvelopeHeader` (§7.2.4) followed by the Fory-encoded body of
+the `Generated Type`. The envelope is a fixed self-describing
+prefix (§4.8 inv. 1, 2), little-endian (§4.8 inv. 3), and is the
+sole source of dispatch truth at deserialize time (§4.8 inv. 5).
+
+Round-trip identity (§4.8 inv. 4) is tested per-schema via
+Catch2 goldens at `tests/data/schemas/<ctx>/<Type>.cpp`:
+
+1. Construct an instance `t` from a deterministic constructor
+   recipe.
+2. `bytes := Envelope<T>::serialize(t)`.
+3. Assert `bytes` byte-equal a checked-in `golden.fory.bin`
+   (or regenerate under `--update-goldens`).
+4. `t' := Envelope<T>::deserialize(bytes).value()`.
+5. Assert `t' == t` (POD-equality, tag-sorted comparison).
+6. Assert `Envelope<T>::serialize(t') == bytes`.
+
+Per-version goldens are kept under
+`tests/data/schemas/<ctx>/<Type>/v<N>.fory.bin` so older payloads
+exercise the migration path:
+
+1. Read the `vN` golden bytes.
+2. `t := Envelope<T>::deserialize(bytes).value()` — runs the
+   dispatcher, applying every step `vN → vN+1, … → vM`.
+3. Assert `t` matches the version-`M` golden.
+4. Assert `Envelope<T>::serialize(t)` byte-equals the version-`M`
+   serialized golden.
+
+The `MigrationChain` is exercised as an integration test against
+the registry rather than per-step: the data context guarantees
+*chain-level* round-trip, which is the property loader and
+hot-reload code consume.
+
+### 7.6 Bootstrap rule for meta-schemas
+
+The meta-schemas in §7.2 (`SchemaSourceRecord`,
+`MigrationTableRecord`, `AbiHashManifest`, `EnvelopeHeader`)
+describe the spine itself and so **cannot** evolve through the
+in-process `MigrationChain` they describe — that would require
+the spine to be running before its own description is parsable.
+The bootstrap rule decouples them from the runtime migration
+path:
+
+1. **Out-of-band versioning.** Each meta-schema carries the
+   normal `version` integer in its `.fory` header, but the
+   `version` is bumped *only* in lockstep with a `glibre-foryc`
+   release. The release notes call out the bump and the manual
+   migration steps tools and existing build artifacts must
+   take.
+2. **No registered migration providers.** Meta-schemas declare
+   no `migration` clauses. `Foryc` recognises files under
+   `data/schemas/meta/` and lifts the §7.4 rule #5 coverage
+   requirement for those files only — partial chains are
+   acceptable because the chain never runs at runtime.
+3. **Single live version per build.** A given `glibre-foryc`
+   release emits exactly one version of each meta-schema. The
+   middleman dylib produced by that release reads and writes
+   only that version of each meta-schema. There is no
+   `EnvelopeHeader v1` reader inside a build that emits
+   `EnvelopeHeader v2`.
+4. **Cross-build artefacts are reproduced, not migrated.**
+   `AbiHashManifest` files, intermediate `.foryc-stamp` blobs,
+   and the meta-schema binary descriptors embedded in
+   `glibre-types.dylib` are *artefacts of the build*, not
+   user-data. When a meta-schema bumps, the artefacts are
+   regenerated from authoring sources by the new `glibre-foryc`;
+   no migration pass is run.
+5. **Manual migration steps live in `glibre-foryc` release
+   notes.** When an `EnvelopeHeader` flag bit is added, the
+   release notes spell out (a) the wire-format diff, (b) any
+   on-disk artefact rebuild needed, (c) any tooling step
+   downstream consumers must take. The data context owns these
+   notes alongside the `glibre-foryc` source repository; the
+   spec does not enumerate per-release steps.
+6. **Hash invariants hold.** Even though meta-schemas do not
+   migrate, they *do* contribute to `AbiHash` exactly like any
+   other schema (§4.4 inv. 1). A meta-schema bump therefore
+   forces an `AbiHash` change, which forces every plugin
+   consuming the spine to rebuild — the same gate that catches
+   any other schema-shape drift (`reviews/decisions/plugin-abi.md`
+   §"Versioning Rules"). The bootstrap rule lifts only the
+   *runtime-migration* obligation, not the ABI-gating one.
+
+The collapse: domain schemas migrate at runtime via the spine;
+the spine itself migrates at *release time* via `glibre-foryc`.
+Two surfaces, one ABI gate.
+
+### 7.7 Cross-context obligations
+
+Every other context's `specs/<ctx>/SPEC.md` §7 enumerates the
+domain schemas the context owns under
+`data/schemas/<ctx>/<Type>.fory`. Those sections inherit this
+section's rules:
+
+1. The grammar in §7.1 is the only legal `.fory` syntax.
+2. Migration providers obey §7.4.
+3. Round-trip goldens follow the harness in §7.5; per-version
+   goldens are mandatory whenever the schema's version exceeds 1.
+4. The `data` context does **not** own those schemas — adding a
+   new domain schema requires no edit to this section. What `data`
+   owns is the meta-schema layer in §7.2 and the rules above.
+
+The biconditional in §4.10 inv. 1 is the load-bearing connector:
+every `.fory` file under `data/schemas/<ctx>/` corresponds to one
+registry entry, and every registry entry corresponds to one
+`.fory` file — verified at configure time by `Foryc` (§4.5 inv. 5).
 
 ## 8. Hot-Reload Contract
 
