@@ -3,22 +3,28 @@
 Plans are executed by parallel nested subagents. Progress is tracked
 exclusively through GitHub issue comments (English).
 
-## Issue Types (only five — no roles, no kinds)
+## Issue Types (six — no tracking, no roles, no kinds)
 
-1. **Tracking** (`type:tracking`) — non-leaf aggregator. **No own
-   story-point estimate**; total = sum of leaf descendants. Source of
-   truth for plan execution status; subagents post status comments
-   here as work progresses.
-2. **User Story** (`type:user-story`) — testable acceptance criterion.
-   Has its own story-point estimate.
-3. **Epic** (`type:epic`) — multi-PR work item under a tracking issue.
-   Carries an estimate (rolls up to its parent tracking issue).
-4. **Plan** (`type:plan`) — leaf; closes with **exactly one PR**.
-   Carries an estimate. Conventional Commit subject pre-declared on
-   the issue.
-5. **Spike** (`type:spike`) — time-boxed research / design exploration.
-   Output is a doc / decision record / prototype branch. Carries an
-   estimate.
+Hierarchy: **initiative → epic → sub-epic → { plan | spike }**.
+User-story is orthogonal (linked from any leaf or aggregator).
+
+Aggregators carry **no estimate**; leaves carry estimates that roll up.
+
+1. **Initiative** (`type:initiative`) — top-level. Groups epics. No
+   estimate. Source of truth for top-level plan execution status.
+2. **Epic** (`type:epic`) — under an initiative. Aggregates sub-epics
+   / plans / spikes. No estimate. SRP-bounded slice.
+3. **Sub-Epic** (`type:sub-epic`) — nested aggregator under an epic
+   (or another sub-epic). No estimate.
+4. **User Story** (`type:user-story`) — persona-grounded testable
+   acceptance criterion. **Tests required: manual test script + E2E
+   trace.** Has its own estimate.
+5. **Plan** (`type:plan`) — leaf; closes with **exactly one PR**.
+   Conventional Commit subject pre-declared on the issue.
+   **Tests required: unit tests (Catch2).** Has estimate.
+6. **Spike** (`type:spike`) — time-boxed research / design. Output =
+   doc, decision record, or prototype branch. No tests required.
+   Has estimate.
 
 Story-point rollup is automatic: tracking issues never carry a
 `pts:*` label; their total = sum of `pts:*` across leaf descendants.

@@ -49,7 +49,7 @@ body:
   - type: input
     id: parent
     attributes:
-      label: Parent (Tracking or Epic)
+      label: Parent (Epic or Sub-Epic)
       placeholder: "#42"
     validations: { required: true }
   - type: textarea
@@ -63,6 +63,15 @@ body:
     attributes:
       label: Conventional Commit Subject
       placeholder: "feat(core): add Plugin manifest type"
+    validations: { required: true }
+  - type: textarea
+    id: unit-tests
+    attributes:
+      label: Unit Test Plan
+      description: Catch2 test names this plan adds or updates. ≥1 required.
+      placeholder: |
+        - core/world: archetype_transition_o1
+        - core/world: change_tick_increments_on_set
     validations: { required: true }
   - type: textarea
     id: dependencies

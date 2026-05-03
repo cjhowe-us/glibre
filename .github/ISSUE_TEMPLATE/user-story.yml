@@ -56,12 +56,29 @@ body:
     id: acceptance
     attributes:
       label: Acceptance Criteria (Gherkin)
-      description: One or more Given/When/Then blocks. Each maps to ≥1 Catch2 test.
+      description: One or more Given/When/Then blocks. Each must be exercised by both a manual test and an E2E test.
       placeholder: |
         Given ...
         When ...
         Then ...
       render: gherkin
+    validations: { required: true }
+  - type: textarea
+    id: manual-test
+    attributes:
+      label: Manual Test Script
+      description: Step-by-step actions a human reviewer performs in the editor / runtime to verify acceptance.
+      placeholder: |
+        1. Open editor with sample-scene.glibre
+        2. Drag X onto Y
+        3. Observe Z
+    validations: { required: true }
+  - type: textarea
+    id: e2e-test
+    attributes:
+      label: E2E Test Plan
+      description: Path to `.glibre-trace` file (or planned name) that asserts each acceptance criterion via the InputDriver replay harness.
+      placeholder: "tests/e2e/<context>/<topic>.glibre-trace + assertions"
     validations: { required: true }
   - type: input
     id: harmonius

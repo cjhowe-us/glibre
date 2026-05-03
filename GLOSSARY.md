@@ -54,23 +54,29 @@ inside each `specs/<context>/SPEC.md`. Terms used unchanged in code.
 
 ## Stories, Tasks, Issues
 
-All live in GitHub Issues; not in the repo filesystem. Five types only;
-no roles, no kinds.
+All live in GitHub Issues; not in the repo filesystem. Six types; no
+tracking, no roles, no kinds.
 
-- **Tracking Issue** — `type:tracking`. Non-leaf aggregator. **No own
-  `pts:*`**; total rolls up from leaves. Source of truth for plan
-  execution status; subagents post updates here in English.
+Hierarchy: **initiative → epic → sub-epic → { plan | spike }**.
+Aggregators carry no estimate; leaves do; estimates roll up.
+
+- **Initiative** — `type:initiative`. Top-level. Groups epics. No
+  estimate. Source of truth for plan execution status; subagents post
+  updates here in English.
+- **Epic** — `type:epic`. Aggregates sub-epics / plans / spikes under
+  an initiative. No estimate. SRP-bounded slice.
+- **Sub-Epic** — `type:sub-epic`. Nested aggregator under an epic
+  (or another sub-epic). No estimate.
 - **User Story** — `type:user-story`. Persona-grounded testable
   acceptance criterion. `As a <persona>, I want <capability>, so that
-  <outcome>.` Has its own `pts:*` estimate.
-- **Epic** — `type:epic`. Multi-PR work item under a tracking issue.
-  Has its own `pts:*` estimate.
+  <outcome>.` Each story carries a manual test script and an E2E test
+  plan (replay trace + assertions). Has its own `pts:*` estimate.
 - **Plan** — `type:plan`. Leaf; closes with **exactly one PR**.
-  Conventional Commit subject pre-declared on the issue.
+  Conventional Commit subject pre-declared on the issue. Carries a
+  unit test plan (≥1 Catch2 test name).
 - **Spike** — `type:spike`. Time-boxed research / design. Output =
   doc, decision record, or prototype branch.
 - **Story Point** — Fibonacci 1/2/3/5/8 relative effort. > 8 splits.
-  Rolls up from leaves; tracking issues never carry one.
+  Rolls up from leaves; aggregators never carry one.
 - **Pull Request** — granular, single-purpose, Conventional Commit
-  subject. A `type:plan` issue closes with exactly one PR; a
-  `type:epic` may have multiple.
+  subject. A `type:plan` closes with exactly one PR.

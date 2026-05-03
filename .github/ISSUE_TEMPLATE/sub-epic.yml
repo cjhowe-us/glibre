@@ -1,8 +1,14 @@
-name: Spike
-description: Time-boxed research or design exploration. Output is a doc / decision / prototype.
-title: "[SPIKE] "
-labels: ["type:spike"]
+name: Sub-Epic
+description: Nested aggregator under an epic. No own estimate; rolls up.
+title: "[SUB-EPIC] "
+labels: ["type:sub-epic"]
 body:
+  - type: input
+    id: parent
+    attributes:
+      label: Parent Epic
+      placeholder: "#42"
+    validations: { required: true }
   - type: dropdown
     id: domain
     attributes:
@@ -34,30 +40,20 @@ body:
       label: Phase
       options: [ "phase:mvp", "phase:post-mvp", "phase:long-term" ]
     validations: { required: true }
-  - type: dropdown
-    id: points
+  - type: textarea
+    id: scope
     attributes:
-      label: Story Points
-      options: [ "pts:1", "pts:2", "pts:3", "pts:5", "pts:8" ]
+      label: Scope
     validations: { required: true }
   - type: textarea
-    id: question
+    id: children
     attributes:
-      label: Question
-    validations: { required: true }
+      label: Child Issues
+      description: Plans, spikes, or further sub-epics.
+      placeholder: |
+        - [ ] #100  type:plan
+        - [ ] #101  type:spike
   - type: textarea
-    id: deliverable
+    id: progress-log
     attributes:
-      label: Deliverable
-      description: Doc path, decision record, or prototype branch.
-    validations: { required: true }
-  - type: input
-    id: parent
-    attributes:
-      label: Parent (Epic or Sub-Epic)
-      placeholder: "#42"
-    validations: { required: true }
-  - type: textarea
-    id: agent-notes
-    attributes:
-      label: Agent Execution Notes
+      label: Progress Log
