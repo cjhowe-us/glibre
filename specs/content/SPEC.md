@@ -3622,7 +3622,476 @@ importers do not bleed onto the game loop.
 
 ## 10. Failure Modes & Error Model
 
-Typed errors. Recovery.
+Content's failure surface is the closed sum `glibre::content::Error`
+declared in §5.3 — `std::variant<ImporterError, ResidencyError>` — and
+every public boundary in §5 returns
+`Result<T> = std::expected<T, glibre::Error>` per
+`reviews/decisions/error-model.md`. §10 fills four slots that §5.3
+left implicit:
+
+1. **Per-arm contract** — for each `ImporterError::*` and
+   `ResidencyError::*` enumerator: trigger, recovery posture (re-cook
+   / evict / refuse / fallback), and log severity.
+2. **Importer SDK translation** — the rule that thrown exceptions
+   from the FBX SDK, FreeImage, and FreeType are caught at the
+   importer's first ingress and translated into `ImporterError::*`,
+   plus the precise list of `-fexceptions` carve-outs the build is
+   allowed to apply.
+3. **Recovery shapes** — what re-cook, eviction, manifest-rollback,
+   and atomic-write retry actually do at the §6.2 / §6.3 / §8.2 data
+   flows; cross-references to §8.5 for hot-reload refusal cases.
+4. **Logging severity table** — the consolidated mapping
+   `glibre::log_error` uses when it formats a `content::Error` into
+   spdlog.
+
+§10 introduces no new public types. The §5.3 table is the source of
+truth for the variant shape; §10 does not propose new arms. Three
+§5.3 arms (`ImporterError::MagicMismatch`, `UnsupportedVersion`,
+`MalformedPayload`) jointly cover the failure space the issue
+brief named "FbxFailed / FreeImageFailed / FreeTypeFailed" — they
+discriminate by *symptom* (which §4.1.2 invariant the SDK
+violated), not by *which SDK threw*; the SDK identity rides in
+the structured log fields and the `ErrorContext::detail` string,
+not in the enumerator. This honours the closed-sum rule of §3.2
+collapse #1: adding per-SDK arms would re-introduce the registry
+explosion §3.2 collapsed.
+
+### 10.1 `ImporterError` — per-arm contract
+
+Trigger / Recovery / Severity for each `ImporterError::*` enumerator.
+"Recovery" names what the *operator* or the *cook session* may do;
+the importer itself never auto-retries across the boundary
+(§4.1.2 inv #2 — exceptions never escape; §4.1.2 inv #3 — pure of
+effect outside its arena).
+
+#### `ImporterError::SourceNotFound`
+
+- **Trigger.** The path declared on the `SourceAsset` either escapes
+  the `assets/source/` root (§4.1.1 inv #1) or no longer exists at
+  the moment `Importer::ingest()` opens it (file deleted, moved, or
+  renamed between watch-edge fan-out and cook). Also raised when an
+  FBX-internal sidecar reference (e.g. embedded texture override
+  path) escapes the source root after the FBX SDK resolves it.
+- **Recovery.** **Refuse + rollback.** The `CookSession` rolls back
+  per §4.1.9 inv #1; the prior manifest snapshot remains active
+  per §8.5 Class B. Operator restores the source under
+  `assets/source/`; the next `WatchEdge` event re-triggers the cook.
+  No automatic retry — the watcher's debounce already deduplicates
+  rapid restore-then-rename sequences (§4.1.10 inv #2).
+- **Severity.** `warn` at the handling boundary. The prior manifest
+  is unchanged so the runtime continues; the editor surfaces the
+  rejection in its asset-tree status badge.
+
+#### `ImporterError::MagicMismatch`
+
+- **Trigger.** The SDK reports format-prefix mismatch — the file
+  passed magic-byte sniffing for one `SourceKind` (e.g. extension
+  said `.fbx`) but the SDK rejected the actual prefix. Concretely:
+  FBX SDK's `FbxImporter::Initialize` returns
+  `eInvalidFileVersion`/`eInvalidFile` with a magic-related status;
+  FreeImage's `FreeImage_GetFileType` returns `FIF_UNKNOWN` or a
+  format that disagrees with the resolved `SourceKind`; FreeType's
+  `FT_New_Face` returns `FT_Err_Unknown_File_Format`. Each is
+  translated at the importer's `-fexceptions` ingress point per
+  §4.1.2 inv #2.
+- **Recovery.** **Refuse + rollback.** The cook step rejects the
+  source; the prior manifest remains. Operator re-exports the
+  source from the DCC at the expected format, or moves the file to
+  the correct extension.
+- **Severity.** `warn`. The artist's intent is recoverable; the
+  runtime is not at risk.
+
+#### `ImporterError::UnsupportedVersion`
+
+- **Trigger.** The SDK accepts the magic but rejects the file's
+  declared version: FBX file version older than the SDK's minimum
+  (e.g. FBX < 7.0 ASCII) or newer than the SDK's bundled compatibility
+  table; FreeImage codec version unsupported (rare — FreeImage
+  versions image *codecs*, not files, so this fires on EXR multipart
+  / DWAA-compressed variants the linked FreeImage build was not
+  configured for); FreeType reports an unrecognized SFNT or CFF
+  table version (`FT_Err_Invalid_Version`).
+- **Recovery.** **Refuse + rollback.** Operator re-exports at a
+  supported version. The `importer_version` ingredient of `CookKey`
+  (§4.1.3 component #2) ensures that bumping the importer's bundled
+  SDK version automatically forces re-cook of every dependent on
+  the next session, so this arm narrows over time as importers are
+  upgraded — but never silently, per §4.1.2 inv #4.
+- **Severity.** `warn`.
+
+#### `ImporterError::MalformedPayload`
+
+- **Trigger.** Three failure shapes collapse here per §4.1.4 inv #2
+  and §4.1.6 inv #4:
+  1. **SDK-detected corruption.** FBX SDK throws on a truncated
+     stream or a node-graph cycle inside the file; FreeImage's
+     decoder reports a checksum / chunk-size mismatch on PNG /
+     JPEG / EXR; FreeType reports
+     `FT_Err_Invalid_Table` / `Invalid_Outline` on a corrupt glyph.
+     All three flow through the importer's `-fexceptions` ingress.
+  2. **Cooker-output schema-validation failure.** The cooked
+     `CookedAsset.payload` is a Fory blob whose declared
+     `(fqn, schema_version)` is not in the `glibre-types` registry
+     — i.e. the cook step produced bytes claiming to be an
+     artifact class the runtime does not know how to deserialize.
+     §4.1.4 invariant 2; raised by `CookSession::commit()`.
+  3. **Dependency cycle at publish.** The bottom-up
+     invalidation graph (§4.1.6 inv #4) forms a cycle when the
+     manifest is being assembled — typically a circular material
+     reference or a self-referential FBX skeleton sub-asset.
+     Manifest publish refuses to commit a cyclic graph; §4.1.10
+     inv #4.
+- **Recovery.** **Refuse + rollback.** All three sub-causes leave
+  the prior manifest snapshot active per §8.5 Class B. The
+  structured log distinguishes the sub-cause via `error.detail`:
+  `"sdk-corruption"`, `"schema-fqn-unknown"`, or `"dependency-cycle"`.
+  Operator action differs per sub-cause: re-export the source
+  (corruption); file a bug against the cook step's owning context
+  (schema — this is a producer-side defect); break the circular
+  reference in the source tree (cycle).
+- **Severity.** `error` for the schema-validation sub-cause (it is
+  always a defect in producer code); `warn` for the corruption and
+  cycle sub-causes (artist-correctable).
+
+#### `ImporterError::MissingDependency`
+
+- **Trigger.** A child asset referenced by a manifest entry's
+  `DependencyEdge*` cannot be resolved: the child's `AssetId` is not
+  in the active manifest, or its `ContentHash` does not appear in
+  the CAS at lookup time. Distinct from `ResidencyError::HashNotInCas`
+  in that this is detected during *cook-time* dependency walk, not
+  runtime residency load. §4.1.6 inv #4.
+- **Recovery.** **Re-cook the child.** The `CookSession` enqueues a
+  recook for the missing child if its source still exists; the
+  parent's cook is deferred until the child publishes. If the
+  child's source was deleted, the parent's cook fails with this
+  arm and the operator either restores the child source or breaks
+  the parent's reference. The session as a whole rolls back if
+  recovery is not possible inside the same session.
+- **Severity.** `warn` when the child can be re-cooked in the same
+  session; `error` when the child's source is missing and the
+  parent must be edited.
+
+#### `ImporterError::Cancelled`
+
+- **Trigger.** A `CookSession`'s cancellation token was observed by
+  the importer mid-import, or by the cook step between import and
+  Fory-serialize. §4.1.2 inv #5; §4.1.9 inv #5.
+- **Recovery.** **No-op.** Cancellation is the operator's explicit
+  intent (typically: editor stop button, workspace close). The
+  in-flight cook step returns this arm; the session reports
+  `CookOutcome::Cancelled`; the prior manifest remains active.
+  No automatic retry; the operator re-triggers the session if
+  desired.
+- **Severity.** `debug`. Routine; cancellation is not a failure
+  signal at the engine level.
+
+### 10.2 `ResidencyError` — per-arm contract
+
+Trigger / Recovery / Severity for each `ResidencyError::*` enumerator.
+The residency manager owns runtime-side recovery; cook-time recovery
+belongs to `ImporterError` (§10.1).
+
+#### `ResidencyError::HashNotInCas`
+
+- **Trigger.** A `LoadRequest` for `ContentHash H` reaches the I/O
+  lane and `cooked/<prefix>/<H>` does not exist on disk: the
+  manifest claims the hash is current, but the CAS layer does not
+  hold the bytes. This is the runtime symptom the issue brief named
+  "AssetMissing" *and* the symptom of "CasIntegrityFailed" — the
+  closed sum collapses both because residency cannot distinguish
+  "never written" from "written and corrupted on disk" without
+  re-hashing, and re-hashing is a cook-time concern (§4.1.5
+  inv #4 — hash collisions are cryptographically impossible by
+  construction; a payload mismatch implies corruption *of the
+  filesystem*, which is an OS-level event, not a content invariant).
+  Causes in practice: (a) the CAS file was deleted out from under
+  the workspace; (b) the workspace was moved between hosts and
+  `cooked/` was not copied; (c) filesystem-level corruption ate
+  the file.
+- **Recovery.** **Refuse + re-cook.** The residency manager
+  surfaces this arm and fails the `LoadRequest` (the slot returns
+  to `Unloaded`). The next `CookSession` re-cooks every asset
+  whose `ContentHash` is not present in the CAS; the manifest
+  publishes a fresh entry only if the re-cook succeeds. Until then
+  the consumer (typically `render`) falls back to its own
+  default-asset path per the engine-wide composition rule
+  (`reviews/decisions/error-model.md` §"Composition Rules" #2).
+  The handle remains valid — see §4.1.8 — but `view()` will
+  return this arm until the re-cook completes.
+- **Severity.** `error`. A hash-not-in-CAS at runtime always
+  indicates either a workspace move bug or filesystem-level
+  damage; it is operator-actionable and never routine.
+
+#### `ResidencyError::ManifestStale`
+
+- **Trigger.** A handle resolved against a manifest snapshot that
+  has since been superseded by a `CookSession::commit()` publish.
+  §4.1.6 inv #2; §4.1.8 inv #4. Concretely: the consumer cached
+  a `ContentHash` from `Manifest::resolve(asset_id)` at frame N
+  and called back at frame N+k after a hot-reload; the snapshot
+  the consumer was reading no longer matches the active manifest.
+  This is the runtime symptom the issue brief named "HandleStale".
+- **Recovery.** **Refresh + retry.** The handle is still valid
+  (handles are hash-keyed, not snapshot-keyed); the consumer
+  re-resolves through `AssetHandle::view()` which transparently
+  picks up the new `ContentHash`. The residency manager keeps
+  the prior `Resident` slot live as long as outstanding handle
+  refs > 0 (§4.1.7 inv #6) so the consumer never sees torn bytes
+  during the swap. Returning this arm is the contract for
+  "you used a stale snapshot; re-resolve and continue."
+- **Severity.** `info`. Routine during hot-reload; warn-level
+  noise would drown legitimate failures.
+
+#### `ResidencyError::BudgetExceeded`
+
+- **Trigger.** A `LoadRequest`'s deadline elapsed without admission:
+  the residency budget (§4.1.7 inv #1) was full, every resident
+  artifact had outstanding handle refs (so eviction could not free
+  room — §4.1.7 inv #3), and the request's deadline reached zero
+  while still in `Pending`. The §9 content cell's budget is the
+  hard ceiling.
+- **Recovery.** **Backpressure + retry next frame.** The consumer
+  drops the request and surfaces the failure to its own domain.
+  Render's typical response: keep the prior LOD resident, defer
+  the upgrade to the next frame, log at `warn`. Editor's typical
+  response: surface "RAM ceiling reached" in the asset browser
+  and let the operator unload an open scene. The residency
+  manager itself never auto-retries; backpressure is the consumer's
+  to apply per the priority weight it supplied
+  (§4.1.7 invariant 4 — `screen_coverage` is opaque to residency).
+- **Severity.** `warn`. Repeated within a single second escalates
+  to `error` via the §10.4 escalation rule.
+
+#### `ResidencyError::IoFailure`
+
+- **Trigger.** An OS-level I/O error during the residency manager's
+  load path: `mmap` returned an error, `open` failed for a reason
+  other than ENOENT (which would surface as `HashNotInCas`), or
+  `fstat` reported a size that disagrees with the manifest's
+  expected payload length. Wraps the typed `platform::Error::IoFailure`
+  arm per the cross-context composition rule
+  (`reviews/decisions/error-model.md` §"Composition Rules" #2 —
+  content translates platform's error into its own enum at the
+  ingress site, never auto-upcasts). Also the residency-side carrier
+  for the issue brief's "AtomicWriteFailed" — the runtime cannot
+  distinguish "rename interrupted" from "open after rename failed"
+  without re-reading the CAS, so both surface here, and the
+  diagnostic prefix in `error.detail` (`"open"`, `"mmap"`,
+  `"size-mismatch"`) discriminates for telemetry. Note that the
+  *cook-time* atomic-write protocol (§4.1.5 inv #3) is implemented
+  inside the CAS aggregate and reports failures up to the
+  `CookSession`, which surfaces them as `ImporterError::MalformedPayload`
+  with `error.detail = "atomic-write-failed"` — the runtime never
+  observes a half-written CAS file because `rename(2)` is the
+  publication boundary (§4.1.5 inv #3) and the manifest cannot
+  reference a hash whose CAS write never committed.
+- **Recovery.** **Refuse.** The `LoadRequest` fails; the slot
+  returns to `Unloaded`. The consumer falls back as in
+  `BudgetExceeded`. Persistent IO failures imply hardware /
+  workspace-mount problems and require operator intervention;
+  no automatic retry inside content (the platform context's I/O
+  thread already applied its single bounded EINTR retry per
+  `specs/platform/SPEC.md` §10.2.1 before content sees the arm).
+- **Severity.** `error`. OS-level I/O failure is never routine.
+
+### 10.3 Importer SDK translation — `-fexceptions` carve-outs
+
+The importer aggregates (§4.1.2) are the **only** translation units in
+the engine that compile with `-fexceptions`. Everything else compiles
+with `-fno-exceptions` per `reviews/decisions/error-model.md`
+§"Decision" rule 3. The carve-out is bounded to three files exactly:
+
+```
+plugins/content/cook/import/
+    fbx_importer.cpp            # FBX SDK: -fexceptions
+    freeimage_importer.cpp      # FreeImage: -fexceptions
+    freetype_importer.cpp       # FreeType: -fexceptions
+```
+
+The corresponding headers (`fbx_importer.hpp`, etc.) compile with
+`-fno-exceptions` like the rest of the engine; only the implementation
+TUs that *call into* the SDK carry the carve-out. This matches §6.1's
+module layout and is enforced by the build system, not by convention.
+
+#### Translation contract
+
+Each importer's first-ingress entry point (`Importer::ingest(...)`)
+wraps every SDK call in a `try` block whose `catch` arms perform the
+classification table below. The translated `ImporterError` is
+returned as `std::unexpected{Error{ImporterError::*, ErrorContext}}`;
+no exception ever crosses the importer's public boundary
+(§4.1.2 inv #2).
+
+| SDK exception class                                       | Translated arm                              | `error.detail` prefix |
+|-----------------------------------------------------------|---------------------------------------------|-----------------------|
+| FBX SDK `FbxStatus::eInvalidFile`                         | `ImporterError::MagicMismatch`              | `"fbx-magic"`         |
+| FBX SDK `FbxStatus::eInvalidFileVersion`                  | `ImporterError::UnsupportedVersion`         | `"fbx-version"`       |
+| FBX SDK `FbxStatus::eFileCorrupted`, exceptions during traversal | `ImporterError::MalformedPayload`    | `"fbx-corruption"`    |
+| FBX SDK `FbxStatus::eFileNotFound`                        | `ImporterError::SourceNotFound`             | `"fbx-not-found"`     |
+| FreeImage `FIF_UNKNOWN` from `FreeImage_GetFileType`      | `ImporterError::MagicMismatch`              | `"freeimage-magic"`   |
+| FreeImage decoder error callback fired                    | `ImporterError::MalformedPayload`           | `"freeimage-corruption"` |
+| FreeImage codec-version unsupported (build-time absent)   | `ImporterError::UnsupportedVersion`         | `"freeimage-codec"`   |
+| FreeType `FT_Err_Unknown_File_Format`                     | `ImporterError::MagicMismatch`              | `"freetype-magic"`    |
+| FreeType `FT_Err_Invalid_Version`                         | `ImporterError::UnsupportedVersion`         | `"freetype-version"`  |
+| FreeType `FT_Err_Invalid_Table` / `Invalid_Outline` / `Invalid_File_Format` | `ImporterError::MalformedPayload` | `"freetype-corruption"` |
+| `std::bad_alloc` from any SDK                             | terminate (see note below)                  | n/a                   |
+| Any other SDK-thrown exception or status                  | `ImporterError::MalformedPayload`           | `"unclassified"`      |
+
+The `std::bad_alloc` case is **not** translated — the importer's
+per-cook arena (§4.1.2 inv #3) is sized to fit the largest source
+the budget cell allows; a `bad_alloc` from inside that arena is a
+build-system / configuration defect and the process is terminated
+with a structured log. This mirrors the editor-UI carve-out's
+deferred decision in `reviews/decisions/error-model.md` open
+question 4 — content commits to terminate, not to map; if a future
+caller needs graceful handling, this becomes a §12 open question.
+
+#### Why the SDK identity does not ride in the enum
+
+The closed-sum rule of §3.2 collapse #1 forbids per-SDK arms
+(`FbxFailed`, `FreeImageFailed`, `FreeTypeFailed`). The §5.3 enum
+discriminates by *symptom*, not by *which SDK threw*: a corrupt PNG
+and a corrupt FBX both produce `MalformedPayload` because the
+recovery posture (refuse + rollback + operator re-export) is
+identical. SDK identity rides in the structured-log fields
+(`importer_kind`, `error.detail`) where it serves telemetry and
+debugging without inflating the variant arity. Adding per-SDK arms
+would re-introduce the registry explosion §3.2 collapsed and
+require a `core::Error` variant edit per importer family — the
+opposite of what the closed sum is for.
+
+### 10.4 Recovery shape summary
+
+Mapping of every §10.1 / §10.2 arm to one of the four recovery
+postures:
+
+| Recovery posture        | Arms                                                                                       | Mechanism                                              |
+|-------------------------|--------------------------------------------------------------------------------------------|--------------------------------------------------------|
+| **Re-cook**             | `MissingDependency`, `HashNotInCas`                                                        | Next `CookSession` enqueues the affected `AssetId`s; manifest publishes when cook succeeds (§6.2). |
+| **Evict**               | (no direct arm; budget pressure handled inside `BudgetExceeded`'s eviction loop, §4.1.7 inv #1) | Lowest-priority resident artifact moves to `Evicting`; new mapping admitted; if no evictable artifact exists, the request returns `BudgetExceeded`. |
+| **Refuse**              | `SourceNotFound`, `MagicMismatch`, `UnsupportedVersion`, `MalformedPayload`, `IoFailure`, `Cancelled` | Cook step rolls back per §8.5 Class B; runtime load path returns the arm; prior manifest stays active. |
+| **Fallback** (consumer) | `BudgetExceeded`, `ManifestStale`, `HashNotInCas` (consumer-side)                          | Consumer (render / editor) keeps the prior asset visible, retries on the next frame or after the next manifest publish. |
+
+The "evict" posture appears as a *recovery mechanism inside the
+residency manager*, not as a directly-returned arm — eviction is
+the manager's response to budget pressure *before* it surfaces
+`BudgetExceeded`. This is consistent with §4.1.7 inv #1 (hard
+ceiling, no silent overshoot) and §3.2 collapse #2 (one residency
+seam, not separate "eviction" + "load" surfaces).
+
+The "AtomicWriteFailed" symptom the issue brief named is structurally
+absent from the runtime path because the §4.1.5 atomic-write
+protocol guarantees the manifest can never reference a hash whose
+CAS write did not commit. Cook-time atomic-write failures surface
+as `ImporterError::MalformedPayload` with `error.detail =
+"atomic-write-failed"` (§10.1, MalformedPayload sub-cause #2 path);
+the manifest publish is refused, the prior snapshot remains active.
+Runtime-side atomic-write failures are impossible by construction
+(§4.1.5 inv #2 — append-only at the file layer; reads see either
+the prior bytes or the new bytes, never an in-progress prefix).
+
+The "ManifestCorrupted" symptom is similarly absent as a runtime
+arm: a manifest snapshot is constructed from a Fory-deserialized
+buffer that fails the `(fqn, schema_version)` registry check at
+load time and is rejected by `data`'s schema layer, surfacing as
+`data::Error::SchemaMigrationFailed` per the cross-context
+composition rule. Content's only owned manifest-corruption path is
+the publish-time integrity check, which surfaces as
+`ImporterError::MalformedPayload` with `error.detail =
+"manifest-publish-cycle"` (the §10.1 MalformedPayload sub-cause #3
+"dependency-cycle" case).
+
+### 10.5 Logging severity table (consolidated)
+
+The §10.1 / §10.2 per-arm severities, restated as the table the
+`glibre::log_error` helper (per `reviews/decisions/error-model.md`
+§"Logging / Telemetry") uses when it formats a `content::Error`
+into spdlog. Content never logs at the *raise* site; logging is
+the *handler's* responsibility per the same decision document.
+
+| Arm                                              | Default severity | Notes                                                                       |
+|--------------------------------------------------|------------------|-----------------------------------------------------------------------------|
+| `ImporterError::SourceNotFound`                  | `warn`           | Operator-actionable; restore source under `assets/source/`.                 |
+| `ImporterError::MagicMismatch`                   | `warn`           | Re-export from DCC; not runtime-fatal.                                      |
+| `ImporterError::UnsupportedVersion`              | `warn`           | Bumping importer's bundled SDK forces re-cook automatically.                |
+| `ImporterError::MalformedPayload` (sub: `sdk-corruption`)  | `warn`  | Artist-correctable.                                                         |
+| `ImporterError::MalformedPayload` (sub: `schema-fqn-unknown`) | `error` | Producer-side defect; file a bug.                                          |
+| `ImporterError::MalformedPayload` (sub: `dependency-cycle`)   | `warn`  | Break the cycle in the source tree.                                        |
+| `ImporterError::MalformedPayload` (sub: `atomic-write-failed`) | `error` | Filesystem-level event; investigate disk / mount.                          |
+| `ImporterError::MissingDependency` (child re-cookable)        | `warn`  | Same-session recovery via dependency-walk.                                  |
+| `ImporterError::MissingDependency` (child source missing)     | `error` | Operator must edit the parent or restore the child source.                 |
+| `ImporterError::Cancelled`                       | `debug`          | Routine; explicit operator intent.                                          |
+| `ResidencyError::HashNotInCas`                   | `error`          | Workspace-move or filesystem-damage signal; re-cook on next session.        |
+| `ResidencyError::ManifestStale`                  | `info`           | Routine during hot-reload; consumer re-resolves.                            |
+| `ResidencyError::BudgetExceeded`                 | `warn`           | Escalates to `error` on rapid recurrence (>3 within 1 s).                   |
+| `ResidencyError::IoFailure`                      | `error`          | OS-level I/O is never routine; platform's bounded EINTR retry already ran. |
+
+Structured fields attached at the handling site (in addition to the
+engine-wide `error.tag` / `error.code` / `error.file` / `error.line`
+from `reviews/decisions/error-model.md` §"Logging / Telemetry"):
+
+- `asset_id` — the `AssetId` the operation was on, when known.
+- `content_hash` — the `ContentHash` (BLAKE3 hex), when residency-side.
+- `source_path` — the `SourceAsset.path` (relative to
+  `assets/source/`), when importer-side.
+- `importer_kind` — `"fbx"` / `"freeimage"` / `"freetype"`, when
+  importer-side. **Required** for §10.3 SDK-attributable arms so
+  telemetry can spot per-SDK regression patterns even though the
+  enum does not discriminate by SDK.
+- `cook_session_id` — the `CookSession`'s opaque id, when cook-time.
+
+### 10.6 Cross-references (out of §10 scope)
+
+- **Hot-reload refusal classes.** `core::Error::PluginAbiHashMismatch`,
+  `PluginInitFailed`, `SchemaMigrationFailed`, `HotReloadRefused`
+  surface during the `glibre.content` plugin's own dylib swap.
+  Owned by `specs/core/SPEC.md`; documented at the content seam in
+  §8.5 Class C. Content contributes nothing new to those arms.
+- **Schema migration.** `data::Error::SchemaMigrationFailed` covers
+  Fory-serialized payloads whose `(fqn, schema_version)` is no
+  longer in the registry — including the manifest itself when read
+  from disk at workspace open. Owned by `specs/data/SPEC.md`.
+  Content's `MalformedPayload (schema-fqn-unknown)` sub-cause is
+  the *cook-time producer-side* mirror; both surface for the same
+  underlying problem (a producer wrote bytes claiming to be a
+  schema the runtime cannot deserialize) but at different sides
+  of the persistence boundary.
+- **Platform I/O.** `platform::Error::IoFailure` from `mmap`,
+  `open`, `rename`, file-watcher syscalls. Owned by
+  `specs/platform/SPEC.md` §10. Content translates into its own
+  `ResidencyError::IoFailure` at the residency manager's I/O lane
+  (per `reviews/decisions/error-model.md` §"Composition Rules" #2);
+  the `OsCode` from platform rides in `error.detail` for
+  telemetry, never branched on.
+- **Render device-lost on swap.** `render::Error::DeviceLost`
+  during a manifest swap that touches GPU-resident state. Owned by
+  `specs/render/SPEC.md`. Content's manifest publish completes at
+  the CPU layer; render's GPU handle re-resolution is its concern.
+
+### 10.7 Open questions (carried into §12)
+
+- **Per-SDK escalation telemetry.** The §10.5 `importer_kind` field
+  is required, but no §10 contract pins the *retention* horizon for
+  SDK-attributable telemetry. If a per-SDK regression watch becomes
+  load-bearing post-MVP, promote `importer_kind` from a log field
+  to a typed payload on the `ImporterError` enum. Until two
+  consumers need to discriminate, the closed sum stays small per
+  §4.7-style arity discipline.
+- **`bad_alloc` from importer SDKs.** Currently terminates per
+  §10.3. Mirrors `reviews/decisions/error-model.md` open question 4.
+  Will be revisited when the editor module lands and the
+  cross-cutting OOM policy resolves.
+- **Cancellation as `info` vs `debug`.** The editor's stop-button
+  flow logs cancellation at `info` for visibility; the watcher's
+  rapid debounce-induced cancellation logs at `debug`. The two
+  paths share an arm but differ in operational meaning. May warrant
+  splitting into `Cancelled` / `Superseded` post-MVP.
+- **Re-cook escalation on `HashNotInCas` storm.** A workspace move
+  that drops the `cooked/` directory will fire `HashNotInCas` on
+  every load until the next session re-cooks. Today this surfaces
+  one arm per request at `error`; a consolidating storm-detector
+  is post-MVP and will likely live in `obs`, not in content.
 
 ## 11. Acceptance Criteria
 
