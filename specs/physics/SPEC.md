@@ -3664,7 +3664,700 @@ non-deterministic; both must pass for a PR to merge.
 
 ## 10. Failure Modes & Error Model
 
-Typed errors. Recovery.
+Physics's failure surface is the closed sum `physics::Error` declared
+in §5. Every public function in §5 returns
+`Result<T> = std::expected<T, glibre::Error>`, and physics contributes
+exactly one arm to the engine-wide variant per
+`reviews/decisions/error-model.md`. §10 fills three slots that §5
+left implicit:
+
+1. **Per-arm semantics.** For each variant: trigger, recovery
+   contract, and log severity. The recovery contract names what the
+   *caller* may do; physics itself never auto-retries across the
+   boundary (composition rule 2 of `error-model.md`).
+2. **Aggregate-by-aggregate failure surface.** Which arms each §4
+   aggregate can return at which §5 entry points, plus the
+   recovery shape specific to that aggregate.
+3. **Determinism-gate translation.** How `NumericalInstabilityDetected`
+   and `DeterminismCheckFailed` flow through the §6.4 guards and the
+   §8.6 round-trip test; the **CI vs shipping** severity split that
+   keeps determinism a hard gate in CI without aborting shipping
+   sessions on a downgrade-able warn.
+
+§10 introduces three new arms beyond what §5 enumerated at spec-draft
+time — `QueryFilterInvalid`, `NumericalInstabilityDetected`, and
+`DeterminismCheckFailed`. Adding any of them is an ABI bump per the
+`physics::Error` closed-sum rule (§5 preamble, PHILOSOPHY §9). The
+arms are listed here so the diagnostic surface is enumerated in one
+place; the §5 enum row + the `JoltMiddleman` ABI-hash bump for the
+three additions land in the follow-up implementation plan
+(see §10.7).
+
+The issue-cited shorthand `AccumulatorClampHit` is the same condition
+as §5's `physics::Error::AccumulatorClampExceeded` (carry dropped past
+the four-substep cap, §4.1.3 invariant 2). The shorthand
+`BodyIdInvalid` is the same condition as §5's `BodyNotFound`
+(`BodyId` resolves outside its world, §4.1.5b invariant 1). §10 uses
+the §5 enumerator names.
+
+### 10.1 Per-arm contract
+
+Trigger / Recovery / Severity for every `physics::Error` arm. Severity
+is the level the *handling boundary* logs at (per `error-model.md`
+§"Logging / Telemetry" rule 1 — physics never logs at the raise site).
+Recovery is what the caller may do; the table omits the universal
+"propagate via `std::unexpected` and let the next boundary decide"
+fallback.
+
+#### `ConfigInvalid`
+
+- **Trigger.** `PhysicsConfig` rejected at world init: layer
+  interaction matrix incomplete, `dt` non-positive, broadphase-layer
+  mapping missing entries, sleep thresholds negative, budget caps
+  zero, `JoltMiddleman` ABI hash mismatch in the config-stamped
+  field. Detected in `PhysicsWorld::create` before any Jolt allocation.
+- **Recovery.** Caller fixes the `PhysicsConfigRecord`. The world
+  is **refused** — no half-built `PhysicsWorld` is published.
+  Returning `Result<PhysicsWorldHandle>` with `unexpected` is the
+  only outcome; partial state is rolled back inside the call.
+- **Severity.** `error`. Always actionable; a misconfigured
+  `PhysicsConfig` cannot be recovered without operator intervention.
+
+#### `WorldNotInitialised`
+
+- **Trigger.** Any §5 entry point invoked before
+  `PhysicsWorld::create` returned successfully (e.g. spawning a body
+  on a default-constructed `PhysicsWorldHandle`).
+- **Recovery.** Programming error in nearly every case. Caller
+  reorders init: `PhysicsConfig` → `PhysicsWorld::create` → body /
+  collider spawning. Physics **refuses** the call.
+- **Severity.** `error`. CI promotes to a build failure inside test
+  runs (mirrors platform §10.1 `AlreadyExists` behavior).
+
+#### `WorldAlreadyInitialised`
+
+- **Trigger.** `PhysicsWorld::create` called twice on the same
+  `PhysicsWorldHandle` (§4.1.1 invariant 2 — single-owner). Also
+  surfaces if a hot-reload swap accidentally races a second `create`
+  on the carrier handle before the migration arena drains.
+- **Recovery.** Programming error. Caller drops the duplicate
+  `create`. The previous-good world keeps stepping; the second call
+  is **refused** with no state mutation.
+- **Severity.** `warn`. Not `error` because the previous-good world
+  is unaffected; the duplicate is silenced cleanly.
+
+#### `BudgetExceeded`
+
+- **Trigger.** Body / collider / contact / constraint count exceeds
+  the per-pool ceiling pinned by `PhysicsConfig` (§4.1.2,
+  §9.3 ceilings). Surfaces from `PhysicsWorld::add_body`,
+  `add_collider`, `add_joint`, and from the substep when Jolt's
+  internal contact pool overflows.
+- **Recovery.** Caller-domain decision. Content / gameplay code
+  either (a) despawns lower-priority bodies, (b) raises the
+  `PhysicsConfig` budget on the next world creation event (a budget
+  change is a fresh-world event, §4.1.2 invariant 2), or (c)
+  surfaces the failure as a content-budget violation. Physics
+  **clamps** by refusing the `add_*` call — it never silently drops
+  a pre-existing body to make room.
+- **Severity.** `error` at the handling boundary. CI's S1 fixture
+  (§9.6.3) treats a `BudgetExceeded` from steady state as a fixture
+  authoring bug.
+
+#### `BodyNotFound` (alias `BodyIdInvalid` per issue)
+
+- **Trigger.** `BodyId` resolves outside its owning world: stale
+  handle (body despawned mid-frame and the call lands in phase 8),
+  cross-world `BodyId` (handle from world A used against world B),
+  or zero-init `BodyId` reaching a query (§4.1.5b invariant 1).
+- **Recovery.** Caller-domain decision. Gameplay code typically
+  treats a stale `BodyId` as a despawn signal and skips the
+  affected entity. Physics **refuses** the per-call effect — no
+  Jolt mutation occurs.
+- **Severity.** `info` at the handling boundary. The most common
+  trigger (despawn-during-step, §4.1.14 collapse) is expected
+  steady-state traffic; logging at higher levels would drown the
+  legitimate failures.
+
+#### `BodyMotionTypeImmutable`
+
+- **Trigger.** `RigidBody::set_motion_type` (or equivalent) called
+  on a body whose `MotionType` is already pinned (§4.1.5
+  invariant 3). Mutating `MotionType` post-create is forbidden;
+  the caller must despawn and re-add.
+- **Recovery.** Programming error. Caller despawns + re-adds with
+  the desired `MotionType`. Physics **refuses** the mutation; the
+  Jolt body keeps its current `MotionType`.
+- **Severity.** `warn`. Common during gameplay-system development;
+  not `error` because the simulation continues correctly.
+
+#### `BodyStillReferencedByJoint`
+
+- **Trigger.** `PhysicsWorld::remove_body` called while a live
+  `Joint` still references the body as endpoint A or B (§4.1.7
+  invariant 4). Detected by Jolt's joint registry walk before the
+  body destruction is committed.
+- **Recovery.** Caller removes the offending joints first
+  (`PhysicsWorld::remove_joint(jid)`) then re-issues the body
+  remove. Physics **refuses** the body remove until the joint set
+  is empty; this prevents dangling endpoints.
+- **Severity.** `warn`. The previous-good world is unaffected; the
+  caller fixes ordering and retries.
+
+#### `ColliderShapeRequired`
+
+- **Trigger.** `add_collider` called with no `ShapeHandle` set
+  (default-init), or with a `ShapeHandle` whose refcount is zero
+  (§4.1.6 invariant 2 — shape table garbage-collects refcount-zero
+  entries). Surfaces from the §5 collider-builder seam.
+- **Recovery.** Caller calls `PhysicsWorld::intern_shape(blob)` to
+  obtain a live `ShapeHandle`, then re-issues the collider add.
+  Physics **refuses** the collider add.
+- **Severity.** `error`. Almost always a content-pipeline drift
+  (cooked shape blob missing) and operator-actionable.
+
+#### `ShapeBlobMalformed`
+
+- **Trigger.** `intern_shape(blob)` called with bytes that fail
+  Fory deserialisation, or a deserialised `ShapeBlobRecord` whose
+  variant tag is unknown to this build (e.g. a `ConvexHull` blob
+  shipped from a newer cooker than the engine). Surfaces from the
+  data-context schema reader (§7.1.2).
+- **Recovery.** Caller treats as missing-asset (drop / fall back to
+  default cube collider). Physics **refuses** the intern; no
+  partial shape is registered. Content-pipeline drift is the usual
+  root cause; the asset cooker's blob version is the diagnostic
+  field.
+- **Severity.** `error`. CI promotes to a fixture authoring failure.
+
+#### `ShapeBlobVersionUnsupported`
+
+- **Trigger.** `intern_shape(blob)` deserialised cleanly but the
+  `ShapeBlobRecord.schema_version` is greater than the running
+  build's reader-side current version, with no migration chain
+  registered (§7.2.2). Surfaces during normal world build *and*
+  during hot-reload restore (§8.3.2).
+- **Recovery.** Two operator paths: (a) author the missing
+  `vN → vN+1` migration body under `src/physics/migrations/` and
+  rebuild, (b) re-cook the asset against the current schema
+  version. Physics **refuses** the intern; the previous-good world
+  keeps stepping.
+- **Severity.** `error`. Always operator-actionable.
+
+#### `ShapeHandleStale`
+
+- **Trigger.** A `ShapeHandle` whose refcount has decremented to
+  zero is reused (§4.1.6 invariant 2 — handle reuse only after
+  garbage collection of the refcount-zero entry). The most common
+  trigger is a gameplay system that cached a `ShapeHandle` across
+  a world destroy / recreate.
+- **Recovery.** Caller re-interns from the underlying blob.
+  Physics **refuses** the per-call effect.
+- **Severity.** `warn`. Not `error` because the simulation
+  continues; the stale handle is silenced cleanly.
+
+#### `ShapeBlobMissing`
+
+- **Trigger.** Hot-reload restore phase encounters a
+  `body_shape_blob_hashes` entry in the carrier `PhysicsSnapshot`
+  that no longer resolves in the surviving `ShapeBlobRecord` table
+  (§8.4 row 4). Cooked-asset drift between the snapshot and the
+  new plugin's shape table is the root cause.
+- **Recovery.** Operator restores the dropped `ShapeBlobRecord`,
+  re-cooks the affected body's shape, or accepts a fresh world
+  (snapshot re-capture against the current shape table). The
+  hot-reload swap is **refused** at the loader (`core::Error::
+  HotReloadRefused` carrying `ShapeBlobMissing`); the previous-
+  good plugin remains live (§8.4).
+- **Severity.** `warn` per the §8.4 row contract — the previous-
+  good plugin keeps stepping, so the failure is informational at
+  the hot-reload boundary, not an `error`.
+
+#### `JointEndpointInvalid`
+
+- **Trigger.** `PhysicsWorld::add_joint` called with a `JointDescriptor`
+  whose endpoint A or B `BodyId` does not resolve in the world
+  (zero-init handle, cross-world handle, body already despawned).
+  Detected before Jolt's constraint allocation.
+- **Recovery.** Caller validates body endpoints (re-fetches live
+  `BodyId`s) and re-issues. Physics **refuses** the joint add; no
+  Jolt constraint is allocated.
+- **Severity.** `error`. Almost always a content / gameplay
+  ordering bug (joint authored before its endpoint bodies exist).
+
+#### `JointDanglingEndpoint`
+
+- **Trigger.** `remove_body` attempted with a live joint still
+  referencing it (the *symmetric* case of `JointEndpointInvalid`,
+  detected at body-removal time rather than joint-add time;
+  §4.1.7 invariant 4). Surfaces from `PhysicsWorld::remove_body`.
+- **Recovery.** Caller removes joints first, then re-issues the
+  body remove. Physics **refuses** the body remove.
+- **Severity.** `warn`. Previous-good world unaffected.
+
+#### `JointKindUnsupported`
+
+- **Trigger.** Post-MVP joint kind requested (a `JointKind`
+  enumerator absent from this build's sealed sum, §4.1.7
+  invariant 1). Surfaces from `add_joint` and from snapshot
+  restore against an older build.
+- **Recovery.** Operator-level: rebuild the physics plugin with
+  the missing joint kind compiled in (an ABI bump, PHILOSOPHY §9).
+  Physics **refuses** the joint add or the snapshot restore.
+- **Severity.** `error`. Always operator-actionable.
+
+#### `JointBroken`
+
+- **Trigger.** Mutation attempted on a joint that has tripped its
+  `JointBreakThreshold` (`JointBrokenEvent` already emitted,
+  §4.1.7 invariant 5). Surfaces from `set_joint_motor`,
+  `set_joint_limits`, and friends.
+- **Recovery.** Caller checks `is_joint_broken(jid)` before mutating,
+  or removes the broken joint and adds a fresh one. Physics
+  **refuses** the mutation; the broken joint stays broken.
+- **Severity.** `info`. Routine post-break cleanup signal; logging
+  louder would drown legitimate failures.
+
+#### `StepCalledOutsidePhase3`
+
+- **Trigger.** Any caller-driven `Step` outside phase 3 (PHILOSOPHY
+  §7 — phase 3 is the sole owner of advancement; §4.1.3 invariant 1).
+  Detected by the frame-phase guard at the §5 entry point.
+- **Recovery.** Programming error. Caller routes the simulation
+  advance through the engine frame loop. Physics **refuses** the
+  call; no Jolt step occurs.
+- **Severity.** `error`. CI promotes to a frame-loop integration
+  failure.
+
+#### `QueryDuringStep`
+
+- **Trigger.** `PhysicsQueries::ray_cast` / `shape_cast` / `overlap`
+  / `closest_point` invoked while phase 3 is in flight (§4.1.10
+  invariant 4). Detected by the phase guard on the queries
+  aggregate.
+- **Recovery.** Caller defers the query to phase 5+ (post-step
+  window) or phase 1 (pre-step window). Physics **refuses** the
+  query; no Jolt broadphase walk occurs.
+- **Severity.** `warn`. Common during gameplay-system development;
+  not `error` because the simulation continues.
+
+#### `QueryFilterInvalid` (added by §10)
+
+- **Trigger.** `QueryFilter` rejected at the queries entry: an
+  empty `CollisionLayer` mask (would match nothing — programming
+  error), a callback predicate that mutates ECS state during the
+  filter walk (§4.1.10 invariant 5; debug-build assertion
+  promoted to a typed arm in release), or an
+  ECS-component-presence requirement that names a component
+  unknown to the running build's schema. Detected before Jolt's
+  broadphase is touched.
+- **Recovery.** Caller fixes the filter shape. Physics **refuses**
+  the query; the result span is left untouched.
+- **Severity.** `error`. The "filter is pure" rule (§4.1.10
+  invariant 5) is determinism-relevant — a filter that mutates ECS
+  state during the broadphase walk would invalidate substep
+  byte-equality (§4.2 invariant 3); we refuse loudly.
+
+#### `AccumulatorClampExceeded` (alias `AccumulatorClampHit` per issue)
+
+- **Trigger.** Phase-3 entry observed `acc >= 4 * dt` after the
+  per-frame `acc += core_dt` step; the bounded-catch-up cap
+  (§4.1.3 invariant 2) drops the carry past four substeps.
+- **Recovery.** Physics **clamps** by dropping the carry past four
+  substeps and continues stepping. The dropped carry is logged for
+  diagnostic purposes; the simulation re-converges within the
+  next few frames once the wall-clock spike subsides. Caller need
+  not act unless the spike is sustained, in which case operator
+  surfaces a frame-pacing investigation.
+- **Severity.** `warn`. The clamp is a deliberate determinism
+  trade (PHILOSOPHY §7 — determinism over wall-clock fidelity
+  under stall). The non-fatal path is also surfaced as
+  `physics::Warning::AccumulatorClamped` (§5) for the cases that
+  do not need to abort a call; the typed `Error` arm is reserved
+  for the case where a caller asked the accumulator for a guarantee
+  it cannot keep (e.g. fixed-substep-replay traces with a missing
+  carry frame).
+
+#### `SubstepEcsCommitInverted`
+
+- **Trigger.** Mid-substep ECS↔Jolt cross-traffic detected (§4.1.4
+  invariant 2). The debug-build instrumentation promoted to a
+  typed arm in release builds when the deterministic-mode flag is
+  on (§6.4 rule 1).
+- **Recovery.** Programming error in a §6.3 mirror seam refactor.
+  Physics **aborts** the substep — no partial step is committed —
+  and the typed arm carries the offending entity / component.
+- **Severity.** `error`. Always determinism-breaking; CI promotes
+  to a determinism-gate failure (§6.4 + §8.6).
+
+#### `SnapshotSchemaMismatch`
+
+- **Trigger.** `PhysicsSnapshot::from_bytes` deserialised cleanly
+  but the snapshot's `physics_config_hash` mismatches the running
+  world's recomputed `PhysicsConfig.content_hash` (§7.1.4
+  invariant 3, §8.4 row 3). Cross-config restore is forbidden.
+- **Recovery.** Operator either reverts the `PhysicsConfigRecord`
+  change (a config change is a fresh-world event, not a
+  hot-reload event, §4.1.2 invariant 2) or restores from a
+  snapshot whose hash matches the new config. Physics **refuses**
+  the restore; the previous-good world keeps stepping.
+- **Severity.** `warn` at the hot-reload boundary (§8.4 row
+  contract — the previous-good plugin is unaffected); CI promotes
+  to an `error` inside the determinism-gate fixture.
+
+#### `SnapshotDeserialiseFailed`
+
+- **Trigger.** `PhysicsSnapshot::from_bytes` fed bytes that fail
+  Fory deserialisation (truncated, version-tag-corrupt, or
+  schema-incompatible past the migration table's reach). Surfaces
+  from the data-context codec (§7.1.4).
+- **Recovery.** Caller treats the snapshot as unrecoverable
+  (re-capture from the live world, or fall back to a fresh
+  world). Physics **refuses** the restore.
+- **Severity.** `error`. Always actionable.
+
+#### `SnapshotBodyIdUnresolved`
+
+- **Trigger.** Snapshot restore observed a persisted `BodyId` that
+  has no live ECS entity in the post-restore world (§7.1.4
+  invariant 4 — `BodyId` ↔ `ecs::Entity` mapping is part of the
+  snapshot but the entity was destroyed before restore completed).
+- **Recovery.** Caller drops the affected body from the carrier
+  snapshot and re-issues, or accepts the body absence (the
+  per-body-fail-tolerant restore path). Physics **clamps** by
+  skipping the unresolved row and continues; the dropped row
+  count is logged.
+- **Severity.** `warn`. The restore continues — the simulation is
+  not aborted, but the diagnostic is preserved for telemetry.
+
+#### `JoltMiddlemanHashMismatch`
+
+- **Trigger.** Hot-reload protocol step 2.1 observed
+  `Q::glibre_types_abi_hash() != host_glibre_types_abi_hash` for the
+  physics-typed surface, *or* physics's `register` step 1 re-asserted
+  via `JoltMiddleman::require_hash` and the new plugin's compiled-in
+  hash differs from the running middleman dylib's hash (§4.1.13
+  invariants 1+2, §8.4 row 1).
+- **Recovery.** Operator rebuilds the physics plugin against the
+  current `JoltMiddleman` (same Jolt version + type list the host
+  shipped). The hot-reload swap is **refused** at the loader; the
+  previously-loaded physics plugin keeps stepping (PHILOSOPHY §9 —
+  refuse load on hash mismatch).
+- **Severity.** `warn`. The previous-good plugin is unaffected; the
+  refusal is loud-but-bounded per §8.4 / `error-model.md`
+  §"Logging / Telemetry" rule 3.
+
+#### `JoltMiddlemanUnavailable`
+
+- **Trigger.** Engine init reached the physics plugin register step
+  but `glibre-jolt-middleman.dylib` is not loaded (file missing,
+  load failed earlier, or the host's plugin manifest does not
+  declare the middleman dependency). Detected by the middleman
+  presence check before any Jolt allocation.
+- **Recovery.** Operator-level: ship the middleman dylib alongside
+  the physics dylib, or fix the manifest to declare the dependency.
+  Physics **aborts** its register; the engine boots without the
+  physics plugin (the engine treats the missing plugin as a §6.5
+  cross-context handoff failure, not a per-frame error).
+- **Severity.** `error`. Always operator-actionable; the engine
+  cannot run physics without the middleman.
+
+#### `HotReloadStateUnmigratable`
+
+- **Trigger.** Hot-reload protocol step 3.1 found
+  `PhysicsSnapshot.schema_version` greater than the new plugin's
+  reader-side current version, with no migration chain registered
+  (§7.2.4, §8.4 row 2). Detected before any byte is overwritten in
+  the surviving storage.
+- **Recovery.** Operator authors the missing `vN → vN+1` migration
+  body under `src/physics/migrations/`, ships it in the new plugin,
+  and re-triggers the swap; *or* restores from a snapshot taken at
+  the prior schema version. The migration arena is reset before
+  the cause is returned. The hot-reload swap is **refused** at the
+  loader; the previously-loaded physics plugin keeps stepping
+  (§8.4).
+- **Severity.** `warn`. Same `error-model.md` §"Logging /
+  Telemetry" rule 3 contract as the other hot-reload refusals.
+
+#### `NumericalInstabilityDetected` (added by §10)
+
+- **Trigger.** A NaN or infinity reached the substep barrier in a
+  field that crosses the §6.4 rule 4 IEEE-754 bit-equal storage
+  contract: body position / orientation / velocity, contact-event
+  impulse, joint motor target, or external-force drain sum. The
+  runtime never *produces* NaN (§4.1.4 invariant 4); detection here
+  means an external input (gameplay code, hot-reload migration,
+  snapshot deserialise) introduced one. Detected by the substep
+  exit barrier's bit-pattern check.
+- **Recovery.** Physics **aborts** the offending substep — the
+  Jolt body / joint state is rolled back to the substep entry
+  snapshot, and the substep is not committed to ECS. The carrier
+  trace records the offending entity / component / value for the
+  determinism-gate corpus. Recovery in shipping is per-substep
+  (caller's gameplay logic decides whether to despawn the body or
+  freeze it); CI fails the run.
+- **Severity.** `error` always at the handling boundary. Unlike
+  `DeterminismCheckFailed`, this is never downgraded to `warn` in
+  shipping — a NaN in the simulation state is a content / gameplay
+  bug that operators must see.
+
+#### `DeterminismCheckFailed` (added by §10)
+
+- **Trigger.** The §6.4 + §8.6 determinism gate observed a
+  divergence: post-substep snapshot bytes do not match the golden
+  trace at frame `N` (§8.6 step 3 assertion), *or* the §6.4 rule 2
+  fixed-iteration-order scratch span hash diverged from its
+  pre-step value (mid-step iteration order corruption), *or* a
+  cross-host snapshot byte-comparison at the §11 acceptance fixture
+  (`macos-arm64` vs `macos-x64`) reported a mismatch.
+- **Recovery.** Physics **refuses** to commit the divergent
+  substep in CI builds; the simulation is rolled back to the last
+  known-good snapshot and the carrier trace is preserved for the
+  determinism-gate corpus. In shipping builds the **default** is
+  to log at `warn` and continue (the divergence is recorded for
+  telemetry, the simulation keeps stepping with the divergent
+  state). The downgrade is **configurable**: shipping builds may
+  opt into the CI behavior via `PhysicsConfig.determinism_gate =
+  Hard` (default `SoftWarn`), in which case the substep is
+  refused as in CI.
+- **Severity.**
+  - **CI builds (default `Hard`)** — `error`. The PR fails the
+    determinism gate (§9.6.4); the substep refuses to commit.
+  - **Shipping builds (default `SoftWarn`)** — `warn`. The
+    substep commits with the divergent state; telemetry records
+    the divergence for post-hoc analysis. Operators may flip to
+    `Hard` if their build cannot tolerate diverged steady state
+    (e.g. lock-step multiplayer).
+
+  The CI vs shipping split is the only place in §10 where the
+  same arm carries two severities. The split is encoded as a
+  `physics::DeterminismGate { Hard, SoftWarn }` knob in
+  `PhysicsConfig`, defaulted by build flavor: `Hard` under
+  `-DGLIBRE_DETERMINISM_GATE=hard` (set by the CI workflow),
+  `SoftWarn` otherwise. Engine code never branches on the build
+  flavor directly — the knob is the only inspection point.
+
+### 10.2 Aggregate-by-aggregate failure surface
+
+Each §4 aggregate enumerates: which arms it can return at which §5
+entry points, and the recovery shape specific to that aggregate.
+Cross-aggregate recovery is forbidden — `PhysicsQueries` does not
+re-translate a `PhysicsWorld` error.
+
+#### 10.2.1 `PhysicsWorld` (§4.1.1)
+
+| Entry point                          | Returnable arms                                                                                          | Trigger summary                                              |
+|--------------------------------------|----------------------------------------------------------------------------------------------------------|--------------------------------------------------------------|
+| `PhysicsWorld::create`               | `ConfigInvalid`, `WorldAlreadyInitialised`, `JoltMiddlemanUnavailable`, `JoltMiddlemanHashMismatch`      | bad config, double-init, middleman missing / hash mismatch   |
+| `PhysicsWorld::add_body`             | `WorldNotInitialised`, `BudgetExceeded`, `ColliderShapeRequired`, `ShapeHandleStale`                     | budget cap, missing shape, stale handle                      |
+| `PhysicsWorld::remove_body`          | `WorldNotInitialised`, `BodyNotFound`, `BodyStillReferencedByJoint`, `JointDanglingEndpoint`             | live joint endpoint, stale `BodyId`                          |
+| `PhysicsWorld::set_motion_type`      | `WorldNotInitialised`, `BodyNotFound`, `BodyMotionTypeImmutable`                                         | mutation post-create forbidden                               |
+| `PhysicsWorld::add_collider`         | `WorldNotInitialised`, `BodyNotFound`, `ColliderShapeRequired`, `ShapeHandleStale`, `ShapeBlobMalformed` | shape table drift                                            |
+| `PhysicsWorld::add_joint`            | `WorldNotInitialised`, `JointEndpointInvalid`, `JointKindUnsupported`, `BudgetExceeded`                  | bad endpoints, post-MVP kind                                 |
+| `PhysicsWorld::remove_joint`         | `WorldNotInitialised`, `BodyNotFound`                                                                    | stale `JointId`                                              |
+| `PhysicsWorld::set_joint_motor`      | `WorldNotInitialised`, `BodyNotFound`, `JointBroken`                                                     | broken-joint mutation                                        |
+| `PhysicsWorld::step`                 | `StepCalledOutsidePhase3`, `AccumulatorClampExceeded`, `SubstepEcsCommitInverted`, `NumericalInstabilityDetected`, `DeterminismCheckFailed` | phase guard, clamp, mirror inversion, NaN, divergence      |
+| `PhysicsWorld::snapshot`             | `WorldNotInitialised`, `SnapshotSchemaMismatch`                                                          | config hash drift                                            |
+| `PhysicsWorld::intern_shape`         | `WorldNotInitialised`, `ShapeBlobMalformed`, `ShapeBlobVersionUnsupported`, `BudgetExceeded`             | bad blob, version unsupported                                |
+
+`AccumulatorClampExceeded` from `step` is the typed-arm form of
+`Warning::AccumulatorClamped` — see §10.1 for the warning vs error
+split. `NumericalInstabilityDetected` and `DeterminismCheckFailed`
+both abort the offending substep before commit; the world keeps
+stepping at the next frame.
+
+#### 10.2.2 `Accumulator` (§4.1.3)
+
+The accumulator does not expose a public `Result<T>` surface — its
+state mutations are §6.2-internal to `PhysicsWorld::step`. Failures
+surface through `PhysicsWorld::step`'s arms (`AccumulatorClampExceeded`,
+`StepCalledOutsidePhase3`). Listed here for completeness.
+
+#### 10.2.3 `PhysicsQueries` (§4.1.10)
+
+| Entry point                          | Returnable arms                                                              | Trigger summary                                              |
+|--------------------------------------|------------------------------------------------------------------------------|--------------------------------------------------------------|
+| `PhysicsQueries::ray_cast`           | `WorldNotInitialised`, `QueryDuringStep`, `QueryFilterInvalid`, `BodyNotFound` | bad filter, phase-3 violation                              |
+| `PhysicsQueries::shape_cast`         | `WorldNotInitialised`, `QueryDuringStep`, `QueryFilterInvalid`, `ShapeHandleStale` | bad filter, stale shape                                  |
+| `PhysicsQueries::overlap`            | `WorldNotInitialised`, `QueryDuringStep`, `QueryFilterInvalid`               | bad filter                                                  |
+| `PhysicsQueries::closest_point`      | `WorldNotInitialised`, `QueryDuringStep`, `QueryFilterInvalid`, `BodyNotFound` | bad filter, stale body                                    |
+
+`QueryFilterInvalid` is the dedicated arm for the §4.1.10
+invariant 5 "filter is pure" check; mutating ECS during a filter
+callback is determinism-breaking and refused at the boundary.
+
+#### 10.2.4 `PhysicsSnapshot` (§4.1.12)
+
+| Entry point                             | Returnable arms                                                        | Trigger summary                                              |
+|-----------------------------------------|------------------------------------------------------------------------|--------------------------------------------------------------|
+| `PhysicsSnapshot::from_bytes`           | `SnapshotDeserialiseFailed`, `SnapshotSchemaMismatch`, `ShapeBlobMissing`, `HotReloadStateUnmigratable` | bad bytes, config drift, missing blob, schema gap   |
+| `PhysicsSnapshot::to_bytes`             | total                                                                  | —                                                            |
+| `PhysicsSnapshot::restore_into`         | `SnapshotBodyIdUnresolved`, `JointEndpointInvalid`, `ShapeBlobMissing`, `ShapeBlobVersionUnsupported` | per-row restore failure                              |
+
+`SnapshotBodyIdUnresolved` is per-row and the restore continues; the
+other arms are pre-flight and the restore refuses entirely.
+
+#### 10.2.5 `JoltMiddleman` (§4.1.13)
+
+The middleman is not a §5 public boundary — its `Result<T>` surface
+is internal to `PhysicsWorld::create` and the hot-reload register
+step. Failures surface through `JoltMiddlemanHashMismatch` and
+`JoltMiddlemanUnavailable` on the `PhysicsWorld::create` row above.
+Listed here so the §4 aggregate roster maps 1:1 to §10.
+
+### 10.3 Determinism gate translation (CI vs shipping)
+
+The §6.4 rules and the §8.6 round-trip test are the determinism
+contract; §10.3 documents how the contract surfaces as typed arms
+and how the CI vs shipping severity split is encoded.
+
+The two arms that participate are `NumericalInstabilityDetected`
+(NaN / inf reached a substep barrier) and `DeterminismCheckFailed`
+(snapshot / iteration-order divergence detected by the gate). The
+two arms split as follows:
+
+| Arm                              | Detection site                           | CI behavior (`Hard`)                  | Shipping default (`SoftWarn`)         |
+|----------------------------------|------------------------------------------|---------------------------------------|---------------------------------------|
+| `NumericalInstabilityDetected`   | substep exit bit-pattern check (§6.4 r4) | `error`, abort substep, fail PR       | `error`, abort substep, telemetry     |
+| `DeterminismCheckFailed`         | §8.6 round-trip + §6.4 r2 hash compare   | `error`, refuse commit, fail PR       | `warn`, commit divergent step, telemetry |
+
+`NumericalInstabilityDetected` is **never** downgraded — a NaN in the
+simulation state is a content / gameplay bug that operators must see
+even in shipping. `DeterminismCheckFailed` is the only arm whose
+severity depends on the build flavor; the `PhysicsConfig.
+determinism_gate` knob (`Hard` / `SoftWarn`) selects the behavior.
+The default is `Hard` under `-DGLIBRE_DETERMINISM_GATE=hard` (set by
+the CI workflow `.github/workflows/determinism-gate.yml`) and
+`SoftWarn` otherwise.
+
+The split is anchored to PHILOSOPHY §7 ("determinism by default") +
+the operational reality that shipping a build that aborts on a
+single substep divergence would be hostile to players running
+heterogeneous hardware. CI is the place where the gate must be
+hard; shipping is the place where the gate may be soft. The
+configurability lets a downstream that needs hard determinism in
+shipping (e.g. lock-step multiplayer, replay-only competitive
+modes) flip to `Hard`.
+
+The `PhysicsConfig.determinism_gate` knob is part of the
+`PhysicsConfig.content_hash` (§7.1.1), so a build that flips the
+knob mid-trace gets a fresh-world event (§4.1.2 invariant 2) and
+the prior trace cannot be replayed — the gate setting is part of
+the determinism contract.
+
+### 10.4 Logging severity table (consolidated)
+
+The §10.1 per-arm severities, restated as the table the
+`glibre::log_error` helper uses when it formats a `physics::Error`
+into `spdlog`:
+
+| Arm                              | Default severity                        | Notes                                                          |
+|----------------------------------|-----------------------------------------|----------------------------------------------------------------|
+| `ConfigInvalid`                  | `error`                                 | Always operator-actionable                                     |
+| `WorldNotInitialised`            | `error`                                 | Init ordering bug                                              |
+| `WorldAlreadyInitialised`        | `warn`                                  | Previous-good world unaffected                                 |
+| `BudgetExceeded`                 | `error`                                 | Content-budget violation                                       |
+| `BodyNotFound`                   | `info`                                  | Despawn-during-step is steady-state traffic                    |
+| `BodyMotionTypeImmutable`        | `warn`                                  | Simulation continues correctly                                 |
+| `BodyStillReferencedByJoint`     | `warn`                                  | Caller fixes ordering and retries                              |
+| `ColliderShapeRequired`          | `error`                                 | Content-pipeline drift                                         |
+| `ShapeBlobMalformed`             | `error`                                 | Content-pipeline drift                                         |
+| `ShapeBlobVersionUnsupported`    | `error`                                 | Operator-actionable                                            |
+| `ShapeHandleStale`               | `warn`                                  | Simulation continues                                           |
+| `ShapeBlobMissing`               | `warn`                                  | §8.4 hot-reload contract — previous plugin keeps stepping      |
+| `JointEndpointInvalid`           | `error`                                 | Content / gameplay ordering bug                                |
+| `JointDanglingEndpoint`          | `warn`                                  | Previous-good world unaffected                                 |
+| `JointKindUnsupported`           | `error`                                 | Operator-actionable                                            |
+| `JointBroken`                    | `info`                                  | Routine post-break cleanup                                     |
+| `StepCalledOutsidePhase3`        | `error`                                 | Frame-loop integration failure                                 |
+| `QueryDuringStep`                | `warn`                                  | Simulation continues                                           |
+| `QueryFilterInvalid`             | `error`                                 | Determinism-relevant; refused loudly                           |
+| `AccumulatorClampExceeded`       | `warn`                                  | Determinism trade per PHILOSOPHY §7                            |
+| `SubstepEcsCommitInverted`       | `error`                                 | Determinism-breaking                                           |
+| `SnapshotSchemaMismatch`         | `warn` (CI: `error`)                    | §8.4 hot-reload contract                                       |
+| `SnapshotDeserialiseFailed`      | `error`                                 | Always actionable                                              |
+| `SnapshotBodyIdUnresolved`       | `warn`                                  | Per-row, restore continues                                     |
+| `JoltMiddlemanHashMismatch`      | `warn`                                  | §8.4 hot-reload contract — previous plugin keeps stepping      |
+| `JoltMiddlemanUnavailable`       | `error`                                 | Engine cannot run physics                                      |
+| `HotReloadStateUnmigratable`     | `warn`                                  | §8.4 hot-reload contract                                       |
+| `NumericalInstabilityDetected`   | `error` (CI + shipping)                 | Never downgraded                                               |
+| `DeterminismCheckFailed`         | `error` (CI `Hard`) / `warn` (shipping `SoftWarn`) | Configurable per `PhysicsConfig.determinism_gate`     |
+
+Physics never logs at the *raise* site; logging is the *handler's*
+responsibility per `error-model.md` §"Logging / Telemetry" rule 1.
+Physics's contribution is the typed arm + any structured
+diagnostic (offending `BodyId`, `JointId`, `frame_tick`,
+`world_tick`, `physics_config_hash`) attached to the `ErrorContext`;
+the engine-wide log helper does the formatting and dispatches to
+spdlog.
+
+### 10.5 Refusals (out of §10 scope)
+
+- **Hot-reload protocol shape.** `core::Error::HotReloadRefused`,
+  `PluginAbiHashMismatch`, `PluginInitFailed`, `SchemaMigrationFailed`
+  are owned by `specs/core/SPEC.md`. Physics contributes the four
+  inner causes enumerated in §8.4 (which roll up to those core
+  arms); §10 documents the physics-surface aliases
+  (`JoltMiddlemanHashMismatch`, `HotReloadStateUnmigratable`,
+  `SnapshotSchemaMismatch`, `ShapeBlobMissing`).
+- **Schema migration semantics.** Owned by `specs/data/SPEC.md` §10
+  + the per-record migration rules in §7.2. Physics's role stops at
+  surfacing `ShapeBlobVersionUnsupported` / `HotReloadStateUnmigratable`
+  / `SnapshotDeserialiseFailed` at the physics surface.
+- **Render BLAS invalidation on hot-reload.** Owned by
+  `specs/render/SPEC.md` §4.1.8 + §10. Physics publishes
+  `PhysicsWorldReplaced` (§8.5) and stops there; render's BLAS
+  reaction failures are render's failure surface.
+- **Frame-phase scheduler errors.** `core::Error::FramePhaseMisordered`
+  is owned by `specs/core/SPEC.md`. Physics's `StepCalledOutsidePhase3`
+  is the physics-side translation at the §5 boundary.
+- **Plugin-loader error model.** Owned by `specs/core/SPEC.md` and
+  `reviews/decisions/plugin-loader.md`.
+
+### 10.6 Cross-references
+
+- `reviews/decisions/error-model.md` — `std::expected<T, glibre::Error>`
+  contract that §10's per-arm rows fulfil; `-fno-exceptions` on
+  engine code; `glibre::log_error` dispatch rule.
+- `specs/physics/SPEC.md` §5 — the `physics::Error` enum that §10
+  documents arm-by-arm; the `physics::Warning` companion enum
+  cited in the `AccumulatorClampExceeded` row.
+- `specs/physics/SPEC.md` §4.1.* — the per-aggregate invariants
+  whose violation triggers each arm.
+- `specs/physics/SPEC.md` §6.4 — the four determinism guards
+  whose violation surfaces as `NumericalInstabilityDetected` /
+  `DeterminismCheckFailed` / `SubstepEcsCommitInverted`.
+- `specs/physics/SPEC.md` §8.4 — the four hot-reload refusal
+  causes whose physics-surface aliases live in §10.1
+  (`JoltMiddlemanHashMismatch`, `HotReloadStateUnmigratable`,
+  `SnapshotSchemaMismatch`, `ShapeBlobMissing`).
+- `specs/physics/SPEC.md` §8.6 + §9.6.4 — the determinism-gate
+  fixture that consumes `DeterminismCheckFailed`.
+- PHILOSOPHY §7 — determinism contract that §10.3 protects;
+  PHILOSOPHY §9 — refuse-on-hash-mismatch rule that
+  `JoltMiddlemanHashMismatch` enforces.
+
+### 10.7 Open questions (carried into §12)
+
+- Add `QueryFilterInvalid`, `NumericalInstabilityDetected`, and
+  `DeterminismCheckFailed` as enumerator rows in the §5
+  `physics::Error` enum (currently documented in §10.1 as added
+  by §10). Each addition is an ABI bump and triggers a
+  `JoltMiddleman` hash bump (§4.1.13 invariant 1, PHILOSOPHY §9);
+  scheduled for the implementation plan that introduces
+  `physics/include/glibre/physics/error.hpp`.
+- The `PhysicsConfig.determinism_gate` knob (`Hard` / `SoftWarn`)
+  needs a §4.1.2 invariant row + a §7.1.1 schema field. Both
+  edits are in the same implementation plan; they are listed here
+  so the determinism-gate split in §10.3 is testable end-to-end.
+- `ErrorContext` payload shape — physics arms attach `BodyId`,
+  `JointId`, `frame_tick`, `world_tick`, `physics_config_hash`
+  via the `ErrorContext.detail` field; whether `ErrorContext`
+  grows a structured payload struct (instead of the prose `detail`
+  string) is `error-model.md` open question 3 + `core/error.hpp`'s
+  call. Physics will follow whatever core picks.
+- `magic_enum` vs hand-written `to_string` for arm names in log
+  output — same deferral as platform §10.8.
 
 ## 11. Acceptance Criteria
 
