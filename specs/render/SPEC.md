@@ -1443,7 +1443,316 @@ per `reviews/decisions/error-model.md`.
 
 ## 6. Internal Architecture
 
-Non-binding sketch for implementers.
+Non-binding sketch for implementers. The aggregates of §4 and the public
+header of §5 are binding; the file/directory layout, threading topology,
+and per-pass invocation order below are illustrative and exist so the
+plan-leaf author has one obvious place to start. Reviewers should reject
+deviations only when they violate §4 invariants, the §5 header, or the
+per-phase ownership locked in `reviews/decisions/frame-phases.md`.
+
+### 6.1 Module layout
+
+The render plugin compiles to a single `.dylib`. Inside, source is split
+by SRP — one directory per "reason to change". Public headers (the §5
+deliverable + an `internal/` tree the rest of the plugin consumes) live
+under `render/include/glibre/render/`; implementation under `render/src/`.
+
+```
+render/
+  include/glibre/render/         # §5 surface (compiles standalone).
+    render.hpp                   # The single header from §5.
+    capability.hpp               # Capability / CapabilitySet bit layout.
+    handle.hpp                   # Generational `Handle<Tag>` template.
+  src/
+    graph/                       # Aggregate §4.1.2 + §4.1.5.
+      builder.{hpp,cpp}          # GraphBuilder fluent surface.
+      compile.{hpp,cpp}          # Topo sort, alias plan, barrier emit.
+      pass.{hpp,cpp}             # Pass storage + access-set typing.
+      execution_plan.{hpp,cpp}   # ExecutionPlan + structural-hash key.
+      diagnostic.{hpp,cpp}       # DiagnosticOverlay (debug-only).
+    metal/                       # Aggregate §4.1.6.
+      device.{hpp,cpp}           # MetalDevice singleton + heap allocator.
+      queue.{hpp,cpp}            # Graphics / Compute / Copy queue trio.
+      command_buffer.{hpp,cpp}   # MetalCommandBuffer + encoder cursor.
+      fence.{hpp,cpp}            # Cross-queue fence + present-fence emit.
+      residency.{hpp,cpp}        # MTLResidencySet attach/detach helpers.
+    passes/                      # One pass body per file; SRP per pass.
+      gbuffer.{hpp,cpp}          # Mesh-shader gbuffer + visID + velocity.
+      lighting.{hpp,cpp}         # Deferred lighting + RT shadow ray query.
+      shadow_rt.{hpp,cpp}        # Hybrid-RT shadow trace + denoise hook.
+      ao_rt.{hpp,cpp}            # Hybrid-RT AO trace + denoise hook.
+      cluster_cull.{hpp,cpp}     # ClusterCullPass body (state in §4.1.10).
+      hzb_build.{hpp,cpp}        # HZBBuildPass body (state in §4.1.9).
+      tlas_build.{hpp,cpp}       # TLAS rebuild-or-refit pass body.
+      blas_refit.{hpp,cpp}       # BLAS refit dispatch (compute queue).
+      transparent_forward.{hpp,cpp}  # Forward path reading LightCluster.
+      post.{hpp,cpp}             # Bloom / DOF / motion / tonemap chain.
+      aa_upscale.{hpp,cpp}       # TAA / FXAA / SMAA / TSR variant select.
+      present.{hpp,cpp}          # Drawable acquire + present-fence signal.
+    resources/                   # Aggregate §4.1.4 implementation.
+      transient_pool.{hpp,cpp}   # Heap pool drained per recompile.
+      persistent.{hpp,cpp}       # HZB, ShadowAtlas, history-color, rings.
+      alias_planner.{hpp,cpp}    # Interference-graph colouring.
+      ring_buffer.{hpp,cpp}      # Per-frame-in-flight CPU-write rings.
+      argument_buffer.{hpp,cpp}  # Frequency-group binder (§3.2 #8).
+    pso_cache/                   # Aggregate §4.1.7.
+      cache.{hpp,cpp}            # `(shader_hash,state_hash)` table + LRU.
+      warmer.{hpp,cpp}           # MVP-set pre-fault from shader manifest.
+      record.{hpp,cpp}           # PSOCacheRecord (Fory schema in §7.1.2).
+    rt/                          # Aggregate §4.1.8.
+      blas_registry.{hpp,cpp}    # Imported BLAS handle table.
+      tlas.{hpp,cpp}             # TLAS lifetime + rebuild-vs-refit policy.
+      refit_scheduler.{hpp,cpp}  # Per-frame BLAS refit scheduling.
+    cull/                        # Aggregate §4.1.9 + §4.1.10 + extract.
+      hzb.{hpp,cpp}              # HZB pyramid storage; two-phase reads.
+      cluster_cull_state.{hpp,cpp}   # Persistent-thread cluster cull.
+      meshlet_cull.{hpp,cpp}     # Meshlet frustum + normal-cone cull.
+      extract.{hpp,cpp}          # Phase-6 extract → RenderFrame builder.
+      sort.{hpp,cpp}             # Single-pass radix on packed SortKey.
+      budget.{hpp,cpp}           # Cost-aware budget culler (§3.2 #10).
+    frame/
+      render_frame.{hpp,cpp}     # RenderFrame storage + triple-buffer slots.
+      view.{hpp,cpp}             # Per-View instantiation + layer mask.
+    plugin.{hpp,cpp}             # Plugin entry: init / tick / migrate / shutdown.
+```
+
+The split is the §4 aggregate roster lifted directly into directories.
+Each directory owns one reason to change. Adding a new pass adds one
+file under `passes/`; adding a new resource role touches `resources/`;
+swapping the alias algorithm touches `alias_planner.cpp` only.
+
+### 6.2 Frame integration — phase 6 and phase 7
+
+Render owns exactly two phases per `reviews/decisions/frame-phases.md`.
+
+#### 6.2.1 Phase 6 — `cull-extract` (build `RenderFrame`)
+
+Driver thread, sequential body, no GPU calls. Steps in order:
+
+1. `cull/extract.cpp` opens a fresh `RenderFrame` slot in render's
+   triple-buffered per-frame arena (§4.1.1 invariant 4) and pins it
+   to the current `(World, FrameCounter)`.
+2. For each active `View` registered with render:
+   1. `cull/meshlet_cull.cpp` reads `GlobalTransform` + meshlet
+      bounds + last-frame's `HZB` (`cull/hzb.cpp`, §4.1.9 invariant
+      1) and emits the meshlet survivor set per the §3.1 core-raster
+      derivation.
+   2. `cull/budget.cpp` applies `PassPriority`-respecting cost-aware
+      culling against the per-view draw budget so phase 7 never has
+      to drop work silently (§4.1.1 invariant 3).
+   3. `cull/sort.cpp` writes the packed 64-bit `SortKey` column and
+      runs single-pass radix into the phase bucket arrays
+      (opaque / alpha-tested / translucent / shadow / 2D / capture).
+   4. The light list, camera + jitter, interp-α, and `RenderSettings`
+      snapshot are copied into the slot.
+3. The slot becomes immutable (§4.1.1 invariant 1). Phase 6 returns;
+   the snapshot bus delivers a `const RenderFrame&` to phase 7.
+
+Phase 6 is the only place ECS storage is read on the render side
+(§4.2 invariant 6); after exit, the ECS half of the frame may begin
+phase 7 of frame N+1's predecessor or move on to phase 8.
+
+#### 6.2.2 Phase 7 — `render-submit` (consume `RenderFrame`)
+
+Driver thread initiates phase 7; the body splits into a build/compile
+half (graph builder thread) and a recording half (per-pass workers
+on the render thread pool). Phase 7 returns when frame N's command
+buffer is enqueued and `PresentFence` is signalled (consumed by
+phase 9). Steps in order:
+
+1. **Build.** `graph/builder.cpp` instantiates one `RenderGraph`
+   per `View` from the immutable `RenderFrame`. The builder
+   sequence is fixed at MVP and registers passes in this order
+   (capability-gated per §4.1.2 invariant 3):
+
+   1. `passes/blas_refit.cpp` — refit one BLAS per visible LOD0
+      cluster set whose source mesh is dynamic (skinned /
+      deformable). The refit pass declares `Queue::Compute`.
+   2. `passes/tlas_build.cpp` — rebuild-or-refit the TLAS from
+      the visible-set; declares a read-after-write on the BLAS
+      refit outputs (§4.2 invariant 4). Compute queue.
+   3. `passes/cluster_cull.cpp` — persistent-thread compute
+      build of `LightCluster` for the active froxel grid.
+      Compute queue.
+   4. `passes/gbuffer.cpp` — mesh-shader dispatch writing the
+      gbuffer MRT + visibilityID + velocity in one `Pass`
+      (§4.2 invariant 5). Graphics queue.
+   5. `passes/hzb_build.cpp` — depth-pyramid build from the
+      gbuffer's depth output, written to next frame's HZB
+      (§4.1.9 invariant 1). Compute queue.
+   6. `passes/shadow_rt.cpp` + `passes/ao_rt.cpp` — RT shadow /
+      AO compute traces consuming the TLAS. Compute queue.
+   7. `passes/lighting.cpp` — deferred lighting compute reading
+      gbuffer + `LightCluster` + RT shadow / AO outputs; ray
+      query inline for hybrid-RT shadow primary-ray fallback
+      where `RenderSettings.shadow_tier` selects RT
+      (§3.2 collapse #2). Compute queue.
+   8. `passes/transparent_forward.cpp` — forward translucent
+      pass reading the same `LightCluster` (§3.2 collapse #3).
+      Graphics queue.
+   9. `passes/post.cpp` — bloom / DOF / motion / tonemap /
+      grade chain ordered per `RenderSettings`. Graphics queue.
+   10. `passes/aa_upscale.cpp` — TAA / FXAA / SMAA / TSR variant
+       selected by `RenderSettings.aa_mode`; graph topology
+       differs per variant, no shader-side branching
+       (§3.2 collapse #5). Graphics queue.
+   11. `passes/present.cpp` — drawable acquire, swapchain blit,
+       `PresentFence` signal. Graphics queue.
+
+2. **Compile.** `graph/compile.cpp` runs topological sort
+   (§4.1.2 invariant 1), interference-graph colouring through
+   `resources/alias_planner.cpp` (§4.1.4 invariant 2), barrier
+   emission through `graph/compile.cpp` (split-aware, minimum;
+   §4.1.5 invariant 1), queue assignment, and binding-table
+   build through `resources/argument_buffer.cpp`. Hits the
+   `ExecutionPlan` cache keyed by structural hash (§4.1.5 +
+   §4.1.2 invariant 4); a cache hit skips compile and rebinds
+   only.
+
+3. **Record + submit.** `metal/command_buffer.cpp` opens one
+   `MetalCommandBuffer` per queue. Per-pass `execute()` lambdas
+   record into the right encoder; `metal/fence.cpp` emits the
+   inter-queue fences computed by the plan. `metal/queue.cpp`
+   commits the buffers; `metal/fence.cpp` flags `PresentFence`.
+
+4. **Cleanup.** Transient `VirtualResource`s recycle to
+   `TransientPool` (§4.2 invariant 2). The `RenderFrame` slot
+   is marked retired; the graph object is destroyed; the
+   `ExecutionPlan` survives in the cache.
+
+### 6.3 Concurrency
+
+Render runs on three thread-roles inside phase 7. Phase 6 is
+driver-thread only.
+
+- **Graph builder thread (one).** Owns `graph/builder.cpp`,
+  `graph/compile.cpp`, `resources/alias_planner.cpp`, and the
+  `ExecutionPlan` cache. Builds and compiles synchronously per
+  `View`; multi-view fan-out reuses the same thread sequentially
+  because compile time is dominated by hash + cache lookup, not by
+  topo sort (§3.2 collapse #7). The builder is single-threaded so
+  the `ExecutionPlan` cache needs no locks and structural hashing
+  is deterministic frame-to-frame. The graph builder thread is
+  pinned (no migration) to keep its per-frame arena local.
+
+- **Per-pass GPU encoding workers (a small pool).** Once the plan
+  exists, per-pass `execute()` lambdas may be recorded in parallel
+  into per-queue `MetalCommandBuffer`s. The plan's queue assignment
+  partitions passes into independent record streams; passes inside
+  one queue record sequentially in plan order on one worker, but
+  Graphics / Compute / Copy queues may record on three workers
+  concurrently. Worker count is bounded by the queue count (three
+  in MVP); no further scaling — Metal command-buffer recording is
+  not the bottleneck.
+
+- **Render thread (driver).** Submits the recorded command buffers
+  to `MetalQueue` in queue dependency order, waits on no GPU
+  completion, signals `PresentFence`, and returns. Frame N's GPU
+  execution overlaps frame N+1's simulation per
+  `reviews/decisions/frame-phases.md` "one-frame pipeline".
+
+The graph builder thread is the only writer to the `RenderGraph`
+and the `ExecutionPlan` cache; per-pass workers read both as
+`const`. There are no cross-thread mutex acquisitions inside phase
+7 once the plan is built — workers communicate exclusively via the
+plan's pass list (read-only) and per-queue command-buffer handles
+(thread-local until commit).
+
+### 6.4 Hybrid-RT path
+
+Hybrid RT in MVP means: Metal 4 ray query in compute lighting +
+dedicated shadow / AO compute traces, all reading one TLAS rebuilt
+or refit each frame. The structure is:
+
+1. **BLAS refit per visible LOD0 cluster set.** `rt/refit_scheduler.cpp`
+   walks the `RenderFrame` visible-set and selects BLAS handles
+   whose source mesh is dynamic (skinned / deformable). Static-mesh
+   BLAS are cooked by `geometry` (§3.3) and never refit. A refit
+   request goes to `passes/blas_refit.cpp` which records a Metal 4
+   acceleration-structure refit on `Queue::Compute`. Render writes
+   only to the BLAS update slot (§4.1.8 invariant 3).
+
+2. **TLAS rebuild-or-refit.** `rt/tlas.cpp` decides per-frame
+   between full rebuild (visible-set membership churn over
+   threshold) and refit (membership stable, only transforms
+   changed) per §4.1.8 invariant 2. The decision is compile-time
+   from the structural diff of consecutive `RenderFrame`s; the
+   compiler picks the matching pass body. The TLAS-build pass
+   declares an explicit read-after-write on the BLAS refit
+   resources so the plan compiler emits the cross-queue fence
+   (§4.2 invariant 4).
+
+3. **Ray query in lighting compute.** `passes/lighting.cpp` issues
+   a Metal 4 inline ray query against the TLAS for shadow primary
+   rays when `RenderSettings.shadow_tier == ShadowTier::Raytraced`.
+   Dedicated `passes/shadow_rt.cpp` and `passes/ao_rt.cpp` provide
+   denoised auxiliary buffers when their tiers are RT;
+   `passes/lighting.cpp` composites them into the deferred light
+   accumulation. No second TLAS, no second backend; one compute
+   surface per RT consumer.
+
+Reflections in MVP read the lighting result via screen-space
+fallback inside `passes/lighting.cpp`; full RT reflections is a
+post-MVP `Pass` insertion (§3.2 collapse #2).
+
+### 6.5 Mesh-shader path
+
+The opaque coverage path is a single mesh-shader dispatch:
+
+1. `cull/meshlet_cull.cpp` (phase 6) emits the meshlet survivor
+   set per `View` against last frame's HZB.
+2. `passes/cluster_cull.cpp` (phase 7, compute) builds
+   `LightCluster` for the same view; runs in parallel with
+   `passes/blas_refit.cpp` and `passes/tlas_build.cpp` on the
+   compute queue.
+3. `passes/gbuffer.cpp` (phase 7, graphics) consumes the
+   meshlet survivor set as `IndirectDrawBuffer` material-grouped
+   compaction output, dispatches Metal 4 mesh shaders, and writes
+   gbuffer MRT + visibilityID + velocity in one declared `Pass`
+   (§4.2 invariant 5). Reverse-Z is shared with HZB
+   (§4.1.9 invariant 3).
+4. `passes/hzb_build.cpp` (phase 7, compute) builds next frame's
+   HZB from this frame's gbuffer depth.
+
+The visibility ID buffer is written in the same dispatch so that a
+post-MVP visibility-buffer deferred path does not require a second
+gbuffer pass; it slots in as a downstream consumer
+(§3.2 collapse #2).
+
+### 6.6 Cross-platform readiness
+
+Metal 4 is the only shipping backend (MVP and post-MVP near horizon;
+§3.2 collapse #1). Vulkan and D3D12 are explicitly out of scope for
+this plugin and would land as **separate plugins** when needed:
+
+- The §5 public header is backend-neutral. `MetalDevice`,
+  `MetalQueue`, and `MetalCommandBuffer` are forward-declared
+  opaques whose layout lives inside the render dylib; callers
+  manipulate them only through `glibre::Result<T>`-returning
+  methods. A Vulkan or D3D12 plugin would fork this header into
+  a `vk_render` / `d3d_render` plugin with its own opaques but
+  identical aggregate names and identical `Pass` invariants
+  (§4.1.3, §4.2.5).
+- The graph layer (`render/graph/`) is backend-neutral by
+  construction: `Pass::execute(MetalCommandBuffer&, const Bindings&)`
+  is the only seam with Metal types. A second backend plugin would
+  reuse the §4.1.2/§4.1.5 algorithms verbatim and substitute its
+  own command-buffer wrapper.
+- Resources (`render/resources/`) are also reusable: the alias
+  planner operates on declared lifetimes, not on `MTLHeap`
+  specifics; the implementation calls into `metal/` only at
+  materialise time.
+- `passes/` are backend-bound and would be re-implemented per
+  backend; the per-pass file split (one pass per file) keeps the
+  per-backend porting surface small.
+
+No `IDevice` / `ICommandBuffer` abstraction exists in the MVP plugin
+(rejected per §3.2 collapse #1: SRP says one reason to change the
+GPU layer is "Metal 4 evolves"). A future backend plugin owns its
+own copy; cross-backend abstraction would be a fresh spike, not a
+retrofit, and would only happen when a second concrete backend
+landed (PHILOSOPHY anti-pattern: "abstractions invented before two
+concrete users exist").
 
 ## 7. Persistence & Schemas
 
