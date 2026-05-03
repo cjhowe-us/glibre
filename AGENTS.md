@@ -85,9 +85,9 @@ Implementation begins **only after Pass 3 closes**.
 
 - `gh issue create` / `gh issue comment` — agents use these for all
   status updates. No file-based progress logs.
-- `scripts/dep-check.sh` — CI gate: PRs blocked if their task issue
-  has open dependencies.
-- `scripts/spec-check.sh` — CI gate: every acceptance criterion maps
-  to a Catch2 test.
-- `scripts/rollup.sh` (TBD) — recomputes tracking-issue point totals
-  from leaf descendants and posts the result as a comment.
+- CI gates (workflows under `.github/workflows/`):
+  - dependency check — PR blocked if its linked issue has open
+    GitHub-native blockers.
+  - spec check — every acceptance criterion maps to a Catch2 test.
+  - roll-up — aggregator estimates recomputed from leaf descendants
+    and posted as comments.

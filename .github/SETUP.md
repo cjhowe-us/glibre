@@ -80,7 +80,7 @@ gh api graphql -f query='mutation($issue:ID!,$blocker:ID!){
 }' -f issue=BLOCKED_NODE_ID -f blocker=BLOCKER_NODE_ID
 ```
 
-`scripts/dep-check.sh` enforces the topological-order rule in CI: a PR
+A CI dependency-check job enforces the topological-order rule: a PR
 referencing an issue with open blockers fails the gate.
 
 ## 4. Story-Point Roll-up
@@ -129,15 +129,11 @@ Live under `.github/ISSUE_TEMPLATE/`:
 
 ## 8. Bootstrap Issue Set
 
-Run after the repo is provisioned:
-
-```bash
-scripts/scenario-extract.py | scripts/issue-import.py   # both TBD
-```
-
-This drains harmonius `US-*` candidates into draft `type:user-story`
-issues, then opens initial `type:initiative` and `type:epic` issues
-matching `plans/mvp.md` epic table. Subagents take over from there.
+After the repo is provisioned, mine harmonius `US-*` candidates into
+draft `type:user-story` issues (manual triage to keep a
+necessary-and-sufficient set), then open initial `type:initiative` and
+`type:epic` issues matching the `plans/mvp.md` epic table. Subagents
+take over from there.
 
 ## 9. Agent Execution
 

@@ -58,7 +58,7 @@ in once GitHub repo is provisioned.
 
 ## Cross-cutting story imports
 
-Initial user-story batch imported from harmonius `US-*` per
-`scripts/scenario-extract.py`; each becomes a `type:user-story` issue
-phase-tagged `phase:mvp`. See `plans/post-mvp.md` and
-`plans/long-term.md` for stories deferred beyond MVP.
+Initial user-story batch mined from harmonius `US-*` candidates;
+each survivor becomes a `type:user-story` issue phase-tagged
+`phase:mvp`. See `plans/post-mvp.md` and `plans/long-term.md` for
+stories deferred beyond MVP.
