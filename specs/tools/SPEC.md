@@ -2029,7 +2029,409 @@ Questions" #4 (libc++ as shipped with macOS Xcode 15 / Homebrew-LLVM).
 
 ## 6. Internal Architecture
 
-Non-binding sketch for implementers.
+Non-binding sketch for implementers. The aggregates of §4 and the public
+header of §5 are binding; the file/directory layout, the two-world
+topology, the ImGui draw-list extract path, and the per-aggregate thread
+ownership below are illustrative and exist so the plan-leaf author has
+one obvious place to start. Reviewers should reject deviations only when
+they violate §4 invariants, the §5 header, or the per-phase ownership
+locked in `reviews/decisions/frame-phases.md`.
+
+### 6.1 Module layout
+
+The tools plugin compiles to a single `.dylib`. Inside, source is split
+by SRP — one directory per "reason to change". The split is the §4
+aggregate roster lifted directly into directories, with the host's
+sub-parts (§4.1 composition) hoisted into siblings so each has its own
+file family. Public headers (the §5 deliverable + an `internal/` tree
+the rest of the plugin consumes) live under
+`tools/include/glibre/tools/`; implementation under `tools/src/`.
+
+```
+tools/
+  include/glibre/tools/           # §5 surface (compiles standalone).
+    tools.hpp                     # The single header from §5.
+  src/
+    editor-host/                  # Aggregate §4.1 — the root shell.
+      editor_host.{hpp,cpp}       # EditorHost root: two-world ownership,
+                                  # EditorMode FSM, EditorEvent republish,
+                                  # the single RenderFrame draw-list emit.
+      editor_world.{hpp,cpp}      # EditorWorld bootstrap: editor-only
+                                  # archetypes, resources, system schedule.
+      game_world.{hpp,cpp}        # Borrowed-reference adaptor over
+                                  # core::World; mode-gated FrameLoop tick.
+      editor_event.{hpp,cpp}      # EditorEvent sum republished onto
+                                  # core's typed bus (§3.2 collapse #9).
+      plugin.{hpp,cpp}            # Plugin entry: register / drain / migrate
+                                  # / resume / shutdown (§8 wiring).
+    layout/                       # Aggregate §4.2.
+      layout.{hpp,cpp}            # Layout value object: dock splits, tabs,
+                                  # floats, active-tab table.
+      layout_profile.{hpp,cpp}    # LayoutProfile slot map; profile switch.
+      panel.{hpp,cpp}             # Panel base + PanelDesc registration.
+      panel_registry.{hpp,cpp}    # Stable PanelId table; collision check.
+      panel_host.{hpp,cpp}        # OS-window child for floating tear-offs.
+      viewport.{hpp,cpp}          # Single Viewport; render-target blit via
+                                  # render::TextureId (multi-viewport
+                                  # refused in MVP per §4.2 inv. 4).
+      imgui_dock.{hpp,cpp}        # Dear ImGui dockspace integration —
+                                  # owns the ImGuiContext for the shell.
+    scene/                        # Aggregate §4.3.
+      scene_tree.{hpp,cpp}        # Scene hierarchy panel body.
+      selection.{hpp,cpp}         # Selection resource + SelectionChanged
+                                  # publish; deterministic insertion-order.
+      pick.{hpp,cpp}              # Viewport-pick + marquee-rect commit.
+    inspector/                    # Aggregate §4.4.
+      inspector.{hpp,cpp}         # Inspector panel body; per-Selection
+                                  # iteration; lazy InspectorView build.
+      inspector_view.{hpp,cpp}    # InspectorView value object built from
+                                  # one Fory descriptor.
+      reflected_field.{hpp,cpp}   # ReflectedField row: read-via-blob,
+                                  # write-emits-EditCommand.
+      reflection_blob_view.{hpp,cpp} # Cache of data context's
+                                  # ReflectionBlob views per (Entity, Type);
+                                  # invalidated by §8.3.2 callback.
+      custom_widget.{hpp,cpp}     # Plugin-supplied custom-widget registry
+                                  # (still emits EditCommands; §4.4 inv. 5).
+    gizmo/                        # Aggregate §4.5.
+      gizmo.{hpp,cpp}             # Translate | Rotate | Scale closed sum.
+      gizmo_frame.{hpp,cpp}       # World | Local | Parent reference frame.
+      gizmo_constraint.{hpp,cpp}  # Axis / plane lock closed sum.
+      snap.{hpp,cpp}              # Snap quantisation rule.
+      drag_loop.{hpp,cpp}         # Drag-state FSM: down → drag → up.
+      gizmo_widget.{hpp,cpp}      # Viewport widget render path.
+    asset-browser/                # Aggregate §4.6.
+      asset_browser.{hpp,cpp}     # Browser panel body; content listing.
+      asset_thumbnail.{hpp,cpp}   # Thumbnail value (texture id + asset hash).
+      thumbnail_lru.{hpp,cpp}     # Per-AssetHandle LRU; budget-driven evict.
+      drag_payload.{hpp,cpp}      # AssetHandle drag-payload + drop sites.
+    command/                      # Aggregate §4.7.
+      edit_command.{hpp,cpp}      # EditCommand value: apply/undo closures,
+                                  # coalesce predicate, byte estimate, sel
+                                  # snapshots, sealed-sum payload variants.
+      command_stack.{hpp,cpp}     # Undo / redo arrays + byte budget +
+                                  # FIFO eviction. The single edit pipeline.
+      transaction.{hpp,cpp}       # Transaction RAII grouper.
+      payload_component_edit.{hpp,cpp}   # one file per closed-sum payload —
+      payload_entity_add.{hpp,cpp}       # SRP per payload kind keeps the
+      payload_entity_remove.{hpp,cpp}    # variant set easy to widen
+      payload_parent_change.{hpp,cpp}    # additively (§7.2.3) without
+      payload_asset_slot_bind.{hpp,cpp}  # cross-touching the others.
+    toolbar/                      # Aggregate §4.8.
+      toolbar.{hpp,cpp}           # Toolbar panel body; control roster.
+      play_pause_step.{hpp,cpp}   # PlayPauseStep trio; the only outside-
+                                  # the-recorder EditorMode writer.
+    trace-recorder/               # Aggregate §4.9.
+      trace_recorder.{hpp,cpp}    # Recorder resource + non-perturbing
+                                  # capture path.
+      trace_writer.{hpp,cpp}      # Append-only Fory stream writer over
+                                  # data/schemas/e2e/TraceFile (co-owned
+                                  # with specs/e2e/SPEC.md §3.3).
+      assertion_template.{hpp,cpp}# User-configured capture assertions.
+    shortcuts/                    # Cross-aggregate keymap (§4.1 + §7.1.4).
+      shortcuts.{hpp,cpp}         # Keymap resource; binding to actions
+                                  # exposed by other aggregates.
+    extract/                      # Phase-6 ImGui draw-list emit (§6.3).
+      imgui_extract.{hpp,cpp}     # Walks panel registry once per editor
+                                  # frame, drives Dear ImGui frame, copies
+                                  # the resulting draw lists into render's
+                                  # RenderFrame extract slot as one Pass.
+    forward/                      # Forward-declared post-MVP graph editors
+                                  # (§6.6). Headers only; bodies post-MVP.
+      script_graph_editor.hpp     # Visual-script graph editor — deferred
+                                  # to logic-plugin landing.
+      material_graph_editor.hpp   # Material graph editor — deferred to
+                                  # render's material-author lane.
+      effects_graph_editor.hpp    # Effects (VFX) graph editor — deferred
+                                  # post-MVP per §3.3.
+```
+
+The split is mechanical: each `src/<dir>/` holds exactly one §4
+aggregate, plus four utility siblings (`shortcuts/` for the keymap that
+spans toolbar + every panel, `extract/` for the phase-6 ImGui extract
+seam, `editor-host/` for the §4.1 root's sub-parts, `forward/` for the
+post-MVP graph editor headers). Adding a new payload variant adds one
+file under `command/`; adding a new gizmo mode is a new line in
+`gizmo/gizmo.cpp`'s closed sum and one new draw routine; widening
+`EditorMode` or `tools::Error` is an ABI bump per §5.
+
+### 6.2 Two ECS worlds — `EditorWorld` + embedded `GameWorld`
+
+Tools owns exactly two `core::World` instances, side-by-side, never
+intermingled. This topology is the single most load-bearing structural
+decision in the plugin; every other module reads as a consequence of
+it.
+
+#### 6.2.1 `EditorWorld` — tools-private ECS
+
+`editor-host/editor_world.cpp` constructs one `EditorWorld` at plugin
+register time and tears it down at shutdown. It is a fully-functional
+`core::World` configured with editor-only archetypes (panel registry
+rows, ImGui dockspace nodes, drag-payload table, thumbnail LRU rows,
+trace-recorder cursor) and editor-only resources (`Layout` snapshot,
+`LayoutProfile` slot map, `Selection`, `CommandStack`, `Gizmo` config,
+`Toolbar` state, `Shortcuts` keymap, `EditorMode`, `TraceRecorder`).
+Its frame loop ticks every editor frame regardless of `EditorMode`;
+this is what keeps the shell responsive while the game world is
+paused. Phase ownership is the engine-wide schedule:
+
+- Phase 1 (input, owned by `platform`) — input pump funnels events to
+  the active panel's hover-test pipeline; gizmo drag-loop
+  (`gizmo/drag_loop.cpp`) and scene-tree click handling
+  (`scene/pick.cpp`) consume here.
+- Phase 5 (transform, owned by `core`) — the `EditorWorld`'s own
+  transform propagation (gizmo widget origin, panel-host window
+  positions) lands here. `CommandStack::apply` / `undo` runs as a
+  registered system inside this phase per §4.7 inv. 4 single-writer.
+- Phase 6 (cull-extract, owned by `render`) — `extract/imgui_extract.cpp`
+  registers a system that drives one Dear ImGui frame and emits the
+  resulting draw lists into `render::RenderFrame` (see §6.3 below).
+- Phase 9 (present, owned by `platform`) — `EditorMode` transitions
+  apply atomically here per §4.1 inv. 3.
+
+`EditorWorld` registers no phase of its own; it only registers systems
+into phases owned by other contexts (§4.10 inv. 10).
+
+#### 6.2.2 Embedded `GameWorld` — borrowed reference
+
+The host runtime constructs the game `core::World` (the one that ships
+in shipping builds) and passes a borrowed reference to `EditorHost` at
+register time. Tools never owns this world's lifetime. The
+`editor-host/game_world.cpp` adaptor exposes:
+
+- A `tick_once()` wrapper around `core::World::FrameLoop::advance()`
+  that the toolbar's Step button calls in response to phase 9
+  transitioning into and back out of `EditorMode::Step`.
+- A `set_scheduling_enabled(bool)` switch the `EditorMode` FSM
+  toggles at phase 9 boundaries: `Edit | Paused` → false,
+  `Play | Step | Recording` → true.
+- A read-only listing surface over the world's entity allocator,
+  type registry, and `ChildOf` index that the scene-tree, inspector,
+  and selection re-resolution code consult.
+
+The adaptor never registers editor-only components onto the game world
+(§4.1 inv. 1) and never minutes new entities into it; entity creation
+flows through the standard game-world spawn paths invoked by
+`EditCommand::apply`. World disjointness is enforced at every public
+boundary by core's `EntityForeignWorld` rejection (§4.10 inv. 1).
+
+#### 6.2.3 Play-mode toggle is `GameWorld`-scope only
+
+Pressing Play, Pause, or Step in the toolbar mutates `EditorMode` on
+`EditorWorld`'s resource table; the editor world's scheduler does not
+read this flag (it ticks unconditionally). Only the
+`game_world.cpp::set_scheduling_enabled` switch reads it, and only at
+the phase-9 boundary. `core` itself sees no change — it doesn't have
+a "play mode" concept; play mode is *strictly* a tools-local toggle on
+the embedded game world's `FrameLoop` (§4.10 inv. 2). This is the
+cleanest seam consistent with PHILOSOPHY §3 (minimal core); promoting
+play-mode awareness into core would force every plugin to reason about
+it, which neither physics, render, content, nor data needs.
+
+### 6.3 ImGui-Metal-4 renderer integration — one extract, one Pass
+
+Dear ImGui produces draw lists; tools never produces command buffers,
+swapchains, or PSOs. The integration with `render` is exactly one
+unidirectional flow: tools emits one batch of ImGui draw lists per
+editor frame at phase 6, render submits them as one declared `Pass`
+inside its existing graph at phase 7. There is no second renderer, no
+second extract slot, no second graph (§4.10 inv. 7). The flow:
+
+1. **Frame begin (start of editor world's phase 6 system).**
+   `extract/imgui_extract.cpp` calls `ImGui::NewFrame()` against the
+   shell's `ImGuiContext`. The IO struct has already been populated by
+   the input pump in phase 1 — mouse position, button state, keyboard
+   text, modifier flags, the synthetic gamepad axes — so the new frame
+   begins with byte-equal IO state across runs given byte-equal input
+   (PHILOSOPHY §7).
+2. **Panel walk.** The system iterates `layout/panel_registry.cpp`'s
+   stable id table in registration order, and for each registered
+   `Panel` calls its `PanelDrawFn`. Draw callbacks emit ImGui geometry
+   into the per-thread draw-list buffers Dear ImGui owns; they are
+   forbidden to allocate from any heap other than the editor world's
+   per-frame arena, forbidden to mutate `GameWorld` storage, and
+   forbidden to hold any engine-wide singleton reference (§5
+   `PanelDrawFn` contract). Errors returned from a callback abort that
+   panel for this frame; the host logs, the next panel proceeds. The
+   walk is single-threaded by construction — Dear ImGui's draw-list
+   API is not internally synchronised at the resolution we need.
+3. **Frame end.** `ImGui::EndFrame()` finalises per-window draw lists.
+   `ImGui::Render()` produces the `ImDrawData` aggregate the shell
+   ships across the seam.
+4. **Extract.** `extract/imgui_extract.cpp` requests a slot in
+   `render::RenderFrame`'s tools-extract band (the slot is one fixed
+   per-frame entry on the tools side; render's extract code carves
+   capacity at startup), copies pointer + length triples from
+   `ImDrawData`'s `CmdLists` into a pinned, immutable shape, and
+   transfers ownership of the vertex / index buffers (the plain-old-
+   data ImGui produced) into the slot. The slot's lifetime is tied to
+   the `RenderFrame` it lives in; render reclaims it when the frame
+   retires (§6.2 invariant 4 of render's SPEC). After this step the
+   editor world's phase 6 work is done.
+5. **Pass declaration (render side, render's phase 7 graph build).**
+   Render's `passes/imgui_overlay.{hpp,cpp}` (a render-owned file the
+   tools plugin does not author) reads the tools-extract slot, declares
+   one `Pass` named `EditorOverlay` against the swapchain colour
+   attachment with `RenderTargetAccess::Read` for the post-AA chain
+   output and `RenderTargetAccess::Write` for the swapchain image, and
+   provides the `execute()` lambda that translates ImGui's draw
+   commands into `MetalCommandBuffer` calls (PSO, vertex buffer bind,
+   scissor, draw-indexed). The pass slots into render's existing graph
+   between `passes/aa_upscale.cpp` and `passes/present.cpp`. Capability
+   gating is automatic — the editor pass needs nothing beyond the
+   default Metal 4 raster capability bit.
+6. **Submit.** Render's standard phase 7 build → compile → record →
+   submit pipeline submits the editor pass identically to every other
+   pass. The `MetalCommandBuffer` carries the editor's draw calls
+   alongside the game's; one drawable, one present, one frame-pacing
+   tick.
+
+The only Metal 4 surface tools touches is the opaque
+`render::TextureId` value used by `Viewport` (game render-target blit)
+and by `AssetThumbnail` (capture-to-texture preview). Both are vended
+by render's capture-to-texture lane — tools never inspects the
+underlying `MTLTexture`, never holds a heap allocation, and never
+issues a drawable acquire. Multi-viewport, multi-window present, and
+remote desktop variants are all refused / deferred; the single-pass
+single-extract topology is the engine-wide simplest shape consistent
+with the §4 cross-aggregate invariants.
+
+#### 6.3.1 Dear ImGui ownership
+
+The shell owns one `ImGuiContext`; it lives in
+`layout/imgui_dock.cpp`'s static storage and is reset on tools' own
+hot-reload (§8.3.1 — the closures pinned inside it live in tools'
+image). Font atlases, keyboard tables, and the docking node tree are
+per-context and survive every other plugin's reload. ImGui itself is
+linked into the tools dylib statically; no other plugin links it,
+which keeps the engine-wide ABI surface clean (PHILOSOPHY §9: ABI
+gated by middleman hash — ImGui has no place there).
+
+### 6.4 Inspector reads via `ReflectionBlob` only
+
+`inspector/reflected_field.cpp::read()` resolves every component-byte
+read through `glibre::types::ReflectionBlob` from the `data` context
+(§4.4 inv. 1, §4.10 inv. 4). The path:
+
+1. The selection iterator yields a `(GameWorld::Entity, core::TypeId)`
+   pair for each row the inspector intends to render.
+2. `inspector/reflection_blob_view.cpp` looks up the cached
+   `ReflectionBlob` for that `TypeId`; on cache miss it queries
+   `data`'s reflection registry for the schema descriptor (FQN +
+   `since` version + tag-sorted field list) and the type-erased
+   `read_field(blob_bytes, tag)` accessor. The cache is keyed by
+   `TypeId`; it is invalidated wholesale on game-plugin reload by the
+   §8.3.2 observer callback.
+3. For each `ReflectedField` row, `read_field` returns a
+   `std::span<const std::byte>` into the registry's read-only blob;
+   the row's draw closure decodes that span according to the field's
+   `type_name` (`f32`, `vec3f`, `string`, nested FQN, …) and renders
+   the ImGui widget. The inspector aggregate has no `T*`-typed
+   reference to game-world storage at any layer — every read is an
+   opaque byte view, every decode is type-name dispatched.
+4. Writes never call `world.set<T>(...)`. `reflected_field.cpp::write()`
+   constructs an `EditCommand` carrying the post-edit field bytes and
+   the pre-edit snapshot, and routes it through `CommandStack::push`.
+   The single-edit-pipeline invariant (§4.10 inv. 3) is preserved
+   structurally: the inspector module never imports
+   `command_stack.hpp`'s mutation surface directly — it imports the
+   `push` entry point only.
+
+This shape is identical in structure to the inspector-row contract in
+§4.4: the file split (`inspector_view.cpp` vs `reflected_field.cpp` vs
+`reflection_blob_view.cpp`) materialises invariants 1, 2, and 4 of
+§4.4 into separate files so that violating any of them requires
+crossing a module boundary and editing more than one file.
+
+### 6.5 Concurrency
+
+The tools plugin runs predominantly on one thread — the driver — with
+two narrow off-thread islands.
+
+- **Driver thread (main).** Owns every panel `draw()` invocation,
+  `CommandStack::apply` / `undo`, `Selection` mutation,
+  `EditorMode` transitions, the ImGui frame, the extract copy,
+  `TraceRecorder::capture` invocation, and every `EditorEvent` publish.
+  Dear ImGui's draw-list API is not safe to call from multiple threads
+  at our resolution, and the §4.7 single-writer invariant requires
+  one apply path; consolidating both onto the driver thread is the
+  least-machinery shape that satisfies both.
+- **Thumbnail-decoder pool (small, bounded).**
+  `asset-browser/thumbnail_lru.cpp` spins a small thread pool (one
+  worker per logical core, capped at 4) to decode thumbnails returned
+  by the `render` capture-to-texture lane. The pool consumes
+  per-thumbnail decode jobs from a SPSC queue the LRU writes to; it
+  posts results back via an MPSC queue the driver thread drains at
+  the start of each editor frame. The pool's lifetime is tied to
+  tools' image (destroyed in §8.3.1 drain, re-spawned in resume); no
+  game-plugin reload touches it (§8.2 row).
+- **Trace-writer flush (optional, MVP single-threaded).**
+  `trace-recorder/trace_writer.cpp` writes Fory-encoded `TraceOp`
+  bytes synchronously inside the driver thread's call to
+  `TraceRecorder::capture`; the §4.9 inv. 3 100 µs/op latency budget
+  is met by avoiding kernel I/O — the writer accumulates into a
+  pinned ring buffer and flushes the ring in batches at editor-world
+  phase 9 (where a slow sync write does not perturb the frame-loop's
+  determinism, because phase 9 is already the present boundary).
+  Post-MVP, a dedicated flush thread can be added without changing
+  the §4.9 contract.
+
+There is no cross-thread mutex inside any aggregate's hot path. The
+thumbnail pool communicates exclusively via lock-free SPSC / MPSC
+queues; trace-writer batching is single-producer single-consumer
+within one thread. The driver / pool seam crosses no §4 invariant.
+
+### 6.6 Forward-declared post-MVP graph editors
+
+Three graph-style editors are deferred per §3.3 and documented here so
+their landing surface is fixed in advance — the `forward/` headers
+declare the public types these editors will share with their owning
+contexts (logic, render, post-MVP effects). All three reuse the §4
+substrate verbatim:
+
+- They register into the panel registry (§4.2) with their own
+  `PanelId`s; their layouts dock alongside Inspector / Scene /
+  Assets without any new aggregate.
+- Their edits emit `EditCommand`s through `CommandStack` (§4.7)
+  exactly like the inspector and gizmo do — no parallel write path.
+  Every node insert / delete / connect is one variant of the
+  `EditCommand` payload sealed sum (additive per §7.2.3).
+- Their inspectors share `inspector/` (§4.4): selecting a node
+  surfaces its reflected fields through the same `ReflectionBlob`
+  path. No graph-editor-specific reflection mechanism exists.
+- They consume the same Dear ImGui draw-list extract path — adding a
+  graph-editor panel adds zero code to `extract/imgui_extract.cpp`.
+
+`forward/script_graph_editor.hpp` waits on the `logic` plugin landing
+(reserved phase 2 slot per `reviews/decisions/frame-phases.md`).
+`forward/material_graph_editor.hpp` waits on render's material-author
+lane crossing into MVP-relevant scope.
+`forward/effects_graph_editor.hpp` waits on a future VFX context
+spike. None of the three is in the MVP critical path; their forward
+declarations exist solely so the §4 substrate is verifiably sufficient
+for them — if any required a new aggregate, that aggregate would have
+been part of MVP.
+
+### 6.7 Cross-references
+
+- `reviews/decisions/frame-phases.md` — phase 1 input (consumed),
+  phase 5 transform (CommandStack apply), phase 6 cull-extract
+  (ImGui extract), phase 9 present (mode transitions). Tools owns no
+  phase per §4.10 inv. 10.
+- `reviews/decisions/error-model.md` — every fallible call returns
+  `glibre::Result<T>`; tools' arms (§5.3) compose into
+  `glibre::Error` per §"Composition Rules" #2.
+- `reviews/decisions/fory-codegen.md` — `LayoutProfile` (§7.1.1) and
+  the e2e-co-owned `TraceFile` (§7.1.5) ride the standard Fory →
+  middleman dylib pipeline.
+- `reviews/decisions/hot-reload-protocol.md` — §8 specialises this
+  for tools' two reload classes.
+- `specs/render/SPEC.md` §4.1.3 / §6.2 — the `Pass` / `RenderFrame`
+  surface tools' extract path consumes.
+- `specs/data/SPEC.md` §5 — `ReflectionBlob` / `read_field` are
+  data-owned; the inspector consumes them read-only.
+- `specs/e2e/SPEC.md` §7.1.1 — `TraceFile` byte container is co-
+  owned; tools writes, e2e reads.
 
 ## 7. Persistence & Schemas
 
