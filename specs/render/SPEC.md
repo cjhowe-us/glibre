@@ -695,11 +695,751 @@ public boundary at the seams between them:
 
 ## 5. Public Interface
 
+The header stub below is the §5 deliverable: every symbol that crosses
+the render plugin's public boundary, declared in one C++23 header and
+verified via `clang++ -std=c++23 -fsyntax-only -Wall -Wextra -Wpedantic`.
+Bodies live inside the render dylib; this header is the contract every
+caller (core, platform, editor, downstream plugins) compiles against.
+Cross-context invariants enforced here:
+
+- Every fallible operation returns `glibre::Result<T>` per
+  `reviews/decisions/error-model.md`. The render-internal `Error` enum is
+  the closed sum cited in §10 below; it is rolled into `glibre::Error`'s
+  variant in `core`.
+- Aggregates listed in §4 (`RenderFrame`, `RenderGraph`, `Pass`,
+  `ExecutionPlan`, `MetalDevice`, `MetalQueue`, `MetalCommandBuffer`,
+  `PSOCache`, `RTAccelStructures`, `HZB`, `ClusterCullState`,
+  `TransientPool`, `DiagnosticOverlay`) are forward-declared classes whose
+  layout is owned inside the plugin. Callers manipulate them only through
+  the methods exposed below.
+- Resource handles are 64-bit generational `Handle<Tag>` values with no
+  payload pointers; this avoids ABI fixup on hot-reload (PHILOSOPHY §8 +
+  §9). The tag types are empty structs so handles addressing different
+  aggregates are distinct types and cannot be cross-assigned.
+- Capability flags (`Capability`, `CapabilitySet`) are queried at init
+  time and consulted by the graph builder's pass predicates; shader hot
+  paths never branch on them (PHILOSOPHY §6, §3.2 collapse #5/#9).
+- Per-pass execute lambdas receive only `MetalCommandBuffer&` and the
+  resolved `Bindings&`; they may not allocate, may not record on the
+  wrong queue, and may not touch undeclared resources (§4.1.3).
+
+The header has no event types in MVP — render publishes nothing back into
+the ECS event bus; the snapshot bus delivers `RenderFrame` by reference
+and the present fence is read by `platform`'s phase 9 directly. No Fory
+schemas live in this surface either: `RenderFrame` is allocated in the
+per-frame arena and never serialised (PHILOSOPHY anti-pattern), and the
+`ExecutionPlan` cache is keyed by structural hash, not by file. Render's
+contribution to telemetry is the structured per-context error enum
+returned through `Result<T>` and consumed by `glibre::log_error`.
+
 ```cpp
-// header-only stub goes here
+// SPDX-License-Identifier: Apache-2.0
+// glibre — render plugin public interface (header-only stub).
+//
+// This file is the §5 deliverable of `specs/render/SPEC.md`. It declares
+// every symbol crossing the render plugin's public boundary. The bodies
+// live inside the render dylib; this header is the contract every caller
+// (core, platform, editor) compiles against.
+//
+// Cross-context invariants embedded here:
+//   * Every fallible call returns `glibre::Result<T>` per
+//     `reviews/decisions/error-model.md`. `-fno-exceptions` is enforced
+//     globally; this header obeys.
+//   * Aggregates are opaque — `RenderFrame`, `ExecutionPlan`,
+//     `MetalDevice`, `MetalQueue`, `MetalCommandBuffer`, etc. are
+//     forward-declared classes whose layout is owned inside the plugin.
+//   * Resource handles are 64-bit generational `Handle<Tag>` values
+//     with no payload pointers; this avoids ABI fixup on hot-reload.
+//   * Capability flags are compile-time-stable; gating decisions happen
+//     at graph-build time, never inside shader hot paths.
+//
+// This stub compiles standalone with
+// `clang++ -std=c++23 -fsyntax-only -Wall -Wextra -Wpedantic`.
+
+#pragma once
+
+#include <array>
+#include <bit>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <functional>
+#include <memory>
+#include <span>
+#include <string_view>
+#include <type_traits>
+#include <variant>
+
+namespace glibre {
+
+// -----------------------------------------------------------------------
+// Stand-in declarations from sibling contexts. The real definitions live
+// in `core/include/glibre/error.hpp`, `geometry/include/...`, etc.; this
+// header forward-declares them so the stub compiles in isolation. The
+// implementation .cpp files include the real headers, not these stubs.
+// -----------------------------------------------------------------------
+
+#if !defined(GLIBRE_HAVE_CORE_ERROR)
+namespace core {
+enum class Error : std::uint16_t {
+    PluginAbiHashMismatch,
+    PluginInitFailed,
+    SchemaMigrationFailed,
+    HotReloadRefused,
+    FramePhaseMisordered,
+    OutOfBudget,
+};
+}  // namespace core
+
+struct ErrorContext {
+    std::string_view file;
+    int              line  = 0;
+    std::string_view detail;
+};
+
+class Error {
+public:
+    using Variant = std::variant<core::Error /*, render::Error inserted in core */>;
+
+    template <class E>
+    constexpr Error(E e, ErrorContext ctx = {}) noexcept
+        : variant_{e}, ctx_{ctx} {}
+
+    constexpr const Variant&      code() const noexcept  { return variant_; }
+    constexpr const ErrorContext& where() const noexcept { return ctx_; }
+
+private:
+    Variant      variant_;
+    ErrorContext ctx_;
+};
+
+template <class T>
+using Result = std::expected<T, Error>;
+#endif  // GLIBRE_HAVE_CORE_ERROR
+
+// -----------------------------------------------------------------------
+// render::Error — closed sum of every render-internal failure mode.
+// Every public render boundary returns Result<T> over this enum (rolled
+// into glibre::Error's variant per reviews/decisions/error-model.md).
+// The list is closed: adding a variant is an ABI bump.
+// -----------------------------------------------------------------------
+
+namespace render {
+
+enum class Error : std::uint16_t {
+    // Device / queue lifecycle
+    DeviceLost,
+    DeviceUnsupported,
+    QueueSubmitFailed,
+    FenceTimeout,
+
+    // Pipeline / PSO cache
+    PipelineCompileFailed,
+    PipelineCacheMiss,
+    UnsupportedBackend,
+
+    // Resource residency / aliasing
+    ResourceResidencyExceeded,
+    ResourceImportRefused,
+    TransientPoolExhausted,
+    HeapOutOfMemory,
+
+    // Graph compile
+    RenderGraphCycle,
+    PassUnsupportedConfig,
+    PassDeclaredUseUnused,
+    PassUndeclaredAccess,
+    BarrierConflict,
+
+    // RT-accel structures
+    BlasUnavailable,
+    TlasBuildFailed,
+
+    // Swapchain / present
+    SwapchainAcquireFailed,
+    SwapchainOutOfDate,
+    PresentFailed,
+
+    // Capability gating
+    CapabilityNotSupported,
+};
+
+[[nodiscard]] constexpr std::string_view to_string(Error e) noexcept;
+
+// -----------------------------------------------------------------------
+// Capability flags — init-time queried, never branched on in shader hot
+// paths (PHILOSOPHY §6). Used by the graph builder's pass predicates and
+// by RenderSettings to gate optional features.
+// -----------------------------------------------------------------------
+
+enum class Capability : std::uint32_t {
+    None              = 0u,
+    MeshShaders       = 1u << 0,
+    RayQuery          = 1u << 1,
+    HardwareRayTrace  = 1u << 2,
+    BindlessResources = 1u << 3,
+    ResidencySets     = 1u << 4,
+    TimestampQueries  = 1u << 5,
+    HdrPresent        = 1u << 6,
+    DolbyVision       = 1u << 7,
+    VariableRate      = 1u << 8,
+    MetalFx           = 1u << 9,
+};
+
+[[nodiscard]] constexpr Capability operator|(Capability a, Capability b) noexcept {
+    using U = std::underlying_type_t<Capability>;
+    return static_cast<Capability>(static_cast<U>(a) | static_cast<U>(b));
+}
+[[nodiscard]] constexpr Capability operator&(Capability a, Capability b) noexcept {
+    using U = std::underlying_type_t<Capability>;
+    return static_cast<Capability>(static_cast<U>(a) & static_cast<U>(b));
+}
+[[nodiscard]] constexpr bool has(Capability set, Capability bit) noexcept {
+    using U = std::underlying_type_t<Capability>;
+    return (static_cast<U>(set) & static_cast<U>(bit)) != 0u;
+}
+
+struct CapabilitySet {
+    Capability flags = Capability::None;
+    [[nodiscard]] constexpr bool supports(Capability c) const noexcept { return has(flags, c); }
+};
+
+// -----------------------------------------------------------------------
+// Generational handles. 64 bits, packed { generation : 24, index : 40 }.
+// Tag types are empty structs so handles to different aggregates are
+// distinct types and cannot be cross-assigned.
+// -----------------------------------------------------------------------
+
+namespace tags {
+struct mesh                   {};
+struct material               {};
+struct view                   {};
+struct render_layer           {};
+struct pipeline_state         {};
+struct argument_buffer        {};
+struct virtual_resource       {};
+struct physical_allocation    {};
+struct blas                   {};
+struct tlas                   {};
+struct hzb                    {};
+struct cluster_cull_state     {};
+struct shadow_atlas           {};
+struct ring_slice             {};
+struct frame                  {};
+struct render_settings        {};
+}  // namespace tags
+
+template <class Tag>
+class Handle {
+public:
+    using value_type = std::uint64_t;
+
+    constexpr Handle() noexcept = default;
+    explicit constexpr Handle(value_type v) noexcept : bits_{v} {}
+
+    [[nodiscard]] constexpr value_type    raw()        const noexcept { return bits_; }
+    [[nodiscard]] constexpr std::uint64_t index()      const noexcept { return bits_ & 0x000000FF'FFFFFFFFull; }
+    [[nodiscard]] constexpr std::uint32_t generation() const noexcept { return static_cast<std::uint32_t>(bits_ >> 40); }
+    [[nodiscard]] constexpr bool          valid()      const noexcept { return bits_ != 0u; }
+    [[nodiscard]] friend constexpr bool operator==(Handle, Handle) noexcept = default;
+
+private:
+    value_type bits_ = 0u;
+};
+
+using MeshHandle             = Handle<tags::mesh>;
+using MaterialHandle         = Handle<tags::material>;
+using ViewHandle             = Handle<tags::view>;
+using RenderLayerMask        = Handle<tags::render_layer>;
+using PSOHandle              = Handle<tags::pipeline_state>;
+using ArgumentBufferHandle   = Handle<tags::argument_buffer>;
+using VirtualResourceHandle  = Handle<tags::virtual_resource>;
+using PhysicalAllocHandle    = Handle<tags::physical_allocation>;
+using BLASHandle             = Handle<tags::blas>;
+using TLASHandle             = Handle<tags::tlas>;
+using HZBHandle              = Handle<tags::hzb>;
+using ClusterCullStateHandle = Handle<tags::cluster_cull_state>;
+using ShadowAtlasHandle      = Handle<tags::shadow_atlas>;
+using RingSliceHandle        = Handle<tags::ring_slice>;
+using FrameHandle            = Handle<tags::frame>;
+using RenderSettingsHandle   = Handle<tags::render_settings>;
+
+// -----------------------------------------------------------------------
+// Quality + render settings (SPEC §3.2 collapse #9).
+// -----------------------------------------------------------------------
+
+enum class QualityTier : std::uint8_t { Mobile, Switch, Desktop, HighEnd };
+
+enum class AntiAliasMode : std::uint8_t {
+    Off,
+    Fxaa,
+    Smaa,
+    Taa,
+    TemporalSuper,   // TSR / DLSS / FSR / XeSS slot — vendor selected at init.
+};
+
+enum class UpscalerMode : std::uint8_t {
+    Off,
+    BuiltinFallback,
+    MetalFx,
+    Vendor,
+};
+
+enum class ShadowTier : std::uint8_t { None, Pcf, Pcss, RayTraced };
+enum class AmbientOcclusionTier : std::uint8_t { None, Ssao, Gtao, RayTraced };
+
+struct DynamicResolutionBounds {
+    float min_scale = 0.5f;
+    float max_scale = 1.0f;
+};
+
+struct RenderSettings {
+    AntiAliasMode           aa_mode              = AntiAliasMode::Taa;
+    UpscalerMode            upscaler             = UpscalerMode::BuiltinFallback;
+    ShadowTier              shadows              = ShadowTier::Pcf;
+    AmbientOcclusionTier    ao                   = AmbientOcclusionTier::Ssao;
+    bool                    ray_tracing_enable   = false;
+    bool                    hdr_output           = false;
+    DynamicResolutionBounds dynamic_resolution{};
+    std::uint32_t           per_view_draw_budget = 0u;  // 0 = no budget cull.
+};
+
+// -----------------------------------------------------------------------
+// Aggregates — opaque to the public interface. Implementations live
+// inside the render dylib. Callers manipulate them only through the
+// methods exposed here.
+// -----------------------------------------------------------------------
+
+class RenderFrame;        // §4.1.1 — immutable per-frame extract.
+class RenderGraph;        // §4.1.2 — DAG of Pass nodes.
+class GraphBuilder;       // §4.1.2 fluent API — declared below.
+class Pass;               // §4.1.3 — typed read/write declaration + execute lambda.
+class ExecutionPlan;      // §4.1.5 — compiled graph output.
+class MetalDevice;        // §4.1.6 — engine-singleton metal-cpp wrapper.
+class MetalQueue;         // §4.1.6 — per-role queue.
+class MetalCommandBuffer; // §4.1.6 — frame-scoped command buffer.
+class PSOCache;           // §4.1.7 — pipeline-state residency cache.
+class RTAccelStructures;  // §4.1.8 — BLAS / TLAS lifecycle.
+class HZB;                // §4.1.9 — hierarchical Z-buffer.
+class ClusterCullState;   // §4.1.10 — clustered light cull state.
+class TransientPool;      // §4.1.4 — placement heap pool.
+class DiagnosticOverlay;  // §3.2 collapse #10 — DAG visualiser.
+
+// -----------------------------------------------------------------------
+// VirtualResource — value object describing a logical render target /
+// buffer in the graph. The alias planner maps it to a PhysicalAllocation.
+// -----------------------------------------------------------------------
+
+enum class ResourceUsage : std::uint32_t {
+    None             = 0u,
+    SampledTexture   = 1u << 0,
+    StorageTexture   = 1u << 1,
+    ColorAttachment  = 1u << 2,
+    DepthAttachment  = 1u << 3,
+    StorageBuffer    = 1u << 4,
+    UniformBuffer    = 1u << 5,
+    IndirectBuffer   = 1u << 6,
+    AccelStructure   = 1u << 7,
+    PresentTarget    = 1u << 8,
+};
+[[nodiscard]] constexpr ResourceUsage operator|(ResourceUsage a, ResourceUsage b) noexcept {
+    using U = std::underlying_type_t<ResourceUsage>;
+    return static_cast<ResourceUsage>(static_cast<U>(a) | static_cast<U>(b));
+}
+
+enum class ResourceFormat : std::uint16_t {
+    Unknown,
+    Rgba8Unorm,
+    Rgba16Float,
+    Rgba32Float,
+    Depth32Float,
+    Depth24UnormStencil8,
+    R32Uint,
+    R16Float,
+    Bgra8UnormSrgb,
+    // … extended at PSO authoring time; closed list owned by render.
+};
+
+enum class ResourceLifetime : std::uint8_t {
+    Transient,   // alias-eligible inside a single frame.
+    Persistent,  // outlives a frame; never aliased.
+    Imported,    // borrowed from another context (geometry / vfx / shader / platform).
+};
+
+struct ResourceDesc {
+    std::string_view debug_name;
+    ResourceFormat   format       = ResourceFormat::Unknown;
+    std::uint32_t    width        = 0u;
+    std::uint32_t    height       = 0u;
+    std::uint32_t    depth        = 1u;
+    std::uint32_t    mip_levels   = 1u;
+    std::uint32_t    array_layers = 1u;
+    std::uint32_t    sample_count = 1u;
+    ResourceUsage    usage        = ResourceUsage::None;
+    ResourceLifetime lifetime     = ResourceLifetime::Transient;
+};
+
+enum class AccessKind : std::uint8_t {
+    Read,
+    Write,
+    ReadWrite,
+};
+
+enum class Queue : std::uint8_t {
+    Graphics,
+    Compute,
+    Copy,
+};
+
+// -----------------------------------------------------------------------
+// PassPriority — used by the cost-aware budget culler (§2 ubiquitous
+// language). Passes with higher numeric priority drop first when the
+// previous frame's GPU timing exceeds the configured frame budget.
+// -----------------------------------------------------------------------
+
+enum class PassPriority : std::uint16_t {
+    Mandatory       = 0,
+    HighQuality     = 100,
+    StandardQuality = 200,
+    LowQuality      = 300,
+    Optional        = 400,
+};
+
+// -----------------------------------------------------------------------
+// Pass execute signature — invoked by the plan recorder during phase 7.
+// `Bindings` is opaque (resolved argument-buffer offsets); the lambda
+// never touches raw heap addresses.
+// -----------------------------------------------------------------------
+
+struct Bindings;  // opaque; bodies recover typed views from it.
+
+using PassExecuteFn =
+    std::function<Result<void>(MetalCommandBuffer&, const Bindings&) /* noexcept */>;
+
+// -----------------------------------------------------------------------
+// GraphBuilder — fluent surface plugins use to declare passes. Per-pass
+// invariants (declared = used, queue purity, no allocations on the hot
+// path) are checked at compile() time and at execute() in debug builds.
+// -----------------------------------------------------------------------
+
+struct PassDesc {
+    std::string_view name;
+    Queue            queue         = Queue::Graphics;
+    PassPriority     priority      = PassPriority::StandardQuality;
+    Capability       requires_caps = Capability::None;  // unset bits ⇒ compile-time skip.
+};
+
+class GraphBuilder {
+public:
+    GraphBuilder() = delete;  // obtained via RenderGraph::begin(...).
+    GraphBuilder(const GraphBuilder&) = delete;
+    GraphBuilder& operator=(const GraphBuilder&) = delete;
+
+    // Resource declarations — return handles consumed by add_*_pass().
+    [[nodiscard]] Result<VirtualResourceHandle>
+        declare_transient(const ResourceDesc&) noexcept;
+
+    [[nodiscard]] Result<VirtualResourceHandle>
+        declare_persistent(const ResourceDesc&) noexcept;
+
+    [[nodiscard]] Result<VirtualResourceHandle>
+        declare_imported(const ResourceDesc&, PhysicalAllocHandle) noexcept;
+
+    // Pass builders. Each takes a span of (resource, access) edges plus
+    // the execute lambda. The compiler enforces SPEC §4 invariants:
+    // declared-set closure, queue purity, atomic side-effect set.
+    struct ResourceAccess {
+        VirtualResourceHandle resource;
+        AccessKind            access;
+    };
+
+    [[nodiscard]] Result<void>
+        add_raster_pass(const PassDesc&,
+                        std::span<const ResourceAccess> reads,
+                        std::span<const ResourceAccess> writes,
+                        PassExecuteFn                   execute) noexcept;
+
+    [[nodiscard]] Result<void>
+        add_compute_pass(const PassDesc&,
+                         std::span<const ResourceAccess> reads,
+                         std::span<const ResourceAccess> writes,
+                         PassExecuteFn                   execute) noexcept;
+
+    // Ray-trace pass — RT-shadow / AO / reflection bodies declare TLAS
+    // input + shadow / AO / reflection target outputs. Rejected with
+    // `CapabilityNotSupported` if `Capability::HardwareRayTrace` is
+    // missing from the device CapabilitySet at build time.
+    [[nodiscard]] Result<void>
+        add_rt_pass(const PassDesc&,
+                    TLASHandle                       tlas,
+                    std::span<const ResourceAccess>  reads,
+                    std::span<const ResourceAccess>  writes,
+                    PassExecuteFn                    execute) noexcept;
+
+private:
+    // Constructed by RenderGraph::begin(); body in render dylib.
+    GraphBuilder(RenderGraph&) noexcept;
+    friend class RenderGraph;
+    RenderGraph* graph_ = nullptr;
+};
+
+// -----------------------------------------------------------------------
+// RenderGraph — built per (View, FrameCounter) pair. begin() vends the
+// fluent builder; compile() returns the cached or freshly produced
+// ExecutionPlan. Compile is total: success ⇒ ExecutionPlan, failure ⇒
+// typed render::Error (RenderGraphCycle / PassUnsupportedConfig /
+// ResourceResidencyExceeded / BarrierConflict).
+// -----------------------------------------------------------------------
+
+class RenderGraph {
+public:
+    [[nodiscard]] static Result<std::unique_ptr<RenderGraph>>
+        create(MetalDevice&, ViewHandle) noexcept;
+
+    [[nodiscard]] GraphBuilder begin(const RenderFrame&) noexcept;
+
+    [[nodiscard]] Result<const ExecutionPlan*>
+        compile(CapabilitySet) noexcept;
+
+    [[nodiscard]] ViewHandle view() const noexcept;
+
+    ~RenderGraph();
+    RenderGraph(const RenderGraph&)            = delete;
+    RenderGraph& operator=(const RenderGraph&) = delete;
+
+protected:
+    RenderGraph() noexcept;
+};
+
+// -----------------------------------------------------------------------
+// PSOCache — keyed by (shader_hash, state_hash). Render owns residency,
+// not authoring (`shader` plugin compiles HLSL → AIR / metallib).
+// -----------------------------------------------------------------------
+
+struct PSOKey {
+    std::uint64_t shader_hash = 0u;
+    std::uint64_t state_hash  = 0u;
+
+    [[nodiscard]] friend constexpr bool operator==(PSOKey, PSOKey) noexcept = default;
+};
+
+struct PSOKeyHash {
+    [[nodiscard]] constexpr std::size_t operator()(PSOKey k) const noexcept {
+        return std::rotl(k.shader_hash, 21) ^ k.state_hash;
+    }
+};
+
+class PSOCache {
+public:
+    [[nodiscard]] Result<PSOHandle> get(PSOKey) noexcept;
+    [[nodiscard]] Result<void>      warm(std::span<const PSOKey>) noexcept;
+
+    void invalidate_by_shader_hash(std::uint64_t shader_hash) noexcept;
+    void evict_lru(std::size_t target_size) noexcept;
+
+protected:
+    PSOCache() noexcept = default;
+    ~PSOCache() = default;
+    PSOCache(const PSOCache&)            = delete;
+    PSOCache& operator=(const PSOCache&) = delete;
+};
+
+// -----------------------------------------------------------------------
+// Metal wrappers — opaque handles into the render dylib. Real bodies
+// hold `MTL::Device*` / `MTL::CommandQueue*` / `MTL::CommandBuffer*`.
+// -----------------------------------------------------------------------
+
+struct DeviceDesc {
+    bool        prefer_low_power = false;
+    QualityTier tier             = QualityTier::Desktop;
+};
+
+class MetalDevice {
+public:
+    [[nodiscard]] static Result<std::unique_ptr<MetalDevice>>
+        create(const DeviceDesc&) noexcept;
+
+    [[nodiscard]] CapabilitySet capabilities() const noexcept;
+    [[nodiscard]] MetalQueue&    queue(Queue) noexcept;
+    [[nodiscard]] PSOCache&      pso_cache() noexcept;
+    [[nodiscard]] TransientPool& transient_pool() noexcept;
+
+    ~MetalDevice();
+    MetalDevice(const MetalDevice&)            = delete;
+    MetalDevice& operator=(const MetalDevice&) = delete;
+
+protected:
+    MetalDevice() noexcept;
+};
+
+class MetalQueue {
+public:
+    [[nodiscard]] Result<std::unique_ptr<MetalCommandBuffer>>
+        acquire_command_buffer() noexcept;
+
+    [[nodiscard]] Result<void> submit(MetalCommandBuffer&) noexcept;
+
+    [[nodiscard]] Queue role() const noexcept;
+
+protected:
+    MetalQueue() noexcept = default;
+    ~MetalQueue()         = default;
+    MetalQueue(const MetalQueue&)            = delete;
+    MetalQueue& operator=(const MetalQueue&) = delete;
+};
+
+class MetalCommandBuffer {
+public:
+    [[nodiscard]] Result<void> push_debug_group(std::string_view name) noexcept;
+    [[nodiscard]] Result<void> pop_debug_group() noexcept;
+
+    [[nodiscard]] Queue queue_role() const noexcept;
+
+    ~MetalCommandBuffer();
+    MetalCommandBuffer(const MetalCommandBuffer&)            = delete;
+    MetalCommandBuffer& operator=(const MetalCommandBuffer&) = delete;
+
+protected:
+    MetalCommandBuffer() noexcept;
+};
+
+// -----------------------------------------------------------------------
+// RTAccelStructures — BLAS imports + per-View TLAS lifecycle.
+// -----------------------------------------------------------------------
+
+class RTAccelStructures {
+public:
+    [[nodiscard]] Result<void>
+        register_blas(BLASHandle, std::uint64_t version) noexcept;
+
+    [[nodiscard]] Result<TLASHandle>
+        ensure_tlas(ViewHandle, const RenderFrame&) noexcept;
+
+    [[nodiscard]] Result<void>
+        submit_blas_refit(MetalCommandBuffer&, BLASHandle) noexcept;
+
+protected:
+    RTAccelStructures() noexcept = default;
+    ~RTAccelStructures()         = default;
+    RTAccelStructures(const RTAccelStructures&)            = delete;
+    RTAccelStructures& operator=(const RTAccelStructures&) = delete;
+};
+
+// -----------------------------------------------------------------------
+// HZB + ClusterCullState — persistent-thread compute state per View.
+// -----------------------------------------------------------------------
+
+struct HZBDesc {
+    std::uint32_t width  = 0u;
+    std::uint32_t height = 0u;
+    std::uint32_t mips   = 0u;
+};
+
+class HZB {
+public:
+    [[nodiscard]] Result<HZBHandle> ensure(ViewHandle, HZBDesc) noexcept;
+    void invalidate(ViewHandle) noexcept;
+
+protected:
+    HZB()  noexcept = default;
+    ~HZB() = default;
+    HZB(const HZB&)            = delete;
+    HZB& operator=(const HZB&) = delete;
+};
+
+struct ClusterDesc {
+    std::uint32_t cluster_count_x = 16u;
+    std::uint32_t cluster_count_y = 9u;
+    std::uint32_t cluster_count_z = 24u;
+    float         near_plane      = 0.1f;
+    float         far_plane       = 1000.0f;
+};
+
+class ClusterCullState {
+public:
+    [[nodiscard]] Result<ClusterCullStateHandle>
+        ensure(ViewHandle, ClusterDesc, QualityTier) noexcept;
+
+protected:
+    ClusterCullState()  noexcept = default;
+    ~ClusterCullState() = default;
+    ClusterCullState(const ClusterCullState&)            = delete;
+    ClusterCullState& operator=(const ClusterCullState&) = delete;
+};
+
+// -----------------------------------------------------------------------
+// RenderFrame — opaque to all callers. The producer (phase 6) emits one
+// via the snapshot bus; the consumer (phase 7) takes a const reference.
+// -----------------------------------------------------------------------
+
+class RenderFrame {
+public:
+    [[nodiscard]] std::uint64_t              frame_counter() const noexcept;
+    [[nodiscard]] std::span<const ViewHandle> views()        const noexcept;
+
+    ~RenderFrame();
+    RenderFrame(const RenderFrame&)            = delete;
+    RenderFrame& operator=(const RenderFrame&) = delete;
+
+protected:
+    RenderFrame() noexcept;
+};
+
+// -----------------------------------------------------------------------
+// ExecutionPlan — opaque compiled graph; recorded by record_into().
+// -----------------------------------------------------------------------
+
+class ExecutionPlan {
+public:
+    [[nodiscard]] Result<void>
+        record_into(MetalCommandBuffer&) const noexcept;
+
+    [[nodiscard]] std::size_t   pass_count()      const noexcept;
+    [[nodiscard]] std::size_t   barrier_count()   const noexcept;
+    [[nodiscard]] std::uint64_t structural_hash() const noexcept;
+
+    ~ExecutionPlan();
+    ExecutionPlan(const ExecutionPlan&)            = delete;
+    ExecutionPlan& operator=(const ExecutionPlan&) = delete;
+
+protected:
+    ExecutionPlan() noexcept;
+};
+
+// -----------------------------------------------------------------------
+// Top-level entry — invoked from the core frame loop at phase 7. Takes
+// a frozen RenderFrame; produces one submitted command buffer per View
+// and signals a PresentFence consumed by `platform`'s phase 9.
+// -----------------------------------------------------------------------
+
+struct PresentFence {
+    std::uint64_t value = 0u;  // monotonically increasing per-queue.
+};
+
+[[nodiscard]] Result<PresentFence>
+    submit_frame(MetalDevice&, const RenderFrame&) noexcept;
+
+}  // namespace render
+}  // namespace glibre
 ```
 
-Event types, serialized schemas (Fory), error types.
+**Event types.** Render publishes no events back into the ECS event bus
+in MVP; the snapshot bus delivers `RenderFrame` by reference and the
+present fence is read by `platform`'s phase 9 (`PresentFence` value
+above). The `DiagnosticOverlay` exposes a debug-only event channel for
+the editor; that surface ships behind a build-time gate and is therefore
+omitted from this header.
+
+**Serialised schemas (Fory).** None at this layer. `RenderFrame` lives
+in the per-frame arena and is never serialised (PHILOSOPHY anti-pattern
+"serialised render-graph files"). `ExecutionPlan`s are cached by
+in-memory structural hash; they do not persist across process lifetimes.
+PSO blob serialisation is owned by `shader`'s cook (§3.3).
+
+**Error types.** The closed sum `render::Error` declared above lists
+every failure mode at every public render boundary. It is the §10
+authority for failure-mode enumeration; new variants require an ABI bump
+per `reviews/decisions/error-model.md`.
 
 ## 6. Internal Architecture
 
