@@ -2322,7 +2322,223 @@ growth of `Envelope` scratch or a still-undecided lazy-migration cache
 
 ## 10. Failure Modes & Error Model
 
-Typed errors. Recovery.
+The `data` context surfaces failure exclusively through a closed sum
+type `glibre::types::data::Error`. Per
+`reviews/decisions/error-model.md` §"Composition Rules" #1 the enum is
+a leaf — no arm of `data::Error` nests another context's error type;
+instead, callers translate at the boundary they cross. Per §"Type
+Sketch" of the same record, `data::Error` rides into the engine-wide
+`glibre::Error` variant once the data context's enum is appended to
+the central `Error::Variant` alias in `core/include/glibre/error.hpp`.
+
+Per `-fno-exceptions` engine policy (§"Decision" #3 of the error-model
+record), every public `data` boundary in §5 returns `std::expected<T,
+data::Error>` (or `std::expected<T, glibre::Error>` when migrations
+need to surface non-data failure across the dispatcher boundary —
+see §10.2 row "MigrationStepMissing").
+
+§10 is the closed enumeration. New arms may be appended only via a
+spec amendment that ships in the same PR as the new failure point;
+removing or reordering an arm is an ABI-breaking change that follows
+§4.3 inv. 3 (SONAME bump).
+
+### 10.1 The closed sum
+
+```cpp
+// glibre-types public surface, lifted from §5 with payload-bearing
+// arms made explicit. Tag values are stable across patch releases;
+// removing or reordering an arm is an ABI break (§4.3 inv. 3).
+
+namespace glibre::types::data {
+
+// Wire-time location attached to DeserializeError / EnvelopeTruncated.
+// `offset` is the byte index *within the inbound payload* at which
+// decoding stopped, measured from the start of the EnvelopeHeader
+// (§4.8 inv. 2). Non-payload arms set this to a sentinel — see §10.2.
+struct WireSite {
+    SchemaId      schema{};       // the FQN the envelope claimed
+    SchemaVersion version{0};     // the version the envelope claimed
+    std::uint32_t offset{0};      // byte index where decode failed
+};
+
+enum class ErrorTag : std::uint16_t {
+    AbiHashMismatch          = 1,
+    SchemaMigrationFailure   = 2,
+    DeserializeError         = 3,
+    ReservedTagViolation     = 4,
+    SchemaRegistryConflict   = 5,
+    SchemaUnknown            = 6,
+    MigrationStepMissing     = 7,
+    MigrationCycle           = 8,
+    EnvelopeTruncated        = 9,
+};
+
+// Closed sum. Plain-aggregate layout so the C-ABI trampolines in §5
+// can return it without dragging std::variant across the boundary.
+struct Error {
+    ErrorTag tag{};
+
+    // Set on tags 3 and 9; default-constructed on every other arm.
+    WireSite at{};
+
+    // Set on tags 2, 7, 8: identifies the migration step that
+    // refused, the missing step in the chain, or the back-edge of
+    // the detected cycle. (from == 0, to == 0) on every other arm.
+    SchemaId      step_schema{};
+    SchemaVersion step_from{0};
+    SchemaVersion step_to{0};
+
+    // Set on tag 1: the host's compiled-in hash and the offending
+    // plugin's compiled-in hash, hex form (§4.4 inv. 5). Empty
+    // string_views on every other arm.
+    std::string_view host_hash{};
+    std::string_view plugin_hash{};
+
+    // Set on tag 4 (ReservedTagViolation): the tag number whose
+    // reuse was attempted; 0 on every other arm.
+    std::uint16_t reserved_tag{0};
+};
+
+}  // namespace glibre::types::data
+```
+
+The aggregate keeps every arm's payload contiguous and trivially
+copyable so the C-ABI trampolines (§4.3 inv. 4) can return it through
+`std::expected` without crossing a non-trivial type boundary. Arms
+that do not use a particular field leave it default-constructed; the
+table in §10.2 records exactly which payload fields each arm
+populates.
+
+### 10.2 Per-arm trigger / recovery / severity / mapping
+
+Recovery vocabulary — terms used in the table column:
+
+- **refuse load** — the loader at phase 8 logs `warn` and leaves the
+  previous-good plugin live. No state mutation; observers see
+  `core::Error::HotReloadRefused` carrying this `data::Error` in
+  detail (`reviews/decisions/error-model.md` §"Hot-reload refusals";
+  `reviews/decisions/plugin-abi.md` §"Loader Sequence" step 11).
+- **abort plugin** — the loader runs the compensating un-register of
+  any partial registration, `dlclose`s the candidate dylib, and
+  surfaces `core::Error::PluginInitFailed`
+  (`reviews/decisions/plugin-abi.md` §"Loader Sequence" step 9). The
+  rest of the engine continues.
+- **abort build** — codegen-time only. `glibre-foryc` writes no
+  output, exits non-zero, and CMake fails the configure / build step.
+  No runtime path can observe this arm.
+- **refuse decode** — `Envelope<T>::deserialize` returns
+  `std::unexpected(...)`; the calling site decides whether to drop the
+  payload, fall back to a default, or escalate. The world is not
+  mutated.
+- **report** — diagnostic surfacing only; the operation itself does
+  not retry. Used for arms whose detection is informational rather
+  than load-bearing (e.g. tools-build introspection).
+- **process abort** — the engine cannot proceed without violating an
+  invariant; `glibre::log_error(err, fatal)` precedes
+  `std::abort()`. Reserved for arms whose detection means the build
+  itself is broken (per §4.5 inv. 1, registry conflicts at static-init
+  cannot be recovered from in-process).
+
+Severity vocabulary mirrors `error-model.md` §"Logging / Telemetry"
+levels: **fatal** (process abort), **error** (operation refused, log
+at `error`), **warn** (hot-reload refusal — log at `warn` per the
+error-model rule), **info** (codegen / tools diagnostic).
+
+| Arm | Trigger | Detection point | Payload fields | Recovery | Severity | core::Error mapping |
+|-----|---------|-----------------|----------------|----------|----------|---------------------|
+| `AbiHashMismatch` | A loaded plugin's compiled-in `glibre_plugin_abi_hash` byte-string differs from the host's `glibre_types_abi_hash()` (§4.4 inv. 3). | `core` plugin loader, step 4 (`reviews/decisions/plugin-abi.md` §"Loader Sequence"). | `host_hash`, `plugin_hash`. | refuse load — `dlclose` the candidate, log at `warn`, leave previous-good plugin live. | warn | `core::Error::PluginAbiHashMismatch`. The data arm carries the two hex strings; the core arm wraps it via `ErrorContext::detail`. |
+| `SchemaMigrationFailure` | A `MigrationFn` body returned `std::unexpected`, OR the schema-set continuity check at §8.2 step 1 found an `FQN` registered in `outgoing` but missing from `incoming`, OR the meta-schema bootstrap rule (§8.3 gate 3) refused a Mode-B middleman swap. | `Envelope<T>::deserialize` chain step (§4.7 inv. 4); `migrate(...)` step 1 / 2 (§8.2); §8.3 gate 2. | `step_schema`, `step_from`, `step_to`. | At deserialize time: refuse decode. At hot-reload: refuse load — per-row rollback (§8.4) leaves the world byte-identical, the loader un-swaps the vtable. | error (deserialize) / warn (hot-reload). | `core::Error::SchemaMigrationFailed` (`reviews/decisions/plugin-abi.md` §"Failure Modes" row 11). The data arm carries the `(FQN, from, to)` triple; the core arm wraps. |
+| `DeserializeError` | Inbound payload's `SchemaVersion` exceeds the live registry's current version for the same `FQN` (§4.10 inv. 2 — newer-than-host), OR the payload bytes failed Fory's per-tag decode for any reason other than truncation (e.g. tag-type mismatch, builtin range-check failure, nested-type decode refusal). | `Envelope<T>::deserialize` body (§4.8 inv. 5); generated `glibre_types_deserialize_<fqn>` trampoline (§4.3 inv. 2). | `at.schema`, `at.version`, `at.offset`. | refuse decode — caller decides drop / default / escalate. The arena is reset; no partial value escapes. | error | `core::Error` has no dedicated arm; callers that wish to surface to the engine-wide variant pass the `data::Error` through unchanged (a `data::Error` is a leaf variant arm of `glibre::Error` per error-model.md §"Type Sketch"). |
+| `ReservedTagViolation` | A `.fory` source file under `data/schemas/` reuses a tag number that the prior committed version of the same `FQN` retired into the `reserved` set (§4.1 inv. 3). Codegen-time only; runtime cannot observe. | `glibre-foryc` reserved-tag enforcement (§4.2 inv. 4). | `step_schema` (the offending FQN), `reserved_tag` (the reused tag number). | abort build — no output written; CMake configure / build fails. | info (codegen diagnostic; promoted to build error by the host tool's exit code). | None — codegen-time arm; never crosses into the runtime engine. Listed in the closed sum so codegen surfaces a typed enumerator alongside its message rather than a free-form string. |
+| `SchemaRegistryConflict` | Two registry entries share an `FQN` (§4.5 inv. 1). At codegen time this is impossible (§4.10 inv. 1 biconditional); at static-init this fires when two distinct middleman builds load into one process (§4.3 inv. 1). | Middleman static-init (§4.3 inv. 5); also reachable from §8.3 Mode-B reload if the new `Q-types` registry duplicates an `FQN` introduced by an outgoing plugin. | `step_schema` (the duplicated FQN). | process abort at static-init (§4.3 inv. 1 makes a two-middleman process undefined; the spine refuses to run). At Mode-B hot-reload: refuse load — un-swap the candidate registry, leave `P-types` live. | fatal (static-init) / warn (Mode-B). | `core::Error` has no dedicated arm; the loader at Mode-B wraps via `core::Error::HotReloadRefused`. The static-init path is a fatal log + `std::abort`. |
+| `SchemaUnknown` | An inbound payload's envelope `FQN` is not present in the live `SchemaRegistry`. Fires when a save file or world snapshot contains a type the current build does not register, OR when a plugin attempts to deserialize bytes for a `Generated Type` whose schema dropped between Q and P (§8.1 "State that does not survive"). | `Envelope<T>::deserialize` envelope-read step (§4.8 inv. 5); `migrate(...)` schema-set continuity check (§8.2 step 1) — the schema-set continuity arm raises `SchemaMigrationFailure` instead per §8.4, so `SchemaUnknown` only fires at the *deserialize* path, not the *migrate* path. | `at.schema`, `at.version`, `at.offset = 0` (the failure is at the envelope header, not inside the payload). | refuse decode — caller decides drop / default / escalate. Save-file loaders typically translate to a "skip unknown record" warning; per-frame deserializers escalate. | error | `core::Error` has no dedicated arm; the engine-wide variant carries the `data::Error` through. (Distinct from `SchemaMigrationFailure`: that arm fires only when the FQN *is* known and the chain refused; this arm fires when the FQN is not known at all.) |
+| `MigrationStepMissing` | A `MigrationChain` for a known `FQN` lacks an entry whose `from_version` matches the inbound payload's recorded version. Detected at deserialize (an inbound `vN` payload with no `vN → vN+1` step in the chain) and at the §8.3 gate-2 coverage check (Mode-B middleman reload precondition). | `MigrationChain::dispatch` (§4.7 inv. 1); §8.3 gate 2. | `step_schema`, `step_from` (the inbound version), `step_to` (the live version — i.e. the version the chain failed to *reach*). | refuse decode (deserialize path) / refuse load (Mode-B reload). The §4.7 inv. 1 codegen check makes this arm impossible *for in-build types*; it fires only when the inbound bytes carry a version older than the lowest registered chain entry — i.e. a save file or snapshot from a build that has since dropped early-version migrations. | error (deserialize) / warn (hot-reload). | Wrapped by `core::Error::SchemaMigrationFailed` when surfaced through the loader (`reviews/decisions/plugin-abi.md` §"Failure Modes" row 11). The data arm distinguishes "missing step" from "step returned unexpected" so operators can tell a coverage gap from a buggy migration body; both wrap into the same `core::Error` arm because the loader's response is identical. |
+| `MigrationCycle` | The composed `MigrationChain` for an `FQN` contains a back-edge — i.e. a step `(N → M)` where `M ≤ N`. §4.7 inv. 2 mandates strictly ascending application; a cycle would violate it. Detected at codegen time (when `Foryc` builds the chain and asserts strict-ascending) and at static-init time (when `glibre_types_register_migration` wires entries into the per-FQN table). | `Foryc` chain construction (§4.2 inv. 1, deterministic ordering); middleman static-init (§4.3 inv. 5). | `step_schema`, `step_from`, `step_to` — the back-edge that violated ascending order. | abort build (codegen path) / process abort (static-init path — a registered cycle means the build is corrupt and the spine refuses to run, mirroring `SchemaRegistryConflict`). | info (codegen) / fatal (static-init). | None — codegen / static-init arm; never crosses into normal runtime. The static-init fatal path is logged + `std::abort`. |
+| `EnvelopeTruncated` | The inbound byte span ended before the full envelope header was read (`src.size() < sizeof(EnvelopeHeader)` after Fory's variable-width fields), OR the envelope's `payload_length` claimed more bytes than the remaining span carries. (Distinct from `DeserializeError`: that arm covers structurally-complete-but-semantically-invalid payloads; this arm covers physically-incomplete byte runs.) | `Envelope<T>::deserialize` envelope-read step (§4.8 inv. 1, 2). | `at.schema` (default-constructed if the FQN field itself was truncated), `at.version` (likewise), `at.offset` (the byte count of the payload that *was* read before truncation was detected). | refuse decode — caller drops / re-requests. World untouched. | error | `core::Error` has no dedicated arm; passed through. Save-file readers surface this as a "truncated record" diagnostic and continue past the next valid envelope; per-frame deserializers (rare, see §9 budget) escalate. |
+
+### 10.3 Composition with `core::Error`
+
+Per `reviews/decisions/error-model.md` §"Composition Rules" #2 every
+arm above is a leaf in `data`'s context. Three arms have a dedicated
+`core::Error` wrapping (rows 1, 2, 5) because the `core` plugin loader
+is the call site that raises them on `data`'s behalf; the remaining
+six surface to outer contexts by passing the `data::Error` through
+the `glibre::Error` variant unchanged. The mapping is fixed at the
+loader's call sites:
+
+| `data::Error` arm | When `core` raises it | `core::Error` wrapping |
+|-------------------|-----------------------|------------------------|
+| `AbiHashMismatch` | Phase-8 plugin load step 4. | `PluginAbiHashMismatch` (`plugin-abi.md` §"Failure Modes" row 4). |
+| `SchemaMigrationFailure` | Phase-8 plugin load step 11; Mode-B middleman swap (§8.3). | `SchemaMigrationFailed` (`plugin-abi.md` §"Failure Modes" row 11). |
+| `MigrationStepMissing` | Phase-8 step 11 (chain coverage gap discovered during migrate); §8.3 gate 2. | `SchemaMigrationFailed` — same wrap as `SchemaMigrationFailure`; the loader's response (refuse, log, leave previous-good live) is identical for both arms. |
+| `SchemaRegistryConflict` | Mode-B reload only; the static-init path is fatal and never reaches the loader. | `HotReloadRefused` carrying the `data::Error` in `ErrorContext::detail`. |
+| `MigrationCycle` | Never — cycles are codegen-time or static-init time exclusively. | None. |
+| `DeserializeError`, `EnvelopeTruncated`, `ReservedTagViolation`, `SchemaUnknown` | Surface only at the `data` layer; `core` does not wrap them. | None — they appear in `glibre::Error::Variant` as the `data::Error` arm directly. |
+
+Two arms collapse onto one `core::Error::SchemaMigrationFailed`
+(`SchemaMigrationFailure` and `MigrationStepMissing`) per the
+hot-reload protocol's choice to treat coverage gaps and step refusals
+identically (§8.4 schema-set continuity rule). The data layer keeps
+the distinction because operators reading logs benefit from knowing
+*why* the chain refused; the loader does not, because its response is
+identical either way. This is the §"Composition Rules" #2 rule
+applied honestly: cross-context translation is local, explicit, and
+unit-tested at the loader's call site.
+
+### 10.4 Logging discipline
+
+Per `reviews/decisions/error-model.md` §"Logging / Telemetry" #1
+every constructed `data::Error` is logged exactly once at the
+boundary that *handles* it — never at the boundary that *raises* it.
+The data context never logs from inside `Envelope<T>::deserialize`,
+`MigrationChain::dispatch`, or `migrate(...)`. The handler — which
+is either:
+
+- the `core` plugin loader (for arms 1, 2, 5, 7), or
+- the calling context's deserialize site (for arms 3, 6, 9), or
+- `glibre-foryc` itself (for arms 4, 8 codegen path), or
+- the middleman's static-init (for arms 5, 8 static-init path)
+
+— is responsible for the single `glibre::log_error(err, level)` call.
+The structured fields the handler emits are the ones the arm's
+payload populates (table §10.2): never empty strings, never
+default-constructed sentinels masquerading as data. The handler
+that calls `log_error` for an arm whose payload field is unset
+omits that key/value pair entirely — `spdlog` records absence
+rather than a misleading zero.
+
+`spdlog` level mapping (mirrors §10.2 severity column):
+
+- **fatal** → `spdlog::level::critical`, followed by `std::abort()`.
+- **warn** → `spdlog::level::warn` (hot-reload refusals; the
+  previous-good plugin keeps running).
+- **error** → `spdlog::level::err` (operation refused, world
+  untouched).
+- **info** → `spdlog::level::info` (codegen and tools diagnostics).
+
+### 10.5 Test coverage obligations
+
+Every arm in §10.1 carries at least one Catch2 case under
+`tests/data/errors/` that constructs the failure deterministically and
+asserts on the payload fields the arm populates. The fixtures back
+the §11 acceptance criteria.
+
+| Arm | Fixture |
+|-----|---------|
+| `AbiHashMismatch` | Two middleman builds with one schema bytewise different; the test loads a plugin built against build A into a host running build B and asserts `host_hash != plugin_hash`. |
+| `SchemaMigrationFailure` | The `force_migration_failure` test hook from §8.6; the failing migration's `(fqn, from, to)` populate the payload. |
+| `DeserializeError` | A hand-rolled byte buffer with a tag-type mismatch in a known schema; assertion on `at.offset` matches the byte index of the offending tag. |
+| `ReservedTagViolation` | A `.fory` source under `tests/data/schemas/golden/reserved_tag_reuse/` that reuses a previously-committed tag number; assertion on `Foryc`'s exit code and the `reserved_tag` payload field in the codegen-emitted diagnostic. |
+| `SchemaRegistryConflict` | A test-only middleman build that registers two schemas under the same FQN; assertion on `step_schema` and on the `std::abort` path via a death-test. |
+| `SchemaUnknown` | An envelope whose `FQN` is `glibre.test.NeverRegistered`; assertion on `at.schema == "glibre.test.NeverRegistered"`. |
+| `MigrationStepMissing` | A registry whose chain for an FQN at version 4 starts at step `(2 → 3)`; deserialize a `v1` payload and assert `step_from == 1`, `step_to == 2`. |
+| `MigrationCycle` | A test-only `Foryc` invocation against a synthetic chain `[(1→2), (2→1)]`; assertion on the codegen exit code and the `(step_from = 2, step_to = 1)` payload. |
+| `EnvelopeTruncated` | A `std::span<const std::byte>` smaller than `sizeof(EnvelopeHeader)`; assertion on `at.offset == src.size()`. |
+
+Each fixture asserts both (a) the correct arm fires and (b) the
+payload fields it claims to populate are non-default. Arms whose
+payload includes optional spans assert empty spans for the unset
+case, never null pointers.
 
 ## 11. Acceptance Criteria
 
