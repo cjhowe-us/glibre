@@ -556,11 +556,543 @@ Cross-aggregate invariants:
 
 ## 5. Public Interface
 
+The full surface is a single header `glibre/platform/platform.hpp`
+(split across files at implementation time; the spec presents it as one
+translation unit so reviewers can see the whole seam). Every public
+function is `noexcept`; every fallible function returns
+`glibre::Result<T>` (= `std::expected<T, glibre::Error>`) per
+`reviews/decisions/error-model.md`. The platform context contributes
+one new arm to the engine-wide `glibre::Error` variant: the closed sum
+`platform::Error` (§4.7).
+
+The header is verified compileable with
+`clang++ -std=c++23 -fsyntax-only`.
+
 ```cpp
-// header-only stub goes here
+// specs/platform — public interface (header-only stub)
+//
+// One header per family in the real tree; presented here as a single
+// unit. Engine code includes only this seam; libdispatch / AppKit /
+// SDL3 / metal-cpp / POSIX never escape into a sibling context.
+#pragma once
+
+#include <array>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <optional>
+#include <span>
+#include <string_view>
+#include <utility>
+#include <variant>
+
+// Engine-wide error type, defined in core/include/glibre/error.hpp.
+// Forward-declared here so this header is self-contained for syntax
+// checking; the real header pulls in <glibre/error.hpp>.
+namespace glibre {
+struct ErrorContext;
+class  Error;
+template <class T> using Result = std::expected<T, Error>;
+}  // namespace glibre
+
+namespace glibre::platform {
+
+// ---------------------------------------------------------------------------
+// 5.1  Closed sum of typed failures (§4.7)
+// ---------------------------------------------------------------------------
+//
+// Variant-of-tags: `Error` is a `std::variant` so the
+// `IoFailure { OsCode }` payload survives without losing the closed-sum
+// shape. Each non-payload arm is a zero-sized tag struct; the engine-
+// wide `glibre::Error` rolls this whole sum into one of its arms.
+
+struct OsCode {
+    std::int32_t value{0};  // platform-native errno / NSError code / HRESULT.
+    constexpr bool operator==(const OsCode&) const noexcept = default;
+};
+
+struct NotFound          { constexpr bool operator==(const NotFound&)         const noexcept = default; };
+struct PermissionDenied  { constexpr bool operator==(const PermissionDenied&) const noexcept = default; };
+struct AlreadyExists     { constexpr bool operator==(const AlreadyExists&)    const noexcept = default; };
+struct Interrupted       { constexpr bool operator==(const Interrupted&)      const noexcept = default; };
+struct Unsupported       { constexpr bool operator==(const Unsupported&)      const noexcept = default; };
+struct IoFailure         { OsCode code{}; constexpr bool operator==(const IoFailure&) const noexcept = default; };
+
+using Error = std::variant<
+    NotFound,
+    PermissionDenied,
+    AlreadyExists,
+    Interrupted,
+    Unsupported,
+    IoFailure,
+    OsCode>;
+
+// Convenience: every public fallible function returns Result<T>.
+template <class T>
+using Result = ::glibre::Result<T>;
+
+// ---------------------------------------------------------------------------
+// 5.2  Value objects: paths, sizes, time
+// ---------------------------------------------------------------------------
+
+class CanonicalPath {
+public:
+    // Construct after canonicalization. Rejects relative / non-UTF-8 /
+    // non-absolute inputs. The only path shape accepted by FileIo /
+    // FileWatcher (§4.3 inv #1, §4.6 inv #1).
+    [[nodiscard]] static auto from_absolute(std::string_view utf8_abs) noexcept
+        -> Result<CanonicalPath>;
+
+    [[nodiscard]] auto view() const noexcept -> std::string_view { return view_; }
+
+    constexpr bool operator==(const CanonicalPath&) const noexcept = default;
+
+private:
+    constexpr explicit CanonicalPath(std::string_view v) noexcept : view_{v} {}
+    std::string_view view_{};  // backed by an internal arena owned by platform.
+};
+
+struct LogicalSize  { std::uint32_t width{1}; std::uint32_t height{1}; constexpr bool operator==(const LogicalSize&)  const noexcept = default; };
+struct PhysicalSize { std::uint32_t width{1}; std::uint32_t height{1}; constexpr bool operator==(const PhysicalSize&) const noexcept = default; };
+
+struct DpiScale {
+    float value{1.0f};  // §4.1 inv #3: always > 0, validated at construction.
+    [[nodiscard]] static auto make(float v) noexcept -> Result<DpiScale>;
+    constexpr bool operator==(const DpiScale&) const noexcept = default;
+};
+
+// PhysicalSize = round(LogicalSize * DpiScale)  — single conversion site
+// per §4.1 inv #4.
+[[nodiscard]] auto to_physical(LogicalSize, DpiScale) noexcept -> PhysicalSize;
+
+// Monotonic + wall time (§4.4). Instant is opaque, never serialized.
+class Instant {
+public:
+    using rep    = std::int64_t;            // ns since arbitrary epoch.
+    constexpr Instant() noexcept = default;
+    constexpr explicit Instant(rep ns) noexcept : ns_{ns} {}
+    constexpr auto count() const noexcept -> rep { return ns_; }
+    constexpr bool operator==(const Instant&) const noexcept = default;
+    constexpr auto operator<=>(const Instant&) const noexcept = default;
+private:
+    rep ns_{0};
+};
+
+using Duration = std::chrono::nanoseconds;
+
+[[nodiscard]] constexpr auto operator-(Instant a, Instant b) noexcept -> Duration {
+    return Duration{a.count() - b.count()};
+}
+
+struct WallTime {
+    std::chrono::system_clock::time_point point{};  // calendar-bearing; may slew.
+    bool operator==(const WallTime&) const noexcept = default;
+};
+
+// ---------------------------------------------------------------------------
+// 5.3  EventQueue<T>: bounded SPSC ring (§4.2)
+// ---------------------------------------------------------------------------
+//
+// One queue per event family. Sized at construction; never grows.
+// Producer (Pump) is the platform; consumer is the engine. Drain on the
+// main thread. Full-on-write is a fatal pump misconfiguration and the
+// platform reports it via Error::IoFailure (§4.2 inv #3).
+
+template <class T>
+class EventQueue {
+public:
+    [[nodiscard]] static auto with_capacity(std::size_t capacity) noexcept
+        -> Result<EventQueue>;
+
+    EventQueue(EventQueue&&) noexcept;
+    EventQueue& operator=(EventQueue&&) noexcept;
+    EventQueue(const EventQueue&)            = delete;
+    EventQueue& operator=(const EventQueue&) = delete;
+    ~EventQueue();
+
+    [[nodiscard]] auto capacity() const noexcept -> std::size_t;
+    [[nodiscard]] auto size()     const noexcept -> std::size_t;
+    [[nodiscard]] auto empty()    const noexcept -> bool { return size() == 0; }
+
+    // Engine-side drain. Returns the number of events written into `out`.
+    // Never blocks; never reorders within a single device.
+    [[nodiscard]] auto drain(std::span<T> out) noexcept -> std::size_t;
+
+private:
+    EventQueue() noexcept = default;
+    struct Impl;
+    Impl* impl_{nullptr};
+};
+
+// ---------------------------------------------------------------------------
+// 5.4  Input + Window event sums (§4.2)
+// ---------------------------------------------------------------------------
+
+enum class KeyCode      : std::uint16_t { Unknown = 0 /* SDL3 keycode mirror, sealed at compile time */ };
+enum class ScanCode     : std::uint16_t { Unknown = 0 };
+enum class MouseButton  : std::uint8_t  { Left, Right, Middle, X1, X2 };
+enum class GamepadAxis  : std::uint8_t  { LeftX, LeftY, RightX, RightY, LeftTrigger, RightTrigger };
+enum class GamepadBtn   : std::uint8_t  { A, B, X, Y, Back, Guide, Start, LStick, RStick, LShoulder, RShoulder, DUp, DDown, DLeft, DRight };
+
+struct ModifierMask {
+    std::uint16_t bits{0};  // shift, ctrl, alt, gui, num/caps lock.
+    constexpr bool operator==(const ModifierMask&) const noexcept = default;
+};
+
+namespace input {
+
+struct KeyDown      { KeyCode key; ScanCode scan; ModifierMask mods; bool repeat; };
+struct KeyUp        { KeyCode key; ScanCode scan; ModifierMask mods; };
+struct MouseMove    { float x; float y; float dx; float dy; };
+struct MouseButtonEv{ MouseButton button; bool pressed; float x; float y; std::uint8_t click_count; };
+struct Wheel        { float dx; float dy; bool flipped; };
+struct TextInput    { std::array<char, 32> utf8; std::uint8_t length; };  // §3 collapse: IME commit lives here.
+struct GamepadAxisEv{ std::uint8_t device; GamepadAxis axis; float value; };  // value in [-1, 1].
+struct GamepadBtnEv { std::uint8_t device; GamepadBtn button; bool pressed; };
+
+}  // namespace input
+
+using InputEvent = std::variant<
+    input::KeyDown,
+    input::KeyUp,
+    input::MouseMove,
+    input::MouseButtonEv,
+    input::Wheel,
+    input::TextInput,
+    input::GamepadAxisEv,
+    input::GamepadBtnEv>;
+
+struct WindowId  { std::uint32_t value{0}; constexpr bool operator==(const WindowId&)  const noexcept = default; };
+struct DisplayId { std::uint32_t value{0}; constexpr bool operator==(const DisplayId&) const noexcept = default; };
+
+namespace window_event {
+
+struct Resized         { WindowId window; LogicalSize logical; PhysicalSize physical; };
+struct DpiChanged      { WindowId window; DpiScale scale; };
+struct Minimized       { WindowId window; };
+struct Restored        { WindowId window; };
+struct FocusGained     { WindowId window; };
+struct FocusLost       { WindowId window; };
+struct CloseRequested  { WindowId window; };
+struct DisplayChanged  { WindowId window; DisplayId display; };
+
+}  // namespace window_event
+
+using WindowEvent = std::variant<
+    window_event::Resized,
+    window_event::DpiChanged,
+    window_event::Minimized,
+    window_event::Restored,
+    window_event::FocusGained,
+    window_event::FocusLost,
+    window_event::CloseRequested,
+    window_event::DisplayChanged>;
+
+// ---------------------------------------------------------------------------
+// 5.5  Surface: opaque metal-cpp layer wrapper (§4.1 inv #1, #6)
+// ---------------------------------------------------------------------------
+//
+// `Surface` carries an opaque pointer to a `CAMetalLayer` typed as
+// `void*` at the public surface so this header never depends on
+// metal-cpp / Objective-C. The bridging translation unit (the only
+// file allowed to touch AppKit) up-casts to `MTL::Layer*` for render
+// consumption. The handle is non-owning; lifetime is bound to the
+// `Window` that vended it (§4.1 inv #1).
+
+class Surface {
+public:
+    Surface()                                 = default;
+    Surface(const Surface&)                   = delete;
+    Surface& operator=(const Surface&)        = delete;
+    Surface(Surface&&) noexcept               = default;
+    Surface& operator=(Surface&&) noexcept    = default;
+
+    [[nodiscard]] auto raw_layer() const noexcept -> void* { return layer_; }  // CAMetalLayer*
+    [[nodiscard]] auto window()    const noexcept -> WindowId { return owner_; }
+    [[nodiscard]] auto valid()     const noexcept -> bool     { return layer_ != nullptr; }
+
+private:
+    friend class Window;
+    explicit Surface(WindowId w, void* layer) noexcept : owner_{w}, layer_{layer} {}
+    WindowId owner_{};
+    void*    layer_{nullptr};
+};
+
+// ---------------------------------------------------------------------------
+// 5.6  Window + Display (§4.1)
+// ---------------------------------------------------------------------------
+
+struct WindowDesc {
+    std::string_view title{};
+    LogicalSize      size{1280, 720};
+    bool             resizable{true};
+    bool             fullscreen{false};
+};
+
+struct Display {
+    DisplayId     id{};
+    PhysicalSize  bounds{};
+    DpiScale      scale{};
+    std::uint32_t refresh_hz{60};
+    bool          hdr_capable{false};
+    bool operator==(const Display&) const noexcept = default;
+};
+
+class Window {
+public:
+    [[nodiscard]] static auto open(const WindowDesc&) noexcept -> Result<Window>;
+
+    Window(Window&&) noexcept;
+    Window& operator=(Window&&) noexcept;
+    Window(const Window&)            = delete;
+    Window& operator=(const Window&) = delete;
+    ~Window();
+
+    [[nodiscard]] auto id() const noexcept -> WindowId;
+
+    // §4.1 inv #1: surface lifetime strictly bound to this Window.
+    [[nodiscard]] auto surface() noexcept -> Result<Surface>;
+
+    [[nodiscard]] auto request_resize(LogicalSize) noexcept -> Result<void>;
+    [[nodiscard]] auto request_close()              noexcept -> Result<void>;
+
+    [[nodiscard]] auto logical_size()  const noexcept -> LogicalSize;
+    [[nodiscard]] auto physical_size() const noexcept -> PhysicalSize;
+    [[nodiscard]] auto dpi_scale()     const noexcept -> DpiScale;
+    [[nodiscard]] auto display()       const noexcept -> Display;
+
+private:
+    Window() noexcept = default;
+    struct Impl;
+    Impl* impl_{nullptr};
+};
+
+// ---------------------------------------------------------------------------
+// 5.7  Pump: drain SDL3 events into typed queues (§4.2)
+// ---------------------------------------------------------------------------
+
+class Pump {
+public:
+    [[nodiscard]] static auto create(EventQueue<InputEvent>&  input_queue,
+                                     EventQueue<WindowEvent>& window_queue) noexcept
+        -> Result<Pump>;
+
+    Pump(Pump&&) noexcept;
+    Pump& operator=(Pump&&) noexcept;
+    Pump(const Pump&)            = delete;
+    Pump& operator=(const Pump&) = delete;
+    ~Pump();
+
+    // Single-threaded, main-thread-only (§4.2 inv #1). Returns the
+    // total number of events enqueued across both queues this cycle.
+    [[nodiscard]] auto drain() noexcept -> Result<std::size_t>;
+
+private:
+    Pump() noexcept = default;
+    struct Impl;
+    Impl* impl_{nullptr};
+};
+
+// ---------------------------------------------------------------------------
+// 5.8  FileWatcher (§4.3)
+// ---------------------------------------------------------------------------
+
+struct WatchToken { std::uint64_t value{0}; constexpr bool operator==(const WatchToken&) const noexcept = default; };
+
+namespace file_event {
+
+struct Created  { CanonicalPath path; };
+struct Modified { CanonicalPath path; };
+struct Deleted  { CanonicalPath path; };
+struct Renamed  { CanonicalPath from; CanonicalPath to; };
+
+}  // namespace file_event
+
+using FileEvent = std::variant<
+    file_event::Created,
+    file_event::Modified,
+    file_event::Deleted,
+    file_event::Renamed>;
+
+class FileWatcher {
+public:
+    [[nodiscard]] static auto create() noexcept -> Result<FileWatcher>;
+
+    FileWatcher(FileWatcher&&) noexcept;
+    FileWatcher& operator=(FileWatcher&&) noexcept;
+    FileWatcher(const FileWatcher&)            = delete;
+    FileWatcher& operator=(const FileWatcher&) = delete;
+    ~FileWatcher();
+
+    // Subscribe recursively. Returns a token used to drain events / cancel.
+    [[nodiscard]] auto watch(CanonicalPath root) noexcept -> Result<WatchToken>;
+    [[nodiscard]] auto unwatch(WatchToken)        noexcept -> Result<void>;
+
+    // Drain events that arrived for this token since the last call.
+    // Internal I/O thread feeds the buffer (§4.3 inv #5); take_events
+    // never blocks the main thread.
+    [[nodiscard]] auto take_events(WatchToken, std::span<FileEvent> out) noexcept
+        -> Result<std::size_t>;
+
+private:
+    FileWatcher() noexcept = default;
+    struct Impl;
+    Impl* impl_{nullptr};
+};
+
+// ---------------------------------------------------------------------------
+// 5.9  Clock (§4.4)
+// ---------------------------------------------------------------------------
+
+class Clock {
+public:
+    // §4.4 inv #5: one Clock per process; aggregates take it by reference.
+    [[nodiscard]] static auto get() noexcept -> Clock&;
+
+    [[nodiscard]] auto now()         const noexcept -> Instant;
+    [[nodiscard]] auto wall()        const noexcept -> WallTime;
+    [[nodiscard]] auto native_tick() const noexcept -> Duration;
+
+    Clock(const Clock&)            = delete;
+    Clock& operator=(const Clock&) = delete;
+
+private:
+    Clock() noexcept = default;
+};
+
+// ---------------------------------------------------------------------------
+// 5.10 Process (§4.5)
+// ---------------------------------------------------------------------------
+
+using SignalHandlerFn = void (*)(int signal) noexcept;  // async-signal-safe.
+
+enum class Signal : std::uint8_t {
+    Interrupt,    // SIGINT
+    Terminate,    // SIGTERM
+    SegFault,     // SIGSEGV  - install only for crash dumps.
+    BusError,     // SIGBUS
+    IllegalInst,  // SIGILL
+    FpError,      // SIGFPE
+};
+
+class Process {
+public:
+    // §4.5 inv #5: single-instance accessor.
+    [[nodiscard]] static auto get() noexcept -> Process&;
+
+    [[nodiscard]] auto argv()             const noexcept -> std::span<const std::string_view>;
+    [[nodiscard]] auto env(std::string_view name) const noexcept -> std::optional<std::string_view>;
+    [[nodiscard]] auto cwd()              const noexcept -> CanonicalPath;
+    [[nodiscard]] auto executable_path()  const noexcept -> CanonicalPath;
+    [[nodiscard]] auto pid()              const noexcept -> std::uint32_t;
+
+    // §4.5 inv #2: setter only, no getter.
+    auto set_exit_code(int code) noexcept -> void;
+
+    [[nodiscard]] auto install_signal(Signal, SignalHandlerFn) noexcept -> Result<void>;
+    [[nodiscard]] auto uninstall_signal(Signal)                 noexcept -> Result<void>;
+
+    Process(const Process&)            = delete;
+    Process& operator=(const Process&) = delete;
+
+private:
+    Process() noexcept = default;
+};
+
+// ---------------------------------------------------------------------------
+// 5.11 FileIo + IoToken (§4.6)
+// ---------------------------------------------------------------------------
+
+enum class OpenMode : std::uint8_t { Read, Write, ReadWrite, Append };
+
+struct Stat {
+    std::uint64_t size{0};
+    WallTime      modified{};
+    bool          is_directory{false};
+    bool          is_symlink{false};
+};
+
+struct DirEntry {
+    CanonicalPath path;
+    bool          is_directory{false};
+};
+
+// IoToken - single-consumer handle for an in-flight async op (§4.6 inv #3).
+// Move-only. Drop = best-effort cancel. Completion is poll-only; no
+// callbacks cross the boundary (§4.6 inv #7).
+class IoToken {
+public:
+    enum class State : std::uint8_t { InFlight, Ready, Cancelled };
+
+    IoToken()                                 = default;
+    IoToken(const IoToken&)                   = delete;
+    IoToken& operator=(const IoToken&)        = delete;
+    IoToken(IoToken&&) noexcept;
+    IoToken& operator=(IoToken&&) noexcept;
+    ~IoToken();
+
+    // Non-blocking; may be called repeatedly.
+    [[nodiscard]] auto poll() noexcept -> State;
+
+    // Bounded blocking wait. Returns Ready / Cancelled / InFlight (timeout).
+    [[nodiscard]] auto wait_for(Duration) noexcept -> State;
+
+    // Best-effort cancellation; OS may have already completed.
+    auto cancel() noexcept -> void;
+
+    // Once Ready, take the result. Calling before Ready returns
+    // Error::Interrupted; calling twice returns Error::AlreadyExists.
+    [[nodiscard]] auto take_result() noexcept -> Result<std::span<const std::byte>>;
+
+private:
+    friend class FileIo;
+    struct Impl;
+    Impl* impl_{nullptr};
+};
+
+struct FileIoConfig {
+    std::uint8_t io_thread_budget{2};  // §4.6 inv #6, sized at construction.
+};
+
+class FileIo {
+public:
+    [[nodiscard]] static auto create(FileIoConfig = {}) noexcept -> Result<FileIo>;
+
+    FileIo(FileIo&&) noexcept;
+    FileIo& operator=(FileIo&&) noexcept;
+    FileIo(const FileIo&)            = delete;
+    FileIo& operator=(const FileIo&) = delete;
+    ~FileIo();
+
+    // Synchronous primitives. Asserted off-main-thread in debug builds
+    // (§4.6 inv #2). Public surface accepts only CanonicalPath.
+    [[nodiscard]] auto read_all(CanonicalPath) noexcept                                 -> Result<std::span<const std::byte>>;
+    [[nodiscard]] auto write_atomic(CanonicalPath, std::span<const std::byte>) noexcept -> Result<void>;  // §4.6 inv #4.
+    [[nodiscard]] auto stat_path(CanonicalPath) noexcept                                -> Result<Stat>;
+    [[nodiscard]] auto list_dir(CanonicalPath, std::span<DirEntry> out) noexcept        -> Result<std::size_t>;
+    [[nodiscard]] auto remove(CanonicalPath) noexcept                                   -> Result<void>;
+
+    // Bounded-async primitives. Poll-only; never callbacks (§4.6 inv #7).
+    [[nodiscard]] auto read_async(CanonicalPath) noexcept                                     -> Result<IoToken>;
+    [[nodiscard]] auto write_atomic_async(CanonicalPath, std::span<const std::byte>) noexcept -> Result<IoToken>;
+
+private:
+    FileIo() noexcept = default;
+    struct Impl;
+    Impl* impl_{nullptr};
+};
+
+}  // namespace glibre::platform
 ```
 
-Event types, serialized schemas (Fory), error types.
+Event types listed above are the `InputEvent` / `WindowEvent` /
+`FileEvent` sealed sums (§4.2, §4.3). Schemas: the platform context
+exposes no Fory-serialized schema - every event lives only in-memory
+inside its `EventQueue<T>`; persistence is owned by other contexts
+(`data`, `content`). Error type: `glibre::platform::Error`, the closed
+sum from §4.7, contributed as one arm of the engine-wide
+`glibre::Error` variant per `reviews/decisions/error-model.md`.
 
 ## 6. Internal Architecture
 
