@@ -363,8 +363,630 @@ post-MVP, never as a sibling sub-module under `tools`.
 
 ## 4. Aggregates & Invariants
 
-- Aggregate / entity / value object.
-- Invariants that must hold at every public API boundary.
+This section enumerates the aggregates, entities, and value objects the
+`tools` context owns, the invariants that must hold at every public API
+boundary, and the SRP justification for each. The set is closed:
+nothing outside this list is owned by `tools` (per §1 and the refusals
+in §3.3); every Occam collapse cited from §3.2 is honoured by collapsing
+into one named aggregate rather than authoring sibling sub-modules.
+Each aggregate is the smallest unit that preserves an invariant cluster
+atomically; every public API call enters and exits with all invariants
+holding. Failures are signalled through `std::expected<T, glibre::Error>`
+per `reviews/decisions/error-model.md`; the `tools::Error` arms named in
+§2 are surfaced alongside each invariant cluster.
+
+The roster is grouped by responsibility: the host root (§4.1), the
+panel/layout substrate (§4.2), scene navigation + selection (§4.3), the
+reflection-driven inspector (§4.4), the on-viewport gizmo (§4.5), the
+asset browser (§4.6), the undo/redo command stack (§4.7), the toolbar
+play/pause/step controls (§4.8), and the trace recorder (§4.9). The
+cross-aggregate invariants that span those seams are collected in §4.10.
+
+### 4.1 `EditorHost` — root of the in-process editor shell (aggregate root)
+
+**Reason to change:** the boundary between editor-only ECS state and the
+embedded `GameWorld` it inspects (§3.2 collapse #1 — twenty-four
+harmonius tooling sub-files collapse into this one root with eight
+named sub-parts). Distinct from any single panel's body, any single
+inspector view, or the trace recorder's wire format.
+
+**Composition.** Owns exactly two ECS `World` instances:
+
+- The **`EditorWorld`** — a dedicated `core::World` configured at
+  plugin init holding only editor-only resources (`Layout`,
+  `LayoutProfile` slot map, `Selection`, `CommandStack`, `Gizmo` state,
+  `TraceRecorder`, `Toolbar` state, `Shortcuts` keymap). Never
+  serialised into shipping builds; never participates in the
+  game-world frame schedule.
+- The embedded **`GameWorld`** — a borrowed reference to the
+  engine's game `core::World` (the one that ships in the runtime).
+  `EditorHost` toggles its scheduling via `EditorMode` transitions
+  but never registers editor-only components onto it.
+
+Plus the closed-sum `EditorMode` resource (`Edit | Play | Paused | Step
+| Recording`), the `EditorEvent` typed bus (republished from `core`'s
+event bus, not a second bus per §3.2 collapse #9), and a back-pointer to
+`render`'s `RenderFrame` extract slot for the per-frame Dear ImGui draw
+list emit.
+
+**Identity & lifetime.** One `EditorHost` per editor-process invocation.
+Constructed once at `glibre_plugin_register` time; destroyed at plugin
+unload. Survives hot-reload of any other plugin per the engine-wide
+hot-reload protocol; its own dylib swap follows `core`'s
+drain → swap → migrate → resume cycle.
+
+**Public-boundary invariants.**
+
+1. **World disjointness.** `EditorWorld` and the embedded `GameWorld`
+   share no `Archetype`, no `Resource<T>` slot, and no `Entity`
+   namespace; an `Entity` minted in one rejects with
+   `core::Error::EntityForeignWorld` if passed to the other. No
+   editor-only component type ever appears in the game world's type
+   registry.
+2. **Mode-gated scheduling.** The embedded `GameWorld`'s `FrameLoop`
+   advances only when `EditorMode ∈ { Play, Step, Recording }`; in
+   `Edit | Paused` modes its scheduler does not tick (the editor
+   world keeps ticking so the shell stays responsive). `Step`
+   advances exactly one game-world frame and then transitions to
+   `Paused` (single-frame quantum honoured by phase 9, per
+   `reviews/decisions/frame-phases.md`).
+3. **Mode-transition atomicity.** `EditorMode` changes only at the
+   phase-9 boundary of the editor world's frame; no game-world phase
+   observes a mode change mid-frame. Transitions emit
+   `EditorEvent::ModeChanged` synchronously after the boundary.
+4. **One `RenderFrame` consumer.** `EditorHost` emits Dear ImGui draw
+   lists into the `render` context's per-frame extract slot exactly
+   once per editor frame; no second renderer or second extract path
+   exists. The editor never owns swapchains, command buffers, or
+   PSOs (refused by §3.3 → routed to `render` / `platform`).
+5. **No engine-wide singletons inside the host.** `EditorHost` never
+   holds a static reference to any non-editor service; every
+   collaboration with `core`, `render`, `content`, `platform`, or
+   `data` flows through their public boundaries by handle.
+
+**SRP justification — single reason to change:** the rules that govern
+how the editor shell co-exists with the embedded game world. If world
+disjointness, mode gating, or the single-extract contract changes,
+`EditorHost` changes; nothing else does. Every other aggregate in this
+roster has its own narrower reason-to-change.
+
+### 4.2 `Layout` / `LayoutProfile` / `Panel` / `Viewport` (aggregate)
+
+**Reason to change:** the dock-arrangement substrate — how panels are
+positioned, named, persisted, and reflowed (§3.2 collapse #5 collapses
+dock layouts, multi-monitor, per-DPI, idle-skip, partial redraw, and
+frosted-glass into one versioned JSON `Layout` plus existing render
+optimisations). Distinct from any specific panel's body content, which
+each owns its own narrower aggregate (§4.3–§4.9).
+
+**Composition.** A `Layout` is a value object: a versioned JSON
+descriptor naming dock splits, panel positions, sizes, tab groups,
+floating windows, and active tabs, keyed by stable `Panel` ids. A
+`LayoutProfile` is a named `Layout` (e.g. `default`, `level`,
+`inspect`); the host owns a slot map of profiles in `EditorWorld`.
+A `Panel` is one dockable Dear ImGui window identified by a stable
+string id, registered into the host at construction time with its
+draw-callback closure. A `Viewport` is the special `Panel` subtype
+that draws the engine-rendered `GameWorld` into a render-target the
+editor blits via an opaque texture handle from `render` (multi-viewport
+deferred per §3.1, MVP ships exactly one).
+
+**Identity & lifetime.** `LayoutProfile` instances persist across
+sessions in the user-prefs JSON adjacent to the project; `Layout`
+values are loaded into memory on profile activation. `Panel`
+registrations live for the lifetime of the registering plugin (panels
+survive hot-reload of *other* plugins; a panel from a swapped-out
+plugin is unregistered during the drain phase per §8). Only one
+`LayoutProfile` is active at a time; switching is atomic and lossless.
+
+**Public-boundary invariants.**
+
+1. **Stable `Panel` ids.** Each `Panel` registers a
+   compile-time-stable string id; ids are unique within the host.
+   Re-registering an id is rejected with
+   `tools::Error::CommandConflict` (a panel-id collision is
+   structurally identical to a command conflict — same closed-sum
+   refusal arm). Layouts reference panels by id; an unknown id
+   inside a loaded `Layout` is rejected with
+   `tools::Error::LayoutLoadFailed` and the previous active layout
+   is preserved.
+2. **Versioned JSON, monotonic schema.** `Layout`'s on-disk schema
+   carries a `schema_version` integer; loaders accept the current
+   version and any older version reachable by the migration table
+   in `data`. An unknown future version refuses load; a malformed
+   document refuses load. No partial layout is ever applied.
+3. **Lossless profile switch.** Activating a different
+   `LayoutProfile` either fully applies its `Layout` (every panel
+   visible per the layout, every dock split materialised) or
+   leaves the previous layout intact and returns
+   `tools::Error::LayoutLoadFailed`; no half-applied dock state
+   is observable.
+4. **One `Viewport` panel in MVP.** Exactly one `Viewport` is
+   registered; multi-viewport with independent cameras is deferred
+   to a post-MVP plan and refuses to register a second viewport
+   in MVP with `tools::Error::Refused`.
+5. **Draw lists routed through `render`.** Every `Panel`'s draw
+   callback emits Dear ImGui geometry into the host-owned draw-list
+   buffer that flows into `render`'s `RenderFrame` extract; no
+   panel directly touches Metal, swapchains, or GPU resources
+   (PHILOSOPHY §3 — refused by §3.3, routed to `render`).
+
+**SRP justification:** the rules of how panels persist and reflow.
+Changes to dock-layout JSON shape, profile-switch semantics, or panel
+registration discipline move this aggregate; everything else has a
+distinct reason to change.
+
+### 4.3 `SceneTree` + `Selection` (aggregate)
+
+**Reason to change:** how the user navigates the `GameWorld`'s
+hierarchy and which entities the inspector and gizmo will operate on
+(§3.2 collapse #4 — selection state, marquee, lasso, gizmo coupling,
+and selection-changed events collapse into one `Selection` value plus
+one event). Distinct from how the inspector renders (§4.4) or how the
+gizmo authors transforms (§4.5).
+
+**Composition.** `SceneTree` is the panel that walks the embedded
+`GameWorld`'s `ChildOf` forest (using `core`'s parent/child relationship
+index) and renders one row per entity; selection is *not* owned here —
+clicking a row mutates `Selection`. `Selection` is a resource owned by
+`EditorWorld`: a deterministically-ordered set of `Entity` ids
+referencing the `GameWorld`. Every mutation publishes
+`EditorEvent::SelectionChanged` synchronously. MVP scope: click-pick +
+marquee; lasso + sub-object (vertex/edge/face) selection are routed to
+the future `mesh-edit` plugin per §3.3.
+
+**Identity & lifetime.** `SceneTree` is one of the registered `Panel`s
+(§4.2). `Selection` lives across editor frames as a single resource in
+`EditorWorld`; it survives hot-reload of plugins other than `tools`.
+Pre/post snapshots of `Selection` are captured by every `EditCommand`
+(§4.7) so undo/redo restore selection automatically.
+
+**Public-boundary invariants.**
+
+1. **`Selection` references the `GameWorld` only.** Every `Entity` in
+   `Selection` resolves through the `GameWorld`'s entity allocator;
+   stale handles (entity despawned by play-mode logic) are scrubbed
+   at the next selection-event boundary and emit
+   `SelectionChanged`. No `EditorWorld` entities ever appear in
+   `Selection`.
+2. **Deterministic order.** Iteration order of `Selection` is
+   insertion-stable per session; the inspector and gizmo see the
+   same ordering on every read (PHILOSOPHY §7). Cross-session
+   ordering is not promised — selection does not persist to disk.
+3. **Single producer.** Only `SceneTree` row clicks, viewport-pick
+   clicks, marquee-rect commits, and explicit `EditCommand` undo /
+   redo restoration mutate `Selection`. Every other path is
+   read-only.
+4. **Event coalescing.** Multi-entity marquee commits publish
+   exactly one `SelectionChanged` event after the rectangle is
+   released, not one per added entity; consumers see one
+   coherent snapshot.
+5. **Drag-and-drop reparenting refused here.** Re-parenting an
+   entity in the tree pushes an `EditCommand` (§4.7); `SceneTree`
+   never mutates `ChildOf` directly, preserving undo correctness.
+
+**SRP justification:** the rules of "what is selected and how does
+the rest of the editor know". The shape of the navigation row (icons,
+filters, search) is presentational and lives inside the panel
+implementation; selection semantics live here.
+
+### 4.4 `Inspector` + `InspectorView` + `ReflectedField` (aggregate)
+
+**Reason to change:** how the `Selection`'s components surface as
+editable forms — the reflection-driven mapping from Fory descriptors
+to Dear ImGui rows (§3.2 collapse #2 — twelve harmonius "domain
+editors" collapse into this one aggregate). Distinct from how edits
+become reversible operations (§4.7) and from the type registry itself
+(owned by `core`).
+
+**Composition.** `Inspector` is the registered panel that, given the
+current `Selection`, walks the components present on each selected
+entity and instantiates one `InspectorView` per `(Entity, ComponentType)`
+pair. `InspectorView` is a value object derived from the type
+registry's Fory descriptor for one component type: a list of
+`ReflectedField` entries plus a Dear ImGui draw closure. A
+`ReflectedField` is one row: name, type tag, read-closure (returns the
+current value via the Fory descriptor's `read_field(blob, offset)`),
+and write-closure (produces an `EditCommand` rather than mutating the
+component directly). Reads flow through a `ReflectionBlob` — an
+opaque, immutable byte view obtained from the registry — and never
+through raw component pointers.
+
+**Identity & lifetime.** `InspectorView` instances are constructed per
+panel-frame from cached Fory descriptors; descriptors themselves are
+codegen-emitted at build time (PHILOSOPHY §6) and live in static
+storage. `Inspector` itself is one `Panel`.
+
+**Public-boundary invariants.**
+
+1. **Read via `ReflectionBlob`, never raw pointers.** Every
+   `ReflectedField::read()` resolves through the registry's
+   `ReflectionBlob` accessor; the inspector aggregate has no
+   `T*`-typed references to `GameWorld` storage. Type-mismatch on
+   blob access is a build-time error in the codegen.
+2. **Writes produce `EditCommand`s, never direct mutations.** Every
+   `ReflectedField::write(...)` returns an `EditCommand` value;
+   committing it to `CommandStack` is the only path that touches
+   `GameWorld` storage. The inspector itself never calls
+   `world.set<T>(...)`.
+3. **Closed type-registry domain.** A `ReflectedField` exists only
+   for a `(ComponentType, FieldName)` pair the type registry
+   knows; an unknown component type or field returns
+   `tools::Error::InspectorUnknownType` and the row is omitted
+   (no half-rendered form).
+4. **Deterministic field order.** Fields are rendered in the order
+   declared by the Fory descriptor; that order is itself a
+   compile-time constant per `reviews/decisions/fory-codegen.md`.
+   No runtime sort.
+5. **Plugin-supplied custom widgets opt-in.** A plugin may register
+   a custom widget for a `(ComponentType, FieldName)` pair via the
+   engine plugin manifest; absent that registration, the default
+   reflection-driven row is used. Custom widgets still emit
+   `EditCommand`s — no widget bypasses the command stack.
+
+**SRP justification:** the rules of mapping reflected types to
+editable rows. If Fory descriptor shape changes, the read-closure
+shape changes, or the inspector grows new default widget kinds, this
+aggregate changes; everything else does not.
+
+### 4.5 `Gizmo` + `GizmoFrame` + `GizmoConstraint` + `Snap` (aggregate)
+
+**Reason to change:** how on-viewport authoring of transforms turns
+into reversible delta operations (§3.2 collapse #3 — translate /
+rotate / scale gizmos collapse into one closed sum parameterised by
+frame, constraint, and snap). Distinct from the inspector (§4.4) and
+from the command stack (§4.7).
+
+**Composition.** `Gizmo` is the closed sum
+(`Translate | Rotate | Scale`) with one drag-loop state machine and
+one widget-render path. `GizmoFrame` is the closed sum of reference
+frames (`World | Local | Parent`). `GizmoConstraint` is the closed
+sum of axis / plane locks (`X | Y | Z | XY | XZ | YZ | Free`).
+`Snap` is the value object holding the active quantisation rule —
+position step in metres, rotation step in degrees, scale step — with
+states `Off | SinglePerAxis | UniformPerAxis`. The aggregate owns
+the drag-state resource in `EditorWorld` (anchor, current delta,
+hover-axis), the per-`Selection` aggregate-transform centroid used
+as the gizmo origin, and the toolbar bindings that mutate the
+configuration resources.
+
+**Identity & lifetime.** Drag state lives only between drag-begin
+and drag-commit; configuration state (`GizmoFrame`, `GizmoConstraint`,
+`Snap`) persists across editor sessions in user prefs. The gizmo's
+on-viewport widget renders inside the `Viewport` panel (§4.2).
+
+**Public-boundary invariants.**
+
+1. **Drag-commit produces one `EditCommand`.** A drag-loop opens at
+   pointer-down, accumulates deltas while pointer is held, and
+   commits exactly one `EditCommand` (or one `Transaction` if the
+   selection is multi-entity) at pointer-up. An aborted drag
+   (escape key, focus loss) discards the in-progress delta and
+   commits nothing.
+2. **Snap quantises after frame transform.** The deltas the gizmo
+   computes in its `GizmoFrame`'s local axes are snapped *after*
+   the frame transform is applied; consumers never see an
+   un-snapped intermediate when `Snap ≠ Off`.
+3. **Constraint masks the delta source, not the result.**
+   `GizmoConstraint = X | XY | …` masks which input dimensions
+   reach the delta computation; the resulting transform delta
+   leaves un-constrained axes byte-identical to the pre-drag
+   transform. No sub-millimetre noise on locked axes.
+4. **One drag at a time.** The drag-loop state machine is a
+   single-track resource; concurrent drag attempts (e.g. two
+   pointers in a future XR mode) are refused at the input
+   boundary with `tools::Error::Refused`.
+5. **Read-only outside drag.** When no drag is in progress the
+   gizmo aggregate emits no `EditCommand`s and mutates no
+   `GameWorld` state; widget hover and axis-highlight live
+   entirely inside `EditorWorld`.
+
+**SRP justification:** the rules of "user gestures over the
+viewport become atomic transform deltas". If the gizmo's widget
+geometry, frame semantics, constraint interpretation, or snap
+quantisation changes, this aggregate changes; nothing else does.
+
+### 4.6 `AssetBrowser` + `AssetThumbnail` (aggregate)
+
+**Reason to change:** how the local project tree surfaces as
+drag-droppable handles inside the shell (§3.2 collapse #1 sub-part —
+the editor's read-only window onto `content`'s on-disk layout).
+Distinct from `content`'s I/O policy or `render`'s capture-to-texture
+pass — both refused by §3.3.
+
+**Composition.** `AssetBrowser` is the registered panel walking the
+paths surfaced by `content`'s public listing API; it never opens
+files directly. `AssetThumbnail` is a value object: a cached preview
+texture handle (rendered by `render`'s capture-to-texture path,
+borrowed as an opaque texture id) plus the thumbnail's source-asset
+hash so cache invalidation is cheap. The aggregate owns the
+in-memory thumbnail LRU keyed by `AssetHandle`, the active filter /
+search state inside `EditorWorld`, and the drag-payload type
+(`AssetHandle` value passed via Dear ImGui drag-drop) consumed by
+`Inspector` slots and the `Viewport`.
+
+**Identity & lifetime.** Thumbnails live in the LRU until evicted
+under memory pressure (per the §9 budget cell); they are *not*
+persisted to disk by tools (caching policy is `content`'s concern
+when/if added). Drag-payloads exist only between drag-start and
+drop-or-cancel.
+
+**Public-boundary invariants.**
+
+1. **Read-only over the project tree.** `AssetBrowser` issues only
+   listing and metadata queries to `content`; it never writes,
+   imports, bakes, or mutates assets on disk. File I/O policy is
+   refused per §3.3 → `content`.
+2. **Drop produces an `EditCommand`.** Dropping an `AssetHandle`
+   onto an `Inspector` slot produces an `EditCommand` whose
+   `apply()` binds the handle to the target `ReflectedField` and
+   whose `undo()` restores the previous handle. Dropping onto the
+   `Viewport` produces a "spawn entity with `MeshHandle = …`"
+   `EditCommand`. No drop ever mutates `GameWorld` directly.
+3. **Thumbnails are display-only.** `AssetThumbnail` carries an
+   opaque texture id (vended by `render`); the editor never
+   inspects the underlying GPU texture and never re-encodes the
+   image. Capture is requested by handle; the producer (render's
+   capture-to-texture path) owns memory and lifetime.
+4. **Local tree only.** Listings come from `content`'s
+   *project-local* surface; remote stores, marketplaces, asset
+   bundles, mod stores, and download caches are refused per §3.3.
+5. **Eviction never invalidates a drag in progress.** A drag with
+   a live `AssetHandle` payload pins its thumbnail's
+   metadata-row in the LRU until the drag concludes; evicting
+   thumbnails mid-drag is rejected.
+
+**SRP justification:** the rules of how local assets become
+drag-droppable handles in the shell. If the listing protocol, the
+thumbnail-cache eviction policy, or the drop-payload type changes,
+this aggregate changes; nothing else does.
+
+### 4.7 `EditCommand` + `CommandStack` + `Transaction` (aggregate)
+
+**Reason to change:** how reversible operations against the
+`GameWorld` are recorded, grouped, and replayed (§3.2 collapse #6 —
+eight harmonius undo/redo concerns collapse into one stack + one
+grouper at MVP). Distinct from any specific edit's payload (each
+`EditCommand` subtype is a value type carrying its own apply/undo
+closures).
+
+**Composition.** `EditCommand` is a value object carrying `apply()`
+and `undo()` closures, an optional `coalesce(other)` predicate, a
+byte-count estimate (for the in-memory budget), pre/post `Selection`
+snapshots, and a typed payload (component edit / entity add / entity
+remove / parent change / asset slot bind). `CommandStack` is the
+resource in `EditorWorld` holding two contiguous arrays — the undo
+stack and the redo stack — plus the byte-budget cap and the eviction
+policy (oldest-first when over budget). `Transaction` is the grouping
+RAII handle: `begin()` opens a transaction, every push during its
+lifetime appends to a private buffer, `commit()` atomically promotes
+the buffer to one stack entry, `abort()` discards. Multi-entity edits
+emitted by `Gizmo` drag-commits or `Inspector` multi-select writes
+flow through one `Transaction`.
+
+**Identity & lifetime.** `CommandStack` lives across the editor
+session (and survives hot-reload of every plugin including `tools`
+itself per §8). On-disk persistence of history is deferred per
+§3.2 collapse #6. `Transaction` exists only between `begin()` and
+`commit()` / `abort()`.
+
+**Public-boundary invariants.**
+
+1. **Monotonic with O(1) undo / redo.** `CommandStack` is a
+   contiguous array; pushing, undoing, and redoing the top entry
+   are O(1) amortised. The "monotonic" property: at any instant
+   the stack is fully ordered by push-time and partitioned into
+   `undo[0..top]` and `redo[top..end]`; pushing a new command
+   when redo is non-empty truncates redo (no branching history at
+   MVP per §3.2 collapse #6).
+2. **`apply()` and `undo()` are inverses.** For every committed
+   `EditCommand` `c`, applying `c.undo()` immediately after
+   `c.apply()` returns the `(GameWorld, Selection)` pair to a
+   state byte-equal to its pre-`apply` snapshot, modulo unrelated
+   concurrent edits (refused: there are no concurrent edits — see
+   invariant 4). Violation refuses commit with
+   `tools::Error::CommandConflict`.
+3. **`Transaction` atomicity.** A `Transaction` either commits all
+   contained `EditCommand`s atomically (one user-visible undo
+   step) or commits none of them on `abort()`. A transaction in
+   flight refuses any direct push to the stack (push-while-grouped
+   routes to the transaction buffer).
+4. **Single-writer to `GameWorld` storage.** Only `CommandStack`'s
+   apply-path mutates `GameWorld` storage; every mutation source
+   in tools (gizmo drag-commit, inspector write, asset-drop,
+   scene-tree reparent) flows through here. Concurrent applies
+   are refused — the stack mutates serially within phase 5
+   (transform) of the editor world (consistent with `core`'s
+   single-writer-per-chunk invariant § 4.1.5).
+5. **Selection coupling.** Every `EditCommand` carries pre-/post-
+   `Selection` snapshots; `apply()` restores `post`, `undo()`
+   restores `pre`, and either path emits exactly one
+   `EditorEvent::SelectionChanged` if the snapshots differ.
+6. **Byte-budget bounded.** When pushing a new command would
+   exceed the in-memory budget cell from §9, the oldest entries
+   are evicted (FIFO from the bottom of the undo stack); evictions
+   are deterministic and never silently drop redo entries (which
+   are truncated only by an explicit new push, per invariant 1).
+7. **Latency target.** Apply / undo of a single `EditCommand`
+   completes in ≤ 50 ms on the §9 reference target; this is a
+   first-class budget assertion enforced by perf tests.
+
+**SRP justification:** the rules of "how reversible operations are
+recorded, grouped, and replayed". Changes to apply/undo discipline,
+transaction grouping, eviction policy, or selection coupling move
+this aggregate; nothing else does.
+
+### 4.8 `Toolbar` + `PlayPauseStep` (aggregate)
+
+**Reason to change:** how the top-of-shell control strip drives
+`EditorMode` transitions on the embedded `GameWorld` and surfaces
+mode-affecting toggles (snap, gizmo mode, recording status). Distinct
+from any single subsystem the buttons control — the toolbar is the
+*input* surface, not the implementation.
+
+**Composition.** `Toolbar` is the registered panel hosting a fixed
+set of controls: the `PlayPauseStep` trio (Play / Pause / Step
+buttons), gizmo-mode selector (`Translate | Rotate | Scale`),
+gizmo-frame selector (`World | Local | Parent`), snap toggles
+(position, rotation, scale), and recording-status indicator. The
+controls bind to resources owned by other aggregates — `EditorMode`
+on the host (§4.1), gizmo configuration (§4.5), `TraceRecorder` state
+(§4.9) — and produce `EditorEvent`s on every change. `PlayPauseStep`
+is the named trio whose three actions are the only legitimate way to
+transition `EditorMode` from outside the trace recorder.
+
+**Identity & lifetime.** One `Toolbar` per `EditorHost`. Survives
+profile switches (the toolbar is not a `Layout`-positioned panel —
+its shell-anchored slot is fixed in MVP).
+
+**Public-boundary invariants.**
+
+1. **Mode transitions exclusively via `PlayPauseStep` or
+   `TraceRecorder`.** No other code path mutates `EditorMode`;
+   programmatic mode changes from tests or plugins go through the
+   same controls (or through `TraceRecorder` for recording-mode
+   entry / exit). Direct writes to the resource are refused.
+2. **Single-step is exactly one game-world frame.** Pressing Step
+   while in `Paused` transitions to `Step`, advances the embedded
+   `GameWorld` by exactly one phase-9 boundary, and transitions
+   back to `Paused`. Step is a no-op outside `Paused`.
+3. **Buttons are read-only over the systems they reflect.** A
+   toolbar button surfaces state; it does not own state. The
+   gizmo-mode buttons read and mutate `Gizmo`'s configuration
+   resource (§4.5), they do not store gizmo mode locally.
+4. **Recording-status indicator is read-only.** The status
+   indicator reads `TraceRecorder`'s state (§4.9); it never
+   starts or stops recording itself — that is the recorder's
+   own action surface.
+
+**SRP justification:** the rules of how toolbar input maps to mode
+transitions and configuration writes. If the trio's action set,
+button layout, or mode-transition semantics changes, this aggregate
+changes; the systems on the other side of those buttons do not.
+
+### 4.9 `TraceRecorder` + `TraceFile` (aggregate)
+
+**Reason to change:** how the editor captures a deterministic record
+of input + scheduler ticks + assertions into a `.glibre-trace` file
+the E2E runner can replay (§3.2 collapse #7 — automation, replay, AI
+tool-invocation, and CI integration collapse into this one
+deterministic seam; AI-driven editor automation refused per §3.3).
+Distinct from how the E2E runner *replays* a trace (owned by
+`specs/e2e/SPEC.md`).
+
+**Composition.** `TraceRecorder` is the resource in `EditorWorld`
+holding the active recording's writer state: the open `TraceFile`
+handle, the append-only `TraceOp` ring buffer, the assertion
+templates the user has configured for capture, and the recording's
+start tick. `TraceOp` is the closed sum of typed entries: input
+event (mouse / keyboard / gamepad), scheduler tick boundary,
+assertion (`expect:component:value`), `Selection` mutation,
+`EditCommand` push. `TraceFile` is the on-disk artifact — a
+Fory-archived sequence of `TraceOp`s under `tests/e2e/` whose schema
+is owned jointly with `specs/e2e/SPEC.md`. The aggregate owns no
+read path: replay is the E2E runner's responsibility.
+
+**Identity & lifetime.** Recordings exist only when
+`EditorMode == Recording`. The `TraceFile` is opened on
+mode-transition into `Recording`, written through the recording, and
+closed on transition out. Aborted recordings (process crash) leave a
+truncated but well-formed prefix file (per the Fory append-streaming
+contract — final commit is the only header write).
+
+**Public-boundary invariants.**
+
+1. **Non-perturbing capture.** `TraceRecorder` is a write-only
+   side channel: capturing a `TraceOp` may not mutate any system
+   the editor observes. No game-world state, no editor-world
+   non-recorder state, no scheduler ordering, and no input event
+   is altered by the act of recording. Disable / enable
+   recording is byte-equal in the recorded execution path
+   (consistent with PHILOSOPHY §7 — determinism by default).
+2. **Append-only `TraceFile`.** The file is opened with append
+   semantics; in-flight writes never seek backwards. Truncation
+   of an existing file at recording-start is the one allowed
+   non-append act.
+3. **Bounded write latency.** Each `TraceOp` capture serialises
+   in ≤ 100 µs on the §9 target; over-budget writes drop the
+   recording with `tools::Error::TraceWriteFailed` and the
+   editor exits `Recording` mode (per invariant 1, dropping a
+   recording does not perturb the surrounding execution).
+4. **Schema versioned.** `TraceFile` carries the `.glibre-trace`
+   schema version negotiated with `specs/e2e/SPEC.md`; older
+   recordings replay through the data-context migration table.
+5. **Recording boundary is the only `EditorMode` writer outside
+   the toolbar.** Entering / exiting `Recording` mode is the
+   recorder's privilege; the toolbar surfaces a button whose
+   action delegates to the recorder rather than mutating
+   `EditorMode` directly.
+
+**SRP justification:** the rules of capturing a deterministic,
+non-perturbing record of editor activity into a replayable artifact.
+If the `TraceOp` vocabulary, write discipline, or file schema
+evolves, this aggregate changes; the replay runner and the editor
+shell do not.
+
+### 4.10 Cross-aggregate invariants
+
+Invariants that span more than one aggregate and must hold at every
+public boundary at the seams between them:
+
+1. **Editor world disjoint from `GameWorld`, always.** No aggregate
+   above ever stores an `Entity` from one world inside a resource
+   on the other world; no editor-only component type ever enters
+   the game world's type registry. Cross-world `Entity` passes are
+   rejected at each aggregate's public boundary
+   (`core::Error::EntityForeignWorld`).
+2. **Play-mode toggles `GameWorld` scheduling without touching
+   editor world scheduling.** `EditorMode ∈ { Edit, Paused }`
+   freezes the game world's `FrameLoop`; the editor world keeps
+   ticking so the shell stays responsive. `EditorMode = Step`
+   advances the game world by exactly one frame and reverts to
+   `Paused`. `EditorMode = Recording` keeps the game world
+   ticking while `TraceRecorder` captures (§4.9 invariant 1
+   guarantees this is non-perturbing).
+3. **One edit pipeline.** Every mutation of `GameWorld` storage
+   from inside tools flows through `CommandStack` (§4.7) — gizmo
+   drag-commits, inspector writes, asset-drops, scene-tree
+   reparents all produce `EditCommand`s. No aggregate has a
+   parallel write path; `tools::Error::CommandConflict` is the
+   refusal arm when this is violated.
+4. **Inspector reads via `ReflectionBlob`, never raw pointers.**
+   Across the inspector → registry → component-storage seam, no
+   raw `T*` typed reference to game-world component data ever
+   crosses an aggregate boundary. `ReflectionBlob` is the only
+   read path (§4.4 invariant 1).
+5. **Trace recording is non-perturbing.** Across recorder / event
+   bus / scheduler / input pump, capturing a `TraceOp` does not
+   alter any observed system's state, ordering, or timing — the
+   recorder is a write-only side channel (§4.9 invariant 1).
+6. **CommandStack monotonic with O(1) undo.** Across stack /
+   transaction / event-bus seams, undo / redo are O(1) and the
+   stack's partition into `undo` and `redo` halves is fully
+   ordered at every instant (§4.7 invariant 1).
+7. **One `RenderFrame` extract.** Across `EditorHost` / `Panel` /
+   `Viewport` / `render` seam, the editor emits exactly one Dear
+   ImGui draw-list extract per editor frame into `render`'s
+   `RenderFrame` slot. No second extract path or second renderer
+   exists (§4.1 invariant 4 / §4.2 invariant 5).
+8. **Per-context error model honoured.** Every aggregate's public
+   fallible operation returns `glibre::Result<T, glibre::Error>`
+   per `reviews/decisions/error-model.md`; tools' arms live in
+   the `tools::Error` enum named in §2 and are the only
+   tools-internal error surface.
+9. **Hot-reload survival.** Across hot-reload of any plugin
+   *other* than tools itself, `Layout` profiles, `Selection`,
+   `CommandStack`, `Gizmo` configuration, `Toolbar` state, and
+   active `TraceRecorder` recordings all survive the swap per the
+   engine-wide hot-reload protocol (`reviews/decisions/hot-reload-protocol.md`).
+   Tools' own dylib swap follows the same protocol; details
+   live in §8.
+10. **Frame-phase ownership.** Tools registers no phase of its
+    own; its work runs inside phases owned by other contexts
+    (input → core's input phase, draw-list emit → render phase 6
+    extract, mode transitions → editor world phase 9). Tools
+    never mutates `GameWorld` outside the moments when its
+    `CompiledFrame` permits writes.
 
 ## 5. Public Interface
 
