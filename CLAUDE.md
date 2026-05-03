@@ -11,8 +11,12 @@ SDL3 + Metal (via metal-cpp) + HLSL (DXC + metal-shaderconverter).
   Issues**, not in this repo. Always reference issues from `plans/*.md`
   and PR bodies.
 - **Six issue types**: initiative → epic → sub-epic → { plan | spike };
-  user-story is orthogonal. Aggregators carry no estimate; leaves do.
-  No roles, no kinds. See `AGENTS.md`.
+  user-story is orthogonal. Aggregators carry no estimate; leaves do
+  (except spikes, which carry no estimate either). No roles, no kinds.
+  See `AGENTS.md`.
+- **Always create issues via templates** in `.github/ISSUE_TEMPLATE/`.
+  Bodies created programmatically must mirror the template's section
+  structure.
 - **Tests by type**: `user-story` → manual test script + E2E trace.
   `plan` → unit tests. `spike` → deliverable doc / decision (no tests).
 - **Story closure**: E2E test must be green in CI before any manual
@@ -26,7 +30,8 @@ SDL3 + Metal (via metal-cpp) + HLSL (DXC + metal-shaderconverter).
 - **≥3 passes** for every plan / design / issue set before leaves
   execute (coverage → cohesion+SRP → topology+estimation).
 - **No time estimates.** Story points only (Fibonacci 1/2/3/5/8). > 8 → split.
-  Story points roll up from leaves; tracking issues carry no `pts:*`.
+  Story points roll up from leaves; aggregators (initiative / epic /
+  sub-epic) and spikes never carry `pts:*`.
 - **Cohesion AND completeness.** Abstractions are the foundation
   completeness rests on. Reject the false trade-off.
 - **SOLID, SRP first.** One responsibility per module. Two reasons to

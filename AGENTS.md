@@ -30,8 +30,20 @@ Aggregators carry **no estimate**; leaves carry estimates that roll up.
    doc, decision record, or prototype branch. No tests required.
    **No estimate** — spikes do not carry story points.
 
-Story-point rollup is automatic: tracking issues never carry a
-`pts:*` label; their total = sum of `pts:*` across leaf descendants.
+Story-point rollup is automatic: aggregators (`type:initiative`,
+`type:epic`, `type:sub-epic`) never carry a `pts:*` label; their total
+= sum of `pts:*` across leaf descendants. Spikes carry no estimate
+either; only `type:user-story` and `type:plan` do.
+
+## Issue Creation — Always via Templates
+
+Every new issue MUST originate from one of the templates in
+`.github/ISSUE_TEMPLATE/` (`initiative.yml`, `epic.yml`,
+`sub-epic.yml`, `user-story.yml`, `plan.yml`, `spike.yml`). Bodies
+created programmatically (e.g. via `gh issue create --body-file`)
+must mirror the template's section structure so reviewers see the
+same shape regardless of authorship path. Bare/blank issues are
+disabled by `.github/ISSUE_TEMPLATE/config.yml`.
 
 ## Concurrency
 
@@ -62,15 +74,35 @@ session boundary cleanly without committing half-done work.
 
 ## Status Communication (in issue comments)
 
-Subagents post structured status to the issue they are working on:
+All work on a leaf issue is documented via comments on that issue.
+**Issues are the log.** No on-disk status files.
+
+Required fields on every status comment:
 
 ```
-agent:<short-name> status:<started|progress|blocked|done> issue:#N
-notes:<one-paragraph English summary>
+agent:<short-name>
+status:<started|progress|blocked|done>
+issue:#<n>
+branch:<git-branch>
+worktree:<absolute-path>
+host:<hostname-or-'local'>
+cloud:<provider-env-or-'none'>
+commit:<sha-if-any>
+pr:#<n>-or-'none'
+notes:<one-paragraph English summary of work performed>
 ```
 
-The parent tracking issue receives roll-up comments from the orchestrator
-when child status changes. No status lives on disk — issues are the log.
+Posted at minimum on:
+
+- `started` — when the subagent claims the issue
+- `progress` — at meaningful checkpoints (decisions, blockers,
+  unexpected splits)
+- `blocked` — with the dependency or external decision needed
+- `done` — when the deliverable is committed; references the
+  commit SHA and any PR
+
+The parent aggregator (initiative / epic / sub-epic) receives roll-up
+comments from the orchestrator when child status changes.
 
 ## Three-Pass Authoring (mandatory)
 

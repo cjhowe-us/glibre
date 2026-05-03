@@ -107,8 +107,13 @@ Live under `.github/ISSUE_TEMPLATE/`:
   checklist (E2E green → manual PASS → close).
 - `plan.yml` — unit test plan required; one or more PRs.
 - `spike.yml` — research / design; deliverable = doc / decision.
+  No story-point estimate.
 
 `config.yml` disables blank issues so every new issue is typed.
+
+**Mandatory**: every issue MUST originate from a template (UI form or
+`gh issue create --body-file` whose body mirrors the template
+sections). No bare issues.
 
 ## 6. Pull Requests
 
