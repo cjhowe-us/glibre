@@ -333,8 +333,754 @@ runtime behind opaque handles" lives in another plugin.
 
 ## 4. Aggregates & Invariants
 
-- Aggregate / entity / value object.
-- Invariants that must hold at every public API boundary.
+This section enumerates geometry's aggregates, entities, and value objects
+along with the invariants every public boundary must hold. Aggregates are
+listed in data-flow order: cook-time inputs feed cook-time stages that
+emit the immutable `MeshletPak` artefact (§4.1.1 → §4.1.8), then the
+runtime aggregates own load, decode, residency, and handle issuance
+(§4.1.9 → §4.1.15). Each aggregate owns one dimension of "turn an
+authored static mesh into a cooked, runtime-resident `MeshletPak`,
+decoded back behind opaque handles"; per PHILOSOPHY §1 (SRP), an
+aggregate is admitted to this list only when its single reason-to-change
+does not collapse into another's. Where multiple harmonius primitives
+reduce to one glibre primitive, the collapse is cited from §3.2.
+Cross-context concerns (frame submission, BLAS GPU build, shader cook,
+streaming-budget arbitration, animation, materials) are explicitly
+delegated and never re-asserted here (§3.3).
+
+### 4.1 Aggregate roster
+
+#### 4.1.1 `MeshSource` — authored static-mesh input (value object, cook-time only)
+
+**Reason to change:** what authored data the cooker accepts (positions,
+indices, attribute streams, submesh ranges, material slots). Distinct
+from optimisation policy (§4.1.2) and from cluster shape (§4.1.3).
+
+**Composition.** The pre-optimisation snapshot of one authored mesh:
+position stream (`std::span<const f32>` xyz), index stream (`u32`),
+optional per-vertex attribute streams (normal, tangent, UV0..UVn,
+colour, vertex weights), `Submesh` ranges (each carrying an opaque
+`MaterialSlot` index baked at author time), and the source-asset
+content hash that `CookManifest` (§4.1.8) keys incremental cooks off.
+No engine-runtime types live here — `MeshSource` is exclusively the
+input that the cook-time stages consume.
+
+**Identity & lifetime.** Constructed by the upstream `content` importer
+from FBX / glTF / OBJ on the cook worker thread; lives only until the
+end of the per-mesh cook job; never enters a `MeshletPak` directly.
+
+**Public-boundary invariants.**
+
+1. **Pose-rigid.** `MeshSource` carries the authored bind-pose vertex
+   data only; no per-frame deformation, no skinning matrices. Skinning
+   data (joint indices / weights) is carried as opaque attribute
+   streams the future `animation` plugin owns; geometry never inspects
+   it (§3.3 routing for skeletal deformation).
+2. **Manifold submeshes.** Every `Submesh` index range describes a
+   topologically valid triangle list (no degenerate triangles, no
+   index out of range, no orphan vertices); the cooker rejects the
+   mesh with `geometry::Error::MeshSourceInvalidTopology` rather than
+   producing a `MeshletPak` with undefined cluster behaviour.
+3. **Stable attribute set per submesh.** All vertices addressed by one
+   submesh share one attribute layout; mixing layouts inside a
+   submesh is rejected with `geometry::Error::AttributeLayoutMismatch`.
+4. **Deterministic byte order.** Field encoding is little-endian fixed
+   layout; equal-content `MeshSource`s on two hosts produce byte-equal
+   bytes feeding `MeshoptStage`. PHILOSOPHY §7.
+
+#### 4.1.2 `OptimisedMesh` — meshoptimizer-stage output (value object, cook-time only)
+
+**Reason to change:** which meshoptimizer passes are applied and in
+which order (vertex-cache reorder + overdraw + fetch + LOD-chain
+simplify). Bounded; doesn't drag in cluster shape or compression.
+
+**Composition.** Post-`MeshoptStage` reordered vertex/index streams
+keyed by submesh, plus the per-LOD-chain index sets produced by
+`meshopt_simplify` (one index span per LOD level, finest to coarsest).
+Carries the FFI-exact return values from meshoptimizer so the
+downstream `MeshletBuildStage` can reproduce them deterministically.
+Does not yet carry meshlet decomposition or bounds.
+
+**Identity & lifetime.** One per `MeshSource` per cook; lives only
+until consumed by `MeshletBuildStage`; never serialised into
+`MeshletPak` (the LOD chain is re-expressed as `MeshletGroup` records).
+
+**Public-boundary invariants.**
+
+1. **Deterministic given input.** `OptimisedMesh` is a pure function of
+   `MeshSource` plus the cook-time meshoptimizer parameters baked
+   into `CookManifest`; two hosts cook byte-equal output (PHILOSOPHY
+   §7). The cooker uses meshoptimizer's reproducible-flag path; no
+   randomised tie-breaking.
+2. **Vertex-fetch + cache + overdraw all applied.** A pak whose
+   header advertises `MeshoptStage` applied must have all three
+   passes run; partial application is refused at cook time.
+3. **LOD-chain non-empty.** The simplification chain contains at
+   least LOD0 (the finest level); a zero-LOD output is rejected.
+
+#### 4.1.3 `Meshlet` — atomic cluster (value object)
+
+**Reason to change:** the cluster-quantum format — what fits in
+`Meshlet` (vertex count, prim count, bound, cone, SSE record). One
+seam.
+
+**Composition.** Fixed-size record per cluster: an offset into the
+pak's per-meshlet vertex / triangle index arrays, a vertex count
+(`u8`, ≤ 64), a triangle count (`u8`, ≤ 124), the cluster's
+`BoundingSphere` (`f32 cx, cy, cz, r`), the cluster's `BoundingCone`
+(`f32` axis xyz + `f32` half-angle cosine), and the per-cluster
+`ScreenSpaceError` bound at the reference distance.
+
+**Identity & lifetime.** Identified by index inside its owning
+`MeshletPak`'s meshlet table; the index is stable for the life of
+the pak (the pak is immutable post-build, §4.1.7). Geometry never
+exposes raw `Meshlet` records across the plugin boundary — only
+`MeshletGroupHandle` (§4.1.10).
+
+**Public-boundary invariants.**
+
+1. **`vertex_count ≤ 64` and `prim_count ≤ 124`.** Hard cap matching
+   meshoptimizer's `meshopt_buildMeshlets` shape (§3.1 mining of
+   R-3.1.1) and Metal 4 mesh-shader payload limits. Any cluster
+   exceeding either count fails cook with
+   `geometry::Error::MeshletOversize`; the pak format itself
+   physically cannot represent it (the count fields are `u8` with
+   range checks at `PakReader` time).
+2. **Bounding sphere encloses all referenced vertices.** Computed
+   by meshoptimizer's `meshopt_computeMeshletBounds`; the cooker
+   emits a self-test (debug build) that re-validates on a sampled
+   subset.
+3. **Cone half-angle bounded.** A degenerate cone (all-direction
+   normal cone, `cos(θ) = -1`) is allowed (signals "do not
+   backface-cull this cluster") but encoded as a single sentinel
+   value so cull shaders branch deterministically.
+4. **`ScreenSpaceError` non-negative.** Per-meshlet SSE values are
+   bounded by the per-`MeshletGroup` SSE so render's LOD-band
+   selector can rely on group-level monotonicity (§4.2 invariant 2).
+
+#### 4.1.4 `MeshletGroup` — DAG node + LOD-band record (entity)
+
+**Reason to change:** how clusters group into LOD-DAG nodes
+(simplification policy, watertight-cut shape, per-group SSE).
+
+**Composition.** A range of `Meshlet` indices (the cluster set
+this group materialises at one LOD), the parent-group references
+in the next-coarser LOD band, the child-group references in the
+next-finer band, the group-level `BoundingSphere` enclosing all
+constituent meshlet spheres, the per-group `ScreenSpaceError` value
+the LOD-band selector compares against the view's pixel threshold,
+and the `LODBand` tier (0 = finest). Watertight-cut bookkeeping —
+which group edges may be crossed by a render-time LOD cut — is
+encoded as a per-edge bit mask so the runtime selector can verify
+its choice in O(group degree).
+
+**Identity & lifetime.** Identified by index inside its owning
+`MeshletPak`'s group table; the public-facing handle is
+`MeshletGroupHandle` (§4.1.10). One `MeshletGroup` is the residency
+target — `PakPage` (§4.1.6) packs whole groups, never half a
+group's clusters.
+
+**Public-boundary invariants.**
+
+1. **Watertight cut.** Any cut of the cluster DAG that respects
+   group edges (i.e. selects exactly one band per cut) yields a
+   topologically watertight mesh: no T-junctions, no missing
+   triangles, no double-coverage. Cooker validates by re-tessellating
+   sample cuts and rejecting on watertight-failure.
+2. **Per-group SSE monotonically tightens with finer LOD.** For any
+   `MeshletGroup` `g` and its child `c` in `LODBand(c) = LODBand(g)
+   - 1`, `SSE(c) < SSE(g)` strictly (finer = lower SSE). Equality is
+   not permitted; the monotonic-tightening property is what makes
+   the LOD-band selector total. Validated at cook time;
+   cross-aggregate invariant repeated in §4.2.
+3. **LOD0 group set covers the full mesh.** The set of LOD0
+   `MeshletGroup`s collectively materialises every triangle of
+   the original `MeshSource`; coarser bands are simplifications,
+   never additions.
+4. **Group bounds enclose all child meshlets.** The group sphere
+   contains every constituent `Meshlet`'s sphere; cooker computes
+   from constituents and validates.
+
+#### 4.1.5 `ClusterDAG` — acyclic LOD chain (aggregate root, cook-time only)
+
+**Reason to change:** the DAG topology — how groups link across
+bands. Distinct from the per-group payload (§4.1.4) and from how
+the DAG is laid out on disk (§4.1.6, §4.1.7).
+
+**Composition.** The full set of `MeshletGroup` records ordered by
+`LODBand` (0 = finest), the parent-edge / child-edge adjacency
+lists between bands, and the LOD0-band cover (the `MeshletGroup`
+indices that constitute the LOD0 cut — the single cluster band
+the BLAS recipe references, §4.1.7). Stored once per `MeshSource`,
+never rebuilt at runtime.
+
+**Identity & lifetime.** Lives inside the cooker until serialised
+into `MeshletPak`; the runtime equivalent is the immutable bytes
+inside the pak — there is no `ClusterDAG` mutation after cook.
+
+**Public-boundary invariants.**
+
+1. **Acyclic.** Topological sort succeeds; no edge connects a node
+   in band `k` to a node in band `k` or to a finer band. Verified
+   at cook time; violation refuses pak emission with
+   `geometry::Error::ClusterDAGCycle`.
+2. **Edges only between adjacent bands.** A group's parents are
+   exclusively in `LODBand + 1`; children exclusively in `LODBand
+   - 1`. No skip-level edges.
+3. **Single LOD0 cover.** The LOD0 cluster band is a single
+   complete cover of the source; cooker rejects DAGs whose LOD0
+   nodes do not partition the source triangle set.
+4. **Coarsest band is reachable from every leaf.** Every LOD0
+   group is connected to the coarsest band by a chain of
+   parent edges; orphan subgraphs are refused.
+
+#### 4.1.6 `PakPage` — fixed-size streaming unit (value object)
+
+**Reason to change:** the streaming granularity — what the I/O
+scheduler loads / evicts.
+
+**Composition.** A fixed-size, individually-streamable region of
+a `MeshletPak`: a header byte (page-format-version), a list of
+the `MeshletGroup` indices wholly contained in this page, and the
+Draco-compressed per-group vertex / index / attribute streams
+(`DracoStream`, §4.1.6.1) for those groups. Page size is set at
+cook time (default 64 KiB, mined from harmonius `world-geometry.md`
+§ "Meshlet Offline Baking Pipeline" line ~360); paks may carry
+mixed page sizes if the cooker chose per-tier sizing, but every
+page header self-describes its size.
+
+**Identity & lifetime.** Identified by index inside its owning
+`MeshletPak`'s page table; the runtime `ResidencyState`
+(§4.1.13) is keyed by `(MeshHandle, page_index)`. Pages are the
+unit `content` schedules and the unit `DecodePool` operates on.
+
+**Public-boundary invariants.**
+
+1. **Whole-group containment.** A `MeshletGroup`'s clusters
+   reside entirely inside one `PakPage`; group splits across
+   pages are refused at cook time. This makes residency
+   decisions group-coherent — render's LOD selector either
+   sees the whole group resident or none of it.
+2. **Self-describing.** Page header contains the page size, the
+   list of group indices, and the per-stream `DracoStream`
+   offsets relative to page start; readable without reference
+   to neighbouring pages.
+3. **Integrity-checked.** Every page carries a CRC32 trailer over
+   its post-header bytes; `PakReader` (§4.1.11) refuses to feed
+   a page with mismatched CRC into `DecodePool`, returning
+   `geometry::Error::PakPageIntegrityFailed`.
+4. **Sized within scheduler page-budget bounds.** Page bytes ≤
+   the engine-wide upper limit declared in `CookManifest`'s
+   target profile; oversize pages refuse cook.
+
+##### 4.1.6.1 `DracoStream` — one Draco-compressed payload (value object)
+
+**Reason to change:** Draco encoder configuration / quantisation
+profile per attribute kind. Bounded.
+
+**Composition.** A single Draco-compressed byte stream for one
+attribute kind (positions / indices / normals / tangents / UVs /
+colours) of one `MeshletGroup`'s worth of vertex data. Carries
+the Draco quantisation profile (one of a small fixed set declared
+in `PakHeader`) and the decoded byte length so `DecodePool`
+(§4.1.12) can pre-size scratch buffers.
+
+**Public-boundary invariants.**
+
+1. **Byte-equal decode across hosts.** Decoding the same
+   `DracoStream` on any supported host produces byte-equal
+   vertex bytes; this is how the runtime stays deterministic
+   even though it decodes lazily (PHILOSOPHY §7). Validated by
+   the unit test `decompresses-byte-equal-on-multiple-hosts`
+   referenced from §11.
+2. **Self-describing quantisation.** The decoder reads the
+   profile index from the stream header and configures Draco
+   from `PakHeader`'s profile table; profile mismatch refuses
+   load with `geometry::Error::DracoProfileUnknown`.
+3. **No per-stream allocation in shipping.** Decode runs against
+   `DecodePool` scratch buffers pre-sized at engine init; a
+   stream whose decoded bytes exceed the pool slot refuses
+   decode with `geometry::Error::DecodePoolOverflow` (the
+   cooker's pak-level upper bound is supposed to prevent this,
+   so this error is a contract-violation signal, not an
+   expected runtime path).
+
+#### 4.1.7 `MeshletPak` — cooked on-disk container (aggregate root)
+
+**Reason to change:** the cooked-artefact format — the single seam
+geometry ships across plugin and host boundaries. One reason
+licenses a `FormatHash` bump.
+
+**Composition.** A `PakHeader` (§4.1.7.1) followed by the cluster
+DAG bytes (linearised group / meshlet tables), the `BLASRecipe`
+blob (§4.1.7.2), the `PakPage` array, and a page table mapping
+page indices to byte offsets. One `MeshletPak` is one `MeshSource`;
+no pak carries two source meshes.
+
+**Identity & lifetime.** Per cooked mesh; immutable once written by
+`PakWriter`. At runtime, lifetime equals the time the pak file is
+mapped into the process; eviction unmaps.
+
+**Public-boundary invariants.**
+
+1. **Stable `FormatHash` per cooked pak.** Every `MeshletPak`
+   carries a `FormatHash` field in `PakHeader` derived from the
+   pak schema version; runtime refuses to load a pak whose hash
+   mismatches the engine's compiled-in value
+   (`geometry::Error::PakFormatHashMismatch`). This is the
+   primary refusal hook for hot-reload schema drift (§8). The
+   hash is content-of-schema, not content-of-mesh — two paks
+   with different mesh data but identical schema have identical
+   `FormatHash`. Cross-aggregate invariant repeated in §4.2.
+2. **Byte-equal across hosts.** Two cooks of the same source on
+   two hosts produce byte-equal pak bytes (PHILOSOPHY §7). The
+   determinism chain is `MeshSource` byte-equal → `OptimisedMesh`
+   byte-equal → cluster build byte-equal → Draco encode
+   byte-equal → `PakWriter` byte-equal.
+3. **Single `MeshSource` per pak.** No pak multiplexes meshes;
+   multi-mesh asset bundles are a `content`-context concern, not
+   geometry's.
+4. **Header-validated before any payload read.** `PakReader`
+   refuses any payload access until `PakHeader` validation
+   passes.
+
+##### 4.1.7.1 `PakHeader` — format-versioned record (value object)
+
+**Reason to change:** what the runtime needs to validate and
+size before accessing payload (format version, hash, page-table
+offset, residency hints, content hash, decode-pool sizing).
+
+**Composition.** Fixed-layout little-endian record at offset 0 of
+the pak: `FormatHash` (`u64`), glibre engine version triple
+(`u16` major / minor / patch), page-table offset (`u64`),
+page-count (`u32`), `BLASRecipe` offset + length (`u64` × 2),
+`DecodePool` sizing requirements (per-attribute scratch-byte
+maxima, `u32` array), the Draco quantisation profile table
+(`u8` index → profile descriptor), the per-page `ResidencyHint`
+table (one byte per page, mining harmonius's "always-resident
+bind-pose root / distance-bucket / hot-pose" tags), and the
+content-hash of the source `MeshSource` (`u64`) for incremental
+cook.
+
+**Public-boundary invariants.**
+
+1. **Magic + version checked first.** `PakReader` reads the
+   magic + version + `FormatHash` before any other field; an
+   unknown magic refuses with
+   `geometry::Error::PakHeaderMagicMismatch`.
+2. **All offsets in-range.** Page-table offset and `BLASRecipe`
+   offset must be inside the mapped file; refuse with
+   `geometry::Error::PakHeaderOffsetOutOfRange` if not.
+3. **Fixed layout.** No optional fields, no variable-length
+   prefix; layout drift = `FormatHash` bump = different pak.
+
+##### 4.1.7.2 `BLASRecipe` — declarative BLAS-build description (value object)
+
+**Reason to change:** how render is told to build the
+acceleration structure for one `MeshSource` (which clusters
+participate, geometry descriptors, BLAS flags). Distinct from
+the runtime act of building the BLAS, which lives in `render`.
+
+**Composition.** Cook-time blob describing exactly the
+`render`-facing inputs to one BLAS build: a list of geometry
+descriptors (vertex-buffer span, index-buffer span, format) one
+per LOD0 `MeshletGroup`, the Metal `MTLAccelerationStructureFlags`
+the cooker decided on (typically `FastTrace`), and the
+material-slot index per descriptor so the bindless lookup
+matches. The recipe references the LOD0 cluster band exclusively
+— no other LOD band participates in BLAS, mining harmonius
+`design/rendering/render-effects.md` F-2.5.1 / R-2.5.1.
+
+**Public-boundary invariants.**
+
+1. **Lists exactly the LOD0 cluster band.** No coarser band
+   participates in the BLAS; render's TLAS sees the finest
+   geometry only. Cross-aggregate invariant repeated in §4.2.
+2. **Self-contained — no GPU calls inside.** The recipe
+   describes inputs as offsets into the pak's vertex/index
+   bytes; geometry never invokes a GPU API. `render`'s
+   `RTAccelStructures` (peer SPEC §4.1.8) reads the recipe and
+   issues the `MTLAccelerationStructure` build.
+3. **Deterministic ordering.** Geometry descriptors are emitted
+   in stable iteration order over LOD0 groups (group index
+   ascending) so identical paks build identical BLAS bytes
+   given the same Metal driver.
+
+#### 4.1.8 `CookManifest` — per-mesh build record (entity, cook-time only)
+
+**Reason to change:** what the cooker tracks for incremental cooks
+(source path, pak path, format hash, options, content hash).
+
+**Composition.** A small record per `MeshSource` recording the
+absolute source-asset path, the emitted pak path, the
+`FormatHash` the cooker produced against, the cook-time options
+in effect (meshoptimizer flags, Draco quantisation profile,
+target page size, target `LODBand` count), and the source
+content-hash gating incremental rebuild. Stored alongside the
+pak (next to the .pak file) and consumed by the cook driver to
+decide whether a re-cook is needed.
+
+**Identity & lifetime.** One per pak; lifetime equals the lifetime
+of the cooked artefact on disk; runtime never reads
+`CookManifest`.
+
+**Public-boundary invariants.**
+
+1. **Incremental-cook trigger is the source content-hash.** A
+   cook is skipped iff the source hash matches the manifest's
+   recorded hash AND the recorded `FormatHash` matches the
+   engine's compiled `FormatHash`; either mismatch forces a
+   re-cook.
+2. **Manifest is the cook-time mirror of `PakHeader`.** Anything
+   the runtime checks against `PakHeader` has its cook-time
+   counterpart in `CookManifest`; a missing manifest field
+   refuses cook rather than emitting an under-specified pak.
+3. **Cook-time only.** The runtime plugin does not read
+   `CookManifest`; it is exclusively the cooker driver's
+   bookkeeping.
+
+#### 4.1.9 `MeshHandle` — opaque mesh identifier (value object)
+
+**Reason to change:** the public-facing mesh identity the engine
+plumbs through ECS, `RenderProxy`, `BLASRecipe` consumption, and
+material binding. One seam.
+
+**Composition.** A 64-bit packed `(u32 index, u32 generation)`:
+`index` selects a row in `GeometryRegistry`'s `MeshHandle` table;
+`generation` is bumped on slot reuse so stale handles compare
+unequal even after the slot is recycled. No payload pointer
+inside the handle — every consumer goes through `GeometryRegistry`.
+
+**Identity & lifetime.** Issued by `GeometryRegistry::register_mesh`
+when a pak is first mapped; remains stable for the life of the
+mapping. Re-mapping the same pak (e.g. after a `content` reload)
+issues a new handle with a bumped generation.
+
+**Public-boundary invariants.**
+
+1. **Stable and immutable.** A `MeshHandle` returned to a caller
+   never changes meaning until its owning entry is unregistered
+   (generation-bumped). Render and other consumers may cache
+   `MeshHandle` values across frames freely.
+2. **Comparable lock-free.** Equality and ordering are pure
+   bitwise compares; no chain of heap reads. Render's
+   `RenderProxy` SoA stores raw `MeshHandle`s without indirection.
+3. **Stale handles fail safe.** Lookup with a generation
+   mismatch returns `geometry::Error::MeshHandleStale`; consumers
+   never deference a stale slot.
+
+#### 4.1.10 `MeshletGroupHandle` — opaque LOD-node identifier (value object)
+
+**Reason to change:** the granularity at which render's LOD-band
+selector references geometry — one node of the cluster DAG.
+
+**Composition.** A 64-bit packed `(u32 mesh_index, u32 group_index)`
+or `(MeshHandle, u32 group_index)`, depending on the implementation
+plan that lands; the public-boundary semantics are identical: one
+handle identifies one `MeshletGroup` inside one `MeshHandle`'s pak.
+
+**Public-boundary invariants.**
+
+1. **Resolves to one `MeshletGroup`.** The handle is bijective with
+   `(MeshHandle, group_index)` for the lifetime of the parent
+   `MeshHandle`'s generation.
+2. **Render-side is read-only.** Render's LOD selector resolves a
+   handle to the bindless `GpuMeshBuffers` slice that backs the
+   group's currently-resident pages; render never asks the
+   registry to mutate a handle's residency directly — it consults
+   `ResidencyState`.
+3. **Group-coherent.** A handle whose backing `MeshletGroup` spans
+   any non-resident `PakPage` resolves to a render-skip signal,
+   not a partial buffer (§4.1.6 invariant 1 forbids the half-page
+   case at cook time, so this resolves to "page not loaded yet").
+
+#### 4.1.11 `PakReader` — runtime decode front-end (entity)
+
+**Reason to change:** how the runtime maps and validates one pak
+file before payload decode.
+
+**Composition.** A thin `mmap` / file-mapping wrapper that holds
+the validated `PakHeader` view, the page table, the `BLASRecipe`
+view, and a non-owning span over the file bytes. Exposes a
+`PakPage` iterator the decode pipeline drives. Does not own
+heap allocations beyond the OS file mapping.
+
+**Identity & lifetime.** One `PakReader` per loaded pak;
+constructed by `GeometryRegistry::register_mesh`, destroyed when
+the registry unmaps the pak.
+
+**Public-boundary invariants.**
+
+1. **Header-first, payload-after.** Public methods that touch
+   payload are gated on `PakHeader` validation having returned
+   success; calling them on an unvalidated reader returns
+   `geometry::Error::PakReaderUnvalidated` (a contract-violation
+   signal, not an expected runtime path).
+2. **Read-only mapping.** The pak file is mapped read-only; the
+   reader never writes back to the mapping.
+3. **`FormatHash` enforced.** Construction refuses on
+   `FormatHash` mismatch (§4.1.7 invariant 1); a reader is only
+   handed out when its pak is loadable.
+4. **Lock-free for residency reads.** Residency-related reads
+   (page table offset lookup, `ResidencyHint` byte fetch) hit
+   only the immutable header and the page table — no shared
+   mutable state inside `PakReader`.
+
+#### 4.1.12 `DecodePool` — Draco decode scratch arena (entity)
+
+**Reason to change:** how decode scratch buffers are sized and
+recycled. Bounded; doesn't drag in scheduler or render decisions.
+
+**Composition.** A pool of pre-sized scratch buffers (one set per
+attribute kind: positions / indices / normals / tangents / UVs /
+colours) sized at engine init from the maximum per-attribute
+decode requirement across all loaded `PakHeader`s. The pool
+issues a slot to a decode worker, the worker decodes into the
+slot, the decoded bytes are copied (via the platform-native
+upload path) into `GpuMeshBuffers`, then the slot returns to
+the pool. Sizing is **never** changed mid-frame.
+
+**Identity & lifetime.** One pool per process, owned by
+`GeometryRegistry`. Sized at init; resized only at engine
+shutdown / restart. Slots are reused per-frame; the pool itself
+persists across frames.
+
+**Public-boundary invariants.**
+
+1. **Sized at startup, never mid-frame.** `DecodePool` capacity
+   is determined from the union of every loaded `PakHeader`'s
+   per-attribute scratch maxima; loading a pak whose
+   requirements exceed the pool refuses load with
+   `geometry::Error::DecodePoolUndersized` rather than
+   reallocating mid-frame. Re-sizing requires engine restart.
+2. **Slot acquisition is bounded-wait.** A decode worker that
+   cannot acquire a slot returns the page to the scheduler's
+   pending queue with `geometry::Error::DecodePoolBusy`; no
+   worker spins or allocates around the contention.
+3. **Decoded bytes byte-equal across hosts.** A decode against
+   a `DracoStream` with profile `P` and the cook-time profile
+   table from `PakHeader` produces byte-equal vertex bytes
+   regardless of host (cross-aggregate invariant repeated in
+   §4.2).
+
+#### 4.1.13 `ResidencyState` — per-page residency table (entity)
+
+**Reason to change:** how residency is tracked across frames
+between geometry, content (scheduler), and render.
+
+**Composition.** A lock-free table keyed by `(MeshHandle,
+page_index)` mapping to a `ResidencyState` enum value:
+`NotResident` / `Pending` / `Resident` / `Evicting`. Reads are
+lock-free atomics so render's LOD selector and content's
+scheduler can both consult the table without taking locks.
+Writes are serialised through `GeometryRegistry` (§4.1.14) at
+phase 7 mutation points only.
+
+**Identity & lifetime.** One table per process, owned by
+`GeometryRegistry`; persists across frames; entries are added
+on `register_mesh` and removed on `unregister_mesh`.
+
+**Public-boundary invariants.**
+
+1. **Monotonic transitions per frame.** Within a single frame, a
+   page's `ResidencyState` transitions only along the legal
+   chain `NotResident → Pending → Resident` or `Resident →
+   Evicting → NotResident`; backwards transitions inside a
+   single frame are refused. This is what makes render's
+   LOD-band selector see a consistent residency view between
+   phase 6 (read) and phase 7 (consume). Cross-aggregate
+   invariant repeated in §4.2.
+2. **Lock-free reads.** Render and content both read the table
+   without locking; reads observe atomic snapshots only.
+3. **Writes happen inside phase 7.** State changes are applied
+   inside the geometry-owned phase-7 mutation point (the same
+   phase render submits in); no other phase observes a half-
+   updated transition.
+4. **`ResidencyHint` does not mutate at runtime.** The hint
+   byte is read from `PakHeader` and never overwritten; only
+   the *state* mutates. The hint informs the scheduler's
+   weighting; geometry never adjudicates budget.
+
+#### 4.1.14 `GeometryRegistry` — runtime aggregate root (aggregate root)
+
+**Reason to change:** the public-boundary surface every other
+plugin calls into — `MeshHandle` issuance, `MeshletGroupHandle`
+resolution, `ResidencyState` reads, `GpuMeshBuffers` lookup.
+
+**Composition.** Owns the `MeshHandle` table (slot array,
+generation array, backing `PakReader` per slot), the
+`ResidencyState` table (§4.1.13), the `DecodePool` (§4.1.12),
+the `GpuMeshBuffers` allocator (§4.1.15), and the integration
+hooks `content` calls when a page completes loading. Every
+public geometry API entry point routes through this aggregate.
+
+**Identity & lifetime.** Engine-singleton; constructed during
+`core`'s init phase; destroyed during shutdown. No second
+instance.
+
+**Public-boundary invariants.**
+
+1. **Single owner of the handle table.** No other plugin holds
+   write access; `MeshHandle` issuance is centralised so
+   generation bumping cannot race.
+2. **All public APIs return `glibre::Result<T>`.** Every
+   fallible operation surfaces `geometry::Error` per
+   `reviews/decisions/error-model.md`; geometry adds a single
+   arm to `glibre::Error`'s variant.
+3. **Writes serialised at phase 7 boundary.** Concurrent reads
+   (render's LOD selector, content's scheduler) are lock-free;
+   writes (residency transitions, handle issuance) happen
+   inside phase 7's geometry mutation point so the post-write
+   state is visible to phase-9 present and to the next frame's
+   phase 6 cull-extract.
+4. **Boundary opacity.** No method exposes raw `Meshlet` /
+   `MeshletGroup` records to callers; everything crosses the
+   plugin boundary as opaque handles or as the
+   geometry-owned `GpuMeshBuffers` view (§4.1.15) bound
+   bindlessly.
+
+#### 4.1.15 `GpuMeshBuffers` — handle-only GPU buffer aggregate (entity)
+
+**Reason to change:** how decoded vertex / index / attribute
+bytes are exposed to render. Geometry stores the **handles**;
+the actual `MTLBuffer` upload is a render-context concern
+called via the platform-native upload path. This split keeps
+geometry render-API-agnostic.
+
+**Composition.** Per `MeshHandle` and per currently-resident
+`LODBand`: a set of opaque buffer handles (one per attribute
+stream + one for indices) that geometry materialises by asking
+the `render`-vended buffer allocator to upload the decoded
+bytes from `DecodePool` slots. Geometry retains the **handles**
+(stable identifiers consumed bindlessly via `MaterialHandle`
+indirection); geometry never holds an `MTLBuffer*`. The
+upload itself is a one-shot copy declared by render; geometry
+provides the source bytes and receives the handle.
+
+**Identity & lifetime.** One `GpuMeshBuffers` record per
+`(MeshHandle, LODBand)` band that has at least one resident
+page; lifetime ends when every page in the band evicts. The
+buffer-handle slot returns to render's allocator at that point.
+
+**Public-boundary invariants.**
+
+1. **Geometry holds handles, render owns memory.** No
+   `MTLBuffer*` lives inside `GpuMeshBuffers`; geometry stores
+   only the opaque handles render allocates. Geometry's
+   responsibility is "what bytes go where"; render's is "where
+   on the GPU".
+2. **Bindless lookup-only.** Render binds the buffers
+   bindlessly via `MaterialHandle` indirection; the
+   `GpuMeshBuffers` record is a lookup table, not a binding
+   point.
+3. **Decode-once-per-band.** Multiple visible LOD-cuts that
+   share a band see one resident `GpuMeshBuffers` record; no
+   duplicate decode.
+4. **Lifetime tied to residency.** A `GpuMeshBuffers` record
+   exists iff at least one page in its band is `Resident`; the
+   `ResidencyState` table is the source of truth.
+
+### 4.2 Cross-aggregate invariants
+
+Invariants that span more than one aggregate and must hold at every
+public boundary at the seams between them:
+
+1. **Stable `FormatHash` per cooked mesh.** Every `MeshletPak`'s
+   `PakHeader.FormatHash` is derived from the pak schema version
+   in effect when the pak was cooked; the runtime refuses any pak
+   whose hash does not match the engine's compiled-in value
+   (`geometry::Error::PakFormatHashMismatch`). This is the single
+   gate for hot-reload schema drift refusal (§8) and the only
+   schema-evolution mechanism geometry exposes — there is no
+   migration path inside a `FormatHash` change. Changing
+   `FormatHash` requires a new pak cook.
+
+2. **`ClusterDAG` is acyclic with monotonically-tightening
+   `LODBand` SSE.** Across `ClusterDAG` (§4.1.5) and the
+   `MeshletGroup` records (§4.1.4) it points at, the topology is
+   a DAG and the per-group `ScreenSpaceError` strictly tightens
+   as `LODBand` decreases (finer = lower SSE). This is what makes
+   the runtime LOD-band selector total: any view with a pixel
+   threshold `T` admits exactly one cut of the DAG that respects
+   group edges and yields the coarsest band whose every group has
+   `SSE ≤ T`. Violation of either property refuses pak cook.
+
+3. **`BLASRecipe` lists exactly the LOD0 cluster band.**
+   `BLASRecipe` (§4.1.7.2) emits geometry descriptors for the
+   LOD0 `MeshletGroup` cover only; no coarser band participates
+   in any BLAS build. Render's `RTAccelStructures` (peer SPEC
+   `specs/render/SPEC.md` §4.1.8) consumes the recipe under the
+   same assumption — TLAS sees the finest geometry only,
+   independent of per-frame LOD-band choice.
+
+4. **Meshlet ≤ 64 vertices / ≤ 124 primitives.** Every `Meshlet`
+   (§4.1.3) record packs no more than 64 unique vertices and 124
+   triangles; this is the size of the Metal 4 mesh-shader payload
+   and the meshoptimizer cluster default we mined from harmonius
+   R-3.1.1. Cooker rejects oversize clusters with
+   `geometry::Error::MeshletOversize`; the pak format physically
+   cannot represent them (count fields are `u8` with range
+   checks at `PakReader` time).
+
+5. **Draco decode produces byte-equal vertex data across hosts.**
+   `DracoStream` decode (§4.1.6.1) into `DecodePool` (§4.1.12)
+   produces byte-equal vertex bytes on every supported host given
+   the same compressed input and the same cook-time quantisation
+   profile from `PakHeader`. Combined with byte-equal cooks
+   (§4.1.7 invariant 2), this is what closes PHILOSOPHY §7
+   (deterministic byte-equal artefacts) at the geometry boundary.
+   The unit test
+   `decompresses-byte-equal-on-multiple-hosts` (§11) is the
+   contract test.
+
+6. **`ResidencyState` transitions are monotonic per-frame.**
+   Within a single frame, every `ResidencyState` (§4.1.13) entry
+   transitions only along `NotResident → Pending → Resident` or
+   `Resident → Evicting → NotResident`; no backwards transition is
+   observable inside a frame. This means render's LOD-band
+   selector (in phase 6) and `GpuMeshBuffers` resolver (in phase
+   7) see the same residency snapshot across the same frame, even
+   though the table itself is mutated by `content`'s scheduler
+   between frames.
+
+7. **Per-context error model honoured.** Every aggregate's public
+   fallible operation returns `glibre::Result<T, glibre::Error>`
+   per `reviews/decisions/error-model.md`; geometry's enum lives
+   in the `geometry::Error` arm cited there and is the only
+   geometry-internal error surface. Variants enumerated in §10
+   stay in lockstep with the §4 invariant prose above.
+
+8. **Frame-phase ownership (per `reviews/decisions/frame-phases.md`
+   and `reviews/decisions/perf-budget.md`).** Cook-time aggregates
+   (§4.1.1 – §4.1.8) live exclusively inside the cook driver
+   process — never inside the engine runtime. Runtime aggregates
+   (§4.1.9 – §4.1.15) participate in the frame as follows:
+   `MeshHandle` and `MeshletGroupHandle` issuance happens at
+   `register_mesh` time (any phase, but typically phase 1 / 8 in
+   editor); `ResidencyState` reads happen inside phase 6
+   (cull-extract reads what's resident for LOD-band selection)
+   and phase 7 (render consumes resolved `GpuMeshBuffers`);
+   `ResidencyState` writes and `GpuMeshBuffers` materialisation
+   happen at the geometry-owned phase 7 mutation point
+   (alongside `BLAS` refits per the perf-budget table). No
+   geometry aggregate is mutated inside phases 1–5 or phase 9.
+
+9. **Opaque-handle boundary.** Geometry's public API exposes only
+   opaque handles (`MeshHandle`, `MeshletGroupHandle`,
+   `MaterialSlot`-as-opaque-`MaterialHandle`-index) and the
+   geometry-owned `GpuMeshBuffers` lookup view (consumed
+   bindlessly, never inspected). No raw `Meshlet`,
+   `MeshletGroup`, `PakPage`, or `DracoStream` record crosses
+   the plugin boundary. This is PHILOSOPHY §3 (plugin-only
+   growth, opaque handles at every plugin boundary) applied
+   uniformly.
+
+10. **Geometry never enqueues GPU work.** Geometry computes
+    bytes and issues handles; render submits draws and builds
+    BLAS. The `BLASRecipe` blob is the *only* artefact crossing
+    that seam, and it is declarative — render reads it and
+    issues its own GPU calls. This is the SRP split mined as
+    §3.2 collapse #5.
 
 ## 5. Public Interface
 
