@@ -916,7 +916,207 @@ Non-binding sketch for implementers.
 
 ## 7. Persistence & Schemas
 
-Fory schemas. Migration rules.
+The `shader` context persists three on-disk record types via Apache Fory
+schemas under the `data` middleman dylib (`reviews/decisions/fory-codegen.md`).
+Schemas live at `data/schemas/shader/<Type>.fory`; codegen emits
+`glibre::types::shader::*` POD-like structs that the in-memory C++ types
+in §5 serialize into. **HLSL source is never persisted** — it stays
+versioned in the project repo. The cache is content-addressable; the
+manifest is a single sidecar pointing into it; reflection rides inside
+each artifact record.
+
+### 7.1 Persistent record set
+
+| Record | Schema path | Role |
+|--------|-------------|------|
+| `ShaderArtifactRecord` | `data/schemas/shader/ShaderArtifactRecord.fory` | One CAS blob per `(PermutationKey, source-hash, CompileTarget)`: bytecode bytes + embedded `ReflectionRecord` + derived `DescriptorLayoutRecord` + identity envelope. |
+| `ShaderCacheManifest` | `data/schemas/shader/ShaderCacheManifest.fory` | Sidecar enumerating every `ShaderArtifactRecord` reachable from a project's resolved permutation set. Used to cook the shipping `ShaderLibrary` (§4.6). |
+| `ReflectionRecord` | `data/schemas/shader/ReflectionRecord.fory` | Standalone Fory schema for the `ReflectionBlob` value object (§4.4). Embedded by value inside `ShaderArtifactRecord`; also serializable on its own for editor / IPC consumers. |
+
+Three supporting value-schemas live alongside the records and are
+embedded by tag inclusion (no separate files on disk; they are reused
+across the records above):
+
+| Sub-schema | Embedded in | Role |
+|------------|-------------|------|
+| `PermutationKeyRecord` | `ShaderArtifactRecord`, `ShaderCacheManifest` | 4-axis packed key (§4.2). Bit-stable `to_bytes()` / `from_bytes()` round-trip. |
+| `DescriptorLayoutRecord` | `ShaderArtifactRecord` | Backend-neutral 4-frequency-group descriptor schema (§4.5). |
+| `BindingSlotRecord`, `VertexIOLayoutRecord`, `PushConstantRangeRecord`, `MaterialParameterBlockRecord`, `SpecializationConstantSlotRecord`, `StaticSamplerRecord`, `EntryPointRecord` | `ReflectionRecord`, `DescriptorLayoutRecord` | Element-of-vector value records mirroring §5 boundary structs. |
+
+### 7.2 Schema sketches
+
+The format follows the canonical sketch in
+`reviews/decisions/fory-codegen.md`. Tags are immutable once shipped;
+removal of a field marks the tag `reserved`. Built-in scalar names
+(`u8`, `u16`, `u32`, `bytes`, `string`, `list<T>`, `option<T>`) compile
+to the audited `glibre/types/_builtins.hpp` set.
+
+`data/schemas/shader/ShaderArtifactRecord.fory`:
+
+```fory
+schema glibre.shader.ShaderArtifactRecord {
+  version  1
+  since    "0.1.0"
+
+  field key             : glibre.shader.PermutationKeyRecord  tag 1 since 1
+  field target          : u8                                  tag 2 since 1   // CompileTarget enum ordinal
+  field source_hash     : bytes32                             tag 3 since 1   // BLAKE3 of preprocessed source
+  field flags_hash      : bytes32                             tag 4 since 1   // BLAKE3 of canonical compile-flag list
+  field artifact_hash   : bytes32                             tag 5 since 1   // ShaderHash from §2 (CAS key)
+  field bytecode        : bytes                               tag 6 since 1   // DXIL / SPIR-V / metallib bytes
+  field reflection      : glibre.shader.ReflectionRecord      tag 7 since 1
+  field descriptors     : glibre.shader.DescriptorLayoutRecord tag 8 since 1
+  field producer_label  : string                              tag 9 since 1   // backend identity (e.g. "hlsl-dxc-1.7")
+}
+```
+
+`data/schemas/shader/ShaderCacheManifest.fory`:
+
+```fory
+schema glibre.shader.ShaderCacheManifest {
+  version  1
+  since    "0.1.0"
+
+  field cache_root_relative : string                                   tag 1 since 1
+  field schema_abi_hash     : bytes32                                  tag 2 since 1   // glibre_types_abi_hash() at cook time
+  field entries             : list<glibre.shader.ShaderManifestEntry>  tag 3 since 1   // sorted ascending by artifact_hash
+  field enumerated_keys     : list<glibre.shader.PermutationKeyRecord> tag 4 since 1   // sorted ascending by packed key bytes
+}
+
+schema glibre.shader.ShaderManifestEntry {
+  version  1
+  since    "0.1.0"
+
+  field artifact_hash : bytes32                              tag 1 since 1   // CAS lookup key
+  field key           : glibre.shader.PermutationKeyRecord   tag 2 since 1
+  field target        : u8                                   tag 3 since 1
+  field byte_size     : u32                                  tag 4 since 1
+}
+```
+
+`data/schemas/shader/ReflectionRecord.fory`:
+
+```fory
+schema glibre.shader.ReflectionRecord {
+  version  1
+  since    "0.1.0"
+
+  field entry_points         : list<glibre.shader.EntryPointRecord>          tag 1 since 1
+  field bindings             : list<glibre.shader.BindingSlotRecord>         tag 2 since 1   // every slot frequency-tagged
+  field vertex_io            : glibre.shader.VertexIOLayoutRecord            tag 3 since 1
+  field push_constants       : list<glibre.shader.PushConstantRangeRecord>   tag 4 since 1
+  field material_parameters  : glibre.shader.MaterialParameterBlockRecord    tag 5 since 1
+  field spec_constants       : list<glibre.shader.SpecializationConstantSlotRecord> tag 6 since 1
+  field rt_payload_bytes     : u32                                           tag 7 since 1
+}
+```
+
+### 7.3 Determinism + serialization rules
+
+1. **Cache key = artifact identity.** `artifact_hash` is the BLAKE3 of
+   `(source_hash ∪ key.to_bytes() ∪ flags_hash ∪ target_byte)` (§2,
+   §4.6 invariant 1). The manifest stores it; the CAS file path is
+   derived from it. Insert is idempotent.
+2. **Sort orders are spec-frozen.** `ShaderCacheManifest.entries` is
+   sorted ascending by `artifact_hash`; `enumerated_keys` ascending by
+   the bit-stable packed bytes of `PermutationKeyRecord` (§4.2 invariant
+   2). `ReflectionRecord.bindings` is sorted by
+   `(register_space, register_index, stage_mask)` (§4.5 invariant 3).
+   `DescriptorLayoutRecord` tables likewise. No iterator-order from a
+   hash container may leak into any field.
+3. **HLSL source never enters a record.** Only the BLAKE3 `source_hash`
+   appears. The `data/schemas/shader/` files are the only artifacts
+   that ship; the HLSL itself is repo-versioned (§3 collapse 1, §4.6
+   invariant 2).
+4. **Manifest stamps the middleman ABI.** `schema_abi_hash` is the
+   value `glibre_types_abi_hash()` returns at cook time. The shader
+   loader refuses a manifest whose hash differs from the host's
+   (`Error::CacheIntegrity`); together with the dynamic linker's SONAME
+   check this catches both schema-additive and schema-breaking drift.
+5. **`metallib` records reuse the upstream DXIL reflection.** A
+   `ShaderArtifactRecord` whose `target == MetalLib` carries the
+   `ReflectionRecord` derived from the DXIL the lowering consumed
+   (§4.4 invariant 1, §4.8 invariant 2). Never re-reflected from MSL.
+6. **Round-trip equality.** For every record type, Fory deserialize ∘
+   serialize is the identity on the in-memory §5 type (golden tests at
+   the plan level).
+
+### 7.4 Migration rules
+
+Migration follows the engine-wide pattern in `reviews/decisions/fory-codegen.md`:
+each record carries `current_version`; vN→vN+1 transforms are pure
+functions provided by the `shader` context and registered through the
+codegen-emitted dispatcher. The shader-specific rules:
+
+1. **`PermutationKeyRecord` axis growth is additive.** Adding a new
+   `FeatureBit`, `ShadingModel`, `RenderPath`, or `LODTier` enumerator
+   bumps the axis cardinality but not the schema's tag layout — the
+   packed encoding (§4.2 invariant 1) reserves headroom inside its
+   existing field widths. Older payloads decode unchanged: missing
+   feature bits are zero, older enumerators retain their ordinal.
+   Hosts encountering an unknown enumerator while loading a newer
+   manifest fail with `Error::PermutationKeyOutOfRange` rather than
+   silently widening (refusal-driven hot reload, PHILOSOPHY §8).
+2. **`ReflectionRecord` extensions are additive.** New reflected
+   metadata (e.g. work-graph node descriptors, future RT payload
+   layouts) must be appended at a fresh tag with `since N+1` and a
+   deterministic synthesised default for older payloads. Removing or
+   re-typing a field requires a major version bump and a
+   `migrate_ReflectionRecord_vN_to_vNplus1` provider in
+   `glibre::shader::migrate`.
+3. **`DescriptorLayoutRecord` is regenerated, not migrated.** A
+   layout-record schema bump always re-derives layouts from the
+   surviving `ReflectionRecord` rather than transforming old layouts
+   in-place. The reflection record is the source of truth (§4.5
+   invariant 1); a stale layout encountered at load time is rebuilt
+   by calling `DescriptorLayout::derive(reflection)` and the result
+   replaces the on-disk record on the next cook.
+4. **`ShaderCacheManifest` is rebuildable, not migrated.** The
+   manifest is a derived index over the CAS — a version skew bumps the
+   cooker, which re-walks the resolved permutation set and writes a
+   fresh manifest. No vN→vN+1 transform is provided; instead the
+   cooker runs against the new schema and emits a new manifest.
+   Stale manifests are detected by `schema_abi_hash` mismatch and
+   rejected with `Error::CacheIntegrity`.
+5. **`ShaderArtifactRecord` envelope migrations are full-record.** A
+   bump in this schema's version (e.g. adding a new identity field to
+   the envelope) provides a `migrate_ShaderArtifactRecord_vN_to_vNplus1`
+   transform that operates on the envelope only; bytecode bytes are
+   never decoded or rewritten by a migration. If a migration would
+   require touching `bytecode`, the design choice is to recompile from
+   source (re-running `CompilationPipeline` against the recorded
+   `source_hash`) rather than transform bytes.
+6. **Hot-reload integration.** At the frame-boundary swap (PHILOSOPHY
+   §8) the `shader` plugin loader resolves each persistent
+   `ShaderArtifactRecord` through the migration chain into the new
+   middleman ABI; failures surface as `Error::SchemaMigrationFailure`
+   propagated up through `Error::CacheIntegrity`, and the swap is
+   refused (no half-migrated cache state).
+7. **Migration testing.** Each shipped `vN_to_vNplus1` transform owns a
+   Catch2 golden under `tests/shader/persistence/` that loads a frozen
+   `vN` payload, runs the migration, and asserts byte-equal
+   re-serialization at `vN+1`. Goldens are committed alongside the
+   migration provider.
+
+### 7.5 Cooked `ShaderLibrary` layout
+
+The shipping `ShaderLibrary` (§4.6, §5) is the on-disk projection of a
+`ShaderCacheManifest` plus the CAS blobs it references:
+
+```text
+<library_root>/
+    manifest.fory                 # ShaderCacheManifest, single file
+    artifacts/<aa>/<bb>/<hash>    # ShaderArtifactRecord blobs, CAS
+                                  #   <aa><bb> = first 4 hex chars of artifact_hash
+                                  #   <hash>   = full hex artifact_hash
+```
+
+Read-only at runtime in shipping (§4.8 invariant 3); the cooker is the
+sole writer, and it runs strictly offline through
+`ShaderCache::cook(span<const PermutationKey>)`. Orphan blobs (CAS file
+not referenced by manifest) and dangling references (manifest entry
+without CAS file) both fail integrity verification with
+`Error::CacheIntegrity` (§4.6 invariant 3).
 
 ## 8. Hot-Reload Contract
 
