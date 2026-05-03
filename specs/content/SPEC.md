@@ -1908,7 +1908,403 @@ Non-binding sketch for implementers.
 
 ## 7. Persistence & Schemas
 
-Fory schemas. Migration rules.
+Content's persistence surface is intentionally split into two layers
+that this section pins separately:
+
+1. The **manifest layer** — small, structured, schema-evolved Fory
+   records that map `AssetId → ContentHash + CookKey + dependency
+   edges`. This is the only thing the content context owns *as a
+   schemaful artefact*. Three persistent types live here, all under
+   `data/schemas/content/<Type>.fory` per
+   `reviews/decisions/fory-codegen.md`: `ManifestEntry`, `CookKey`,
+   `DependencyEdge`. Their FQNs are `glibre.content.<Type>`.
+2. The **CAS payload layer** — the cooked `MeshArtifact` /
+   `TextureArtifact` / `FontArtifact` blobs under `cooked/<prefix>/<hash>`.
+   The payload schemas are listed in §5.2 for cross-reference; the
+   manifest layer references those payloads only by `ContentHash`. The
+   cooked bytes themselves are **not manifest-managed at field level**
+   — they are opaque to the manifest, addressed by their BLAKE3 digest,
+   and never patched in place (§4.1.4 inv #3, §4.1.5 inv #2).
+
+The `Manifest` aggregate (§4.1.6) is itself the on-disk file
+`cooked/_manifest.fory`; its top-level encoding is a list of
+`ManifestEntry` records. There is no separate `Manifest`-the-record
+schema beyond `list<glibre.content.ManifestEntry>` plus the standard
+`EnvelopeHeader` (data SPEC §7.2.4).
+
+Schemas are authored as `.fory` text files using the grammar in data
+SPEC §7.1, generated into the `glibre-types` middleman dylib by
+`glibre-foryc`, and ship with at least one Catch2 round-trip test
+under `tests/data/schemas/content/<Type>.cpp` per data SPEC §7.5.
+
+### 7.1 Persistent types
+
+#### 7.1.1 `ManifestEntry` — one row of the asset table
+
+**File:** `data/schemas/content/ManifestEntry.fory`
+**FQN:** `glibre.content.ManifestEntry`
+**Lifetime scope:** per-workspace; written by the `CookSession`
+end-of-session publish (§4.1.9 inv #1); read at runtime through the
+active `Manifest` snapshot (§4.1.6 inv #1) and at startup by the cook
+to decide cache-hit-vs-recook (§4.1.3 inv #3).
+
+```fory
+schema glibre.content.ManifestEntry {
+  version 1
+  since   "0.1.0"
+
+  field asset_id     : string                          tag 1 since 1
+  field content_hash : bytes                           tag 2 since 1
+  field cook_key     : glibre.content.CookKey          tag 3 since 1
+  field edges        : list<glibre.content.DependencyEdge>
+                                                       tag 4 since 1
+}
+```
+
+- `asset_id` is the stable logical identity from §2 / §4.1.6 inv #5,
+  matching `glibre.<ctx>.<slug>`. Validated at parse time against the
+  same regex `Foryc` uses for built-in `Ident` strings; malformed
+  values become `ImporterError::MalformedPayload`.
+- `content_hash` is exactly 32 bytes (BLAKE3-256 of the cooked
+  payload, §4.1.4 inv #1). Shorter or longer sequences are
+  `ImporterError::MalformedPayload`. The hash is opaque here — its
+  agreement with the addressed file at `cooked/<prefix>/<hash>` is a
+  publish-time invariant of the `CookSession` (§4.1.9 inv #2), not a
+  field-level constraint.
+- `cook_key` is the recorded cache key from the cook that produced
+  `content_hash` (§4.1.6 composition; §4.1.3 inv #1). Recording the
+  key — rather than re-deriving its ingredients on every scan —
+  collapses the bottom-up incremental check to a single BLAKE3
+  comparison.
+- `edges` is the per-asset dependency set from §4.1.6 composition.
+  Sorted by `(child_kind, child_id_or_path)` ascending at serialise
+  time so two semantically-equal manifests round-trip byte-equal
+  (deterministic encoding per PHILOSOPHY §7).
+
+**Invariants** (echoing §4.1.6 where the manifest aggregate enforces
+them):
+
+1. **Internally consistent at publish.** Every `ManifestEntry` whose
+   `content_hash` is published must have its CAS file durable on disk
+   first (§4.1.6 inv #3, §4.1.9 inv #2). The schema does not encode
+   this — it is a publish-protocol obligation — but the round-trip
+   test fixture asserts it for the per-version goldens.
+2. **Atomic publish.** A persisted manifest payload is either the
+   complete updated table (every entry re-mapped) or absent; no
+   partial write is ever observable at the `cooked/_manifest.fory`
+   path (§4.1.6 inv #2, §4.1.9 inv #1). Enforced by the temp-write +
+   `rename(2)` protocol; the schema is unaware of the file system.
+3. **Cycle-free `edges` closure.** The union of every entry's `edges`
+   forms a DAG; cycles are rejected at publish with
+   `ImporterError::MalformedPayload` (§4.1.6 inv #4). The schema
+   permits any `DependencyEdge` list; cycle detection is a publish-
+   time invariant of the `Manifest` aggregate, not a field-level
+   constraint.
+
+#### 7.1.2 `CookKey` — canonicalised cache key
+
+**File:** `data/schemas/content/CookKey.fory`
+**FQN:** `glibre.content.CookKey`
+**Lifetime scope:** embedded inside `ManifestEntry`; never persisted
+standalone. The schema exists so the canonicalised input set the
+digest is computed *over* is recoverable from the manifest at
+diagnostic time (cache misses, audit trails, importer regressions),
+without re-running the cook.
+
+```fory
+schema glibre.content.CookKey {
+  version 1
+  since   "0.1.0"
+
+  field digest                   : bytes  tag 1 since 1
+  field source_hash              : bytes  tag 2 since 1
+  field importer_version         : bytes  tag 3 since 1
+  field normalize_params_hash    : bytes  tag 4 since 1
+  field processing_params_hash   : bytes  tag 5 since 1
+  field downstream_versions_hash : bytes  tag 6 since 1
+}
+```
+
+- `digest` is the 32-byte BLAKE3-256 cache key from §4.1.3 — the
+  length-prefixed concatenation of the five component hashes below.
+  Two `CookKey`s with the same `digest` are interchangeable for
+  cache-hit purposes (§4.1.3 inv #3).
+- `source_hash` (32 bytes) is `BLAKE3(SourceAsset bytes)` (§4.1.1 /
+  §4.1.3 inv #1).
+- `importer_version` (32 bytes) is `BLAKE3(dispatched importer's
+  compiled identity)` (§4.1.2 inv #4 / §4.1.3 inv #1).
+- `normalize_params_hash` (32 bytes) is `BLAKE3(canonical
+  serialisation of the per-source-kind normalise parameter set
+  applied)`. Canonical serialisation here means sorted-key,
+  length-prefixed bytes per §4.1.3 inv #2.
+- `processing_params_hash` (32 bytes) is `BLAKE3(canonical
+  serialisation of cook-step processing parameters)` (§4.1.3 inv #1
+  component 4).
+- `downstream_versions_hash` (32 bytes) is `BLAKE3(sorted-tuple
+  serialisation of every transitively-invoked tool's
+  (name, version))`, including `geometry` plugin version,
+  `glibre-foryc` version, and the `glibre-types` ABI hash from
+  data SPEC §4.4.
+
+**Invariants:**
+
+1. **Digest is reproducible.** Recomputing `BLAKE3` over the
+   length-prefixed concatenation of the five component hashes, in
+   the order declared above, MUST yield `digest` exactly. The
+   round-trip test fixture asserts this for every shipped golden;
+   this is the schema-level enforcement of §4.1.3 inv #1 (pure
+   function of declared inputs).
+2. **All hashes are exactly 32 bytes.** Any other length is
+   `ImporterError::MalformedPayload` at deserialise time, before any
+   higher layer sees the value.
+3. **Canonical-input audit only.** The component hashes are recorded
+   for diagnostic recoverability (cache-miss audit, importer
+   regression triage); the runtime cache-hit path keys only on
+   `digest` (§4.1.3 inv #3). No code path re-derives `digest` from
+   the components at runtime — that is a build-time assertion of
+   the schema's golden tests.
+4. **Versioning is a key change, not a key annotation** (§4.1.3
+   inv #4). Bumping the schema does not migrate the recorded keys;
+   see §7.2.2.
+
+#### 7.1.3 `DependencyEdge` — one edge of the bottom-up invalidation graph
+
+**File:** `data/schemas/content/DependencyEdge.fory`
+**FQN:** `glibre.content.DependencyEdge`
+**Lifetime scope:** embedded inside `ManifestEntry.edges`; never
+persisted standalone. The persisted form mirrors the in-memory
+`DependencyEdge` struct in §5.1 / §5.2 with the discriminant made
+explicit so the on-disk encoding is unambiguous.
+
+```fory
+schema glibre.content.DependencyEdge {
+  version 1
+  since   "0.1.0"
+
+  field parent     : string         tag 1 since 1
+  field child_kind : u8             tag 2 since 1
+  field child      : string         tag 3 since 1
+}
+```
+
+- `parent` is the dependent's `AssetId` (the asset that must be
+  re-cooked when `child` changes). Same validation as
+  `ManifestEntry.asset_id`.
+- `child_kind` is a closed-sum discriminant over the two child
+  variants from §4.1.6 / §5.2:
+  - `0` = `Asset` — `child` is another `AssetId`.
+  - `1` = `SourcePath` — `child` is a workspace-relative path under
+    `assets/source/...`.
+  Any other value is `ImporterError::MalformedPayload` at
+  deserialise time. Treating the discriminant as a `u8` rather than
+  a Fory `enum` is intentional: future kinds (e.g.
+  `ExternalToolVersion`, `EnvironmentInput`) extend the closed sum
+  via new positions per §7.2.3 without moving any tag — see the
+  migration rules below.
+- `child` is the textual identity matching `child_kind`: an
+  `AssetId` regex when `child_kind == 0`, or a workspace-relative
+  path when `child_kind == 1`. The `SourcePath` variant is sorted
+  by NFC-normalised Unicode code-point order at canonicalisation
+  time so identical edge sets serialise byte-equal.
+
+**Invariants:**
+
+1. **Closed discriminant.** The set of recognised `child_kind`
+   values is fixed by the running middleman dylib's schema version;
+   unknown values cannot be silently tolerated (PHILOSOPHY §6 — no
+   reflection-driven runtime branches). Decoding a value the dylib
+   does not recognise is `ImporterError::MalformedPayload`.
+2. **Path discipline.** When `child_kind == SourcePath`, `child`
+   MUST start with `assets/source/` and contain no `..` segments;
+   otherwise `ImporterError::SourceNotFound` (matches §4.1.1 inv #1
+   path-scope rule). Validated at deserialise time.
+3. **Cycle-freedom is the manifest's invariant.** A
+   `DependencyEdge` in isolation cannot encode a cycle; cycle
+   detection runs across the union of every published
+   `ManifestEntry.edges` set (§4.1.6 inv #4). The edge schema does
+   not constrain global topology.
+
+### 7.2 Migration rules
+
+Per `reviews/decisions/fory-codegen.md` §"Migration Mechanic" and
+data SPEC §7.4, every schema-version bump generates a dispatcher
+hookup; content owns the migration *bodies*, `data` owns the
+plumbing. The three rules below differ from the typical
+`data/schemas/<ctx>/<Type>.fory` pattern because the manifest layer
+sits directly in front of an opaque content-hashed cache that is
+itself an authoritative re-cook source.
+
+#### 7.2.1 `ManifestEntry` — additive variants only
+
+The manifest schema is **additive-only** within MVP and the
+foreseeable post-MVP horizon. Two flavours of additive change are
+recognised:
+
+1. **Append a new defaulted field at a new tag.** Example: a
+   future `last_published_at_unix_ms : u64 default 0` appended at
+   tag 5. Codegen synthesises the default at deserialise time per
+   data SPEC §7.4 rule #6; no migration body is required. Fory's
+   `since` clause makes older payloads load cleanly into newer
+   readers; older readers see Fory's "unknown trailing tag" path
+   and skip the bytes per Fory's wire format.
+2. **Add a new `DependencyEdge` kind.** A new `child_kind` variant
+   (e.g. `ExternalToolVersion`) is an additive variant of the
+   `DependencyEdge` schema — see §7.2.3. The `ManifestEntry`
+   schema itself does not change.
+
+Anything else — renaming a field, changing an existing field's
+type, removing a field, or changing the meaning of a recorded
+`content_hash` — is treated as **breaking** and falls under the
+re-cook rule in §7.2.4. Migrating individual `ManifestEntry`
+records across a breaking schema bump is explicitly **not
+supported**.
+
+Round-trip golden contract: for every shipped schema version `N`,
+`tests/data/schemas/content/ManifestEntry.cpp` includes a recorded
+`vN` payload golden and asserts the v`N` → v(current) chain
+produces a v(current)-byte-equal payload (data SPEC §7.5).
+
+#### 7.2.2 `CookKey` — schema-bump = full re-cook
+
+`CookKey`'s `digest` is computed over a length-prefixed
+concatenation of five component hashes (§7.1.2 / §4.1.3). Any
+change to the `CookKey` schema — new component hash, removed
+component hash, reordering, or width change — **alters the digest
+algorithm itself**. The digest of a v1 `CookKey` is therefore
+*never* equal to the digest of an equivalent v2 `CookKey`, even
+when every input is byte-identical.
+
+Consequence: a `CookKey` schema bump invalidates **every recorded
+key** in the manifest, which by definition forces a re-cook of
+**every asset** on the next `CookSession`. There is no live
+migration of recorded `CookKey` records — the manifest is treated
+as cold cache and fully rebuilt.
+
+This rule is enforced in code by **omitting** any `migration`
+clause from `CookKey.fory` entirely. The Fory codegen tool refuses
+to emit a migration dispatcher for a type that declares no
+migration providers (data SPEC §7.4 rule #5 mandates complete
+coverage; absence of the clause is a load-bearing signal here per
+data SPEC §7.6's parallel pattern for meta-schemas, lifted at
+codegen-time for `CookKey` only). Future schema bumps therefore
+force the author to either author an explicit migration (rejected
+by review per this rule) or accept full re-cook (the only allowed
+path).
+
+Operationally: a `CookKey` schema bump rides the same release
+boundary as a `glibre-types` ABI hash bump; the next workspace
+open after the upgrade observes a manifest whose every entry's
+`cook_key.digest` mismatches the freshly-computed key for its
+asset, falls through to the cook path for every asset, and
+publishes a fresh manifest. The CAS contents already on disk
+(§4.1.5) survive — they are addressed by `ContentHash`, not by
+`CookKey` — so the re-cook collapses to deduplicating writes for
+any asset whose cooked bytes happen to round-trip byte-equal.
+
+#### 7.2.3 `DependencyEdge` — additive variants on `child_kind`
+
+Adding a new dependency kind extends the closed sum on
+`child_kind` (§7.1.3). The migration rule is:
+
+1. **Allocating a new `child_kind` value.** Reserve the next
+   unused position in the discriminant; do **not** move existing
+   positions. Existing edges loaded from a prior payload retain
+   their original `child_kind`; the schema bump is additive
+   because no tag changes and no field type changes (the
+   discriminant remains a `u8`). Codegen treats this as a
+   no-op migration (identity mapping) and does not require a
+   provider body.
+2. **Authoring the new variant's interpretation.** The owning
+   site that emits edges with the new `child_kind` (the cook
+   step, the watcher fan-out, etc.) is updated in lockstep with
+   the schema bump; older `glibre-types.dylib` readers will refuse
+   such payloads with `ImporterError::MalformedPayload` per §7.1.3
+   inv #1, which is the desired behaviour (they cannot interpret
+   the kind correctly anyway).
+3. **Removing or repurposing a `child_kind` value.** Forbidden.
+   Discriminant positions are immutable once shipped; deprecated
+   kinds are left in place and the cook simply stops emitting them.
+   This mirrors the data SPEC §7 reserved-tag rule applied to
+   discriminant positions.
+
+There is no migration body for any `DependencyEdge` change; the
+schema is structurally additive by design. `tests/data/schemas/
+content/DependencyEdge.cpp` carries one round-trip golden per
+shipped `child_kind` value.
+
+#### 7.2.4 Why no live migration of manifest entries
+
+The `CookKey` schema **absorbs the full identity of every cook
+input** (§4.1.3 inv #1, §7.1.2 inv #1) — including the
+`glibre-types` ABI hash, every importer's compiled identity, every
+downstream tool version, and the canonicalised normalize /
+processing parameter sets. Any breaking change to *any* of those
+inputs — by definition — alters every shipped asset's `CookKey`
+digest, regardless of whether the manifest schema itself moved.
+
+Consequence: a "live migration of manifest entries" — rewriting
+recorded `(content_hash, cook_key)` pairs in place to track a new
+schema or new tool version — is never the right operation. The
+correct operation is always: invalidate the affected entries,
+re-run the cook, re-publish. The cook is the authoritative
+fallback; the manifest is an optimisation on top of it.
+
+Therefore content's persistent surface is split between (a) the
+narrow additive-only manifest schema in §7.1, which never needs
+migration bodies inside the MVP horizon, and (b) the opaque CAS
+in §7.3, which does not migrate at the field level by
+construction.
+
+### 7.3 The CAS payload layer (not manifest-managed)
+
+The cooked artifacts under `cooked/<prefix>/<hash>` — Fory-encoded
+`MeshArtifact` / `TextureArtifact` / `FontArtifact` payloads —
+are referenced from `ManifestEntry.content_hash` but are
+**opaque to the manifest layer**. Schema-level reasoning about
+those payloads belongs to their per-artefact §7.x cells (cited in
+§5.2): the manifest only sees their 32-byte digest.
+
+Two consequences:
+
+1. **CAS contents are not manifest-managed at field level.** A
+   schema bump on `MeshArtifact` does not perturb the manifest
+   schema. The bump invalidates the affected `cook_key.digest`s
+   (because the Fory schema version participates in
+   `glibre-types`'s ABI hash, which feeds
+   `cook_key.downstream_versions_hash` — §7.1.2), the next
+   `CookSession` re-cooks the affected assets, and the manifest
+   is republished with new `(content_hash, cook_key)` pairs.
+   The manifest schema, the meta-schema layer, and the data
+   spine all stand still.
+2. **The CAS itself is append-only and not migrated.** Cooked
+   files at `cooked/<prefix>/<hash>` are immutable bytes
+   (§4.1.4 inv #3, §4.1.5 inv #2). A schema bump on a payload
+   type produces *new* hashes; the prior hashes' files remain on
+   disk until post-MVP garbage collection (§4.1.5 inv #2 / §3.2
+   collapse #2). There is no in-place rewrite path and no
+   migration dispatcher for cooked bytes at the file layer.
+
+### 7.4 What is NOT persisted
+
+To make the boundary explicit (in line with §5 and the §3.3
+refusals):
+
+| Artefact          | Why not persisted                                                                                     |
+|-------------------|-------------------------------------------------------------------------------------------------------|
+| `Residency` state | Process-local; rebuilt on next run from `Manifest` + CAS lookups (§4.1.7 lifetime).                   |
+| mmap regions      | Owned by the `ResidencyManager`; never serialised (§4.1.7 inv #5).                                    |
+| `LoadRequest`     | Ephemeral I/O-lane unit; never crosses process boundaries.                                            |
+| `ScreenCoverage`  | Per-frame hint from `render`; never persisted.                                                        |
+| `WatchEdge`       | Subscription state owned by `platform`'s watcher; rebuilt at startup from the `DependencyEdge` graph. |
+| `RecookRequest`   | Bounded to a single `CookSession`'s lifetime (§4.1.9 entity lifetime).                                |
+| `CookSession`     | Bounded run; identity is timestamp + counter, debug-only (§4.1.9 lifetime).                           |
+| `AssetHandle<T>`  | Process-local refcount; never serialised (§4.1.8 lifetime).                                           |
+| `CookedAsset`     | Bytes only — addressed by `ContentHash`, opaque to the manifest (§7.3).                               |
+| Importer config   | Per-`SourceKind` parameter sets feed `cook_key.normalize_params_hash` as bytes; the structured config is owned by each importer's source tree, not the manifest. |
+
+These appear in the persistence surface only as *identifiers*
+(`AssetId`, `ContentHash`, `CookKey.digest`) referenced from §7.1,
+never as byte payloads.
 
 ## 8. Hot-Reload Contract
 
