@@ -1120,7 +1120,276 @@ without CAS file) both fail integrity verification with
 
 ## 8. Hot-Reload Contract
 
-What survives swap, what `migrate(...)` must do, what triggers refusal.
+The `shader` context's hot-reload semantics differ from the engine-wide
+plugin reload protocol (`reviews/decisions/hot-reload-protocol.md`) in
+one fundamental way: **the unit of reload is an HLSL source file, not
+the `shader` plugin `.dylib`**. The plugin loader's drain → swap →
+migrate → resume state machine governs `.dylib` swaps; `shader` does
+not perform a plugin self-swap as its hot-reload story. Shader source
+edits bypass the loader's vtable-swap step entirely and instead drive
+a content-keyed cache-invalidation event observed by `render`. This
+matches harmonius RF-9's intent (re-run reflection on new bytecode so
+descriptor layout stays in sync) without conflating two unrelated
+reasons-to-change (PHILOSOPHY §1).
+
+### 8.1 Trigger
+
+Exactly one trigger fires a `shader` hot-reload event in editor / dev
+builds:
+
+1. **HLSL source change.** The editor's filesystem watcher observes a
+   modified `.hlsl` translation unit (or any file in its include
+   closure, §4.1 invariant 3) under the project source root. The
+   watcher calls into the `shader` plugin to re-`open()` the affected
+   `ShaderSource` and recompute its `PreprocessedSource.total_hash`.
+   If the new hash differs from the cached hash, the affected
+   `(ShaderSource, PermutationKey, CompileTarget)` set is the
+   *affected permutation set*; everything else is unaffected.
+
+The plugin `.dylib` swap path is **not** a `shader` hot-reload trigger.
+The `shader` plugin is reloaded only by the engine-wide loader protocol
+when the plugin's own code (DXC argv builder, reflection extractor,
+backend trait implementation) changes — that is a `core`-driven event,
+not a content event, and it inherits `hot-reload-protocol.md` verbatim.
+
+Editor-driven partial reload is the path
+`hot-reload-protocol.md` Open Question 5 anticipated; this section is
+its `shader`-side answer for the source-change case.
+
+### 8.2 What survives the swap
+
+Shader hot-reload changes content-addressed artifacts on disk; nothing
+in-memory needs migration. Specifically:
+
+1. **`ShaderCache` entries for unaffected permutations survive
+   verbatim.** Cache is keyed by `ShaderHash = BLAKE3(preprocessed
+   source ∪ resolved PermutationKey ∪ canonical flags ∪ target)` (§2,
+   §4.6 invariant 1). An edit to `foo.hlsl` changes the `source_hash`
+   only for `(PermutationKey, target)` pairs that include `foo.hlsl`
+   in their preprocessed closure. All other permutations retain their
+   prior `ShaderHash`, prior bytecode, prior `ReflectionBlob`, and
+   prior `DescriptorLayout` — bit-equal across the swap.
+2. **`ShaderCache` entries for affected permutations are not
+   "migrated" — they are recompiled.** The new artifact lives at a new
+   `ShaderHash`; the old artifact remains in CAS as a now-unreferenced
+   blob until the next `cook()` walk garbage-collects it (cooker is
+   the sole writer; runtime never deletes). `insert` is idempotent
+   (§4.6 invariant 1); re-keying is by construction.
+3. **`PermutationKey`, `PermutationIndex`, axis enums, and the
+   permutation enumeration table survive unchanged.** The four axes
+   (§4.2) are spec-frozen; a source-only edit cannot grow a new
+   `ShadingModel` or `FeatureBit`. Axis growth requires a spec
+   amendment (§4.2 invariant 3) which routes through the engine-wide
+   plugin reload, not this path.
+4. **`ShaderCacheManifest` is rebuilt, not migrated.** The manifest
+   is a derived index over the CAS (§7.4 rule 4); after a source
+   change the dev-build cooker re-walks the resolved permutation set
+   and writes a fresh manifest with updated `artifact_hash` entries
+   for the affected permutations and unchanged entries for the rest.
+5. **`PSOCache` entries for affected permutations are invalidated by
+   `render`.** The PSO cache is owned by `render`, not `shader`
+   (§4.8 invariant 1, §3 refusal 4); `shader` publishes the affected
+   `ShaderHash` set on the observer bus and `render` evicts each PSO
+   whose source artifact's hash changed, then rebinds via the new
+   `ShaderHash` lookup. PSO cache entries for unaffected permutations
+   survive — their input `ShaderHash` is bit-equal across the swap.
+6. **No GPU resources cross the swap from `shader`'s side.** `shader`
+   never owns GPU memory (§3 refusal 5); resource handles live in
+   `render` and are re-acquired by `render`'s observer reaction to
+   the invalidation event, not by `shader`.
+
+### 8.3 `migrate(...)`: not applicable
+
+The `shader` context **does not provide a `migrate_<Type>_vN_to_vNplus1`
+function for source-change hot-reload**. The contract collapses to:
+
+- **Persistent on-disk records** (§7) are migrated only when a record
+  *schema* version bumps; that is the engine-wide path
+  (`hot-reload-protocol.md` Step 3, `fory-codegen.md` migration
+  table). A source-only edit never bumps a schema version, so no
+  migrate function fires.
+- **In-memory state to carry across the swap is empty by
+  construction.** `shader` produces sealed, immutable
+  `ShaderArtifact` values; downstream consumers (`render`, `material`)
+  hold them by `ShaderHash`. The swap replaces the affected hash set;
+  no live `ShaderArtifact` instance needs field-by-field reshape.
+- **Cache-state survival is a content-hash equality check, not a
+  migration.** The loader's "if it has a `.fory` schema, it survives"
+  rule (`hot-reload-protocol.md` State Survival Rules) trivially
+  applies: `ShaderArtifactRecord` and `ShaderCacheManifest` survive
+  by definition. Their *content* changes for affected entries; their
+  *layout* does not.
+
+A future schema bump on `ShaderArtifactRecord`, `ReflectionRecord`, or
+`DescriptorLayoutRecord` invokes the migration rules already locked
+in §7.4 (rules 1–5); those rules belong to the schema-evolution path,
+not to source-change hot-reload, and are not duplicated here.
+
+### 8.4 Refusal cases
+
+A `shader` hot-reload event refuses (i.e., the new artifact is not
+published; the prior cache state remains live; affected PSOs are
+*not* invalidated) in exactly four cases. The first is a hard refusal
+of the trigger itself in shipping; the other three are recompile-time
+failures that surface to the editor and leave the previous-good
+artifact bound.
+
+1. **Shipping build refuses to invoke DXC.** In any build with
+   `GLIBRE_SHIPPING == 1`, the entire `CompilationPipeline`
+   translation unit is excluded (§4.3 invariant 3, §4.8 invariant 3),
+   and the filesystem watcher is not registered. A reload-on-source
+   request synthesised from any source (e.g., a stray dev tool
+   embedded in a shipping binary) is **ignored without error**: the
+   shipping `shader` plugin has no path that can serve it, and
+   `IShaderBackend::compile()` itself does not exist as a virtual at
+   that ABI. If a request nonetheless reaches the plugin (for
+   example, via the engine-wide test harness mistakenly enabled), it
+   is rejected with `Error::ShippingCompilationAttempted`.
+2. **DXC subprocess failure.** The subprocess invocation fails
+   (`Error::CompilerInvocationFailed`), exits non-zero
+   (`Error::CompilerExitNonZero`), or times out
+   (`Error::CompilerTimedOut`) — see §10 for the closed enum. The
+   editor surfaces the captured stderr; the in-flight `ShaderArtifact`
+   is discarded; the prior CAS entry remains the live artifact for
+   that `(PermutationKey, target)`.
+3. **Reflection or descriptor-layout failure on the new bytecode.**
+   The new DXIL reflects but yields a `ReflectionBlob` whose bindings
+   include an unassigned descriptor frequency
+   (`Error::DescriptorFrequencyAmbiguous` /
+   `DescriptorFrequencyMissing`, §4.4 invariant 3) or whose
+   `DescriptorLayout::derive(...)` rejects the schema. The new
+   artifact never reaches `ShaderCache::insert`; the old artifact
+   remains live.
+4. **Cache integrity violation on insert.** A `ShaderHash` collision
+   with a non-byte-equal payload (theoretically impossible under
+   BLAKE3 but checked) or a manifest-vs-CAS skew detected by the
+   cooker (§4.6 invariant 3) yields `Error::CacheIntegrity`; the new
+   artifact is dropped and the affected permutation continues to
+   resolve through the prior hash.
+
+In every refusal case the `shader` plugin emits a structured `warn`
+log entry (per `reviews/decisions/error-model.md`) carrying
+`source_path`, `affected_permutation_count`, and the `Error`
+enumerator name; it does **not** publish an invalidation event on the
+observer bus. `render`'s PSO cache therefore continues to bind the
+prior artifact deterministically.
+
+### 8.5 Observer notification — `render` invalidation and rebind
+
+`shader` and `render` communicate via a single typed event published
+on the engine-wide observer bus (the same bus used by the loader
+protocol's `HotReloadCompleted`, see `hot-reload-protocol.md`
+Observer Notification). The event is a middleman type so its
+on-the-wire layout survives plugin swaps:
+
+```text
+glibre::types::shader::ShaderArtifactReplaced {
+    source_id              : SourceId            // §5
+    affected_old_hashes    : list<ShaderHash>    // bit-stable order
+    affected_new_hashes    : list<ShaderHash>    // 1:1 with old, same index
+    affected_permutations  : list<PermutationKey>
+    target                 : CompileTarget
+}
+```
+
+`render` is the sole subscriber relevant to PSO cache invalidation.
+On receiving a `ShaderArtifactReplaced` event:
+
+1. For each `affected_old_hash`, `render` looks up every PSO whose
+   shader-stage input keys include that hash and marks the entry
+   invalid in `PSOCache`.
+2. `render` rebinds the affected pipeline state by resolving the
+   matching `affected_new_hash` through `ShaderCache::get(...)` and
+   reconstructing the PSO from the new `ShaderArtifact` plus the
+   surviving render-side device fingerprint.
+3. PSOs whose source hashes are not in the affected set survive
+   bit-equal — their cache lookups continue to hit the same record.
+
+The event is published synchronously on the editor's tool thread
+after `ShaderCache::insert` succeeds for the entire affected set;
+subscribers see a fully-published cache, never a half-inserted one.
+This mirrors the loader protocol's "synchronous on the loader thread,
+between steps 4.2 and 4.3" rule (`hot-reload-protocol.md` Observer
+Notification) and gives `render` a single deterministic point at
+which to re-derive PSO state.
+
+### 8.6 Test hooks
+
+Two `shader`-side test entry points complement the loader's
+`enqueue_hot_reload` / `await_reload` pair (`hot-reload-protocol.md`
+Test Hooks). Both are guarded by `#if defined(GLIBRE_E2E)` and never
+linked into runtime or shipping; they let the harness drive
+source-change hot-reload deterministically without touching the
+filesystem watcher.
+
+```cpp
+namespace glibre::shader::test {
+
+// Inject an HLSL diff for `source_id` as if the watcher had observed
+// it; new_bytes replace the file's preprocessed body. Returns the
+// affected permutation set discovered by re-keying through the
+// permutation enumerator.
+std::expected<std::vector<PermutationKey>, Error>
+inject_source_diff(
+    const SourceId&                source_id,
+    std::span<const std::byte>     new_preprocessed_bytes
+) noexcept;
+
+// Synchronously drive the recompile + reflect + cache-insert chain
+// for the given affected set, returning the published
+// ShaderArtifactReplaced payload. Used by render-side tests to
+// assert deterministic PSO invalidation.
+std::expected<glibre::types::shader::ShaderArtifactReplaced, Error>
+recompile_affected(
+    const SourceId&                       source_id,
+    std::span<const PermutationKey>       affected,
+    CompileTarget                         target
+) noexcept;
+
+}
+```
+
+The CI matrix exercises four scenarios in a single deterministic
+frame each:
+
+- **Unaffected-permutation survival.** Inject a diff to `foo.hlsl`;
+  assert that every permutation whose preprocessed closure does
+  *not* include `foo.hlsl` retains its prior `ShaderHash` byte-equal,
+  and that `render`'s `PSOCache` does not evict the corresponding
+  PSO (zero invalidations on the unaffected set).
+- **Affected-permutation invalidation.** Inject a diff that touches
+  N permutations; assert exactly N old hashes appear in
+  `affected_old_hashes`, exactly N new hashes appear in
+  `affected_new_hashes`, the lists' indices line up, and `render`'s
+  observer reaction evicts exactly those N PSOs and rebinds them
+  through the new hashes.
+- **Each refusal case.** Drive `inject_source_diff` with synthetic
+  inputs that fail at DXC, at reflection, at descriptor derivation,
+  and at cache insert; assert that no `ShaderArtifactReplaced` is
+  published and that the prior `ShaderHash` continues to resolve
+  through `ShaderCache::get`.
+- **Shipping refusal.** Compile the test binary with
+  `-DGLIBRE_SHIPPING=1`; assert that
+  `glibre::shader::test::inject_source_diff` is not linked and that
+  any synthesised reload request returns
+  `Error::ShippingCompilationAttempted` through the
+  test-only error gate.
+
+The `inject_source_diff` symbol is the same in-process trigger used
+by the dev-build watcher wrapper, so testing the in-process path
+covers the full source-change hot-reload state machine.
+
+### 8.7 Cross-context summary
+
+| Concern | Owner | Survival |
+|---------|-------|----------|
+| Affected `ShaderArtifact` bytecode + reflection | `shader` (CAS, recompiled) | New hash, new blob; prior blob orphaned until cooker GC. |
+| Unaffected `ShaderArtifact` records | `shader` (CAS) | Bit-equal across reload (§7.3 rule 1). |
+| `ShaderCacheManifest` | `shader` (rebuilt) | Re-emitted by cooker; `schema_abi_hash` unchanged. |
+| Affected `PSOCache` entries | `render` | Evicted on `ShaderArtifactReplaced`; rebound to new hash. |
+| Unaffected `PSOCache` entries | `render` | Survive bit-equal (input hash unchanged). |
+| GPU device fingerprint, descriptor heaps, command encoders | `render` | Survive — no `shader`-side dependency changed. |
+| Schema migrations on §7 records | `data` middleman + `shader` | Out of band — fires only on schema bumps, not source edits. |
 
 ## 9. Performance Budget
 
