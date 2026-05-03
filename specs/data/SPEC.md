@@ -1375,7 +1375,413 @@ registry entry, and every registry entry corresponds to one
 
 ## 8. Hot-Reload Contract
 
-What survives swap, what `migrate(...)` must do, what triggers refusal.
+The `data` context is the persistence spine; it does not run the
+hot-reload state machine. The loader at the frame-8 barrier owns the
+four-step **drain → swap → migrate → resume** protocol
+(`reviews/decisions/hot-reload-protocol.md` §"Protocol Sequence"); the
+data context owns step 3 (**migrate**) and the gate values steps 2 and
+4 consult (`AbiHash`, `SchemaRegistry`). This section pins the contract
+between those owners: what bytes survive, what `migrate(...)` must do,
+which refusals are typed at this layer, and how observers are notified
+without ever seeing a half-swapped registry.
+
+Two reload modes exist and the rules differ between them. **Mode A —
+per-plugin reload** (the common case) is what every domain plugin
+exercises in dev and CI workflows. **Mode B — `glibre-types.dylib`
+reload** is rare, requires engine restart by default, and is permitted
+only under the strict conditions in §8.3.
+
+### 8.1 What survives a swap
+
+The §4.10 inv. 6 determinism guarantee combines with the
+hot-reload-protocol survival rule (`reviews/decisions/hot-reload-protocol.md`
+§"State Survival Rules") to yield one mechanical predicate the data
+context promises to preserve:
+
+> **Data survives the swap if and only if its type has a `.fory`
+> schema registered in the live `SchemaRegistry`.**
+
+This biconditional is the same one the loader checks; the data context
+guarantees the *forward* direction (registered ⇒ preserved by either
+identity or migration) and the codegen guarantees the *reverse*
+direction (no schema ⇒ no registry entry ⇒ not persistent ⇒ not
+preserved). Concretely, the spine preserves:
+
+1. **Generated-type byte storage.** Every ECS component, world
+   singleton, asset payload, or plugin-private record whose C++ type
+   is a `Generated Type` (§4.2) survives. Storage rows are migrated
+   in place when the new plugin's `SchemaVersion` for the type
+   exceeds the version recorded in the storage's per-row header
+   (`reviews/decisions/hot-reload-protocol.md` §"Step 3 — Migrate"
+   step 3); rows whose stored version equals the current version
+   are passed through unchanged.
+2. **The `SchemaRegistry` itself.** In Mode A the live registry is
+   not mutated — Q's manifest re-references existing entries by
+   FQN, and the loader's step 2.4 appends only entries Q introduces
+   that are *new* and append-additive. In Mode B the live registry
+   is *replaced wholesale* (§8.3); no in-place mutation crosses a
+   reload.
+3. **The `AbiHash` value.** Mode A leaves the host's
+   `glibre_types_abi_hash()` unchanged by definition (§4.4 inv. 4
+   makes it a build-time constant of the middleman, not of any
+   plugin). Mode B is the only reload that publishes a new
+   `AbiHash`, and it does so by replacing the middleman as a unit
+   (§8.3).
+4. **Per-payload arena state — *not* preserved.** The dispatcher's
+   `Arena` (§4.6) is per-payload and reset between steps; nothing
+   in the arena survives the migrate phase, let alone the swap.
+   This is restated here only because step 3.4 of the loader
+   protocol resets it on failure — see §8.4.
+
+State that does **not** survive (consistent with
+`reviews/decisions/hot-reload-protocol.md` §"State Survival Rules"
+"Re-derived"):
+
+- Plugin-private types without a `.fory` schema. By §4.10 inv. 1
+  these have no registry entry and the spine has no migration
+  story for them.
+- The `MigrationChain` function-pointer table for plugin-emitted
+  types whose plugin is being swapped out — the table's entries
+  point into the *outgoing* plugin's `.text` segment and are
+  invalidated by `dlclose`. The new plugin's static-init
+  re-registers replacements through
+  `glibre_types_register_migration` before the loader proceeds
+  past step 4.1 (§4.5 inv. 4 still holds: the registry is
+  read-only after static-init *of the live middleman build*).
+- Editor-only `ReflectionBlob` interning tables for types whose
+  schemas dropped between Q and P. Tools handle the null pointer
+  per §4.9 inv. 5.
+
+### 8.2 The `migrate(...)` responsibility
+
+Every plugin reload routes through one entry point in the data
+context:
+
+```cpp
+namespace glibre::types::data {
+
+// Called by the loader at hot-reload-protocol step 3, once per
+// outgoing-plugin / incoming-plugin pair. Drives MigrationDispatcher
+// across the version gap and validates schema-set continuity.
+[[nodiscard]] auto migrate(
+    const SchemaRegistry& outgoing,    // pre-swap registry view
+    const SchemaRegistry& incoming,    // post-swap registry view
+    World&                world,        // borrowed; storage walk only
+    Arena&                arena         // per-payload, reset between rows
+) noexcept -> std::expected<MigrationReport, Error>;
+
+}  // namespace glibre::types::data
+```
+
+**Responsibility.** `migrate(...)` performs *exactly* the data
+context's part of the loader's step 3:
+
+1. **Schema-set continuity check.** For every `FQN` registered in
+   `outgoing` and referenced by any surviving storage row in
+   `world`, `migrate` asserts the same `FQN` is registered in
+   `incoming`. A missing `FQN` is a major-version change, not a
+   hot-reload (`reviews/decisions/hot-reload-protocol.md` §"Step 2 —
+   Swap" step 2.2); `migrate` returns `unexpected(Error::
+   SchemaMigrationFailure)` carrying the dropped `FQN` in the
+   detail payload.
+2. **Per-row dispatch.** For each surviving storage row whose stored
+   `SchemaVersion` is less than `incoming.lookup(fqn)->version`,
+   `migrate` invokes the `MigrationDispatcher` (§4.7,
+   `reviews/decisions/hot-reload-protocol.md` §"Step 3 — Migrate"):
+   the dispatcher composes the per-step `MigrationFn`s into the
+   chain `(stored_version → current_version)`, allocating into
+   `arena` and resetting it between rows.
+3. **Per-row in-place commit.** On chain success, the new bytes
+   overwrite the row in place; on chain failure, the arena is
+   reset and the row is left in its *outgoing* state (the loader's
+   rollback path then un-swaps the vtable per
+   `reviews/decisions/hot-reload-protocol.md` §"Failure & Rollback").
+   At most one row is half-overwritten at any instant, and the
+   loader's exclusive lock on phase 8 hides that intermediate from
+   every observer.
+4. **Validation, not interpretation.** `migrate` does not decide
+   *which* migration to run; it dispatches by `(FQN, from, to)`
+   tuples that the registry already records. It does not run any
+   plugin-private code beyond the `MigrationFn` bodies registered
+   through `glibre_types_register_migration`. It never reads
+   `World` outside the storage row currently being migrated, never
+   touches the file system, and never allocates outside `arena`.
+5. **Report-out.** On success `MigrationReport` contains the count
+   and the sorted span of `FQN`s actually migrated (i.e. those
+   whose stored version differed from the current); the loader
+   forwards the span into the `HotReloadCompleted` event published
+   at protocol step 4.3.
+
+**Out of scope — `migrate(...)` does not.** The function does *not*
+dlopen, dlsym, swap vtables, mutate the system schedule, log
+structured warnings, or publish observer events. Each of those is
+the loader's responsibility per
+`reviews/decisions/hot-reload-protocol.md` and
+`reviews/decisions/plugin-abi.md`. The data context refuses to host
+any of them (§1; §4.10 inv. 7).
+
+**Idempotence.** Re-invoking `migrate(...)` against an `outgoing`
+whose registry already matches `incoming` is a no-op that returns
+`MigrationReport{count = 0, migrated = {}}`. This makes step-3
+retries safe in the loader's rollback path.
+
+### 8.3 Self-reload of `glibre-types.dylib`
+
+The middleman dylib itself is a hot-reload candidate only under the
+strictest gate in the spine. By default it requires engine restart
+(PHILOSOPHY §8 / `reviews/decisions/hot-reload-protocol.md`
+§"Consequences" — self-reload of the middleman is listed as out of
+MVP scope). The data context records the contract this section
+satisfies *if and when* a future MVP+ spike turns the gate on:
+
+A new middleman build `Q-types` may replace the live `P-types` at
+phase 8 only if **all** of the following hold; failing any single
+condition refuses the reload and leaves `P-types` live:
+
+1. **Every loaded plugin proves ABI continuity.** For every plugin
+   `P_i` currently registered, `P_i.glibre_plugin_abi_hash() ==
+   Q_types.glibre_types_abi_hash()` *or* the plugin is also being
+   reloaded in the same phase 8 against `Q-types`. A single plugin
+   compiled against the old hash defeats the reload; the loader
+   returns `core::Error::PluginAbiHashMismatch` carrying the
+   offending plugin's name.
+2. **Migration-chain coverage is complete.** For every `FQN` in
+   `P_types.SchemaRegistry` whose `SchemaVersion` differs from the
+   `FQN`'s version in `Q_types.SchemaRegistry`, the chain
+   `(P_version → Q_version)` is fully present in
+   `Q_types.SchemaRegistry`. Missing any step refuses with
+   `Error::SchemaMigrationFailure` (`reviews/decisions/hot-reload-protocol.md`
+   §"Refusal Cases" #2). Coverage is checked *before* any byte is
+   migrated, against the meta-schemas in §7.2 — the loader reads
+   `Q-types`'s `AbiHashManifest` and walks every entry.
+3. **Meta-schema bootstrap rule holds.** Per §7.6, a
+   `glibre-types.dylib` reload that bumps any of the meta-schemas
+   (`SchemaSourceRecord`, `MigrationTableRecord`,
+   `AbiHashManifest`, `EnvelopeHeader`) requires release-time
+   migration via `glibre-foryc`, not in-process `MigrationChain`.
+   A self-reload that crosses such a bump is refused by
+   construction; the operator either rebuilds the world from
+   sources via the new `glibre-foryc` (acceptable) or restarts the
+   process against the new middleman (acceptable). In-process
+   self-reload is *only* permitted when the new build's
+   meta-schemas are byte-identical to the live build's.
+4. **Live registry replacement is wholesale.** When all gates pass,
+   the loader publishes `Q_types.SchemaRegistry` as the new
+   `instance()` (§4.5 inv. 4) atomically alongside the vtable
+   swap; the previous registry is dropped only after every plugin
+   in the same phase 8 has completed its step 4. There is no
+   intermediate "merged" registry — readers see exactly one
+   well-formed `SchemaRegistry` at every observable moment.
+
+The collapse: a `glibre-types.dylib` reload is **a multi-plugin
+reload plus a meta-schema-frozen middleman swap**, gated by
+*every* loaded plugin's ABI hash and by *every* migrated type's
+chain. The default failure mode — engine restart — is preferable
+in MVP, and this contract exists so that the future enabling spike
+inherits a clear refusal envelope rather than ad-hoc rules.
+
+### 8.4 Refusal cases owned by `data`
+
+The hot-reload-protocol enumerates three umbrella refusal cases
+(`reviews/decisions/hot-reload-protocol.md` §"Refusal Cases"). The
+data context types and raises exactly two of them:
+
+| Loader symptom                                      | Data-typed cause                          | Detection point                              |
+|-----------------------------------------------------|-------------------------------------------|----------------------------------------------|
+| `Q.glibre_types_abi_hash() != host.abi_hash()`      | `Error::AbiHashMismatch` (§5.3)           | step 2.1 (Mode A); §8.3 gate 1 (Mode B)      |
+| `MigrationChain` missing or `MigrationFn` returned `unexpected` | `Error::SchemaMigrationFailure` (§5.3) | step 3.1 / 3.2; §8.3 gate 2                  |
+| `Q.glibre_plugin_register` returned `unexpected`    | (not data — `core::Error::PluginInitFailed`) | step 4.1                                  |
+
+The third case is included for completeness only; its detection and
+typing live in `core` per `reviews/decisions/plugin-abi.md`
+§"Failure Modes → core::Error". The data context contributes to it
+solely through `MigrationReport`-carried context attached to the
+plugin's failed `register` (the new plugin may consult the report
+to know which migrations ran, but the data context does not type
+its failure mode).
+
+**Schema-set continuity refusals** (§8.2 step 1) raise
+`Error::SchemaMigrationFailure` rather than a new arm. The data
+context takes the §10 closed sum at face value: a missing schema
+in `incoming` is a defective migration *story* (the plugin author
+failed to write the migration that drops or relocates the type),
+and the loader surfaces it identically to a mid-chain failure.
+This collapses two failure modes into one error arm and one
+typed `core::Error::SchemaMigrationFailed` wrapping (per
+`reviews/decisions/plugin-abi.md` §"Failure Modes" row 11).
+
+**Per-row rollback discipline.** Every refusal that fires inside
+`migrate(...)` leaves the world byte-identical to its pre-`migrate`
+state — at most one row's worth of arena bytes is in flight at any
+instant, and a single failing row's arena is reset before the
+function returns. The loader's outer rollback (un-swap vtable,
+re-register P) then proceeds without any bytes-in-flight from the
+data layer (`reviews/decisions/hot-reload-protocol.md` §"Failure &
+Rollback" — failure at step 3).
+
+**Logging.** Refusals are logged exactly once at `warn` by the
+loader (`reviews/decisions/hot-reload-protocol.md` §"Refusal
+Cases"); the data context emits no log of its own. The structured
+fields the loader records include the `MigrationReport`'s partial
+contents so operators can see how far the chain progressed before
+the refusing step.
+
+### 8.5 Observer notification — `SchemaRegistry` change
+
+The data context publishes one observer event around hot-reload, on
+the loader thread, synchronous with the loader's
+`HotReloadCompleted`/`HotReloadRefused` events
+(`reviews/decisions/hot-reload-protocol.md` §"Observer Notification"):
+
+```cpp
+namespace glibre::types::data {
+
+struct SchemaRegistryChange {
+    enum class Kind : std::uint8_t {
+        EntriesAppended = 0,    // Mode A: new FQNs added by Q
+        VersionsBumped  = 1,    // Mode A: SchemaVersion of an existing FQN moved up
+        RegistryReplaced = 2,   // Mode B: full SchemaRegistry instance() swap
+    };
+    Kind                              kind{Kind::EntriesAppended};
+    std::span<const SchemaId>         affected_fqns{};   // sorted ascending
+    std::span<const MigrationReport>  reports{};         // one per migrated FQN
+};
+
+// Subscribers observe a fully-swapped, fully-migrated registry.
+// Synchronous on the loader thread; no allocation past the call
+// boundary (the spans alias loader-owned storage that lives until
+// the event handler returns).
+[[nodiscard]] auto subscribe_schema_registry_change(
+    void* userdata,
+    void (*on_change)(void* userdata, const SchemaRegistryChange&) noexcept
+) noexcept -> SubscriptionId;
+
+}  // namespace glibre::types::data
+```
+
+**Atomicity.** The event is delivered after `migrate(...)` succeeds
+and after the loader's own step 4.2 caches are rebuilt — i.e. the
+subscriber sees the post-swap world exactly the way it will tick
+in frame N+1. Subscribers never observe a half-migrated registry
+(§4.5 inv. 4 + §8.1 inv. 2 combined: Mode A's registry is
+append-only mid-phase-8, Mode B's swap is wholesale).
+
+**Subscriber discipline.** Subscribers may walk the registry and
+build derived caches; they may not call back into the data
+context's mutating API (the registry is read-only by §4.5 inv. 4).
+The MVP subscriber set is ≤ 10 (editor live-reload UI, e2e
+harness, profiler attach-point); registry-walk cost dominates the
+notification cost and is captured in the §9 budget.
+
+**No queue.** The observer bus is synchronous and unbuffered. A
+subscriber that throws (impossible — `noexcept` boundary) or that
+takes excess time to return delays the loader's exit from phase 8;
+the `core` perf budget bounds the latency the loader tolerates and
+this section adopts that bound by reference rather than restating
+it.
+
+### 8.6 Test hooks — deterministic schema-version bump fixture
+
+Hot-reload is testable in-process per
+`reviews/decisions/hot-reload-protocol.md` §"Test Hooks". The data
+context exports the schema-side counterpart to the loader's
+`enqueue_hot_reload`: a deterministic fixture that bumps a single
+schema's `SchemaVersion` and registers a paired migration without
+touching the filesystem.
+
+```cpp
+#if defined(GLIBRE_E2E)
+namespace glibre::types::data::test {
+
+// Builds a fresh SchemaRegistry instance whose entry for `fqn` is
+// upgraded by exactly one version, with the supplied migration
+// function wired into the chain. The returned registry is suitable
+// for passing to the loader's enqueue_hot_reload as the post-swap
+// view; existing entries for other FQNs are copied identically.
+//
+// Pure, allocation-free past the supplied arena. The bumped version
+// is recorded in a deterministic SchemaSourceHash derived solely
+// from the (fqn, new_version, migration_provider_name) triple, so
+// repeated calls with the same arguments produce byte-identical
+// registries (PHILOSOPHY §7).
+auto bump_schema_version(
+    const SchemaRegistry& base,
+    SchemaId              fqn,
+    MigrationEntry        new_step,         // from_version = base.version, to_version = base.version + 1
+    Arena&                arena
+) noexcept -> std::expected<const SchemaRegistry*, Error>;
+
+// Forces the next migrate() call against `fqn` at `(N → N+1)` to
+// return Error::SchemaMigrationFailure. Used to exercise the full
+// rollback path in the loader's failure tests
+// (reviews/decisions/hot-reload-protocol.md §"Test Hooks" CI
+// scenario 4). Idempotent; clearing requires
+// `clear_force_migration_failure(fqn)`.
+void force_migration_failure(SchemaId fqn,
+                             SchemaVersion from,
+                             SchemaVersion to) noexcept;
+void clear_force_migration_failure(SchemaId fqn) noexcept;
+
+}  // namespace glibre::types::data::test
+#endif
+```
+
+**Determinism.** `bump_schema_version` is a pure function of its
+inputs; the synthesized `SchemaSourceHash` is reproducible across
+runs and hosts. The fixture never allocates outside the supplied
+arena and never writes to disk. Tests under
+`tests/data/schemas/hot_reload/` exercise:
+
+1. Happy-path bump: stored `vN` payloads migrate to `vN+1`,
+   `SchemaRegistryChange::Kind::VersionsBumped` fires once with
+   the bumped FQN, post-bump `Envelope<T>::deserialize` byte-equals
+   a checked-in golden.
+2. Missing-step refusal: a `MigrationEntry` whose `from_version`
+   is two steps behind raises `Error::SchemaMigrationFailure`
+   without touching a single storage row (§8.4 per-row rollback
+   discipline).
+3. Forced-failure rollback: `force_migration_failure` injected
+   mid-chain leaves storage byte-identical to its pre-`migrate`
+   state and the registry pointer-identical to `outgoing`.
+4. Append-only continuity: a bump that adds a new FQN (rather
+   than upgrading an existing one) fires
+   `SchemaRegistryChange::Kind::EntriesAppended` and the migrate
+   pass is a no-op (`MigrationReport::count == 0`).
+
+These fixtures back the §11 acceptance criteria and are the only
+allowed entry into the spine's mutation-time machinery from test
+code.
+
+### 8.7 Cross-context obligations
+
+Every other context's `specs/<ctx>/SPEC.md` §8 specifies *its*
+plugin-side hot-reload obligations against the contract above.
+Those sections inherit:
+
+1. **Migration providers obey §7.4** — pure, deterministic, total
+   over their input domain. The data context's `migrate(...)`
+   calls them through the dispatcher; it does not validate their
+   bodies.
+2. **`SchemaRegistryChange` subscribers may not allocate** during
+   the synchronous notification window. The editor and tools
+   subscribe a pre-allocated handler; runtime contexts that need
+   notification must pre-arrange their cache structure at
+   `glibre_plugin_register` time.
+3. **No context but `data` mutates the registry.** Plugins
+   contribute entries through codegen (statically) and migrations
+   through `glibre_types_register_migration` (at static-init);
+   nothing else writes (§4.10 inv. 7).
+4. **Self-reload of `glibre-types.dylib` is opt-in.** Contexts
+   may not assume Mode B is enabled; the default in MVP is
+   process restart (§8.3, PHILOSOPHY §8).
+
+The collapse: domain plugins write `MigrationFn` bodies and
+subscribe to registry changes; the data context owns one entry
+point (`migrate(...)`), one observer event (`SchemaRegistryChange`),
+two refusal arms (`AbiHashMismatch`, `SchemaMigrationFailure`),
+and one deterministic test fixture (`bump_schema_version`).
+Everything else lives in the loader (`core`) or in the
+originating contexts.
 
 ## 9. Performance Budget
 
