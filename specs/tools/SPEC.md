@@ -4006,7 +4006,554 @@ the per-aggregate `BENCHMARK_CELL` asserts trip.
 
 ## 10. Failure Modes & Error Model
 
-Typed errors. Recovery.
+Tools' failure surface is the closed sum `glibre::tools::Error` declared
+in §5 and rolled up into the engine-wide `glibre::Error` variant per
+`reviews/decisions/error-model.md` §"Type Sketch". Every public function
+in §5 returns `glibre::Result<T> = std::expected<T, glibre::Error>`; no
+exception ever crosses the §5 header. §10 fills three slots that §4 and
+§5 left implicit:
+
+1. **Per-arm contract** — for each of the five `tools::Error` arms
+   (`LayoutLoadFailed`, `TraceWriteFailed`, `InspectorUnknownType`,
+   `CommandConflict`, `Refused`): trigger, detection point, recovery
+   contract, and log severity.
+2. **Editor-UI exception carve-out** — tools is the lone module in the
+   engine where exceptions are allowed *internally*: Dear ImGui assert /
+   `IM_ASSERT_USER_ERROR` paths and a small set of third-party widgets
+   (e.g. `imgui-node-editor` post-MVP) throw `std::exception` subclasses
+   on internal contract violations. Tools catches at the panel-draw
+   boundary and converts to `tools::Error::Refused`. The carve-out lives
+   inside the plugin; the §5 header still compiles `-fno-exceptions`-
+   clean for every caller.
+3. **Refused-as-user-decision** — `Refused` doubles as the carrier for
+   user-driven refusals (unsaved-edits prompt → user clicks "Cancel",
+   second-viewport register attempt, concurrent gizmo drag, mode-change
+   race). It is **not** a crash signal. The handler logs at `info`
+   when the arm carries a known user-refusal diagnostic prefix, at
+   `warn` for engineering-side refusals (concurrent drag, second
+   viewport), and at `error` only when the refusal masks an invariant
+   bug.
+
+§10 introduces no new public types. Every arm listed below is the same
+enumerator declared in §5; the tables below are binding contracts for
+the implementing plan-leaves.
+
+### 10.1 Per-arm contract
+
+Trigger / detection point / recovery / severity for each `tools::Error`
+arm. "Recovery" names what the *handler* does inside tools (or what the
+caller may do); tools never auto-retries across the §5 boundary.
+
+#### `LayoutLoadFailed`
+
+- **Trigger.** A `LayoutProfile` cannot be applied as a single atomic
+  swap (§4.2 inv. 2 / inv. 3). Sub-cases:
+  1. malformed JSON (parser refuses the document);
+  2. unknown panel id referenced by the layout (no `Panel` registered
+     under that stable id at the moment of activation);
+  3. schema version unreachable through the `data` migration table
+     (§7.2.1 / §7.2.2 — older-than-floor or newer-than-host);
+  4. partial-apply detected mid-swap (any dock split, tab group, or
+     float refused by the dock engine while the previous layout has
+     already been torn down).
+- **Detection point.** `EditorHost::activate_profile` and
+  `EditorHost::load_profile` (§5.14); `layout/layout_profile.cpp::apply`
+  internally on profile-switch and on first-frame default-profile load.
+  Cases (1) and (3) are detected by the `data` Fory loader and surfaced
+  as `data::Error`, which the activation site translates into
+  `tools::Error::LayoutLoadFailed` at the boundary
+  (`error-model.md` §"Composition Rules" #2). Cases (2) and (4) are
+  detected inside tools.
+- **Recovery.** Load fallback layout. The handler:
+  1. Logs the failure with the offending profile name + sub-case in
+     `error.detail`.
+  2. Restores the previous active `Layout` byte-identically (the
+     profile-switch implementation buffers the prior layout state until
+     the new one is fully materialised — §4.2 inv. 3 lossless property).
+     If the failure occurs on the very first activation of a session
+     (no previous layout to restore), the host falls back to the
+     ship-default `LayoutProfile` named `"default"`, which is bundled
+     with the tools dylib and is verified at build time to load clean.
+  3. Emits no `LayoutSwitched` event (the active profile did not
+     change).
+  4. Surfaces `LayoutLoadFailed` to the caller; the editor shell may
+     then prompt the user (e.g. in a "could not load 'level' profile,
+     reverted to 'default'" toast).
+- **Severity.** `warn`. The session continues with the previous-good
+  (or default) layout; the failure is operator-actionable (fix the
+  profile JSON or re-export it from a working session) but never
+  crashes the editor. CI promotes any `LayoutLoadFailed` raised by the
+  bundled `"default"` profile to a build failure, since that profile
+  must always load.
+
+#### `TraceWriteFailed`
+
+- **Trigger.** A `TraceRecorder` write step refuses (§4.9 inv. 3).
+  Sub-cases:
+  1. per-`TraceOp` serialisation latency exceeded the §9.4 row 4 budget
+     (100 µs target; over-budget detection lives in
+     `trace-recorder/trace_writer.cpp`'s release-build counter);
+  2. the backing store errored — `data::Error::DeserializeError` /
+     truncated envelope is unreachable on the writer side, so this
+     reduces to `core::Error::OutOfBudget` (I/O thread saturation,
+     `platform::Error::IoFailure` prefix `"out-of-budget"`) or a raw
+     `platform::Error::IoFailure` (disk full, EIO, sandbox revoked
+     mid-recording);
+  3. schema-version negotiation refused (recorder opened a `TraceFile`
+     against a version older than the current `data` floor — only
+     possible on a downgraded engine, refused at `begin`).
+- **Detection point.** `TraceRecorder::begin` (sub-case 3) and
+  `trace_writer.cpp::append` per `TraceOp` capture (sub-cases 1, 2).
+  Sub-case 2 is detected by translating `platform::Error` /
+  `core::Error::OutOfBudget` into `tools::Error::TraceWriteFailed` at
+  the recorder's call-site boundary.
+- **Recovery.** Abort recording. The handler:
+  1. Closes the open `TraceFile` handle. The Fory append-streaming
+     contract (§4.9 identity-and-lifetime paragraph) leaves a truncated-
+     but-well-formed prefix file on disk; partial recordings are
+     replayable up to the last committed `TraceOp`.
+  2. Transitions `EditorMode` back to its pre-`Recording` value
+     (typically `Edit`) — same path the toolbar's "stop recording"
+     button takes (§4.8 inv. 1, §4.9 inv. 5).
+  3. Emits `events::TraceStopped` with the truncated path and the
+     count of `TraceOp`s actually committed before the failure.
+  4. Surfaces `TraceWriteFailed` to the caller. The recorder does
+     **not** retry; under §4.9 inv. 1 (non-perturbing capture) the
+     recorder may not stall the editor frame loop chasing a flaky
+     disk.
+- **Severity.** `error`. A dropped recording is operator-visible — a
+  user who pressed "record" expects either a complete trace or a clear
+  signal that recording stopped. The arm escalates to `error` (not
+  `warn`) so the editor shell surfaces a user-visible toast. Under
+  §9.4 row 4 budget pressure, the arm fires only when the recorder
+  itself is over-budget, never when the surrounding execution is —
+  consistent with the non-perturbing invariant.
+
+#### `InspectorUnknownType`
+
+- **Trigger.** `Inspector` walks the current `Selection` and finds a
+  `(Entity, ComponentType)` pair whose `core::TypeId` has no
+  descriptor in `data`'s reflection registry (§4.4 inv. 3), OR a
+  `(ComponentType, FieldName)` row whose `field_tag` is unknown to
+  the type's `ReflectionBlob` accessor. The common cause is a stale
+  `InspectorView` cache surviving a game-plugin reload that retired
+  a component type or renamed a field tag; the rarer cause is a
+  third-party plugin component registered without its Fory schema
+  shipping in the build.
+- **Detection point.** `inspector/reflection_blob_view.cpp` on
+  cache-miss lookup; `inspector/reflected_field.cpp::read` on
+  per-field accessor resolution. The §8.3.2 game-plugin-reload
+  observer invalidates the cache wholesale, so a clean reload
+  precedes the second cache build with no stale entries — this arm
+  fires only when the cache rebuild itself cannot find the
+  descriptor.
+- **Recovery.** Skip view. The handler:
+  1. Omits the offending `InspectorView` row (or the entire view
+     when no field of the type resolves) from this frame's inspector
+     panel. No partial form is rendered (§4.4 inv. 3).
+  2. Logs the missing `(TypeId, FieldName?)` pair once per session
+     per pair — the inspector keeps a small set of already-logged
+     pairs in `EditorWorld` to keep the log channel clean across
+     repeated frame draws of the same selection.
+  3. Returns from the panel-draw closure with success (the missing
+     row is not a panel-fatal error); the surrounding `EditorHost`
+     frame proceeds to the next panel.
+  4. Surfaces `InspectorUnknownType` only at the public §5 boundary
+     when an external caller (e.g. an automated test harness or the
+     E2E runner) explicitly asks the inspector to refresh against
+     a `Selection` that hits the case. Day-to-day editor frames
+     swallow it after the once-per-pair log.
+- **Severity.** `warn`. A missing descriptor is almost always a build
+  configuration issue (plugin schema not shipped) — operator-
+  actionable but not session-fatal. The inspector continues; the
+  user sees fewer rows but the rest of the editor is unaffected.
+
+#### `CommandConflict`
+
+- **Trigger.** Two distinct sub-cases on the single edit pipeline
+  (§4.10 inv. 3):
+  1. `CommandStack::push` refused because `apply` then `undo` of the
+     candidate `EditCommand` did not produce a state byte-equal to
+     the pre-`apply` snapshot — the command's apply / undo pair is
+     not an inverse (§4.7 inv. 2). Detection is gated to debug
+     builds + perf tests by default; release builds rely on the
+     unit-test contract per `error-model.md`.
+  2. `EditorHost::register_panel` was called with a `PanelId` already
+     present in the registry (§4.2 inv. 1). A panel-id collision is
+     structurally identical to a command-pipeline conflict — the
+     same closed-sum arm carries both per the §5.3 origin row.
+- **Detection point.** `command/command_stack.cpp::push` (sub-case 1);
+  `layout/panel_registry.cpp::register_panel` (sub-case 2).
+- **Recovery.** Undo. The handler:
+  1. Sub-case 1: discards the candidate `EditCommand` without
+     committing; the undo / redo arrays remain unchanged. If the
+     command originated inside a `Transaction`, the transaction is
+     marked dirty so its `commit()` will fail-fast, and the caller
+     is expected to call `Transaction::abort()` to discard the entire
+     group. (The §4.7 inv. 3 atomicity property — all-or-nothing —
+     still holds.) The pre-edit snapshot was never overwritten;
+     `GameWorld` storage is byte-identical to the pre-`push` state.
+  2. Sub-case 2: refuses the registration; the prior `Panel`
+     registered under the same id remains active. No partial
+     registration is observable.
+  3. Logs the offending `(EditCommand` payload type + cause / `PanelId`
+     value) and returns `CommandConflict`. The shell may surface a
+     user-visible message ("could not commit edit"), but the session
+     continues.
+- **Severity.** `error`. A non-inverse `apply`/`undo` pair is a
+  programming error in the originating aggregate (gizmo, inspector,
+  asset-drop, scene-tree reparent) and almost always indicates the
+  command's payload encoder lost information; CI promotes any
+  `CommandConflict` raised by tools' own commands to a test failure.
+  Sub-case 2 is also `error` because a panel-id collision is a
+  registration bug, not a runtime hazard. (User-driven refusals do
+  not pass through this arm — they go through `Refused`; see below.)
+
+#### `Refused`
+
+- **Trigger.** The catch-all closed-sum refusal arm. Five sub-cases,
+  each a distinct invariant:
+  1. **Concurrent gizmo drag** (§4.5 inv. 4) — a second pointer-down
+     arrived while a drag-loop was already in flight (e.g. multi-
+     pointer XR mode attempted post-MVP, or a programmatic input
+     stream tried to interleave drags).
+  2. **Second viewport register** (§4.2 inv. 4) — a panel registered
+     itself as a `Viewport` while another `Viewport` is already live.
+     MVP ships exactly one.
+  3. **Mode-change race** (§4.10 inv. 2) — a non-`Toolbar`,
+     non-`TraceRecorder` writer attempted to mutate `EditorMode`,
+     OR `PlayPauseStep` issued a `Step` outside `Paused`.
+  4. **User-driven refusal** — the user declined a prompt that would
+     have proceeded with destructive intent. MVP carries one canonical
+     case: the unsaved-edits prompt on `EditorHost::activate_profile`
+     when the current `LayoutProfile` is dirty. The activation call
+     opens a modal in the shell; the user clicks "Cancel"; the call
+     returns `Refused` with diagnostic prefix `"user-cancelled"`.
+     Future user-prompt sites (close-without-save, discard recording)
+     extend the same prefix vocabulary; the typed arm does not change.
+  5. **Allocator out-of-budget at the tools boundary** —
+     `core::Error::OutOfBudget` from the editor world's per-frame
+     arena or the command-stack byte budget surfaces here as
+     `Refused` with prefix `"out-of-budget"` per the §9.7 cross-
+     reference and the §6.7 last bullet.
+- **Detection point.** Each sub-case detects in the aggregate that
+  owns the invariant: `gizmo/drag_loop.cpp` (1), `layout/panel_registry.cpp`
+  (2), `editor-host/editor_host.cpp::set_mode` and
+  `toolbar/play_pause_step.cpp` (3), the modal-prompt seam in the
+  shell — `editor-host/editor_host.cpp::activate_profile` calling
+  through `shell` (4), and the budget-translation site in
+  `command/command_stack.cpp::push` / per-frame arena reset (5).
+- **Recovery.** **Prompt user** for sub-case 4; otherwise the refusal
+  is non-destructive and the handler reverts to the pre-call state:
+  1. Sub-case 1: ignores the second pointer-down; the in-flight drag
+     continues unaffected. The dropped event is logged once per
+     drag-session.
+  2. Sub-case 2: refuses the second `Viewport` registration; the
+     existing `Viewport` remains; the offending panel is unregistered.
+  3. Sub-case 3: leaves `EditorMode` byte-identical; no
+     `events::ModeChanged` is emitted.
+  4. Sub-case 4: leaves the previous `LayoutProfile` active; emits
+     no `LayoutSwitched`. The shell is responsible for re-showing the
+     prompt, preserving the user's draft, or routing them to a save-
+     as flow per the editor's UX. The user can re-issue the call
+     after saving or discarding their edits.
+  5. Sub-case 5: discards the over-budget `EditCommand` (or the
+     over-budget per-frame arena allocation, which the arena
+     allocator handles by returning `nullptr` and surfacing the typed
+     arm at the call site). The undo stack's FIFO eviction policy
+     (§4.7 inv. 6) handles steady-state byte-budget pressure
+     transparently — `Refused` fires only when a single command's
+     byte estimate alone exceeds the budget cell.
+- **Severity.** Diagnostic-prefix-driven, per the §10.6 table:
+  - `"user-cancelled"` (sub-case 4) → `info`. User-driven refusal is
+    not a fault. The editor's own UX surfaces the cancellation; the
+    log line is for telemetry only.
+  - `"concurrent-drag"` (sub-case 1) → `warn`. Common in input
+    replay; rare in interactive use.
+  - `"second-viewport"` (sub-case 2) → `warn`. Plugin
+    misconfiguration.
+  - `"mode-change-race"` (sub-case 3) → `warn`. Programming error
+    in a panel that bypassed the toolbar / recorder boundary.
+  - `"out-of-budget"` (sub-case 5) → `warn`. Backpressure signal;
+    the editor world's frame loop continues, the over-budget command
+    is dropped.
+  - any other prefix → `error`. Unclassified `Refused` is treated
+    as a bug — we refuse to silence what we have not classified, in
+    the same spirit as `platform::Error::OsCode` (§10.6 last row of
+    `specs/platform/SPEC.md`).
+
+### 10.2 Editor-UI exception carve-out
+
+`reviews/decisions/error-model.md` §"Decision" #3 grants the editor
+UI module the engine's lone `-fexceptions` carve-out. §10.2 documents
+exactly where the carve-out begins and ends inside tools.
+
+#### 10.2.1 Where exceptions live
+
+The exception-tolerant translation units inside `tools/src/` are:
+
+- `extract/imgui_extract.cpp` — wraps `ImGui::NewFrame`,
+  `ImGui::EndFrame`, and `ImGui::Render` in a `try` / `catch`.
+- `layout/imgui_dock.cpp` — wraps the dockspace mutation calls
+  (`ImGui::DockBuilderSplitNode`, `ImGui::DockSpaceOverViewport`).
+- Every `<aggregate>/*.cpp` whose body is invoked from inside a
+  `PanelDrawFn` closure — i.e. the panel-draw bodies themselves
+  (`scene/scene_tree.cpp`, `inspector/inspector.cpp`,
+  `asset-browser/asset_browser.cpp`, `command/command_stack.cpp`'s
+  toolbar-row body, `toolbar/toolbar.cpp`, `gizmo/gizmo_widget.cpp`'s
+  on-viewport draw body, `trace-recorder/trace_recorder.cpp`'s
+  recording-status body, `forward/*.hpp`'s post-MVP graph editors
+  when they land).
+
+These units compile with `-fexceptions` (a per-target CMake property,
+not a directory-wide flag). Every other file under `tools/src/` —
+including the `tick`, `apply`, `undo`, `register`, `unregister`,
+`activate_profile`, `begin`, `end`, and `set_assertion_templates`
+boundary bodies — compiles `-fno-exceptions` like the rest of the
+engine.
+
+#### 10.2.2 The panel-draw boundary
+
+Exceptions never cross the §5 header. The conversion seam is the
+panel-draw boundary in `extract/imgui_extract.cpp`. Pseudocode for the
+walk:
+
+```cpp
+// extract/imgui_extract.cpp — illustrative; bodies live inside the plugin.
+glibre::Result<void> extract_one_frame(EditorHost& host,
+                                       render::RenderFrame& out) noexcept {
+    ImGui::NewFrame();
+    for (const auto& [id, draw] : host.panel_registry().table()) {
+        glibre::Result<void> r = invoke_panel_safely(id, draw);
+        if (!r) {
+            log_error(r.error(), severity_for(r.error()));
+            // Aborts THIS panel for THIS frame; loop continues.
+        }
+    }
+    ImGui::EndFrame();
+    ImGui::Render();
+    // ... copy ImDrawData into render::RenderFrame extract slot ...
+    return {};
+}
+
+static glibre::Result<void>
+invoke_panel_safely(PanelId id, const PanelDrawFn& draw) noexcept {
+    try {
+        return draw();  // PanelDrawFn returns Result<void>.
+    } catch (const std::bad_alloc&) {
+        // Map to core::Error::OutOfBudget → tools::Error::Refused
+        // with diagnostic prefix "out-of-budget" per §10.1 sub-case 5.
+        return std::unexpected(make_refused("out-of-budget", id));
+    } catch (const std::exception& e) {
+        // ImGui assert / IM_ASSERT_USER_ERROR / third-party widget
+        // contract violation. Stamp the exception's what() into the
+        // ErrorContext::detail; the log helper surfaces it.
+        return std::unexpected(make_refused("imgui-assert", id,
+                                            std::string_view{e.what()}));
+    } catch (...) {
+        // Catch-all defends against non-std exceptions (Objective-C++
+        // bridge fall-through, etc.). Refuses to leak.
+        return std::unexpected(make_refused("imgui-unknown", id));
+    }
+}
+```
+
+The closure body of every `PanelDrawFn` is `noexcept` from the §5
+caller's perspective — the `try` / `catch` block ensures that even if
+the `-fexceptions` interior raises, the function returns
+`std::expected` instead of unwinding through the `noexcept` qualifier
+on `EditorHost::tick`. Failing this boundary would call
+`std::terminate` per `[expect.spec]`; the catch-all guarantees we never
+do.
+
+#### 10.2.3 What each exception class maps to
+
+| Caught type             | Origin                                               | Maps to                                                          |
+|-------------------------|------------------------------------------------------|------------------------------------------------------------------|
+| `std::bad_alloc`        | ImGui internal allocation, third-party widget alloc  | `tools::Error::Refused` prefix `"out-of-budget"` (§10.1 sub-case 5) |
+| `std::out_of_range`     | ImGui table-id mismatch, dockspace lookup miss       | `tools::Error::Refused` prefix `"imgui-assert"`                  |
+| `std::logic_error` etc. | `IM_ASSERT_USER_ERROR`, third-party contract panic   | `tools::Error::Refused` prefix `"imgui-assert"`                  |
+| any other `std::exception` subclass | uncategorised (rare)                     | `tools::Error::Refused` prefix `"imgui-assert"`                  |
+| non-`std::exception`    | Objective-C++ bridge fall-through, foreign C++ throw | `tools::Error::Refused` prefix `"imgui-unknown"`                 |
+
+The `what()` text is preserved into `ErrorContext::detail` for
+telemetry; engine code never branches on the prose, only on the
+typed arm and the diagnostic prefix.
+
+#### 10.2.4 What is *not* covered
+
+The carve-out does **not** apply to:
+
+- The §5 header itself. `tools.hpp` and every public symbol it
+  declares compile against an exception-free contract; callers see
+  `noexcept` everywhere.
+- Apply / undo paths. `EditCommand::apply` and `EditCommand::undo`
+  are invoked from `command_stack.cpp::push` / `undo` / `redo`,
+  which compile `-fno-exceptions` — these paths never throw, by
+  contract (§4.7 inv. 2 verifies inverse property; the body is pure
+  ECS storage manipulation through `core`'s typed accessors).
+- `TraceRecorder::*` writers. Recording capture is non-perturbing
+  (§4.9 inv. 1) and runs under `-fno-exceptions`; any failure is
+  surfaced through `tools::Error::TraceWriteFailed` per §10.1.
+- The hot-reload `migrate(...)` body. §8 paths run between frames
+  and never invoke ImGui; they compile `-fno-exceptions`.
+
+This keeps the carve-out genuinely minimal: only the panel-draw
+inner loop, only the seams that touch ImGui or third-party widgets,
+only the `try` / `catch` block at the panel-draw entry. Every other
+tools translation unit is identical-by-build-flag to the rest of the
+engine.
+
+### 10.3 Cross-context error translation
+
+Tools' aggregates call into `core`, `data`, `render`, `content`, and
+`platform`; their failures surface as `glibre::Error` arms tagged with
+the originating context's enum. Tools never nests those enums inside
+its own — it translates at the call site that crosses the boundary
+(`error-model.md` §"Composition Rules" #2). The translation table:
+
+| Inner error                                    | Surfacing tools call site                                        | Translates to                                                     |
+|------------------------------------------------|-------------------------------------------------------------------|-------------------------------------------------------------------|
+| `core::Error::EntityForeignWorld`              | `Selection::insert`, `Inspector::refresh`, command `apply`        | passes through unchanged — selection / inspector / command stack reject the cross-world entity at their own §4 invariant boundary; not remapped |
+| `core::Error::EntityStale`                     | `Inspector::refresh` after a despawn                              | scrubbed to `events::SelectionChanged` in the next frame; not surfaced as a tools error |
+| `core::Error::TypeUnregistered`                | `inspector/reflection_blob_view.cpp::lookup`                       | `tools::Error::InspectorUnknownType` (§4.4 inv. 3)                |
+| `core::Error::OutOfBudget` (allocator)         | per-frame arena alloc, `command_stack.cpp::push`                   | `tools::Error::Refused` prefix `"out-of-budget"` (§10.1 sub-case 5) |
+| `core::Error::FramePhaseMisordered`            | `EditorHost::tick`                                                 | passes through unchanged — frame-phase order is a `core` invariant; tools does not reinterpret |
+| `core::Error::HotReloadRefused`                | `editor-host/plugin.cpp::register` / `migrate` / `resume`          | passes through unchanged — surfaced to the engine's hot-reload coordinator, not reinterpreted by tools |
+| `data::Error::DeserializeError` (LayoutProfile) | `EditorHost::load_profile`, `activate_profile`                    | `tools::Error::LayoutLoadFailed` (§4.2 inv. 2 sub-case 1)         |
+| `data::Error::SchemaMigrationFailure` (LayoutProfile) | `EditorHost::load_profile`, `activate_profile`              | `tools::Error::LayoutLoadFailed` (§4.2 inv. 2 sub-case 3)         |
+| `data::Error::DeserializeError` (TraceFile)    | `TraceRecorder::begin` (negotiation)                               | `tools::Error::TraceWriteFailed` (§10.1 sub-case 3)               |
+| `render::Error::*`                             | `Viewport` blit, `AssetThumbnail` capture                          | passes through unchanged — render's `TextureId` lifetime is render's contract; tools does not own it |
+| `content::Error::*`                            | `AssetBrowser` listing                                             | passes through unchanged — read-only listing per §4.6 inv. 1; the browser surfaces "asset unavailable" to the user without remapping |
+| `platform::Error::IoFailure` prefix `"out-of-budget"` | `TraceRecorder` writer (I/O thread saturation)              | `tools::Error::TraceWriteFailed` (§10.1 sub-case 2)               |
+| `platform::Error::IoFailure` other             | `TraceRecorder` writer (disk full, EIO, sandbox revoked)           | `tools::Error::TraceWriteFailed` (§10.1 sub-case 2)               |
+| `platform::Error::PermissionDenied`            | `TraceRecorder::begin` (cannot write `tests/e2e/`)                 | `tools::Error::TraceWriteFailed` (§10.1 sub-case 2); also surfaced through the editor's first-launch UX |
+
+"Passes through unchanged" means the tools call site forwards the
+inner `glibre::Error` to its caller without re-wrapping; the engine-
+wide variant carries the originating context's tag and the consumer
+discriminates on it. This preserves SRP per `error-model.md` —
+selection / hot-reload / render-target failures are not tools
+failures.
+
+### 10.4 Logging severity table (consolidated)
+
+The §10.1 per-arm severities, restated as the table the
+`glibre::log_error` helper uses when it formats a `tools::Error` into
+`spdlog`. Tools logs at the *handler* boundary, never at the raise
+site (`error-model.md` §"Logging / Telemetry" rule 1).
+
+| Arm                                          | Default severity | Notes                                                                  |
+|----------------------------------------------|------------------|------------------------------------------------------------------------|
+| `LayoutLoadFailed`                           | `warn`           | Falls back to previous-good or bundled `"default"`. CI promotes to error if the bundled default fails. |
+| `TraceWriteFailed`                           | `error`          | Operator-visible; recording is dropped, mode reverts to the prior `EditorMode`. |
+| `InspectorUnknownType`                       | `warn`           | Skip the row; log once per `(TypeId, FieldName)` pair per session.     |
+| `CommandConflict`                            | `error`          | Programming error; CI promotes any tools-internal source to a test failure. |
+| `Refused` prefix `"user-cancelled"`          | `info`           | User-driven refusal — not a fault. Cancel button, prompt-decline, etc. |
+| `Refused` prefix `"concurrent-drag"`         | `warn`           | Second pointer ignored mid-drag (§4.5 inv. 4).                         |
+| `Refused` prefix `"second-viewport"`         | `warn`           | MVP single-viewport invariant (§4.2 inv. 4).                           |
+| `Refused` prefix `"mode-change-race"`        | `warn`           | Non-toolbar, non-recorder mode write (§4.10 inv. 2).                   |
+| `Refused` prefix `"out-of-budget"`           | `warn`           | Allocator backpressure signal; over-budget edit dropped.               |
+| `Refused` prefix `"imgui-assert"`            | `warn`           | Editor-UI carve-out (§10.2). Panel aborted for this frame; loop continues. |
+| `Refused` prefix `"imgui-unknown"`           | `error`          | Non-`std::exception` thrown across the panel-draw boundary; investigate. |
+| `Refused` other / unprefixed                 | `error`          | Unclassified — refused to silence what we have not classified.         |
+
+The log helper formats `error.tag = "tools::Error"`, `error.code = <arm
+name>`, `error.detail` (the diagnostic prefix + any aggregate-supplied
+context — offending profile name, panel id, what()-string), and
+`error.file` / `error.line` from `ErrorContext` per
+`reviews/decisions/error-model.md` §"Logging / Telemetry" rule 2.
+
+### 10.5 Test seams
+
+Each arm has a unit-test seam under `tools/test/` matching the §11
+acceptance-criteria roster. The seams in scope for §10:
+
+- `tools/test/error/layout_load_failed_test.cpp` — covers all four
+  sub-cases of §10.1 `LayoutLoadFailed`; verifies the previous-good
+  layout is preserved byte-identically and that the bundled
+  `"default"` profile loads clean.
+- `tools/test/error/trace_write_failed_test.cpp` — covers the three
+  sub-cases of §10.1 `TraceWriteFailed`; uses a fake
+  `platform::FileIo` that returns the exact `IoFailure` prefixes; asserts
+  the mode reverts and `events::TraceStopped` carries the correct
+  `op_count`.
+- `tools/test/error/inspector_unknown_type_test.cpp` — covers the
+  cache-rebuild-after-game-plugin-reload path, both the missing-type
+  and missing-field-tag cases; verifies the inspector continues with
+  the remaining views and logs once per pair.
+- `tools/test/error/command_conflict_test.cpp` — covers the non-
+  inverse `apply` / `undo` detection (debug-build only) and the
+  panel-id-collision path; asserts the undo / redo arrays remain
+  byte-identical on refusal.
+- `tools/test/error/refused_test.cpp` — one section per sub-case
+  (concurrent drag, second viewport, mode-change race, user-cancelled,
+  out-of-budget); the user-cancelled case uses a fake modal-prompt
+  seam in `editor-host/editor_host.cpp` that returns "Cancel" without
+  rendering ImGui.
+- `tools/test/error/imgui_carveout_test.cpp` — drives the
+  panel-draw boundary with three injected throwers (`std::bad_alloc`,
+  `std::logic_error`, an Objective-C++-style foreign throw via a
+  `throw int{}`); asserts the §10.2.3 mapping table holds.
+
+Each test references `tools::Error` arms by name (Catch2
+`SECTION("LayoutLoadFailed - malformed-json")` form) so the §11
+spec-check workflow can confirm every arm is covered without
+regex-scraping prose.
+
+### 10.6 Refusals (out of §10 scope)
+
+- **Render / GPU error model.** Texture-id lifetime, drawable
+  acquisition, swapchain present, pipeline compile failure live in
+  `specs/render/SPEC.md` §10. Tools' `Viewport` and `AssetThumbnail`
+  hold render-vended `TextureId`s opaquely; render's failures pass
+  through unchanged (§10.3) and the editor surfaces them as render
+  errors, not tools errors.
+- **Hot-reload refusal codes.** `core::Error::PluginAbiHashMismatch`,
+  `PluginInitFailed`, `SchemaMigrationFailed`, `HotReloadRefused`
+  are owned by `specs/core/SPEC.md` §10 and the hot-reload protocol
+  decision record. Tools' contribution to hot-reload is the §8
+  contract (drain, swap, migrate, resume); failures inside tools'
+  own `migrate(...)` body return `core::Error` arms, not new
+  `tools::Error` arms.
+- **Schema / Fory persistence failures.** `data::Error` is owned by
+  `specs/data/SPEC.md` §10. Tools' two persistent artifacts
+  (`LayoutProfile`, `TraceFile`) produce typed `data::Error` arms at
+  the `data` boundary; the §10.3 translation table records exactly
+  which `tools::Error` arm they surface as.
+- **Replay divergence.** The `.glibre-trace` replay path is owned by
+  `specs/e2e/SPEC.md`. Tools is the writer; replay-side mismatches
+  (assertion diff, timing skew, scheduler-tick mismatch) belong to
+  E2E, not tools.
+- **Crash dump format.** Owned by the future observability context;
+  tools' contribution stops at the structured `glibre::Error` log.
+- **AI-driven editor automation.** Refused by §3.3; the trace
+  recorder is the deterministic seam, but AI tool-invocation that
+  would mutate editor state through a side channel is out of scope.
+
+### 10.7 Open questions (carried into §12)
+
+- **Promote `"user-cancelled"` to a first-class `tools::Error::UserRefused`
+  arm** when a second user-prompt site lands (close-without-save,
+  discard recording, etc.). Today only the layout-profile prompt
+  discriminates; the diagnostic prefix is sufficient and the closed
+  sum stays small per the same Occam's-razor argument
+  `specs/platform/SPEC.md` §10.7 makes for `SurfaceLost`.
+- **Promote `"out-of-budget"` to a first-class arm** if a second
+  consumer needs to discriminate it from other `Refused` cases. The
+  command stack already discriminates on the diagnostic prefix; the
+  arena-allocator sub-case is rare in MVP.
+- **Per-pair-per-session log throttling for `InspectorUnknownType`**
+  — the §10.1 contract caps to one log line per `(TypeId, FieldName)`
+  pair per session. Validate the throttle map's memory bound under
+  fuzz (a malicious plugin could register many distinct unknown
+  types). Decided in the implementation plan.
+- **`magic_enum` vs hand-written `to_string` for `tools::Error` arm
+  names in log output** — deferred to `core/error.hpp` per
+  `error-model.md` open question 1; tools follows whatever core
+  picks.
+- **`source_location` adoption for `ErrorContext`** — same deferral
+  as `error-model.md` open question 3; tools follows core.
 
 ## 11. Acceptance Criteria
 
