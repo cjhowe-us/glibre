@@ -1859,7 +1859,586 @@ Non-binding sketch for implementers.
 
 ## 7. Persistence & Schemas
 
-Fory schemas. Migration rules.
+Physics's persistence surface is the **deterministic-replay spine**:
+the configuration that drives a `PhysicsWorld`, the cooked collision
+geometry blobs that populate its shape table, the constraint
+descriptors that re-create joint topology, and the `PhysicsSnapshot`
+that captures one tick of stepping output for byte-equal cross-host
+comparison. Per-frame artefacts (`ContactManifold`, contact / trigger
+events, `Island` membership, `QueryHit` rows, Jolt-internal solver
+state) are runtime-only and never serialised — they are reborn each
+substep (§4.1.4, §4.1.8, §4.1.9, §4.1.14) and reclaimed at end of
+phase 8 (§4.2 invariant 8).
+
+All schemas below are authored as `data/schemas/physics/<Type>.fory`
+files per `reviews/decisions/fory-codegen.md` and compile into the
+`glibre-types` middleman dylib. FQNs are `glibre.physics.<Type>`.
+Each schema ships with at least one Catch2 round-trip test under
+`tests/data/schemas/physics/<Type>.cpp` per the data SPEC §7.5
+golden-roundtrip mandate.
+
+**Determinism contract (load-bearing).** Every `f32` and `f64` field
+in §7.1's schemas is serialised as the **bit-exact IEEE 754
+representation** of its in-memory value: `f32` as the 32-bit
+little-endian payload of `std::bit_cast<std::uint32_t>(x)`; `f64` as
+the 64-bit little-endian payload of `std::bit_cast<std::uint64_t>(x)`.
+No rounding, no canonicalisation, no platform-tier branch. NaN
+payloads round-trip unchanged (the snapshot writer never produces a
+NaN — §4.1.4 invariant 4 — but the codec contract preserves whatever
+bit pattern arrives from a host's solver). This rule is the byte-
+equality unit `PhysicsSnapshot` invariant 3 (§4.1.12) compiles down
+to; violating it at any field decodes the whole spine into a
+`physics::Error::SnapshotMismatch` at the determinism gate.
+
+### 7.1 Persistent types
+
+#### 7.1.1 `PhysicsConfigRecord` — frozen deterministic configuration
+
+**File:** `data/schemas/physics/PhysicsConfigRecord.fory`
+**FQN:** `glibre.physics.PhysicsConfigRecord`
+**Lifetime scope:** per-world, per-glibre-version. Authored by the
+editor / world-template tool, read at world init by `PhysicsWorld`
+constructor (§4.1.2). Init-time-immutable for the world's lifetime
+(§4.1.2 invariant 1). The `content_hash` field of the in-memory
+`PhysicsConfig` (§5) is BLAKE3 over the canonicalised bytes of this
+record and is the dispatch key the snapshot's `physics_config_hash`
+(§4.1.12, §7.1.4) compares against.
+
+```fory
+schema glibre.physics.PhysicsConfigRecord {
+  version  1
+  since    "0.1.0"
+
+  # ---- Global stepping math (§4.1.2, §4.1.3) ----
+  field gravity              : vec3f tag 1  since 1
+  field fixed_dt             : f32   tag 2  since 1
+  field max_substeps         : u8    tag 3  since 1   default 4
+  field velocity_iters       : u8    tag 4  since 1   default 10
+  field position_iters       : u8    tag 5  since 1   default 2
+  field warm_start_factor    : f32   tag 6  since 1   default 0.85
+  field ccd_enabled          : bool  tag 7  since 1   default true
+  field rng_seed             : u64   tag 8  since 1   default 0
+
+  # ---- Sleep thresholds (§4.1.14, §5 SleepThresholds) ----
+  field sleep_linear_speed   : f32   tag 9  since 1   default 0.05
+  field sleep_angular_speed  : f32   tag 10 since 1   default 0.05
+  field sleep_frame_count    : u16   tag 11 since 1   default 30
+
+  # ---- World budgets (§5 WorldBudgets) ----
+  field max_bodies           : u32   tag 12 since 1   default 0
+  field max_shapes           : u32   tag 13 since 1   default 0
+  field max_constraints      : u32   tag 14 since 1   default 0
+  field max_contacts         : u32   tag 15 since 1   default 0
+
+  # ---- Layer filter (§4.1.2 inv 4, §4.1.11) ----
+  # Total mapping CollisionLayer -> BroadphaseLayer; index is the
+  # CollisionLayer ordinal, value is the BroadphaseLayer enum.
+  field broadphase_mapping   : list<u8>  tag 16 since 1
+  # Layer-pair interaction matrix. Row-major, length = layer_count^2,
+  # value = LayerInteraction enum (Ignore / Collide / TriggerOnly).
+  field layer_interactions   : list<u8>  tag 17 since 1
+  field layer_count          : u16       tag 18 since 1
+}
+```
+
+**Invariants** (echoing §4.1.2 / §4.1.11 where the runtime aggregate
+enforces them):
+
+1. **Layer matrix is total at decode.** `len(broadphase_mapping) ==
+   layer_count` and `len(layer_interactions) == layer_count *
+   layer_count`. Either mismatch returns
+   `physics::Error::ConfigInvalid` at deserialise time; the world
+   constructor never observes a partial matrix (§4.1.2 invariant 4).
+2. **Stepping fields are bit-exact.** `fixed_dt`, `warm_start_factor`,
+   `gravity`, and the sleep speeds are stored per the §7
+   determinism contract above. Two builds writing the same
+   `PhysicsConfig` produce byte-equal records on every supported host.
+3. **`content_hash` is computed, not stored.** The record carries
+   no hash field; the in-memory `PhysicsConfig.content_hash` is
+   computed by BLAKE3 over the canonicalised serialised bytes at
+   load time. A future schema bump that adds a field bumps the hash
+   automatically — there is no parallel "version of the hash" to
+   keep in sync (data SPEC §4.4).
+4. **No runtime tuning.** Re-tuning a world means writing a new
+   record and re-creating the world (§4.1.2 invariant 1); there is
+   no in-place mutation path through this schema.
+
+#### 7.1.2 `ShapeBlobRecord` — cooked collision-geometry payload
+
+**File:** `data/schemas/physics/ShapeBlobRecord.fory`
+**FQN:** `glibre.physics.ShapeBlobRecord`
+**Lifetime scope:** per-asset; produced by `content` / `geometry` at
+cook time (§3.3, §4.1.6) and consumed by `PhysicsWorld`'s shape
+table at first reference. Identified by `content_hash` (BLAKE3 of
+the canonicalised bytes); two `Collider`s referencing the same hash
+share one row of the table (§4.1.6 invariant 1, §4.2 invariant 6).
+
+```fory
+schema glibre.physics.ShapeBlobRecord {
+  version  1
+  since    "0.1.0"
+
+  # Stable identifier. BLAKE3 of the canonicalised serialised bytes
+  # of every other field below; computed by the cook tool, verified
+  # at deserialise time. Mismatch ⇒ Error::ShapeBlobCorrupt.
+  field content_hash       : u64   tag 1 since 1
+  # ShapeKind ordinal (sealed sum below). One ShapeKind per record.
+  field kind               : u8    tag 2 since 1
+
+  # ---- Primitive parameters (used by Sphere / Box / Capsule) ----
+  # Encoding rule: every primitive populates the fields its kind
+  # references; codegen fills unreferenced fields with defaults at
+  # write time. The kind-tag is the discriminator at read time.
+  field sphere_radius      : f32   tag 3 since 1   default 0.0
+  field box_half_extents   : vec3f tag 4 since 1   default { 0.0, 0.0, 0.0 }
+  field capsule_radius     : f32   tag 5 since 1   default 0.0
+  field capsule_half_height: f32   tag 6 since 1   default 0.0
+
+  # ---- Convex hull (kind == ConvexHull) ----
+  # Vertices in shape-local space. Jolt's hull builder consumes the
+  # span verbatim; the cook tool guarantees vertex count >= 4 and
+  # planarity-free input.
+  field hull_vertices      : list<vec3f> tag 7 since 1
+  # Per-vertex hull plane normal index (Jolt `HullVertex::mPlane`).
+  field hull_plane_indices : list<u32>   tag 8 since 1
+
+  # ---- Triangle mesh (kind == TriangleMesh) ----
+  field mesh_vertices      : list<vec3f> tag 9  since 1
+  # Triangle indices, 3 entries per face, length divisible by 3.
+  field mesh_indices       : list<u32>   tag 10 since 1
+  # Per-triangle MaterialId ordinal (length == len(mesh_indices)/3),
+  # or empty when the shape uses a single material from `Collider`.
+  field mesh_materials     : list<u32>   tag 11 since 1
+
+  # ---- Heightfield (kind == Heightfield) ----
+  field heightfield_extent_x : u32   tag 12 since 1   default 0
+  field heightfield_extent_z : u32   tag 13 since 1   default 0
+  field heightfield_scale    : vec3f tag 14 since 1   default { 1.0, 1.0, 1.0 }
+  field heightfield_samples  : list<f32> tag 15 since 1
+
+  # ---- Compound (kind == Compound) ----
+  # Sub-shapes referenced by content_hash; the table lookup at load
+  # time resolves each entry to a child ShapeHandle. The transform
+  # is the sub-shape's offset within the compound's local frame.
+  field compound_child_hashes     : list<u64>   tag 16 since 1
+  field compound_child_positions  : list<vec3f> tag 17 since 1
+  field compound_child_rotations  : list<quatf> tag 18 since 1
+}
+```
+
+**`ShapeKind` sealed sum** (mirrors §4.1.6 + §5):
+
+| Ordinal | Name           | Populated tags                              |
+|---------|----------------|---------------------------------------------|
+| 0       | `Sphere`       | 3                                           |
+| 1       | `Box`          | 4                                           |
+| 2       | `Capsule`      | 5, 6                                        |
+| 3       | `ConvexHull`   | 7, 8                                        |
+| 4       | `TriangleMesh` | 9, 10, 11                                   |
+| 5       | `Heightfield`  | 12, 13, 14, 15                              |
+| 6       | `Compound`     | 16, 17, 18                                  |
+
+Adding a kind (post-MVP 2D primitives, SDF voxel, runtime quickhull
+per §3.3) appends a new ordinal; existing ordinals are immutable
+once shipped (§7.2.2 below).
+
+**Invariants:**
+
+1. **Self-authenticating.** `content_hash` MUST equal BLAKE3 of the
+   canonicalised serialised bytes of every field tag ≥ 2 (i.e.
+   excluding the hash itself). Mismatch decodes to
+   `physics::Error::ShapeBlobCorrupt`; the corrupt blob is **not**
+   migrated and **not** fed to Jolt.
+2. **Kind-tag dispatch is total.** A reader observes only the fields
+   its `kind` references; reading a field outside that set is
+   undefined and a debug-build assertion fires. The cook tool
+   zeroes unused fields at write time so canonicalisation is
+   determinism-stable across kinds (§7.2.2 invariant 2).
+3. **No runtime baking.** Convex decomposition / V-HACD / quickhull /
+   heightfield resampling all live in `tools` + `content`/`geometry`
+   at cook time (§3.3). Physics consumes the cooked record only;
+   any record whose payload would require runtime baking decodes to
+   `physics::Error::ShapeBlobCorrupt`.
+4. **Compound children resolve at load time, not at decode.** A
+   `Compound` record references children by `content_hash`; the
+   shape table resolves each hash to a `ShapeHandle` when the
+   compound is loaded into a world. A missing child hash returns
+   `physics::Error::ShapeBlobMissing` at table-load time, not at
+   record-deserialise time (the bytes are well-formed; the world's
+   asset graph is what is incomplete).
+5. **Reference-counted at the table.** The byte form makes no
+   reference-count statement; refcount lives on `ShapeHandle` in
+   the world's shape table (§4.1.6) and is reset to zero on every
+   load. Two worlds in the same process loading the same hash
+   each get one reference; the table is per-world (§4.1.1).
+
+#### 7.1.3 `JointDescriptorRecord` — constraint topology + tuning
+
+**File:** `data/schemas/physics/JointDescriptorRecord.fory`
+**FQN:** `glibre.physics.JointDescriptorRecord`
+**Lifetime scope:** per-world; one record per `Joint` ECS entity at
+world spawn. Re-emitted into `PhysicsSnapshot` (§7.1.4) as the
+joint roster needed to re-create constraint topology on restore.
+Authored by the editor / scene-template tool, read by physics's
+joint-creation hook at component-add (§4.1.7).
+
+```fory
+schema glibre.physics.JointDescriptorRecord {
+  version  1
+  since    "0.1.0"
+
+  # ---- Identity (§4.1.7, §5 JointEndpoints) ----
+  field joint_id           : u32   tag 1  since 1
+  # JointKind ordinal — sealed sum (§5):
+  #   0 Point, 1 Hinge, 2 Slider, 3 Cone,
+  #   4 Distance, 5 SwingTwist.
+  field kind               : u8    tag 2  since 1
+  field body_a             : u32   tag 3  since 1   # BodyId ordinal.
+  field body_b             : u32   tag 4  since 1   # BodyId ordinal.
+
+  # ---- Anchor frames on each body (§5 JointFrame) ----
+  field frame_a_position   : vec3f tag 5  since 1
+  field frame_a_rotation   : quatf tag 6  since 1
+  field frame_b_position   : vec3f tag 7  since 1
+  field frame_b_rotation   : quatf tag 8  since 1
+
+  # ---- Optional companion: limits (§5 JointLimits) ----
+  field has_limits         : bool  tag 9  since 1   default false
+  field limit_lower        : f32   tag 10 since 1   default 0.0
+  field limit_upper        : f32   tag 11 since 1   default 0.0
+  field limit_swing_y      : f32   tag 12 since 1   default 0.0
+  field limit_swing_z      : f32   tag 13 since 1   default 0.0
+  field limit_twist_low    : f32   tag 14 since 1   default 0.0
+  field limit_twist_high   : f32   tag 15 since 1   default 0.0
+
+  # ---- Optional companion: motor (§5 JointMotor) ----
+  field has_motor          : bool  tag 16 since 1   default false
+  field motor_target_value : f32   tag 17 since 1   default 0.0
+  field motor_max_force    : f32   tag 18 since 1   default 0.0
+  field motor_damping      : f32   tag 19 since 1   default 0.0
+
+  # ---- Optional companion: break (§5 JointBreakThreshold) ----
+  field has_break          : bool  tag 20 since 1   default false
+  field break_max_force    : f32   tag 21 since 1   default 0.0
+  field break_max_torque   : f32   tag 22 since 1   default 0.0
+}
+```
+
+**Invariants:**
+
+1. **Sealed-sum dispatch.** `kind` decodes to one of the six ordinals
+   listed in §5; an out-of-range value returns
+   `physics::Error::JointKindUnsupported` (§5 / §10), which is the
+   same error a future build raises when a record authored on a
+   newer schema arrives at an older middleman. Existing ordinals
+   are immutable; adding a kind is a schema bump (§7.2.3 below).
+2. **Endpoints exist at load time.** `body_a` and `body_b` ordinals
+   resolve to live `BodyId`s in the world; an unresolved endpoint
+   returns `physics::Error::JointDanglingEndpoint` (§4.1.7
+   invariant 1). The error fires at **load time**, not at decode
+   time — the bytes are well-formed; the world's body roster is
+   what is incomplete.
+3. **Companion presence is the discriminator.** The `has_*` bits
+   are the only discriminators for which optional payload bytes
+   are meaningful. Codegen synthesises zero defaults when a bit is
+   false, and the world skips the corresponding companion-component
+   add (§4.1.7 invariant 2). Two records that differ only in zeroed
+   "absent" payload remain hash-equivalent because the canonicalised
+   form normalises absent payloads to zero (§7.2.3 invariant 5).
+4. **Frame quaternions are unit-normalised.** `frame_a_rotation`
+   and `frame_b_rotation` MUST satisfy `|q| ∈ [1 - 1e-6, 1 + 1e-6]`
+   at decode; non-unit quaternions return
+   `physics::Error::ConfigInvalid` (§4.1.7's frame is part of the
+   constraint's deterministic input).
+5. **Bit-exact float tuning.** Every `f32` field on this record is
+   stored per the §7 determinism contract; an authored joint
+   re-spawned on a different host produces a byte-equal Jolt
+   constraint impulse trajectory (§4.2 invariant 3).
+
+#### 7.1.4 `PhysicsSnapshot` — deterministic replay artefact
+
+**File:** `data/schemas/physics/PhysicsSnapshot.fory`
+**FQN:** `glibre.physics.PhysicsSnapshot`
+**Lifetime scope:** per-tick capture; produced by
+`PhysicsWorld::snapshot()` (§4.1.12, §5), consumed by the
+determinism gate (cross-host byte compare), by golden-trace replay,
+and by the post-MVP rollback path. Survives across worlds and
+across hot-reload (§4.1.12 identity & lifetime).
+
+```fory
+schema glibre.physics.PhysicsSnapshot {
+  version  1
+  since    "0.1.0"
+
+  # ---- Header (§5 SnapshotHeader) ----
+  # Monotone schema_version is the migration discriminator (§7.2.4).
+  field schema_version       : u64   tag 1 since 1
+  field physics_config_hash  : u64   tag 2 since 1
+  field world_tick           : u64   tag 3 since 1
+  field accumulator_carry    : f32   tag 4 since 1
+  field middleman_abi_hash   : u64   tag 5 since 1
+
+  # ---- Body roster (§5 SnapshotBody, BodyId-keyed) ----
+  # Iteration order is BodyId-ascending; the writer enforces sort at
+  # capture time so two hosts emit byte-equal payloads (§4.1.12 inv 3).
+  field body_ids                  : list<u32>   tag 6  since 1
+  field body_motion_types         : list<u8>    tag 7  since 1
+  field body_positions            : list<vec3f> tag 8  since 1
+  field body_rotations            : list<quatf> tag 9  since 1
+  field body_linear_velocities    : list<vec3f> tag 10 since 1
+  field body_angular_velocities   : list<vec3f> tag 11 since 1
+  field body_sleep_frames         : list<u16>   tag 12 since 1
+  field body_sleeping_flags       : list<bool>  tag 13 since 1
+  # Per-body active shape ShapeBlobRecord.content_hash. References,
+  # not bytes (§4.1.12 invariant 4); the bytes live in the asset
+  # bundle and are loaded by `data` / `content` (§3.3).
+  field body_shape_blob_hashes    : list<u64>   tag 14 since 1
+
+  # ---- Joint roster (§5 SnapshotJoint, JointId-keyed) ----
+  # Iteration order is JointId-ascending; sort enforced at capture.
+  field joint_ids                 : list<u32>   tag 15 since 1
+  field joint_kinds               : list<u8>    tag 16 since 1
+  field joint_body_a              : list<u32>   tag 17 since 1
+  field joint_body_b              : list<u32>   tag 18 since 1
+  field joint_normal_impulses     : list<f32>   tag 19 since 1
+  field joint_friction_impulses   : list<f32>   tag 20 since 1
+}
+```
+
+**Invariants** (echoing §4.1.12 / §4.2 invariant 3):
+
+1. **Byte-equal across hosts.** Two snapshots captured at the same
+   `world_tick` on two hosts running with the same
+   `physics_config_hash` are bit-identical (§4.2 invariant 3,
+   R-4.1.NF3, PHILOSOPHY §7). The determinism gate compares the
+   byte form; mismatch returns
+   `physics::Error::SnapshotMismatch` and surfaces a host-pair
+   diff in the trace report.
+2. **Schema version is monotone.** `schema_version` increases by
+   exactly one per shipped Fory schema bump (§7.2.4 below); readers
+   refuse a higher version with
+   `physics::Error::SnapshotVersionFuture` (a future build wrote a
+   snapshot an older middleman cannot reconstruct). Migrations
+   from `vN` to `vM > N` follow §7.2.4; there is no "skip-version"
+   decode path.
+3. **`physics_config_hash` is the dispatch key.** Restoring a
+   snapshot into a world whose `PhysicsConfig.content_hash` differs
+   returns `physics::Error::SnapshotConfigDrift`; cross-config
+   restore is forbidden because `PhysicsConfig` is the only input
+   that decides what counts as deterministic (§4.1.2 invariant 2).
+4. **`middleman_abi_hash` gates restore.** A snapshot whose
+   `middleman_abi_hash` differs from the live `JoltMiddleman` hash
+   (§4.1.13, §5 `MiddlemanInfo`) is **refused at restore** with
+   `physics::Error::PluginAbiHashMismatch`. Cross-Jolt-version
+   replay is not supported; the determinism gate recompiles its
+   trace corpus when the middleman ships a new hash (§4.2 inv 7).
+5. **Parallel-list shape, not array-of-struct.** Bodies and joints
+   are stored as parallel `list<T>` columns rather than an
+   array-of-struct. Codegen still generates SoA C++ (§4.1.12), but
+   the schema's column shape makes the migration story explicit:
+   adding a per-body field is one new column at a new tag, not a
+   struct-shape change. Index `i` across the body columns names
+   one body; mismatched column lengths decode to
+   `physics::Error::SnapshotMismatch`.
+6. **No NaN / no denormal in writer output.** The writer asserts
+   each `f32` payload is finite and non-denormal at capture time
+   (§4.1.4 invariant 4). The reader decodes whatever bytes arrive
+   verbatim per §7's determinism contract — the assertion guards
+   only the producer side; corrupt inputs from a foreign host
+   surface as `SnapshotMismatch` at the determinism gate.
+7. **References, not bytes.** Snapshots reference `ShapeBlobRecord`
+   payloads by `content_hash`; the bytes themselves live in the
+   asset bundle and are loaded by `data` / `content` (§3.3,
+   §4.1.12 invariant 4). A restore with an absent shape hash
+   returns `physics::Error::ShapeBlobMissing` at world rebind
+   time, not at decode time.
+
+### 7.2 Migration rules
+
+Per `reviews/decisions/fory-codegen.md` §"Migration Mechanic" and
+data SPEC §7.4, every schema-version bump emits a generated
+dispatcher hookup; physics owns the migration *bodies* for the
+types above (under `src/physics/migrations/`), and `data` owns the
+plumbing.
+
+#### 7.2.1 `PhysicsConfigRecord` — additive defaulted-field only
+
+The config record follows the **additive defaulted-field** pattern
+(data SPEC §7.4 rule 6, render SPEC §7.2.1 case 1):
+
+1. **`vN → vN+1` adds a field at a new tag, appended past the prior
+   version's last offset.** Default value defined in the schema;
+   codegen synthesises the default at deserialise time (Fory's
+   `since` clause). No migration body required; codegen emits
+   `migrate_PhysicsConfigRecord_v<N>_to_v<N+1>` as the identity
+   mapping with default-fill (data SPEC §7.4 rule 6).
+2. **`vN → vN+1` removes a field.** Tag becomes `reserved`; never
+   reused (data SPEC §7.4 rule 7). The removed field's runtime
+   reading code is deleted in the same release; readers of older
+   payloads ignore the reserved bytes.
+3. **`vN → vN+1` changes the meaning of an existing field.**
+   Treated as breaking. Bump the schema and author the migration
+   body under `src/physics/migrations/
+   physics_config_record_v<N>_to_v<N+1>.cpp`. Round-trip golden
+   under `tests/data/schemas/physics/PhysicsConfigRecord/v<N>.
+   fory.bin` becomes mandatory (data SPEC §7.5).
+4. **Adding a `LayerInteraction` enumerator.** Append-only at the
+   ordinal end; existing ordinals are immutable. An older middleman
+   reading a newer-ordinal value returns
+   `physics::Error::ConfigInvalid` (the value is outside its closed
+   sum). This matches the closed-sum rule render SPEC §7.1.1 uses
+   for `AntiAliasMode` etc.
+5. **`content_hash` consequence.** Any of the above changes the
+   canonicalised bytes and therefore changes the in-memory
+   `PhysicsConfig.content_hash`. A snapshot captured under the old
+   hash is refused with `SnapshotConfigDrift` (§7.1.4 invariant 3)
+   on a build that authors the new hash; the determinism gate
+   regenerates its trace corpus when the schema bumps.
+
+#### 7.2.2 `ShapeBlobRecord` — additive parameter struct extensions + new kinds
+
+Shape parameter struct extensions are **additive**:
+
+1. **Adding a parameter to an existing kind** (e.g. a third
+   capsule-end radius for a future "TaperedCapsule" generalisation)
+   appends a new tag past the prior version's last offset.
+   Defaulted-field synthesis (Fory `since`) makes older blobs
+   readable; codegen emits the identity migration with default-fill
+   (data SPEC §7.4 rule 6).
+2. **Adding a new `ShapeKind` ordinal.** Append-only at the ordinal
+   end. New parameter fields the kind needs are appended past the
+   prior last offset (rule 1). Existing kind ordinals are immutable;
+   reusing an ordinal returns
+   `physics::Error::ShapeBlobCorrupt` at decode (the cook tool
+   would be writing a new shape against an old ordinal). An older
+   middleman reading a newer-kind value returns
+   `physics::Error::ShapeBlobCorrupt` — the closed-sum rule in
+   §7.1.2 invariant 2 holds across versions.
+3. **Removing a kind.** Tag becomes `reserved`; ordinal never
+   reused. Cooked blobs of the removed kind become unreadable on
+   the build that drops the kind, by design. Asset-pipeline
+   migration (recook to a still-supported kind) is owned by
+   `tools` + `content` (§3.3); physics does not bridge the gap.
+4. **Canonicalisation across kinds.** Unused-field zero-fill is
+   load-bearing for `content_hash` stability across cook-tool
+   versions: a cook tool that emits a `Sphere` record must zero
+   every non-sphere field. The `glibre-foryc` codegen enforces
+   this at write time per the §7 determinism contract; a
+   non-zero unused field returns
+   `physics::Error::ShapeBlobCorrupt` at decode.
+5. **No runtime ID-bake migration.** Compound records reference
+   children by `content_hash`, not by table index, so reordering
+   children in a future cook does not require a migration as long
+   as the children themselves are still resolvable. A child whose
+   hash changes is a new asset; the parent recomputes its own
+   `content_hash` and ships as a new asset (§7.1.2 invariant 1).
+
+#### 7.2.3 `JointDescriptorRecord` — new joint kinds add variants
+
+Joint kind extensions are **additive sealed-sum bumps**:
+
+1. **Adding a `JointKind` ordinal** (post-MVP ragdoll-friendly
+   variants per §3.3). Append-only at the ordinal end; existing
+   ordinals are immutable. New tuning fields the kind needs are
+   appended past the prior version's last offset with `since N+1`
+   and a default; codegen emits the identity migration with
+   default-fill (data SPEC §7.4 rule 6).
+2. **Adding a companion** (e.g. a future `has_drive_curve` bit
+   plus payload). Same additive pattern: one new `has_*` bool tag
+   at default false, plus the payload tags at zero defaults. Older
+   records decode to `has_drive_curve = false` and zero payload;
+   the world skips the companion-component add (§4.1.7
+   invariant 2).
+3. **Removing a kind.** Treated as breaking. Worlds shipping with
+   that kind cannot load on the new build; the migration body
+   under `src/physics/migrations/` is responsible for either
+   re-mapping the old kind to a still-shipped one (lossy, but
+   total — data SPEC §7.4 rule 3) or surfacing
+   `physics::Error::JointKindUnsupported` at restore. The choice
+   is per-bump in the migration body; it is not a schema-level
+   decision.
+4. **Tuning-field meaning change.** Same as §7.2.1 case 3: schema
+   bump, migration body, golden under
+   `tests/data/schemas/physics/JointDescriptorRecord/v<N>.fory.bin`.
+5. **Canonicalisation across kinds.** A record's
+   `content_hash`-equivalent stability comes from zero-filling
+   absent companions (§7.1.3 invariant 3); writers MUST zero
+   payload bytes when the corresponding `has_*` bit is false. A
+   non-zero absent payload returns
+   `physics::Error::ConfigInvalid` at decode.
+
+#### 7.2.4 `PhysicsSnapshot` — monotone version, golden-replay corpus
+
+Snapshot migrations follow data SPEC §7.4 rules 1–7 with the
+following physics-specific overlay:
+
+1. **Monotone version.** `schema_version` increases by exactly one
+   per shipped bump (§7.1.4 invariant 2). The dispatcher composes
+   the chain `vN → vN+1 → ... → vM` per data SPEC §7.4 rule 1; no
+   skip-step decode path.
+2. **Per-version golden corpus.** For every shipped `schema_version`
+   `N`, `tests/data/schemas/physics/PhysicsSnapshot/v<N>.fory.bin`
+   carries a recorded snapshot. The Catch2 round-trip harness:
+   - decodes the `vN` golden,
+   - runs every migration step `vN → vN+1 → ... → vCurrent`,
+   - asserts the post-migration in-memory snapshot equals a
+     matching `v<Current>.expected.fory.bin` golden, and
+   - asserts re-serialising the migrated snapshot under the
+     current writer reproduces `v<Current>.fory.bin` byte-for-byte.
+   Failure on any step blocks the bump (data SPEC §7.5).
+3. **Adding a per-body or per-joint column.** Append a new
+   `list<T>` field at a new tag with `since N+1` and a default
+   "all entries zero / empty"; codegen emits the identity
+   migration that fills the new column with the default at length
+   matching `body_ids` / `joint_ids`. The §7.1.4 invariant 5
+   column-length check enforces the fill.
+4. **Adding a header field.** Same additive defaulted-field
+   pattern as §7.2.1 case 1; the migration body fills the new
+   header field with a deterministic default (typically zero or
+   the current world's value when the snapshot is restored into
+   that world).
+5. **Removing a column.** Tag reserved; never reused. The migration
+   body is responsible for **dropping** the column from older
+   snapshots (the dispatcher reads the old column, ignores it,
+   and writes a snapshot without it). Subsequent goldens regenerate.
+6. **Changing column-element type** (e.g. `f32 → f64` on
+   `accumulator_carry`). Treated as breaking. Migration body
+   converts under the §7 bit-exact contract: an `f32` value
+   migrates to an `f64` value via `static_cast<double>(x)`, where
+   `x` is read by `std::bit_cast<float>` on the wire bytes. The
+   reverse (`f64 → f32`) is forbidden inside MVP — narrowing
+   loses determinism at the migrated tick.
+7. **Cross-build replay corpus.** The determinism gate's trace
+   corpus is keyed on `(schema_version, physics_config_hash,
+   middleman_abi_hash)`. A bump of any of those three forces a
+   corpus regeneration, run by CI under the new build before the
+   bump merges. A snapshot whose triple matches the corpus key
+   but whose bytes differ from the recorded golden returns
+   `physics::Error::SnapshotMismatch` and surfaces the diff
+   (§7.1.4 invariant 1).
+
+### 7.3 What is NOT persisted
+
+To make the boundary explicit (in line with §5 "Serialised schemas
+(Fory)" and render SPEC §7.3):
+
+| Artefact                                  | Why not persisted                                                                                                  |
+|-------------------------------------------|--------------------------------------------------------------------------------------------------------------------|
+| `ContactManifold` / contact events        | Per-substep; reborn each step, reclaimed end-of-phase-8 (§4.1.8, §4.2 inv 8).                                      |
+| `TriggerEnter` / `TriggerStay` / `TriggerExit` | Per-substep ECS event components; same lifetime as contact events (§4.1.9).                                  |
+| `JointBrokenEvent`                        | Same-frame event; consumed by phases 5+ inside the emitting frame (§4.1.7 inv 4).                                 |
+| `Island` membership                       | Rebuilt by Jolt every substep; read-only, not durable across steps (§4.1.14 inv 2).                                |
+| `QueryHit` rows                           | Caller-owned span output of `PhysicsQueries`; never crosses the persistence layer (§4.1.10 inv 2).                 |
+| Jolt-internal solver state                | Owned by Jolt's `PhysicsSystem`; never crosses the `JoltMiddleman` ABI as bytes (§4.1.13 inv 1).                   |
+| `ShapeHandle` (the runtime handle)        | Per-world refcount; resolved from `ShapeBlobRecord.content_hash` at table load (§4.1.6 inv 1, §7.1.2 inv 5).       |
+| `BodyId` allocator state                  | Stable per world; the snapshot's `body_ids` column is the authority for what is live (§4.2 inv 5, §7.1.4 inv 5).   |
+| `Accumulator` private state               | Captured into `PhysicsSnapshot.accumulator_carry`; no separate persistence (§4.1.3, §7.1.4).                       |
+| `PhysicsMaterial` bytes                   | Owned at the asset layer by `data` (§3.3); physics consumes `MaterialId` references only.                          |
+| `PhysicsQueries` / `LayerFilter`          | Runtime objects derived from `PhysicsConfigRecord` at world init (§4.1.10, §4.1.2); not persisted independently.   |
+
+These appear in the persistence surface only as **identifiers**
+(`BodyId`, `JointId`, `MaterialId`, `content_hash`) referenced from
+§7.1, never as byte payloads.
 
 ## 8. Hot-Reload Contract
 
