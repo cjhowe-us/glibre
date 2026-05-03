@@ -991,11 +991,867 @@ public boundary at the seams between them:
 
 ## 5. Public Interface
 
+The header stub below is the §5 deliverable: every symbol that crosses
+the physics plugin's public boundary, declared in one C++23 header and
+verified via `clang++ -std=c++23 -fsyntax-only -Wall -Wextra -Wpedantic`.
+Bodies live inside the physics dylib; this header is the contract every
+caller (core, gameplay/logic, editor, downstream plugins) compiles
+against. Cross-context invariants enforced here:
+
+- Every fallible operation returns `glibre::Result<T>` per
+  `reviews/decisions/error-model.md`. The physics-internal `Error` enum
+  is the closed sum cited in §10 below; it is rolled into
+  `glibre::Error`'s variant in `core` (PHILOSOPHY §1, §6).
+- Aggregates listed in §4 (`PhysicsWorld`, `Accumulator`, `LayerFilter`,
+  `PhysicsQueries`, `PhysicsSnapshot`, `JoltMiddleman`) are
+  forward-declared classes whose layout is owned inside the plugin.
+  Callers manipulate them only through the methods exposed below.
+- Resource identifiers (`BodyId`, `ShapeHandle`, `JointId`, `MaterialId`,
+  `CollisionLayer`) are 32-bit `Handle<Tag>` values with no payload
+  pointers and a stable bit layout; identity survives a hot-reload swap
+  whenever the `JoltMiddleman` ABI hash matches (PHILOSOPHY §8 + §9,
+  §4.1.5 invariant 1, §4.1.13 invariants 1+2).
+- The `Joint` family is a sealed sum (`JointKind::Point` / `Hinge` /
+  `Slider` / `Cone` / `Distance` / `SwingTwist`) mirroring Jolt's joint
+  primitive set. Adding a kind is an ABI bump: it forces a new
+  `JointKind` enumerator, a new `physics::Error::JointKindUnsupported`
+  rejection path is removed, and the `JoltMiddleman` ABI hash bumps
+  (§4.1.7 invariant 1, §3.2 collapse #1).
+- The Jolt-derived ABI is **gated by the `JoltMiddleman` seam**: this
+  header pulls in zero Jolt headers, and a `#error` defends the
+  invariant when downstream code accidentally includes Jolt before this
+  file (§4.1.13 invariant 1).
+- ECS components (`RigidBody`, `Collider`, `Trigger`, `Velocity`,
+  `AngularVelocity`, `ExternalForce`, `ExternalTorque`, `Sleeping`,
+  `JointEndpoints`, `JointLimits`, `JointMotor`,
+  `JointBreakThreshold`) are POD-like aggregates. Storage is the ECS
+  archetype that holds them; identity is the owning `ecs::Entity`.
+  Physics never reaches across into ECS storage from outside the
+  substep-boundary mirror (§4.1.4 invariants 2+3, §4.2 invariant 2).
+- The query API (`PhysicsQueries`) returns spans of plain-data
+  `QueryHit` rows into caller-supplied buffers, never references Jolt
+  internals across the ABI, and is rejected with
+  `physics::Error::QueryDuringStep` when invoked while phase 3 is
+  in flight (§4.1.10 invariants 1+2+4, §4.2 invariant 9).
+
+The header declares the events `CollisionStarted` / `CollisionPersisted`
+/ `CollisionEnded` / `TriggerEnter` / `TriggerStay` / `TriggerExit` plus
+`JointBrokenEvent` and a sealed `ContactEvent` variant. These are the
+only physics-emitted events; they are written into ECS event-component
+buffers at substep exit and reclaimed at end of phase 8 (§4.1.8
+invariants 1+2, §4.1.9 invariant 2, §4.1.7 invariant 4, §4.2
+invariant 8).
+
+The Fory-serialised schema lives on `PhysicsSnapshot` (and its
+`SnapshotHeader` / `SnapshotBody` / `SnapshotJoint` field rosters). The
+schema is authored here and codegenned by `data` per
+`reviews/decisions/fory-codegen.md`; physics owns the layout, `data`
+owns the codec.
+
 ```cpp
-// header-only stub goes here
+// SPDX-License-Identifier: Apache-2.0
+// glibre — physics plugin public interface (header-only stub).
+//
+// This file is the §5 deliverable of `specs/physics/SPEC.md`. It declares
+// every symbol crossing the physics plugin's public boundary. The bodies
+// live inside the physics dylib; this header is the contract every caller
+// (core, gameplay/logic, editor, downstream plugins) compiles against.
+//
+// Cross-context invariants embedded here:
+//   * Every fallible call returns `glibre::Result<T>` per
+//     `reviews/decisions/error-model.md`. `-fno-exceptions` is enforced
+//     globally; this header obeys.
+//   * Aggregates are opaque — `PhysicsWorld`, `PhysicsQueries`,
+//     `PhysicsSnapshot`, `LayerFilter`, `JoltMiddleman`, `Accumulator`
+//     are forward-declared classes whose layout is owned inside the
+//     physics dylib.
+//   * The Jolt-derived ABI is gated by the `JoltMiddleman` seam: no Jolt
+//     header is reachable from this file (PHILOSOPHY §9, §3.2 collapse
+//     #1, §4.1.13 invariants 1+3). Including this header after a Jolt
+//     header refuses to compile.
+//   * Identifiers (`BodyId`, `ShapeHandle`, `JointId`, …) are
+//     trivially-copyable value types with stable bit layout; no payload
+//     pointers cross the seam — reload swaps preserve identity
+//     (PHILOSOPHY §8).
+//   * Joint family is a sealed sum (Point / Hinge / Slider / Cone /
+//     Distance / SwingTwist); adding a kind is an ABI bump and a new
+//     `physics::Error` variant.
+//
+// This stub compiles standalone with
+// `clang++ -std=c++23 -fsyntax-only -Wall -Wextra -Wpedantic`.
+
+#pragma once
+
+#if defined(GLIBRE_PHYSICS_INCLUDES_JOLT) && !defined(GLIBRE_PHYSICS_INTERNAL)
+#error "Jolt headers must not cross the physics plugin ABI; include only "    \
+       "<glibre/physics/physics.hpp>. The middleman seam owns Jolt types."
+#endif
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <functional>
+#include <memory>
+#include <span>
+#include <string_view>
+#include <type_traits>
+#include <variant>
+
+namespace glibre {
+
+// -----------------------------------------------------------------------
+// Stand-in declarations from sibling contexts. The real definitions live
+// in `core/include/glibre/error.hpp`, `core/include/glibre/math.hpp`,
+// `core/include/glibre/ecs.hpp`, etc.; this header forward-declares them
+// so the stub compiles in isolation. The implementation .cpp files
+// include the real headers, not these stubs.
+// -----------------------------------------------------------------------
+
+#if !defined(GLIBRE_HAVE_CORE_ERROR)
+namespace core {
+enum class Error : std::uint16_t {
+    PluginAbiHashMismatch,
+    PluginInitFailed,
+    SchemaMigrationFailed,
+    HotReloadRefused,
+    FramePhaseMisordered,
+    OutOfBudget,
+};
+}  // namespace core
+
+namespace physics { enum class Error : std::uint16_t; }  // declared below.
+
+struct ErrorContext {
+    std::string_view file;
+    int              line  = 0;
+    std::string_view detail;
+};
+
+class Error {
+public:
+    using Variant = std::variant<core::Error /*, physics::Error inserted in core */>;
+
+    template <class E>
+    constexpr Error(E e, ErrorContext ctx = {}) noexcept
+        : variant_{e}, ctx_{ctx} {}
+
+    constexpr const Variant&      code()  const noexcept { return variant_; }
+    constexpr const ErrorContext& where() const noexcept { return ctx_; }
+
+private:
+    Variant      variant_;
+    ErrorContext ctx_;
+};
+
+template <class T>
+using Result = std::expected<T, Error>;
+#endif  // GLIBRE_HAVE_CORE_ERROR
+
+#if !defined(GLIBRE_HAVE_CORE_MATH)
+struct Vec3 { float x = 0.0f, y = 0.0f, z = 0.0f; };
+struct Quat { float x = 0.0f, y = 0.0f, z = 0.0f, w = 1.0f; };
+struct Mat4 { std::array<float, 16> m{}; };
+#endif  // GLIBRE_HAVE_CORE_MATH
+
+#if !defined(GLIBRE_HAVE_CORE_ECS)
+namespace ecs {
+struct Entity {
+    std::uint64_t bits = 0u;
+    [[nodiscard]] friend constexpr bool operator==(Entity, Entity) noexcept = default;
+};
+class World;  // archetype storage; declared in core.
+}  // namespace ecs
+#endif  // GLIBRE_HAVE_CORE_ECS
+
+namespace physics {
+
+// -----------------------------------------------------------------------
+// physics::Error — closed sum of every physics-internal failure mode.
+// Every public physics boundary returns Result<T> over this enum (rolled
+// into glibre::Error's variant per reviews/decisions/error-model.md).
+// The list is closed: adding a variant is an ABI bump and forces a
+// JoltMiddleman hash bump (PHILOSOPHY §9).
+// -----------------------------------------------------------------------
+
+enum class Error : std::uint16_t {
+    // Config / world lifecycle (§4.1.1, §4.1.2)
+    ConfigInvalid,                  // layer matrix incomplete, dt non-positive, …
+    WorldNotInitialised,            // operation before PhysicsWorld::create.
+    WorldAlreadyInitialised,        // double-init.
+    BudgetExceeded,                 // bodies / shapes / contacts past PhysicsConfig caps.
+
+    // Body / collider mirror (§4.1.5, §4.1.6)
+    BodyNotFound,                   // BodyId resolves outside its world.
+    BodyMotionTypeImmutable,        // changing MotionType not permitted.
+    BodyStillReferencedByJoint,     // remove blocked by live Joint endpoint.
+    ColliderShapeRequired,          // missing ShapeHandle on add.
+    ShapeBlobMalformed,             // invalid Fory bytes / unknown variant.
+    ShapeBlobVersionUnsupported,    // schema-version newer than this build.
+    ShapeHandleStale,               // refcount-zero handle reused.
+
+    // Joints (§4.1.7)
+    JointEndpointInvalid,           // either BodyId resolves nowhere.
+    JointDanglingEndpoint,          // body remove attempted with live joint.
+    JointKindUnsupported,           // post-MVP joint kind requested.
+    JointBroken,                    // attempt to mutate after break.
+
+    // Step / phase (§4.1.3, §4.1.4, §4.2)
+    StepCalledOutsidePhase3,        // any caller-driven Step outside phase 3.
+    QueryDuringStep,                // PhysicsQueries during an in-flight substep.
+    AccumulatorClampExceeded,       // > 4 substeps owed; carry dropped.
+    SubstepEcsCommitInverted,       // ECS↔Jolt mid-substep cross-traffic detected.
+
+    // Snapshot / determinism (§4.1.12)
+    SnapshotSchemaMismatch,         // PhysicsConfig content hash diverged.
+    SnapshotDeserialiseFailed,      // Fory bytes invalid or truncated.
+    SnapshotBodyIdUnresolved,       // persisted BodyId has no live ECS entity.
+
+    // Hot-reload + ABI (§4.1.13, §8)
+    JoltMiddlemanHashMismatch,      // refused load — previous plugin keeps running.
+    JoltMiddlemanUnavailable,       // middleman dylib not loaded at engine init.
+    HotReloadStateUnmigratable,     // schema bump invalidates a live world.
+};
+
+[[nodiscard]] constexpr std::string_view to_string(Error e) noexcept;
+
+// -----------------------------------------------------------------------
+// physics::Warning — non-fatal surface; logged but not returned. Listed
+// here so the warning vocabulary is enumerated in one place.
+// -----------------------------------------------------------------------
+
+enum class Warning : std::uint16_t {
+    AccumulatorClamped,             // §4.1.3 invariant 2 — carry dropped.
+    SleepThresholdShadowed,         // per-body override ignored (collapse #6).
+    BodyDespawnedDuringStep,        // entity removed mid-frame; deferred to phase 8.
+};
+
+// -----------------------------------------------------------------------
+// Strong-typed handles. All trivially-copyable, all fixed bit-layout, all
+// reload-stable (PHILOSOPHY §8). Equality + hashing are part of the ABI;
+// they are how downstream code keys `PhysicsSnapshot` rows (§4.1.12).
+// -----------------------------------------------------------------------
+
+namespace tags {
+struct body              {};
+struct shape             {};
+struct joint             {};
+struct material          {};
+struct collision_layer   {};
+struct broadphase_layer  {};
+}  // namespace tags
+
+template <class Tag, class Repr = std::uint32_t>
+class Handle {
+public:
+    using value_type = Repr;
+
+    constexpr Handle() noexcept = default;
+    explicit constexpr Handle(Repr v) noexcept : bits_{v} {}
+
+    [[nodiscard]] constexpr Repr raw()   const noexcept { return bits_; }
+    [[nodiscard]] constexpr bool valid() const noexcept { return bits_ != Repr{0}; }
+
+    [[nodiscard]] friend constexpr bool operator==(Handle, Handle) noexcept = default;
+
+private:
+    Repr bits_ = Repr{0};
+};
+
+// Hash specialisation contract — any std::hash<Handle<Tag,Repr>> that
+// downstream code instantiates must collapse to hashing `raw()`. The
+// real specialisation lives in core; this struct documents the shape.
+struct HandleHashContract {
+    template <class Tag, class Repr>
+    [[nodiscard]] constexpr std::size_t
+        operator()(Handle<Tag, Repr> h) const noexcept {
+        return static_cast<std::size_t>(h.raw());
+    }
+};
+
+using BodyId           = Handle<tags::body,            std::uint32_t>;
+using ShapeHandle      = Handle<tags::shape,           std::uint32_t>;
+using JointId          = Handle<tags::joint,           std::uint32_t>;
+using MaterialId       = Handle<tags::material,        std::uint32_t>;
+using CollisionLayer   = Handle<tags::collision_layer, std::uint32_t>;
+
+// -----------------------------------------------------------------------
+// BroadphaseLayer — §4.1.11. Closed enum; the concrete bucket set is
+// fixed by `PhysicsConfig` at world init and never mutates.
+// -----------------------------------------------------------------------
+
+enum class BroadphaseLayer : std::uint8_t {
+    NonMoving = 0,
+    Moving    = 1,
+    Trigger   = 2,
+    // Closed list. Adding a bucket is an ABI bump (collapse #6).
+};
+
+// -----------------------------------------------------------------------
+// MotionType — §4.1.5. Pinned at body creation; mutating is a recreate
+// (§4.1.5 invariant 3).
+// -----------------------------------------------------------------------
+
+enum class MotionType : std::uint8_t {
+    Static    = 0,  // immovable; ignores ExternalForce / ExternalTorque.
+    Kinematic = 1,  // script-driven; immune to solver impulse.
+    Dynamic   = 2,  // solver-driven.
+};
+
+// -----------------------------------------------------------------------
+// Joint kind — sealed sum mirroring Jolt's joint family (§4.1.7).
+// Adding a kind is an ABI bump (PHILOSOPHY §9).
+// -----------------------------------------------------------------------
+
+enum class JointKind : std::uint8_t {
+    Point      = 0,  // 3-DoF position-fixed (Jolt PointConstraint).
+    Hinge      = 1,  // 1-DoF rotational (Jolt HingeConstraint).
+    Slider     = 2,  // 1-DoF prismatic (Jolt SliderConstraint).
+    Cone       = 3,  // limited swing only (Jolt ConeConstraint).
+    Distance   = 4,  // anchored at distance (Jolt DistanceConstraint).
+    SwingTwist = 5,  // swing-cone + twist (Jolt SwingTwistConstraint).
+};
+
+// -----------------------------------------------------------------------
+// PhysicsConfig — §4.1.2. Init-time-immutable; one per PhysicsWorld.
+// -----------------------------------------------------------------------
+
+struct SleepThresholds {
+    float linear_speed   = 0.05f;   // m / s.
+    float angular_speed  = 0.05f;   // rad / s.
+    std::uint16_t frame_count = 30; // frames below thresholds before sleep.
+};
+
+struct WorldBudgets {
+    std::uint32_t max_bodies      = 0u;
+    std::uint32_t max_shapes      = 0u;
+    std::uint32_t max_constraints = 0u;
+    std::uint32_t max_contacts    = 0u;
+};
+
+// Per-pair interaction policy.
+enum class LayerInteraction : std::uint8_t {
+    Ignore      = 0,
+    Collide     = 1,
+    TriggerOnly = 2,
+};
+
+// LayerFilter — §2 ubiquitous language; mapping every CollisionLayer to
+// a BroadphaseLayer plus the layer-pair interaction matrix. The opaque
+// body lives in the physics dylib; callers populate via the methods.
+class LayerFilter {
+public:
+    [[nodiscard]] static Result<std::unique_ptr<LayerFilter>>
+        create(std::uint16_t layer_count) noexcept;
+
+    [[nodiscard]] Result<void>
+        set_broadphase(CollisionLayer, BroadphaseLayer) noexcept;
+
+    [[nodiscard]] Result<void>
+        set_pair(CollisionLayer a, CollisionLayer b, LayerInteraction) noexcept;
+
+    [[nodiscard]] Result<void>
+        validate() const noexcept;  // §4.1.2 invariant 4 — totality check.
+
+    [[nodiscard]] std::uint16_t layer_count() const noexcept;
+
+    ~LayerFilter();
+    LayerFilter(const LayerFilter&)            = delete;
+    LayerFilter& operator=(const LayerFilter&) = delete;
+
+protected:
+    LayerFilter() noexcept;
+};
+
+struct PhysicsConfig {
+    Vec3                          gravity              = {0.0f, -9.81f, 0.0f};
+    float                         fixed_dt             = 1.0f / 60.0f;
+    std::uint8_t                  max_substeps         = 4u;   // §4.1.3 inv 2.
+    std::uint8_t                  velocity_iters       = 10u;
+    std::uint8_t                  position_iters       = 2u;
+    float                         warm_start_factor    = 0.85f;
+    SleepThresholds               sleep                = {};
+    bool                          ccd_enabled          = true;
+    std::uint64_t                 rng_seed             = 0u;
+    WorldBudgets                  budgets              = {};
+    std::shared_ptr<LayerFilter>  layer_filter         = {};
+    // Content-hash of the canonicalised config bytes; written by `data` at
+    // load and matched against persisted PhysicsSnapshot at restore time.
+    std::uint64_t                 content_hash         = 0u;
+};
+
+// -----------------------------------------------------------------------
+// ShapeBlob — §4.1.6. Cooked, content-hashed bytes. The handle surface
+// is the only thing that crosses the seam; the bytes are owned by `data`.
+// -----------------------------------------------------------------------
+
+struct ShapeBlob {
+    std::uint64_t              content_hash   = 0u;  // BLAKE3 of the cooked bytes.
+    std::uint16_t              schema_version = 0u;
+    std::span<const std::byte> bytes          = {};
+};
+
+// -----------------------------------------------------------------------
+// PhysicsMaterial — §2 ubiquitous language. Asset-side; physics consumes
+// MaterialId references via Collider.
+// -----------------------------------------------------------------------
+
+enum class CombineMode : std::uint8_t {
+    Average  = 0,
+    Min      = 1,
+    Max      = 2,
+    Multiply = 3,
+};
+
+struct PhysicsMaterial {
+    float         friction               = 0.6f;
+    float         restitution            = 0.0f;
+    float         density                = 1000.0f;
+    CombineMode   friction_combine       = CombineMode::Average;
+    CombineMode   restitution_combine    = CombineMode::Max;
+    std::uint64_t content_hash           = 0u;
+};
+
+// -----------------------------------------------------------------------
+// RigidBody / Collider / Trigger — §4.1.5, §4.1.6, §4.1.9. ECS components
+// — POD-like aggregates with `BodyId` / `ShapeHandle` payloads. Stored
+// in archetype columns; identity is the owning Entity.
+// -----------------------------------------------------------------------
+
+struct RigidBody {
+    BodyId       body_id          = {};
+    MotionType   motion_type      = MotionType::Dynamic;
+    float        mass             = 1.0f;
+    Vec3         inertia_diagonal = {1.0f, 1.0f, 1.0f};
+    bool         auto_inertia     = true;
+    float        linear_damping   = 0.05f;
+    float        angular_damping  = 0.05f;
+    bool         ccd              = false;
+    bool         sleeping         = false;
+};
+
+struct Collider {
+    ShapeHandle    shape            = {};
+    Vec3           offset_position  = {};
+    Quat           offset_rotation  = {};
+    CollisionLayer layer            = {};
+    MaterialId     material         = {};
+    bool           is_trigger       = false;
+    float          density_override = 0.0f;  // 0 ⇒ use material density.
+};
+
+struct Trigger {};  // Marker tag — §4.1.9.
+
+struct Velocity        { Vec3 v      = {}; };
+struct AngularVelocity { Vec3 w      = {}; };
+struct ExternalForce   { Vec3 force  = {}; };
+struct ExternalTorque  { Vec3 torque = {}; };
+struct Sleeping        {};  // marker; managed by physics (§4.1.14).
+
+// -----------------------------------------------------------------------
+// Joint — §4.1.7. Joint *is* an ECS entity; the `JointEndpoints` +
+// optional companion components describe the constraint.
+// -----------------------------------------------------------------------
+
+struct JointFrame {
+    Vec3 anchor_position = {};
+    Quat anchor_rotation = {};
+};
+
+struct JointEndpoints {
+    JointId    joint_id = {};
+    JointKind  kind     = JointKind::Point;
+    BodyId     body_a   = {};
+    BodyId     body_b   = {};
+    JointFrame frame_a  = {};
+    JointFrame frame_b  = {};
+};
+
+struct JointLimits {
+    // Axis-agnostic; semantics depend on JointKind.
+    float lower      = 0.0f;
+    float upper      = 0.0f;
+    float swing_y    = 0.0f;  // SwingTwist / Cone — radians.
+    float swing_z    = 0.0f;  // SwingTwist — radians.
+    float twist_low  = 0.0f;  // SwingTwist — radians.
+    float twist_high = 0.0f;  // SwingTwist — radians.
+};
+
+struct JointMotor {
+    bool  enabled       = false;
+    float target_value  = 0.0f;
+    float max_force     = 0.0f;  // N or N·m depending on kind.
+    float damping       = 0.0f;
+};
+
+struct JointBreakThreshold {
+    float max_force  = 0.0f;
+    float max_torque = 0.0f;
+};
+
+// -----------------------------------------------------------------------
+// ContactManifold + lifecycle events — §4.1.8.
+// All payloads are plain-data; no Jolt pointer crosses the seam.
+// -----------------------------------------------------------------------
+
+struct ContactPoint {
+    Vec3  position_world   = {};
+    float separation       = 0.0f;
+    float normal_impulse   = 0.0f;
+    float friction_impulse = 0.0f;
+};
+
+struct ContactManifold {
+    BodyId                       body_a       = {};
+    BodyId                       body_b       = {};
+    Vec3                         normal_world = {};
+    MaterialId                   material_a   = {};
+    MaterialId                   material_b   = {};
+    std::array<ContactPoint, 4>  points       = {};
+    std::uint8_t                 point_count  = 0u;
+};
+
+// Substep-boundary lifecycle events — written to ECS event-component
+// buffers at substep exit (§4.1.8 invariant 2).
+struct CollisionStarted   { ContactManifold manifold; };
+struct CollisionPersisted { ContactManifold manifold; };
+struct CollisionEnded     { BodyId body_a; BodyId body_b; };
+
+// Trigger lifecycle — §4.1.9. Same substep-exit drain rule; no impulse.
+struct TriggerEnter { BodyId body_a; BodyId body_b; };
+struct TriggerStay  { BodyId body_a; BodyId body_b; };
+struct TriggerExit  { BodyId body_a; BodyId body_b; };
+
+// Joint break event — §4.1.7 invariant 4. Physics's only joint event.
+struct JointBrokenEvent {
+    JointId   joint          = {};
+    JointKind kind           = JointKind::Point;
+    float     applied_force  = 0.0f;
+    float     applied_torque = 0.0f;
+};
+
+// Generic ContactEvent — sealed sum of the above; downstream code may
+// match on the variant for unified handling.
+using ContactEvent = std::variant<
+    CollisionStarted,
+    CollisionPersisted,
+    CollisionEnded,
+    TriggerEnter,
+    TriggerStay,
+    TriggerExit>;
+
+// -----------------------------------------------------------------------
+// Spatial query surface — §4.1.10.
+// All methods are synchronous, run outside phase 3, and return spans of
+// plain-data QueryHit rows into a caller-supplied buffer.
+// -----------------------------------------------------------------------
+
+struct QueryHit {
+    ecs::Entity     entity         = {};
+    BodyId          body           = {};
+    Vec3            point_world    = {};
+    Vec3            normal_world   = {};
+    float           distance       = 0.0f;
+    CollisionLayer  layer          = {};
+    MaterialId      material       = {};
+    std::uint32_t   sub_shape_id   = 0u;  // for compound shapes.
+};
+
+// QueryFilter callback — pure (read-only over ECS, §4.1.10 inv 5).
+// Returns true to keep the candidate, false to reject.
+using QueryPredicateFn = std::function<bool(const QueryHit&) /* noexcept */>;
+
+struct QueryFilter {
+    std::uint64_t                layer_mask         = ~std::uint64_t{0};
+    bool                         hit_triggers       = false;
+    bool                         hit_static         = true;
+    bool                         hit_kinematic      = true;
+    bool                         hit_dynamic        = true;
+    QueryPredicateFn             predicate          = {};
+    std::span<const ecs::Entity> ignore_entities    = {};
+};
+
+struct ShapeCastDesc {
+    ShapeHandle shape       = {};
+    Vec3        origin      = {};
+    Quat        orientation = {};
+    Vec3        sweep       = {};   // direction × distance.
+};
+
+class PhysicsQueries {
+public:
+    // Ray cast — directional. The caller scales `direction` by max
+    // distance. Returned hits are written into `out` (caller-owned)
+    // up to its capacity; `Result` carries the populated subspan.
+    [[nodiscard]] Result<std::span<QueryHit>>
+        raycast(Vec3 origin,
+                Vec3 direction,
+                const QueryFilter&,
+                std::span<QueryHit> out) const noexcept;
+
+    // Sphere overlap — non-sweeping; returns every body whose AABB +
+    // narrowphase intersects the sphere.
+    [[nodiscard]] Result<std::span<QueryHit>>
+        sphere_overlap(Vec3 centre,
+                       float radius,
+                       const QueryFilter&,
+                       std::span<QueryHit> out) const noexcept;
+
+    // Capsule sweep — oriented; the QueryHit::distance is the sweep-T
+    // at first contact in [0, 1].
+    [[nodiscard]] Result<std::span<QueryHit>>
+        capsule_sweep(Vec3 centre_a,
+                      Vec3 centre_b,
+                      float radius,
+                      Vec3 sweep,
+                      const QueryFilter&,
+                      std::span<QueryHit> out) const noexcept;
+
+    // Generic shape cast — used by post-MVP character controllers /
+    // vehicle wheels; `desc.sweep` controls direction and length.
+    [[nodiscard]] Result<std::span<QueryHit>>
+        shape_cast(const ShapeCastDesc&,
+                   const QueryFilter&,
+                   std::span<QueryHit> out) const noexcept;
+
+    // Closest-point — single hit; `Result` carries an empty span if the
+    // filter rejects every candidate.
+    [[nodiscard]] Result<std::span<QueryHit>>
+        closest_point(Vec3 point,
+                      float max_distance,
+                      const QueryFilter&,
+                      std::span<QueryHit> out) const noexcept;
+
+    ~PhysicsQueries();
+    PhysicsQueries(const PhysicsQueries&)            = delete;
+    PhysicsQueries& operator=(const PhysicsQueries&) = delete;
+
+protected:
+    PhysicsQueries() noexcept;
+};
+
+// -----------------------------------------------------------------------
+// Accumulator — §4.1.3. Owns the substep draining loop; advances the
+// simulation clock once per phase-3 entry. Opaque; no caller may step
+// independently of `PhysicsWorld::advance`.
+// -----------------------------------------------------------------------
+
+struct AdvanceReport {
+    std::uint8_t  substeps_run     = 0u;
+    std::uint8_t  substeps_dropped = 0u;  // > 0 ⇒ AccumulatorClamped warning.
+    float         carry_seconds    = 0.0f;
+};
+
+class Accumulator {
+public:
+    [[nodiscard]] Result<AdvanceReport> advance(float real_dt) noexcept;
+    [[nodiscard]] float                  carry()      const noexcept;
+    [[nodiscard]] std::uint64_t          tick_count() const noexcept;
+
+    ~Accumulator();
+    Accumulator(const Accumulator&)            = delete;
+    Accumulator& operator=(const Accumulator&) = delete;
+
+protected:
+    Accumulator() noexcept;
+};
+
+// -----------------------------------------------------------------------
+// PhysicsSnapshot — §4.1.12. Fory-serialised determinism unit. Schema
+// authored here (the field roster); codegen owned by `data`.
+// -----------------------------------------------------------------------
+
+struct SnapshotHeader {
+    std::uint64_t schema_version       = 1u;
+    std::uint64_t physics_config_hash  = 0u;
+    std::uint64_t world_tick           = 0u;
+    float         accumulator_carry    = 0.0f;
+    std::uint64_t middleman_abi_hash   = 0u;
+};
+
+struct SnapshotBody {
+    BodyId        body_id          = {};
+    MotionType    motion_type      = MotionType::Static;
+    Vec3          position         = {};
+    Quat          rotation         = {};
+    Vec3          linear_velocity  = {};
+    Vec3          angular_velocity = {};
+    std::uint16_t sleep_frames     = 0u;
+    bool          sleeping         = false;
+    std::uint64_t shape_blob_hash  = 0u;
+};
+
+struct SnapshotJoint {
+    JointId       joint_id                     = {};
+    JointKind     kind                         = JointKind::Point;
+    BodyId        body_a                       = {};
+    BodyId        body_b                       = {};
+    float         accumulated_normal_impulse   = 0.0f;
+    float         accumulated_friction_impulse = 0.0f;
+};
+
+class PhysicsSnapshot {
+public:
+    [[nodiscard]] const SnapshotHeader&             header() const noexcept;
+    [[nodiscard]] std::span<const SnapshotBody>     bodies() const noexcept;
+    [[nodiscard]] std::span<const SnapshotJoint>    joints() const noexcept;
+
+    // Fory bridge — `data` codegens these. Writer / reader are total:
+    // success ⇒ canonical bytes / restored snapshot, failure ⇒ typed
+    // error.
+    [[nodiscard]] Result<std::span<const std::byte>> to_bytes() const noexcept;
+
+    [[nodiscard]] static Result<std::unique_ptr<PhysicsSnapshot>>
+        from_bytes(std::span<const std::byte>) noexcept;
+
+    ~PhysicsSnapshot();
+    PhysicsSnapshot(const PhysicsSnapshot&)            = delete;
+    PhysicsSnapshot& operator=(const PhysicsSnapshot&) = delete;
+
+protected:
+    PhysicsSnapshot() noexcept;
+};
+
+// -----------------------------------------------------------------------
+// JoltMiddleman — §4.1.13. The single ABI seam through which any
+// Jolt-derived type may cross the plugin boundary. The header surface
+// here exposes only the hash-gated load contract; concrete Jolt-derived
+// payload types live behind `GLIBRE_PHYSICS_INTERNAL`.
+// -----------------------------------------------------------------------
+
+struct MiddlemanInfo {
+    std::uint64_t abi_hash       = 0u;   // BLAKE3 over the canonical type list.
+    std::uint32_t jolt_version   = 0u;
+    std::uint16_t schema_version = 0u;
+};
+
+class JoltMiddleman {
+public:
+    [[nodiscard]] static Result<const JoltMiddleman*>
+        load_from_engine() noexcept;
+
+    [[nodiscard]] MiddlemanInfo info() const noexcept;
+
+    [[nodiscard]] Result<void>
+        require_hash(std::uint64_t expected_abi_hash) const noexcept;
+
+    ~JoltMiddleman()                                = default;
+    JoltMiddleman(const JoltMiddleman&)             = delete;
+    JoltMiddleman& operator=(const JoltMiddleman&)  = delete;
+
+protected:
+    JoltMiddleman() noexcept = default;
+};
+
+// -----------------------------------------------------------------------
+// PhysicsWorld — §4.1.1 root aggregate. One per ECS World; owns the Jolt
+// instance, the shape table, the joint registry, the contact-event
+// drain, the Accumulator, and the PhysicsQueries surface.
+// -----------------------------------------------------------------------
+
+class PhysicsWorld {
+public:
+    // Construction — fails fast on ConfigInvalid / ABI hash mismatch /
+    // budget overflow. Captures `config` by value (immutable for life).
+    [[nodiscard]] static Result<std::unique_ptr<PhysicsWorld>>
+        create(ecs::World&, PhysicsConfig config) noexcept;
+
+    // Phase-3 entry point — advances the accumulator and drains owed
+    // substeps. Called exactly once per frame by core's phase-3 driver.
+    [[nodiscard]] Result<AdvanceReport>
+        advance(float real_dt) noexcept;
+
+    // Shape table.
+    [[nodiscard]] Result<ShapeHandle>
+        intern_shape(const ShapeBlob&) noexcept;
+    [[nodiscard]] Result<void>
+        release_shape(ShapeHandle) noexcept;
+
+    // Material table.
+    [[nodiscard]] Result<MaterialId>
+        intern_material(const PhysicsMaterial&) noexcept;
+
+    // Body lifecycle. Insert / remove are deterministic (allocation
+    // order = ECS materialisation order, §4.1.5 invariant 1).
+    [[nodiscard]] Result<BodyId>
+        add_body(ecs::Entity, const RigidBody&, const Collider&) noexcept;
+    [[nodiscard]] Result<void>
+        remove_body(BodyId) noexcept;
+
+    // Joint lifecycle. Endpoints must resolve before insert; live joint
+    // blocks endpoint body removal (§4.1.7 invariant 1).
+    [[nodiscard]] Result<JointId>
+        add_joint(const JointEndpoints&,
+                  const JointLimits*         limits = nullptr,
+                  const JointMotor*          motor  = nullptr,
+                  const JointBreakThreshold* brk    = nullptr) noexcept;
+    [[nodiscard]] Result<void>
+        remove_joint(JointId) noexcept;
+
+    // Resolved accessors.
+    [[nodiscard]] PhysicsQueries&     queries()      noexcept;
+    [[nodiscard]] Accumulator&        accumulator()  noexcept;
+    [[nodiscard]] const PhysicsConfig& config()      const noexcept;
+    [[nodiscard]] std::uint64_t       world_tick()   const noexcept;
+
+    // Snapshot — produces an opaque PhysicsSnapshot rooted in this
+    // world's tick. Restore is total: it resets the world to the
+    // captured tick or returns a typed error.
+    [[nodiscard]] Result<std::unique_ptr<PhysicsSnapshot>>
+        snapshot() const noexcept;
+    [[nodiscard]] Result<void>
+        restore(const PhysicsSnapshot&) noexcept;
+
+    // Hot-reload — swap the underlying physics dylib. Refused on ABI
+    // hash mismatch (§4.1.13 invariant 2). The previously-running
+    // instance keeps stepping if refused.
+    [[nodiscard]] Result<void>
+        on_plugin_reload(const JoltMiddleman&) noexcept;
+
+    ~PhysicsWorld();
+    PhysicsWorld(const PhysicsWorld&)            = delete;
+    PhysicsWorld& operator=(const PhysicsWorld&) = delete;
+
+protected:
+    PhysicsWorld() noexcept;
+};
+
+}  // namespace physics
+}  // namespace glibre
 ```
 
-Event types, serialized schemas (Fory), error types.
+**Event types.** Physics emits seven event-component types, all written
+at substep exit (§4.1.8 invariant 2, §4.1.9 invariant 2, §4.1.7
+invariant 4) and reclaimed at end of phase 8 (§4.2 invariant 8):
+`CollisionStarted` / `CollisionPersisted` / `CollisionEnded` /
+`TriggerEnter` / `TriggerStay` / `TriggerExit` / `JointBrokenEvent`. The
+six contact + trigger events compose into the `ContactEvent` sealed-sum
+variant for unified consumer code; `JointBrokenEvent` stays separate as
+the joint lifecycle is independent of contact lifecycle (§3.2 collapse
+#5). Physics emits nothing else; all other "physics-adjacent" events
+(severance, fragment spawn, prosthetic re-attachment, ragdoll
+activation) are post-MVP plugin work routed away from this context per
+§3.3.
+
+**Serialised schemas (Fory).** One Fory-serialised artifact lives at
+this layer — `PhysicsSnapshot`, with the `SnapshotHeader` /
+`SnapshotBody` / `SnapshotJoint` field rosters declared above (§4.1.12).
+The schema is authored by `physics`, codegenned by `data` per
+`reviews/decisions/fory-codegen.md`. Iteration order is fixed by the
+schema definition (PHILOSOPHY §7), so two snapshots captured at the
+same logical tick on different hosts are byte-identical (§4.2 invariant
+3, R-4.1.NF3). `PhysicsConfig` and `PhysicsMaterial` are also
+Fory-serialised assets, owned at the asset layer by `data` (§3.3); the
+field rosters above are the schema authority.
+
+**Error types.** The closed sum `physics::Error` declared above lists
+every failure mode at every public physics boundary. It is the §10
+authority for failure-mode enumeration; new variants require an ABI
+bump and a `JoltMiddleman` hash bump per
+`reviews/decisions/error-model.md` and PHILOSOPHY §9. Physics also
+exposes a `physics::Warning` enum for non-fatal surfaces that are
+logged but not returned (clamped accumulator, body despawn during
+step, shadowed sleep override).
 
 ## 6. Internal Architecture
 
