@@ -3487,7 +3487,522 @@ unsaved edits`, `Game-plugin reload revalidates Selection`.
 
 ## 9. Performance Budget
 
-Cycles / frame, memory ceiling, allocation rules.
+This section quotes tools' row from the engine-wide budget table
+(`reviews/decisions/perf-budget.md`), refines it across the §4
+aggregates that consume the cell each frame, fixes the heap
+composition inside the 256 MiB ceiling, restates the allocator rules
+tools plugs into, and lists the CI gate hooks tools owns. Every
+number in this section is a **contractual ceiling**, not a
+steady-state expectation — the budget gate fails on any frame that
+exceeds the cell or any aggregate slice (§9.6). The §11 acceptance
+criteria name the Catch2 benchmarks that enforce these ceilings.
+This SPEC §9 is the per-aggregate refinement of the cited row; it
+MUST sum into the row and MUST NOT silently expand it. Any cell-level
+amendment requires a perf-budget amendment spike per
+`perf-budget.md` §"Consequences".
+
+### 9.1 Cell — tools row
+
+Tools' cell from `reviews/decisions/perf-budget.md` §"Per-Context
+Budget Table", restated verbatim:
+
+| Axis              | Budget       | Source                                                                                       |
+|-------------------|--------------|----------------------------------------------------------------------------------------------|
+| CPU (sim)         | **0.80 ms**  | `perf-budget.md` row "tools": gizmo + inspector systems in phase 1; scene-tree + ImGui prep. |
+| CPU (submit)      | **0.20 ms**  | `perf-budget.md` row "tools": ImGui-Metal-4 record cost on the driver thread inside phase 7. |
+| CPU (combined)    | **1.00 ms**  | sum, used as the §9.3 sub-budget ceiling.                                                    |
+| GPU               | **0.5 ms**   | `perf-budget.md` row "tools": ImGui-Metal-4 overlay pass declared by render at phase 7.      |
+| Heap ceiling      | **256 MiB**  | `perf-budget.md` row "tools": editor textures, font atlases, undo-redo ring buffer.          |
+| Phase ownership   | 1, 6, 7      | gizmo + inspector commit in phase 1; ImGui draw-list build in phase 6; record in phase 7.    |
+
+The cell is sized against the editor smoke fixture **(S1-tools)** =
+S1 game scene (1 character + 200 props + 8 dynamic lights at
+1920x1080, per `perf-budget.md` §"Justification Per Cell") with the
+editor shell visible in **edit-mode**, default `LayoutProfile`, all
+six MVP panels open (`SceneTree`, `Inspector`, `AssetBrowser`,
+`Viewport`, `Console`, `Profiler`), one entity selected, no active
+gizmo drag, `AssetBrowser` showing ~512 thumbnails resident, no
+trace recording in flight. Edit-mode is the gated baseline; play-mode
+is bounded by the same cell because the editor's per-frame surface
+does not change between modes (only the embedded `GameWorld`'s
+scheduler ticks differ, and that cost belongs to the contexts owning
+those systems, not to tools). Justification for the row's sizing
+lives in `perf-budget.md` §"Justification Per Cell" (tools row) and
+is not re-derived here. `perf-budget.md` Open Question #2 — whether
+edit-mode and play-mode should carry separate ceilings — is resolved
+to **one row** by §9; revisiting requires a perf-budget amendment.
+
+Tools' row is the **only** context row in the engine table that
+carries a non-zero GPU number outside `render`'s 8.0 ms slice. The
+0.5 ms is funded by GPU work tools causes but does not encode: the
+ImGui overlay pass (`render`'s `passes/imgui_overlay.cpp` per §6.3,
+step 5) runs on the graphics queue between `passes/aa_upscale.cpp`
+and `passes/present.cpp`. **render encodes the pass; tools owns the
+GPU budget** because the only thing that grows the cost is the size
+of the draw lists tools emits (vertex / index count, material /
+clipping rect count) — not anything render decides. This split keeps
+the budget contract aligned with reasons-to-change (PHILOSOPHY §1):
+if the editor's panel surface grows, tools' GPU row absorbs the
+cost; render's 8.0 ms cell is unaffected.
+
+### 9.2 Phase ownership — gizmo + inspector commit, ImGui extract, ImGui record
+
+The cell decomposes across three phases per
+`perf-budget.md` §"Pipelined Frame Timing" (tools row) and
+`reviews/decisions/frame-phases.md` (rows 1, 6, 7):
+
+- **Phase 1 — gizmo + inspector commit (sim, edit-mode only).**
+  Gizmo manipulation (drag deltas → `EditCommand` push) and inspector
+  field commits (`ReflectedField::write` → `EditCommand` push) run
+  in phase 1 of the editor world's frame, before any sim consumer
+  reads (`frame-phases.md` Open Q #3 resolution: tools writes happen
+  in phase 1). Cost is bounded by user input rate (single drag at a
+  time, single selection at a time); steady-state is below the noise
+  floor of the §9.6 measurement. The cell line below funds it under
+  the §9.3 `Gizmo` and `Inspector` rows; no separate phase-1 budget
+  slot is exposed because per-frame work is dominated by the panel
+  walk in phase 6.
+- **Phase 6 — editor frame extract (sim).** The editor world's phase
+  6 system (`extract/imgui_extract.cpp` per §6.3) walks the panel
+  registry once, drives Dear ImGui's `NewFrame` / `EndFrame` /
+  `Render` cycle, and copies the resulting `ImDrawData` into the
+  tools-extract slot of `render::RenderFrame`. This is the dominant
+  per-frame CPU cost in tools and is gated by §9.3.
+- **Phase 7 — ImGui-Metal-4 record (submit, render-issued).**
+  `render`'s `passes/imgui_overlay.cpp` records the ImGui draw calls
+  into the graphics-queue command buffer (§6.3 step 5). Driver-thread
+  CPU cost is the **0.20 ms submit slot** of the cell; GPU wall-clock
+  is the **0.5 ms** slot. Tools owns both budgets even though render
+  encodes the pass (§9.1 paragraph 4).
+
+Editor-world phases 2-5 and 8-9 carry no tools work in steady state:
+phase 2 (logic) and phase 4 (animation) are deferred contexts; phase
+3 (physics-fixed) is `physics`'s; phase 5 (transform) and phase 9
+(present) are `core`'s and `platform`'s. Tools' sole hot-reload-frame
+cost (own dylib swap; §8.3.1 ImGui context preservation) is bounded
+by `perf-budget.md` §"Hot-reload frame budget" 0.40 ms ceiling, not
+by §9.
+
+### 9.3 Per-aggregate sub-budgets
+
+Sub-budgets refine the §9.1 cell across the nine `tools`-owned
+aggregates from §4. Each row lists CPU ms (sim or submit half),
+GPU ms (only the ImGui overlay row carries non-zero), heap allocation
+under the 256 MiB ceiling, and the dominant operation that the
+budget pays for. The CI gate (§9.6) attaches one
+`BENCHMARK_CELL(...)` block per aggregate that asserts steady-state
+CPU time is `<= cpu_ms` under the S1-tools fixture defined in §9.1.
+
+| Aggregate (§4 ref)                                | CPU ms  | Half   | GPU ms | Heap     | Dominant operation                                                                |
+|---------------------------------------------------|---------|--------|--------|----------|-----------------------------------------------------------------------------------|
+| `EditorHost` (§4.1)                               | ~0.05   | sim    | -      | 4 MiB    | EditorMode FSM dispatch + `EditorEvent` republish on the editor world's bus       |
+| `Layout` / `Panel` / `Viewport` (§4.2)            | ~0.05   | sim    | -      | 8 MiB    | dockspace tree walk + Viewport blit (one engine-rendered `TextureId` swap)        |
+| `SceneTree` + `Selection` (§4.3)                  | **0.20**| sim    | -      | 16 MiB   | scene-graph hierarchy refresh: `GameWorld` parent-child sweep into ImGui rows     |
+| `Inspector` + `InspectorView` + `ReflectedField` (§4.4) | **0.20** | sim | -      | 16 MiB   | per-`Selection` `ReflectionBlob` field walk → ImGui form rows for current frame   |
+| `Gizmo` + `Snap` (§4.5)                           | ~0.05   | sim    | -      | 4 MiB    | drag-loop FSM tick + viewport widget draw routine                                 |
+| `AssetBrowser` + `AssetThumbnail` (§4.6)          | **0.10**| sim    | -      | 128 MiB  | thumbnail LRU lookup + filter / search + Dear ImGui drag-drop payload bookkeeping |
+| `EditCommand` + `CommandStack` (§4.7)             | ~0.05   | sim    | -      | 32 MiB   | undo/redo ring bookkeeping; `apply()` cost is paid in phase 1 at user input rate  |
+| `Toolbar` + `PlayPauseStep` (§4.8)                | ~0.05   | sim    | -      | 4 MiB    | static toolbar redraw; mode indicator + button hit-test                           |
+| `TraceRecorder` + `TraceFile` (§4.9)              | **0.00**| (n/a)  | -      | 16 MiB   | append-only Fory writer; **zero on the hot path** when not `Recording` (§9.4)     |
+| ImGui-Metal-4 overlay (§6.3, render-encoded)      | **0.20**| submit | **0.5**| (in 32 MiB) | record `ImDrawData` into `MetalCommandBuffer`; one `Pass` per frame             |
+| Reserve inside the cell                           | 0.10    | -      | -      | 28 MiB   | absorbs panel-walk variance + thumbnail decode warm-starts + driver tail jitter   |
+| **Per-aggregate total**                           | **1.00**|       | **0.5**| **256 MiB** | sums to the §9.1 cell exactly (no rounding-margin slack)                         |
+
+Notes per row, indexed by aggregate:
+
+- **`EditorHost` (~0.05 ms / 4 MiB).** Steady-state cost is the FSM
+  step on the editor world's `EditorMode` resource (§4.1 inv. 3),
+  one `EditorEvent` republish per phase boundary, and the back-pointer
+  poke into `render::RenderFrame`'s tools-extract slot. World
+  disjointness (§4.1 inv. 1) is structural, paid at archetype-build
+  time, not per-frame. 4 MiB holds the editor-only resource bag.
+- **`Layout` / `Panel` / `Viewport` (~0.05 ms / 8 MiB).** The
+  dockspace tree walk is bounded by the panel registry size (~10
+  panels at MVP; §6.1 module layout). The `Viewport` blit is one
+  ImGui `Image` call against the render-vended `TextureId` (§4.2
+  inv. 4); no GPU work tools owns. 8 MiB stores the active `Layout`
+  JSON, the `LayoutProfile` slot map, and the panel registry.
+- **`SceneTree` + `Selection` (0.20 ms / 16 MiB).** The hierarchy
+  panel walks the `GameWorld`'s scene-graph aggregate once per frame
+  to refresh visible rows (the panel virtualises non-visible rows;
+  bound is the visible-window count, ~200 rows on a typical 1080p
+  layout). Selection mutations are bounded by user input rate; the
+  0.20 ms covers the worst-case full-tree expand. The 16 MiB heap
+  holds the scene-tree mirrors — read-only `EditorWorld` shadows
+  of the `GameWorld` hierarchy that allow the panel to render
+  without holding any read-lock on game-world storage (§4.3 inv. 1).
+- **`Inspector` + `InspectorView` + `ReflectedField` (0.20 ms /
+  16 MiB).** Per-`Selection` iteration: for each component on the
+  selected entity, walk its `ReflectionBlob` (§4.4 inv. 1; §6.4)
+  and emit one Dear ImGui form row per `ReflectedField`. Cost is
+  bounded by visible-component-count × visible-field-count for the
+  current selection (~5 components × ~10 fields = ~50 rows typical).
+  The 16 MiB heap is the **Inspector reflection cache**: per
+  `(Entity, Type)` `ReflectionBlob` view caches built lazily and
+  invalidated by the §8.3.2 hot-reload callback, so the panel does
+  not re-walk the type registry every frame.
+- **`Gizmo` + `Snap` (~0.05 ms / 4 MiB).** Idle steady-state is the
+  drag-loop FSM tick (single relaxed atomic check on `DragState`)
+  plus the viewport widget redraw (one ImGui draw list of <100
+  vertices for the three-axis cross + handles). Drag-active cost
+  during gizmo manipulation is bounded by user input rate (one
+  delta per mouse event). 4 MiB holds the gizmo state resource +
+  drag-payload buffer.
+- **`AssetBrowser` + `AssetThumbnail` (0.10 ms / 128 MiB).**
+  Per-frame work is filter / search predicate evaluation over the
+  visible thumbnail rows (~64 visible at a typical layout)
+  + drag-drop payload bookkeeping (§4.6 inv. 2; §4.6 inv. 5
+  pinning during drag). Capture is requested on cache miss but
+  the request itself is O(1) — render's capture-to-texture pass
+  produces the texture asynchronously and tools only stores the
+  vended `TextureId` (§4.6 inv. 3). The **128 MiB heap is the
+  AssetBrowser thumbnail cache**: the LRU keyed by `AssetHandle`
+  with budget-driven eviction (§4.6 *Identity & lifetime*; §6.1
+  `thumbnail_lru.{hpp,cpp}`). 128 MiB is the largest single row in
+  the cell; alias plan: at ~256x256 RGBA8 per thumbnail (~256 KiB)
+  the cap holds ~512 resident thumbnails which matches the
+  S1-tools fixture's resident set. Eviction-during-drag is rejected
+  per §4.6 inv. 5; the drag pin is paid out of the 32 MiB
+  CommandStack arena, not the LRU.
+- **`EditCommand` + `CommandStack` (~0.05 ms / 32 MiB).** Per-frame
+  bookkeeping is the redo-ring guard + transaction-depth counter
+  check (§4.7 inv. 4 transactional grouping). Actual `apply()` /
+  `undo()` work is paid in phase 1 at user input rate; the 0.05 ms
+  steady-state covers idle frames. The **32 MiB heap is the
+  CommandStack ring**: undo + redo arrays + per-`Transaction`
+  payload arena + `Selection` snapshots per command (§4.7 *Identity
+  & lifetime*; §4.7 inv. 6 byte-budget eviction). 32 MiB is sized
+  to hold a typical session's undo history (~1k commands at ~32
+  KiB worst-case payload; FIFO eviction kicks in beyond that).
+- **`Toolbar` + `PlayPauseStep` (~0.05 ms / 4 MiB).** Static control
+  strip: ~10 buttons + mode indicators redrawn every frame. Cost
+  is dominated by the ImGui state-bag allocations the panel makes
+  for its own widgets (button-hover state, tooltip text). 4 MiB
+  reserves toolbar texture atlases (icon set) + mode-indicator
+  state.
+- **`TraceRecorder` + `TraceFile` (0.00 ms / 16 MiB).**
+  `TraceRecorder` is **append-only and zero on the hot path** when
+  `EditorMode != Recording` (§4.9 inv. 1 non-perturbing capture):
+  the recorder system's frame check is a single relaxed atomic
+  load on the recording flag and an early return. In `Recording`
+  mode (out-of-budget for steady-state gates; explicitly excluded
+  from §9.6 baseline), the cost is bounded by capture-rate
+  (input-event rate ~hundreds/s; the Fory writer's append cost is
+  amortised over a 16 MiB write buffer that flushes to disk at
+  phase 9 boundaries). The 16 MiB heap is the TraceFile write
+  buffer; in non-recording mode it is reserved-but-empty (allocator
+  reservation, not resident bytes). Steady-state `time = 0.00 ms`
+  in §9.6 is the gated assertion.
+- **ImGui-Metal-4 overlay (0.20 ms submit / 0.5 ms GPU; in 32 MiB
+  shared with command-buffer scratch).** The overlay pass is
+  declared by `render`'s `passes/imgui_overlay.cpp` (§6.3 step 5);
+  tools' SPEC §9 owns the budget because draw-list size is what
+  drives both numbers. CPU 0.20 ms is the driver-thread record
+  cost (translate `ImDrawData::CmdLists` into `MetalCommandBuffer`
+  draws + scissor / PSO bind). GPU 0.5 ms is the wall-clock pass
+  cost on M1 8-core graphics queue: per
+  `perf-budget.md` §"Justification Per Cell" (tools row) ~1k ImGui
+  draws ⇒ <0.5 ms on M1, with margin. The 32 MiB CPU-side staging
+  shadow for the per-frame draw-list copies is not its own row;
+  it is funded out of the cell's 28 MiB reserve plus a 4 MiB
+  command-buffer scratch sub-allocation tagged `ContextTag::tools`
+  (CPU shadow only — the GPU bytes for ImGui textures are
+  render-tagged per §9.5 invariant 4 / `perf-budget.md` Allocator
+  Rule 5).
+- **Reserve inside the cell (0.10 ms / 28 MiB).** Absorbs (a)
+  panel-walk variance when more than the typical visible-row count
+  is open, (b) thumbnail decode warm-starts the first time a
+  newly-imported asset shows in `AssetBrowser` (paid into the LRU
+  on miss, not per frame after), (c) Metal driver tail jitter on
+  the overlay pass record. Eating into the reserve sustained for
+  two consecutive nightlies trips the §9.6 headroom-low alarm.
+
+The §9.3 row sums (CPU 1.00 ms, GPU 0.5 ms, heap 256 MiB) match the
+§9.1 cell exactly. There is no engine-headroom slack absorbed into
+the per-aggregate ceilings — the 1.5 ms / 0.5 ms engine headroom rows
+in `perf-budget.md` §"Per-Context Budget Table" are reserved
+unallocated capacity, not slack tools may spend (`perf-budget.md`
+§Decision: "explicitly reserved unallocated capacity, not slack to
+be spent silently").
+
+The §9.3 contribution decomposition the issue brief calls out
+explicitly:
+
+- **Phase 6 contribution = 1.00 ms CPU sim half + submit half**
+  - ImGui draw list build (panel walk + `EndFrame` + `Render`):
+    ~0.50 ms (sum of `Toolbar` 0.05 + `Layout` 0.05 + `EditorHost`
+    0.05 + `Gizmo` 0.05 + reserve panel-walk variance ~0.10 +
+    fixed Dear ImGui frame-prologue ~0.20 ms baked into the panel
+    walk).
+  - SceneTree refresh: 0.20 ms (§9.3 row).
+  - Inspector panel updates: 0.20 ms (§9.3 row).
+  - AssetBrowser: 0.10 ms (§9.3 row).
+- **Phase 7 GPU contribution = 0.5 ms** (ImGui-Metal-4 overlay pass
+  encoded by render; budget owned here per §9.1 paragraph 4).
+
+### 9.4 TraceRecorder is append-only, zero on the hot path
+
+`perf-budget.md` does not call out `TraceRecorder`'s capture path
+explicitly; this section pins down the rule that flows from §4.9
+inv. 1 (non-perturbing capture):
+
+1. **Hot-path zero.** When `EditorMode != Recording`, the recorder's
+   per-frame system is one relaxed atomic load on the recording
+   flag (in the editor world's resource bag) plus an early return.
+   Measured CPU cost is below the §9.6 measurement noise floor and
+   asserted as **`time == 0.00 ms`** under the `BENCHMARK_CELL`
+   row for `TraceRecorder` (§9.6).
+2. **Append-only writer in `Recording` mode.** The Fory stream
+   writer (`trace-recorder/trace_writer.cpp`, §6.1) is append-only
+   by construction (§4.9 inv. 4 atomic write semantics). New
+   `TraceOp`s land at the buffer's tail; no in-place edits, no
+   seek-and-rewrite. The 16 MiB write buffer flushes to the
+   `.glibre-trace` file at phase 9 boundaries when in `Recording`
+   mode; flush is off the editor's per-frame critical path because
+   `TraceFile` I/O policy is owned by `data` / `content` (§3.3
+   refusal cluster: tools never owns file I/O policy).
+3. **No capture during edit-mode steady-state.** §9.6's
+   measurement baseline is `EditorMode == Edit`; recording variance
+   is excluded from the gate. A separate `BENCHMARK_CELL` row asserts
+   recorder overhead in `Recording` mode is bounded by capture-rate
+   × per-op append cost (~hundreds/s × ~1 us = <0.1 ms typical,
+   well inside the 0.10 ms reserve). `Recording`-mode CPU is **not**
+   funded by the §9.3 cell rows; it is funded by the cell reserve
+   plus the explicit recording-mode budget exception cited here.
+4. **Ring overflow → write back-pressure, never frame-drop.** If
+   the 16 MiB write buffer fills before the phase-9 flush completes
+   (e.g. disk stall), additional `TraceOp` appends spill to a
+   secondary 16 MiB ring (counted against the same heap row, not
+   doubling the budget) and the next phase-9 flush drains both.
+   Sustained back-pressure surfaces `tools::Error::TraceWriteFailed`
+   (§4.9 inv. 5) without ever introducing per-frame allocator
+   pressure that would perturb the gated cell.
+
+The rule is simple and one-sentence in code: `if (mode != Recording)
+return;`. The §9 record is the SPEC-level pin that no implementation
+amendment may relax it without re-budgeting the recorder out of the
+hot path.
+
+### 9.5 Heap composition inside the 256 MiB ceiling
+
+The 256 MiB ceiling is CPU-side residency tagged `ContextTag::tools`.
+Per `perf-budget.md` Allocator Rule 5, GPU bytes for any ImGui
+texture / font atlas / capture-to-texture thumbnail are tagged
+`ContextTag::render` regardless of which context requested the
+resource; the 256 MiB ceiling here is **CPU shadow only**. Heap
+composition pre-allocates the persistent half at plugin init and
+reserves the rest as the per-aggregate working sets enumerated below.
+
+| Sub-budget                                                    | Ceiling  | Aggregate / source                                                                                     |
+|---------------------------------------------------------------|----------|--------------------------------------------------------------------------------------------------------|
+| **ImGui draw lists + textures (CPU shadow)**                  | **64 MiB**| Per-frame `ImDrawData` shadow + ImGuiContext static (font atlas CPU mirror, keyboard tables, dock node tree per §6.3.1) + ImGui state-bag allocations across all panels. The tools-extract slot copies vertex / index buffers into render's `RenderFrame` per frame (§6.3 step 4); 64 MiB reserves the CPU shadow before transfer. |
+| **AssetBrowser thumbnail cache (LRU)**                        | **128 MiB**| Per-`AssetHandle` LRU under `asset-browser/thumbnail_lru.{hpp,cpp}` (§6.1; §4.6 *Identity & lifetime*). Sized for the S1-tools fixture's ~512 resident thumbnails at ~256 KiB each; budget-driven eviction policy keeps live bytes ≤ 128 MiB strictly. |
+| **Inspector reflection cache**                                | **16 MiB**| Per-`(Entity, Type)` `ReflectionBlob` view cache (§6.1 `reflection_blob_view.{hpp,cpp}`; §6.4) invalidated by §8.3.2 hot-reload callback. Sized for ~256 distinct (Entity, Type) tuples at ~64 KiB per cached descriptor. |
+| **CommandStack** (undo / redo ring + payload arenas)          | **32 MiB**| §4.7 *Identity & lifetime* / §4.7 inv. 6 byte-budget eviction. Holds undo + redo arrays, per-`Transaction` payload arenas, `Selection` snapshots per command. FIFO eviction at the 32 MiB cap keeps a typical session's history. |
+| **scene-tree mirrors** (read-only `EditorWorld` shadows)      | **16 MiB**| Read-only mirrors of the `GameWorld` scene-graph hierarchy that `SceneTree` walks each frame (§9.3 row). Sized for the MVP entity ceiling (~2k entities × ~8 KiB per mirror entry including parent / child / name / icon-id columns). |
+| **Subtotal**                                                  | **256 MiB**| Sum of the five rows = tools' cell ceiling exactly.                                                     |
+
+The five rows are exhaustive and additive; tools does not maintain a
+sixth catch-all bucket. Any new editor-side cache type at MVP must
+dock under one of these five rows, or amend `perf-budget.md`. The
+LRU's 128 MiB is the largest row by design — the asset browser is
+the editor's largest visible surface, and the §4.6 inv. 5 drag-pin
+guarantee requires the LRU never evict below the working set.
+
+#### 9.5.1 Allocator rules tools plugs into
+
+`perf-budget.md` §"Allocator Rules" defines `glibre::PerContextAllocator`
+and the `ContextTag` mechanism. Tools plugs into it as follows;
+nothing here amends the engine-wide rules:
+
+1. **Per-context tag (`ContextTag::tools`).** Every allocation made
+   by any module under `tools/src/**` is stamped with
+   `ContextTag::tools` at the allocator-handle level
+   (`perf-budget.md` Allocator Rule #1). The tag is supplied by the
+   allocator handle that tools obtains at `glibre_plugin_register`;
+   call sites under §6.1 are tag-free.
+2. **Hard ceiling in diagnostic / debug builds.** When
+   `GLIBRE_ALLOC_STRICT=1` (debug + diagnostic presets), an
+   allocation that would push live `ContextTag::tools` bytes above
+   256 MiB returns `std::unexpected{core::Error::OutOfBudget}`
+   (`perf-budget.md` Allocator Rule #2). Tools call sites that
+   allocate use the `Result<T>` form (§5) and propagate; a missing
+   handler aborts with the diagnostic dump (mapped to
+   `tools::Error::Refused` at the public boundary per §4.10 + §10).
+3. **Soft warning in shipping builds.** Shipping builds log a `warn`
+   once per-tag-per-frame to `spdlog` and increment a frame-stat
+   counter on overshoot (`perf-budget.md` Allocator Rule #3). The
+   editor's perf HUD (`Profiler` panel, §4) surfaces the counter —
+   tools is the context that **renders** the HUD, so the visibility
+   is end-to-end.
+4. **GPU memory is render-owned.** All Metal-side bytes for ImGui
+   textures, font atlases (the GPU upload), `Viewport` blit
+   targets, and `AssetThumbnail` capture-to-texture results carry
+   the `ContextTag::render` tag (`perf-budget.md` Allocator Rule
+   #5) and are accounted in render's 512 MiB cell. The 256 MiB
+   ceiling here is CPU-only. The opaque `render::TextureId` values
+   tools holds (§6.3 paragraph 5; §4.2 inv. 4; §4.6 inv. 3) are
+   pointer-sized and counted under the parent aggregate's row, not
+   as image bytes.
+5. **Per-aggregate sub-shares are advisory at the allocator level.**
+   `PerContextAllocator` enforces the 256 MiB cell ceiling, not the
+   §9.3 / §9.5 per-aggregate row ceilings; per-aggregate enforcement
+   is via the `BENCHMARK_CELL` heap-residency assertions (§9.6)
+   that exercise the S1-tools fixture and record resident bytes at
+   frame end. This split keeps the runtime allocator path branch-
+   free per aggregate while still catching drift on a CI cadence.
+6. **Transient arenas exempt from cell, drained at phase 9.** Each
+   tools aggregate's per-frame transient arena (Dear ImGui frame
+   scratch, panel-callback scratch, drag-payload bookkeeping) is a
+   `perf-budget.md` Allocator Rule #4 transient — drained at
+   phase 9, does not count against the 256 MiB ceiling. Drain
+   failure is `core::Error::OutOfBudget` with a "leak" detail and a
+   debug-build assertion (`perf-budget.md` Allocator Rule #4).
+7. **No raw `new` / `malloc` in `tools/`.** Per the
+   `-Wglibre-no-raw-alloc` clang custom-warning-as-error
+   (`perf-budget.md` Allocator Rules header), all dynamic allocations
+   in `tools/src/**` MUST go through `PerContextAllocator`. The
+   build rejects raw `new` / `malloc`. Standard-library containers
+   use `std::pmr::*` with a `ContextTag::tools`-backed
+   `memory_resource`. **Dear ImGui's allocator is rebound** to the
+   tools `PerContextAllocator` at plugin init via
+   `ImGui::SetAllocatorFunctions`; ImGui's static-storage
+   `ImGuiContext` (§6.3.1) is the one allowed exception, accounted
+   under the 64 MiB ImGui CPU-shadow row.
+
+### 9.6 CI gate hooks tools owns
+
+`perf-budget.md` §"CI Gate Spec" defines `perf-budget.yml` (authored
+under the `task-breakdown-error-perf` spike) and the five gate items.
+Tools owns the per-context portions of items 1, 2, and 3 — the
+micro-benchmarks that prove its row, the e2e editor-frame slice
+attributable to tools, and the heap ceiling enforcement on
+`ContextTag::tools`. The §11 acceptance criteria name the Catch2
+benchmarks; this section fixes the **measurement mechanism** so
+the gate authors and benchmark authors agree on what is counted.
+
+#### 9.6.1 Editor smoke fixture (S1-tools)
+
+`e2e/perf/editor_smoke/` is the versioned fixture that drives the
+editor-frame benchmarks. Setup:
+
+1. Boot the engine at the S1 game scene (1 character + 200 props +
+   8 dynamic lights at 1920x1080), the same fixture render's §9.6.2
+   uses.
+2. Boot the tools plugin in `EditorMode::Edit`, `LayoutProfile`
+   `default`, all six MVP panels open
+   (`SceneTree`, `Inspector`, `AssetBrowser`, `Viewport`, `Console`,
+   `Profiler`).
+3. Pre-populate the `AssetBrowser` thumbnail LRU with 512 resident
+   thumbnails from the fixture's asset pack (`fixtures/assets/` —
+   versioned alongside the gate).
+4. Select one entity in the `SceneTree` (a `Mesh` + `Transform` +
+   `MaterialSlot` triple — covers the inspector's three most common
+   reflected-field shapes).
+5. No active gizmo drag, no trace recording, no panel resize during
+   measurement.
+6. Run for 600 frames (10 s at 60 fps); collect per-frame
+   `MTLCounterSampleBuffer` GPU timestamps for the
+   `passes/imgui_overlay.cpp` slice and CPU timestamps for the
+   editor world's phase 6 entry / exit and phase 7 driver-thread
+   record window.
+
+Fixture-change requires a perf-budget amendment spike per
+`perf-budget.md` §Consequences. The fixture's 600-frame default
+matches render's §9.6 cadence so the e2e harness can measure both
+contexts in a single nightly run.
+
+#### 9.6.2 ImGui frame extract benchmark
+
+The dominant per-frame CPU cost in tools is the editor world's phase
+6 panel walk + Dear ImGui frame cycle + extract-slot copy. The §9.3
+sub-budgets are asserted via Catch2 `BENCHMARK_CELL` blocks under
+`tests/tools/perf/`. Each block runs the S1-tools fixture and
+asserts the row's CPU ceiling with the `time <= cell_budget_ms` form
+of `perf-budget.md` §"CI Gate Spec" item 1.
+
+| Catch2 benchmark name (under `tests/tools/perf/`)         | Aggregate (§9.3 row)              | CPU ceiling | Heap ceiling |
+|-----------------------------------------------------------|-----------------------------------|-------------|--------------|
+| `BENCHMARK_CELL("tools/editor-host: mode_fsm_step")`      | `EditorHost`                      | 0.05 ms     | 4 MiB        |
+| `BENCHMARK_CELL("tools/layout: dockspace_walk")`          | `Layout` / `Panel` / `Viewport`   | 0.05 ms     | 8 MiB        |
+| `BENCHMARK_CELL("tools/scene-tree: hierarchy_refresh")`   | `SceneTree` / `Selection`         | 0.20 ms     | 16 MiB       |
+| `BENCHMARK_CELL("tools/inspector: reflection_walk")`      | `Inspector`                       | 0.20 ms     | 16 MiB       |
+| `BENCHMARK_CELL("tools/gizmo: drag_loop_idle")`           | `Gizmo` / `Snap`                  | 0.05 ms     | 4 MiB        |
+| `BENCHMARK_CELL("tools/asset-browser: lru_lookup_walk")`  | `AssetBrowser` / `AssetThumbnail` | 0.10 ms     | 128 MiB      |
+| `BENCHMARK_CELL("tools/command-stack: undo_ring_idle")`   | `EditCommand` / `CommandStack`    | 0.05 ms     | 32 MiB       |
+| `BENCHMARK_CELL("tools/toolbar: redraw_static")`          | `Toolbar` / `PlayPauseStep`       | 0.05 ms     | 4 MiB        |
+| `BENCHMARK_CELL("tools/trace-recorder: hot_path_zero")`   | `TraceRecorder` (Edit-mode)       | 0.00 ms     | 16 MiB       |
+| `BENCHMARK("imgui-extract phase-6 total, S1-tools, p99")` | aggregate phase 6 panel walk      | ≤ 1.00 ms   | -            |
+| `BENCHMARK("imgui-overlay phase-7 record, S1-tools, p99")`| ImGui-Metal-4 overlay (record)    | ≤ 0.20 ms   | -            |
+| `BENCHMARK("imgui-overlay phase-7 GPU, S1-tools, p99")`   | ImGui-Metal-4 overlay (GPU pass)  | ≤ 0.5 ms    | -            |
+| `BENCHMARK("tools heap ceiling, S1-tools, strict-mode")`  | full cell                         | -           | ≤ 256 MiB    |
+| `BENCHMARK("tools transient drain at phase 9, strict")`   | per-frame transient arenas        | == 0 (leak) | -            |
+
+The `imgui-extract phase-6 total` benchmark is the single canonical
+"editor frame extract" gate the spike brief calls out. Its
+measurement window is the editor world's phase 6 entry timestamp to
+the tools-extract slot's pinned-shape commit (the timestamp render's
+phase 7 reads first). Per-aggregate `BENCHMARK_CELL` blocks
+decompose the 1.00 ms ceiling so reviewers see which aggregate is
+responsible when the phase-6 total drifts; the assertion fails the
+PR per `perf-budget.md` §"CI Gate Spec" item 1.
+
+The `imgui-overlay phase-7 GPU` slot uses the same
+`MTLCounterSampleBuffer` / `MTLCommonCounterTimestamp` mechanism
+render's §9.6.1 establishes; the overlay pass timestamps land in
+render's debug-gated GPU-timestamp ring (§7.3 of render's SPEC) and
+the tools harness reads them at frame N+2. `Capability::TimestampQueries`
+gating applies identically — on hosts without the capability, the
+GPU slot falls back to the per-frame total of `perf-budget.md`
+§"CI Gate Spec" item 2.
+
+#### 9.6.3 Heap ceiling enforcement
+
+Per `perf-budget.md` §"CI Gate Spec" item 3, the diagnostic build
+runs the S1-tools fixture with `GLIBRE_ALLOC_STRICT=1` and asserts
+live `ContextTag::tools` bytes ≤ 256 MiB at phase 9 (after
+transient-arena drain). PR fails on overshoot. The
+`tools transient drain at phase 9, strict` benchmark is the
+companion leak-guard — any allocations leaking past phase 9 surface
+as `core::Error::OutOfBudget` with a `"leak"` detail and abort the
+diagnostic run.
+
+#### 9.6.4 Headroom-low tripwire
+
+Per `perf-budget.md` §"CI Gate Spec" item 5, if p50 CPU sits within
+0.5 ms of the cell ceiling for two consecutive nightlies, the gate
+posts a warning comment on the next PR and labels it
+`perf:headroom-low`. Tools-specific thresholds: ≥ 0.5 ms p50 CPU
+(out of 1.00 ms cell) or ≥ 0.25 ms p50 GPU (out of 0.5 ms) for two
+consecutive nightlies trip the alarm. The tripwire does not block
+merge; it requests a perf-budget amendment spike before the budget
+breaks. Tools' ratio (ceiling / cell) is tighter than render's
+because the cell itself is small and the alarm should fire before
+the per-aggregate `BENCHMARK_CELL` asserts trip.
+
+### 9.7 Cross-references
+
+- Engine budget record: `reviews/decisions/perf-budget.md` (per-context
+  table, allocator rules, CI gate spec, pipelined-frame timing model).
+- Frame slot ownership: `reviews/decisions/frame-phases.md` rows 1
+  (gizmo + inspector commit), 6 (ImGui draw-list build), 7 (ImGui
+  overlay pass record + GPU).
+- Aggregates touched: §4.1 `EditorHost`, §4.2 `Layout` / `Panel` /
+  `Viewport`, §4.3 `SceneTree` / `Selection`, §4.4 `Inspector` /
+  `InspectorView` / `ReflectedField`, §4.5 `Gizmo` / `Snap`, §4.6
+  `AssetBrowser` / `AssetThumbnail`, §4.7 `EditCommand` /
+  `CommandStack`, §4.8 `Toolbar` / `PlayPauseStep`, §4.9
+  `TraceRecorder` / `TraceFile`.
+- Render-encoded pass tools depends on: `passes/imgui_overlay.cpp`
+  declared in render's §6.2.2 step list and budgeted under tools'
+  cell here per §9.1 paragraph 4.
+- Errors used: `core::Error::OutOfBudget` (allocator-side, mapped to
+  `tools::Error::Refused` at the public boundary per §4.10 + §10);
+  `tools::Error::TraceWriteFailed` (§4.9 inv. 5; §9.4 row 4).
+- §11 acceptance criteria: see `Editor frame extract within 1.00 ms`,
+  `ImGui overlay record within 0.20 ms`, `ImGui overlay GPU within
+  0.5 ms`, `Tools heap within 256 MiB`, `Trace recorder zero on the
+  hot path`, `Tools transient pool drains by phase 9`.
 
 ## 10. Failure Modes & Error Model
 
