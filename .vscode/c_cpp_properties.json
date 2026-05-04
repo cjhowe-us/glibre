@@ -3,11 +3,10 @@
   "configurations": [
     {
       "name": "macOS-clang-arm64",
-      "compileCommands": "${workspaceFolder}/build/macos-debug/compile_commands.json",
       "configurationProvider": "ms-vscode.cmake-tools",
       "intelliSenseMode": "macos-clang-arm64",
-      "cppStandard": "c++23",
-      "cStandard": "c17"
+      "cppStandard": "c++26",
+      "cStandard": "c23"
     }
   ]
 }
