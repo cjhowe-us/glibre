@@ -2,15 +2,20 @@
 
 ## 1. Purpose
 
-The `shader` context owns the offline pipeline that turns HLSL source
+The `shader` context owns the offline pipeline that turns Slang source
 into platform-native shader bytecode plus the reflection metadata that
-downstream contexts consume. Concretely it owns: HLSL authoring
-conventions (Slang-compatible subset); the `IShaderBackend` plugin
-interface (compile / reflect / link / capabilities); DXC invocation
-producing DXIL and SPIR-V; metal-shaderconverter transpilation of DXIL
-into `.metallib`; HLSL reflection extraction (entry points, resource
-bindings, descriptor-frequency groups, vertex IO, push constants,
-specialization constants, material parameter blocks); the permutation
+downstream contexts consume. The MVP pipeline is **Slang source →
+`slangc` subprocess → `metallib`** for Apple Silicon / Metal 4; D3D12 /
+Windows support is added post-MVP by invoking the same `slangc` driver
+with `--target=dxil`. Concretely it owns: Slang authoring
+conventions; the `IShaderBackend` plugin
+interface (compile / reflect / link / capabilities); the single
+`slangc` subprocess invocation that emits the platform bytecode
+directly from Slang source (no transpile chain, no intermediate pivot);
+Slang reflection extraction via slangc's native reflection API
+(entry points, resource bindings, descriptor-frequency groups, vertex
+IO, push constants, specialization constants, material parameter
+blocks); the permutation
 key `(ShadingModel × Features × RenderPath × LOD)` and its enumeration
 + codegen; the on-disk shader cache keyed by source hash + permutation
 + target; root-signature / argument-buffer layout derived from
@@ -28,19 +33,18 @@ Terms used unchanged in code.
 
 | Term | Meaning |
 |------|---------|
-| Shader Source | Versioned HLSL translation unit on disk. Slang-compatible subset; entry points tagged by stage attribute. |
-| Shader Stage | One of `vertex`, `pixel`, `compute`, `mesh`, `amplification`, `library` (RT). Identified by HLSL entry-point attribute. |
+| Shader Source | Versioned Slang translation unit on disk. Slang-compatible subset; entry points tagged by stage attribute. |
+| Shader Stage | One of `vertex`, `pixel`, `compute`, `mesh`, `amplification`, `library` (RT). Identified by Slang entry-point attribute. |
 | Shading Model | Closed enum naming a BSDF family (e.g. `Standard`, `Skin`, `Hair`, `Cloth`, `Foliage`, `Eye`, `Water`, `ClearCoat`). One axis of `Permutation Key`. |
 | Feature Set | Bitfield of optional shader capabilities (e.g. `Skinned`, `MotionVectors`, `AlphaTest`, `Decal`, `VirtualTexture`, `RT`). One axis of `Permutation Key`. |
 | Render Path | Closed enum: `Forward`, `Deferred`, `DepthOnly`, `Shadow`, `Velocity`, `Probe`. One axis of `Permutation Key`. |
 | LOD Tier | Closed enum of shading-cost tiers (`Mobile`, `Switch`, `Desktop`, `HighEnd`) selected at device init, never branched per-frame. One axis of `Permutation Key`. |
 | Permutation Key | The 4-tuple `(ShadingModel, FeatureSet, RenderPath, LODTier)`. Total enumerable at codegen time; used as primary key for compiled artifacts. |
 | Permutation | A single resolved `Permutation Key` value; one compiled artifact per `(Permutation, target backend)`. |
-| Shader Backend | Implementation of `IShaderBackend` plugin trait: `compile`, `reflect`, `link`, `capabilities`. One per source language family (HLSL today). |
-| Compile Target | `DXIL`, `SPIRV`, or `MetalLib`. DXC emits the first two; metal-shaderconverter consumes DXIL to emit the third. |
-| DXC | DirectX Shader Compiler subprocess. The sole HLSL → DXIL / SPIR-V producer; never linked in-process. |
-| metal-shaderconverter | Apple CLI subprocess that lowers DXIL into Metal `.metallib`. Sole MSL producer; HLSL is never authored as MSL. |
-| Reflection | Structured metadata extracted from compiled DXIL: entry points, register bindings, descriptor frequency groups, vertex input layout, push-constant ranges, sampler bindings, RT payload sizes. Source of truth for downstream binding code. |
+| Shader Backend | Implementation of `IShaderBackend` plugin trait: `compile`, `reflect`, `link`, `capabilities`. One per source language family (Slang today). |
+| Compile Target | `MetalLib` (MVP — Apple Silicon / Metal 4) or `DXIL` (post-MVP — D3D12 / Windows). slangc emits the requested target directly from Slang source. |
+| slangc | Apple/Khronos Slang shader compiler subprocess. Emits `metallib` (MVP) and `DXIL` (post-MVP) directly from Slang source. Sole bytecode producer; never linked in-process. |
+| Reflection | Structured metadata produced by slangc's native reflection API, paired with the emitted bytecode in the same subprocess invocation: entry points, register bindings, descriptor frequency groups, vertex input layout, push-constant ranges, sampler bindings, RT payload sizes. Source of truth for downstream binding code. |
 | Descriptor Frequency Group | One of `PerFrame`, `PerPass`, `PerMaterial`, `PerDraw`. Reflection assigns each binding to exactly one group. Drives backend-native descriptor mapping in `render`. |
 | Material Parameter Block | A reflected constant-buffer struct describing the per-instance parameter buffer that material instances upload; shared across all instances of a parent material. |
 | Vertex IO Layout | Reflection-derived description of vertex stage input semantics; consumed by `render` to validate / build vertex layouts. |
@@ -51,7 +55,7 @@ Terms used unchanged in code.
 | Shader Library | Cooked archive of all `Shader Artifact` records reachable from a project's permutation enumeration; the runtime asset that ships with the game. |
 | `IShaderBackend` | Plugin trait: `compile(source, key, target) → Artifact`, `reflect(artifact) → Reflection`, `link(artifacts...) → LinkedModule`, `capabilities() → Caps`. |
 | Capabilities | Static descriptor of what a backend supports (mesh shaders, RT pipelines, work graphs, wave intrinsics, 16-bit types). Queried offline; never per-frame. |
-| Specialization Constant | Reflected named scalar baked at link time, not at HLSL compile time, when the backend supports it (SPIR-V); folded into permutation otherwise. |
+| Specialization Constant | Reflected named scalar baked at link time when slangc supports it for the target; folded into permutation otherwise. |
 
 ## 3. Derived From
 
@@ -67,34 +71,35 @@ authority.
 |------------------|------|---------------|
 | Shader Variants Design | `docs/design/rendering/shader-variants.md` | 4-axis permutation key `(ShadingModel, ShaderFeatures, RenderPath, Lod)`; per-axis enumerations; bitset feature dimension; precompile + on-demand-compile split; usage-metric-driven precompile list; pak-bundle layout. |
 | Shader Variants Test Cases | `docs/design/rendering/shader-variants-test-cases.md` | Concrete invariants (deterministic key hash, bit-stable ordering, dimension cardinalities, budget-fail-build behavior). |
-| GPU Abstraction Layer Reqs | `docs/requirements/rendering/gpu-abstraction-layer.md` § R-2.1.16 / R-2.1.17 / R-2.1.18 | Four descriptor-frequency groups (PerFrame / PerPass / PerMaterial / PerDraw); HLSL → DXIL + SPIR-V + metallib via DXC and metal-shaderconverter as **CLI subprocesses**; **no runtime shader compilation in shipping**; structured errors at every public boundary. |
+| GPU Abstraction Layer Reqs | `docs/requirements/rendering/gpu-abstraction-layer.md` § R-2.1.16 / R-2.1.17 / R-2.1.18 | Four descriptor-frequency groups (PerFrame / PerPass / PerMaterial / PerDraw); Slang → metallib via slangc as **CLI subprocess**; **no runtime shader compilation in shipping**; structured errors at every public boundary. |
 | GPU Runtime Reqs (GR) | `docs/requirements/rendering/gpu-abstraction.md` GR-2 / GR-4 | Confirmed that state-cache responsibilities (binding caches, push-constant caches) live in `render`, not `shader` — they consume reflection but don't produce it. |
-| Render Pipeline Design | `docs/design/rendering/render-pipeline.md` § "Shader Compilation Pipeline" + § "Descriptor Layout Inference" | Single HLSL front-end; DXC produces DXIL + SPIR-V; metal-shaderconverter consumes DXIL to emit metallib (DXIL is the pivot, not a parallel back-end); descriptor layout / bindings inferred from compiled-bytecode reflection. |
-| Pipeline State Cache Design | `docs/design/rendering/pipeline-state-cache.md` R-2.3.9.2 / R-2.3.9.8 | PSO key composes shader hash with device fingerprint (PSO cache lives in `render`); descriptor layout is inferred from DXIL/SPIR-V reflection **once** and cached — confirms reflection is a `shader`-context output, not a render-thread runtime job. |
-| Advanced Materials Reqs | `docs/requirements/rendering/advanced-materials.md` R-2.12.9 | Custom material graphs **codegen HLSL** consumed by this same DXC pipeline; the `material` context emits HLSL into `shader`'s front door — confirms HLSL is the engine-wide source-of-truth shader language. |
+| Render Pipeline Design | `docs/design/rendering/render-pipeline.md` § "Shader Compilation Pipeline" + § "Descriptor Layout Inference" | Single Slang front-end; slangc emits metallib directly (MVP) and DXIL (post-MVP); no DXIL pivot; descriptor layout / bindings inferred from slangc native reflection. |
+| Pipeline State Cache Design | `docs/design/rendering/pipeline-state-cache.md` R-2.3.9.2 / R-2.3.9.8 | PSO key composes shader hash with device fingerprint (PSO cache lives in `render`); descriptor layout inferred from slangc reflection **once** and cached — confirms reflection is a `shader`-context output, not a render-thread runtime job. |
+| Advanced Materials Reqs | `docs/requirements/rendering/advanced-materials.md` R-2.12.9 | Custom material graphs **codegen Slang** consumed by this same slangc pipeline; the `material` context emits Slang into `shader`'s front door — confirms Slang is the engine-wide source-of-truth shader language. |
 | Rendering Core Design | `docs/design/rendering/rendering-core.md` Material System | `Material` references a `ShaderPermutationCache` keyed by `PermutationKey`; `ShadingModel` enum is the same axis used here. Confirms `render` and `material` both consume artifacts keyed by `PermutationKey`. |
 | Render Pipeline Design — RF-9 | `docs/design/rendering/render-pipeline.md` § RF-9 | Hot-reload re-runs reflection on new bytecode so descriptor layout stays in sync. Adopted as the `shader`-context hot-reload contract obligation; the runtime PSO-invalidate side belongs to `render`. |
 
 ### Occam collapses (multiple harmonius concepts → one glibre primitive)
 
-1. **Shader source language: many → one (HLSL via DXC).** Harmonius's
-   advanced-materials text waves at HLSL as the lingua franca but its
+1. **Shader source language: many → one (Slang via slangc).** Harmonius's
+   advanced-materials text waves at Slang as the lingua franca but its
    broader render docs and assorted prior tooling left ambiguous room
    for Slang front-ends, MSL hand-authored shaders, and direct GLSL
-   paths. Glibre collapses to **HLSL only** at the source layer and a
+   paths. Glibre collapses to **Slang only** at the source layer and a
    single tool pipeline:
 
    ```text
-   HLSL ─► DXC ─► DXIL ─► metal-shaderconverter ─► metallib
-                        │
-                        └► SPIR-V (DXC --target spirv)
+   Slang source ─► slangc ─► metallib   (MVP — Apple Silicon / Metal 4)
+
+   (post-MVP, when Windows lands)
+   Slang source ─► slangc ─► DXIL       (D3D12)
    ```
 
-   Slang remains a *future research seed* via HLSL's Slang-compatible
-   subset, but no Slang front-end is adopted today. MSL is never
-   hand-authored. GLSL is rejected outright. Justification: SRP — one
-   front-end, one error vocabulary, one reflection format. (PHILOSOPHY
-   §1, §10.)
+   slangc emits the platform bytecode directly from Slang source in a
+   single subprocess hop. There is no transpile chain and no
+   intermediate pivot format. MSL is never hand-authored. GLSL is
+   rejected outright. Justification: SRP — one front-end, one error
+   vocabulary, one reflection format. (PHILOSOPHY §1, §10.)
 
 2. **Shader permutation schemes: many → one 4D key.** Harmonius
    gestured at per-feature `#ifdef` flags, `ShaderFeatures` bitsets,
@@ -111,21 +116,19 @@ authority.
 3. **Compiler invocation models: many → one (subprocess CLI).**
    Harmonius's GR-1 through GR-4 implied either in-process linkage or
    subprocess invocation depending on which paragraph one read.
-   Glibre collapses to **subprocess CLI only** for both DXC and
-   metal-shaderconverter — never linked in-process, never run on the
-   render thread. Justification: SRP for plugin boundaries (no DXC
-   ABI bleed into core) and determinism (subprocess sandbox + content
-   hash on inputs gives reproducible artifacts).
+   Glibre collapses to **subprocess CLI only** for slangc — never
+   linked in-process, never run on the render thread. Justification:
+   SRP for plugin boundaries (no slangc ABI bleed into core) and
+   determinism (subprocess sandbox + content hash on inputs gives
+   reproducible artifacts).
 
-4. **Reflection sources: many → one (DXIL/SPIR-V post-compile
-   reflection).** Harmonius mentioned three reflection paths
-   (DXC-produced DXIL metadata, SPIR-V cross-reflection, Metal IR
-   inspection). Glibre collapses to **a single reflection pass over
-   compiled bytecode** (DXIL preferred, SPIR-V as the secondary
-   source) producing one canonical `Reflection` record per artifact.
-   metallib is treated as terminal output, never re-reflected — its
-   binding layout is derived from the upstream DXIL reflection that
-   metal-shaderconverter preserves.
+4. **Reflection sources: many → one (slangc native reflection).**
+   Harmonius mentioned three reflection paths (compiler-produced
+   container metadata, cross-reflection libraries, Metal IR
+   inspection). Glibre collapses to slangc's native reflection API:
+   reflection is emitted alongside the bytecode in the same subprocess
+   invocation. There is no bytecode-container parsing; the reflection
+   record and the bytecode are paired outputs of one slangc run.
 
 5. **Descriptor-frequency taxonomy: keep harmonius's four groups
    verbatim.** Harmonius R-2.1.16 named four frequency groups
@@ -145,10 +148,10 @@ authority.
    `render` is the artifact + reflection blob.
 
 2. **Material-graph nodes and visual authoring.** Harmonius
-   `advanced-materials.md` R-2.12.9 lets material graphs codegen HLSL
+   `advanced-materials.md` R-2.12.9 lets material graphs codegen Slang
    *into* this pipeline. That codegen lives in the `material` context
-   (visual nodes, node-type registry, graph compilation to HLSL).
-   `shader` consumes the resulting HLSL like any other shader source —
+   (visual nodes, node-type registry, graph compilation to Slang).
+   `shader` consumes the resulting Slang like any other shader source —
    it does not author or own material-graph node semantics.
 
 3. **Runtime shader compilation in shipping.** Harmonius's
@@ -157,7 +160,7 @@ authority.
    precompiled artifacts loaded by handle, full stop. Editor / dev
    builds may invoke the same offline pipeline on save, but this is a
    tooling path, not a runtime path. Gating: `#if GLIBRE_SHIPPING` at
-   plugin manifest level — the runtime DXC subprocess code is
+   plugin manifest level — the runtime slangc subprocess code is
    excluded from the shipping `shader` plugin entirely. (PHILOSOPHY
    §6: "zero runtime reflection in shipping builds" extended to zero
    runtime compilation.)
@@ -194,7 +197,7 @@ mutates another's state.
 
 ### 4.1 `ShaderSource` (aggregate root, entity)
 
-**Responsibility.** Own one HLSL translation unit on disk and the set
+**Responsibility.** Own one Slang translation unit on disk and the set
 of stage-tagged entry points it exposes. Validates that the file
 parses, that every entry point carries exactly one stage attribute
 (`[shader("vertex")]`, `[shader("pixel")]`, …), and that the file's
@@ -203,11 +206,11 @@ does **not** know about permutations.
 
 - **Identity.** Stable `SourceId` derived from the project-relative
   source path; survives moves only via explicit rename, never silently.
-- **Owns.** The HLSL byte stream, the include-graph closure (paths +
+- **Owns.** The Slang byte stream, the include-graph closure (paths +
   content hashes), and the entry-point manifest (name + stage).
 - **Exposes.** `SourceId`, `EntryPoint { name, Stage }`,
   `PreprocessedSource` (post-include byte stream + total content hash).
-- **SRP.** "Validate and present an authored HLSL translation unit."
+- **SRP.** "Validate and present an authored Slang translation unit."
   Anything that consumes the unit (compile, reflect, hash for cache)
   belongs to a different aggregate.
 
@@ -226,7 +229,7 @@ does **not** know about permutations.
 `(ShadingModel, FeatureSet, RenderPath, LODTier)` from §2 as a single
 trivially-copyable value with a deterministic packed encoding suitable
 for hashing, ordering, and codegen-table generation. Does **not** know
-about HLSL, DXC, or any backend.
+about Slang, slangc, or any backend.
 
 - **Identity.** Pure value semantics; equality is bitwise on the
   packed encoding.
@@ -255,67 +258,67 @@ about HLSL, DXC, or any backend.
 ### 4.3 `CompilationPipeline` (aggregate, service-shaped)
 
 **Responsibility.** Drive one `(ShaderSource, PermutationKey,
-CompileTarget)` through the appropriate subprocess chain
-(`DXC` for `DXIL` / `SPIRV`; `metal-shaderconverter` consuming `DXIL`
-for `MetalLib`) and return a sealed `ShaderArtifact`. Owns invocation,
-argument construction, sandbox controls, stdout/stderr capture, and
-exit-code translation into `shader::Error`. Does **not** persist
-artifacts; does **not** reflect; does **not** link.
+CompileTarget)` through the single `slangc` subprocess invocation that
+emits the requested bytecode (`metallib` for MVP, `DXIL` post-MVP)
+directly from Slang source, and return a sealed `ShaderArtifact`. Owns
+invocation, argument construction, sandbox controls, stdout/stderr
+capture, and exit-code translation into `shader::Error`. Does **not**
+persist artifacts; does **not** reflect; does **not** link.
 
 - **Identity.** Stateless; one instance per offline build.
-- **Owns.** The DXC subprocess descriptor (binary path, argv template,
-  per-target flags) and the `metal-shaderconverter` subprocess
-  descriptor; the compile-flag canonicalizer used by the cache key.
+- **Owns.** The slangc subprocess descriptor (binary path, argv
+  template, per-target flags) and the compile-flag canonicalizer used
+  by the cache key.
 - **Exposes.** `compile(ShaderSource, PermutationKey, CompileTarget) →
   Result<ShaderArtifact>` and the typed flag struct that feeds it.
-- **SRP.** "Run the offline compiler chain, deterministically."
+- **SRP.** "Run the offline compiler, deterministically."
   Caching, reflection, and linking are explicitly elsewhere.
 
 **Invariants.**
 
-1. Both compilers are invoked **only** as subprocesses; in-process
-   linkage of DXC or `metal-shaderconverter` is forbidden (Occam
-   collapse §3.3).
-2. `MetalLib` artifacts are produced by lowering the **same** `DXIL`
-   bytecode that the SPIR-V/DXIL targets share; no parallel HLSL→MSL
-   path exists. (Reinforces invariant 2 in §4.4.)
+1. slangc is invoked **only** as a subprocess; in-process linkage is
+   forbidden (Occam collapse §3.3).
+2. Each `(ShaderSource, PermutationKey, CompileTarget)` is produced by
+   exactly one `slangc` subprocess invocation that emits the target
+   bytecode directly from Slang source. There is no transpile chain
+   and no parallel Slang→MSL path. (Reinforces invariant 2 in §4.4.)
 3. The pipeline is a no-op symbol in shipping builds: the entire
    `CompilationPipeline` translation unit is excluded from the
    shipping `shader` plugin via `#if !GLIBRE_SHIPPING` at the plugin
-   manifest layer. Shipping builds NEVER invoke DXC.
+   manifest layer. Shipping builds NEVER invoke slangc.
 4. Compile flags are canonicalized (sorted, deduplicated) before they
    feed the cache key, so semantically-equal invocations hash equally.
 
 ### 4.4 `ReflectionBlob` (value object, aggregate boundary)
 
-**Responsibility.** Carry the structured metadata extracted from a
-single compiled bytecode container — entry points, register bindings,
-descriptor frequency tags, vertex IO layout, push-constant ranges,
-sampler bindings, RT payload sizes, specialization constant slots.
-Constructed exclusively by reflecting **DXIL**; SPIR-V is allowed as a
-secondary source only when DXIL is unavailable for a given target.
-Does **not** persist; does **not** know about backend descriptor
-heaps.
+**Responsibility.** Carry the structured metadata produced by slangc's
+native reflection API alongside the emitted bytecode — entry points,
+register bindings, descriptor frequency tags, vertex IO layout,
+push-constant ranges, sampler bindings, RT payload sizes,
+specialization constant slots. Constructed exclusively by ingesting
+slangc's reflection output, paired 1:1 with the bytecode from the same
+subprocess invocation. Does **not** persist; does **not** know about
+backend descriptor heaps.
 
 - **Identity.** Value semantics; equality is structural over its
   fields. A `ReflectionBlob` is paired 1:1 with its source
   `ShaderArtifact`.
-- **Owns.** All reflected metadata and the `Reflector` strategy
-  (DXIL-first; SPIR-V fallback) that produced it.
+- **Owns.** All reflected metadata and the slangc-reflection ingester
+  that produced it.
 - **Exposes.** `ReflectionBlob`, the descriptor-binding records
   tagged with `DescriptorFrequencyGroup`, the `MaterialParameterBlock`
   layout, and the `VertexIOLayout` used by `render` validation.
-- **SRP.** "Translate compiled bytecode into a canonical metadata
-  record." Mapping that record onto a backend-specific descriptor
-  layout belongs to §4.5.
+- **SRP.** "Translate slangc's native reflection output into a
+  canonical metadata record." Mapping that record onto a
+  backend-specific descriptor layout belongs to §4.5.
 
 **Invariants.**
 
-1. A `ReflectionBlob` is produced from DXIL (preferred) or from SPIR-V
-   (fallback) — **never** from MSL or `metallib`. The Metal
-   descriptor schema is derived **only** via the upstream DXIL
-   reflection that `metal-shaderconverter` preserves; re-reflecting
-   `metallib` is a spec violation. (Occam collapse §3.4.)
+1. A `ReflectionBlob` is produced **only** from slangc's native
+   reflection output, paired with the bytecode from the same slangc
+   invocation. There is no bytecode-container re-parsing; reflection
+   and bytecode are joint outputs of one slangc run. (Occam collapse
+   §3.4.)
 2. Reflecting the same bytecode container twice yields a structurally
    equal `ReflectionBlob` (deterministic; no compiler-stamp drift).
 3. Every reflected resource binding is annotated with exactly one
@@ -394,8 +397,9 @@ does **not** reflect.
 
 **Responsibility.** The narrow seam through which the rest of the
 engine talks to a shader source-language family. Today the only
-implementation is the HLSL backend wrapping DXC + `metal-shaderconverter`.
-Defines four operations and nothing else.
+implementation is the Slang backend wrapping the `slangc` subprocess;
+it emits `metallib` (MVP) and `DXIL` (post-MVP) directly from Slang
+source. Defines four operations and nothing else.
 
 - **Identity.** One implementing plugin per source-language family;
   selected at offline-build configuration time.
@@ -407,7 +411,7 @@ Defines four operations and nothing else.
   |----------------|-----------------------------------------------------------------------------|
   | `compile`      | `(ShaderSource, PermutationKey, CompileTarget) → Result<ShaderArtifact>`    |
   | `reflect`      | `(ShaderArtifact) → Result<ReflectionBlob>`                                 |
-  | `link`         | `(span<ShaderArtifact>) → Result<LinkedModule>` (SPIR-V spec-const baking)  |
+  | `link`         | `(span<ShaderArtifact>) → Result<LinkedModule>` (spec-const baking when the target supports it)  |
   | `capabilities` | `() → Capabilities` (mesh shaders, RT, work graphs, wave intrinsics, fp16) |
 
 - **SRP.** "Define the contract a source-language backend must
@@ -437,9 +441,10 @@ context:
    `PermutationKey`. There is no n:1, no 1:n, and no fallback
    permutation. (Enforced by `ShaderArtifact` carrying its
    `PermutationKey` as part of its identity.)
-2. **DXIL is the reflection pivot.** A `ReflectionBlob` for a
-   `metallib` artifact is **always** derived via DXIL during the
-   offline lowering; `metallib` is never re-reflected from MSL.
+2. **Reflection is paired with bytecode at slangc invocation time.**
+   A `ReflectionBlob` is produced by slangc's native reflection API in
+   the same subprocess invocation that emitted the bytecode; bytecode
+   containers are never re-parsed for reflection.
    (§4.4 invariant 1; §3 collapse 4.)
 3. **Shipping never compiles.** `CompilationPipeline` is excluded
    from shipping builds; the only runtime read path is
@@ -456,7 +461,7 @@ The header below is the compileable stub of the `shader` context's public
 boundary. It compiles cleanly with `clang++ -std=c++23 -fsyntax-only`,
 both with `-DGLIBRE_SHIPPING=0` (default; tooling builds) and
 `-DGLIBRE_SHIPPING=1` (the entire `compile()` virtual is `#if`-guarded
-out so shipping plugins never link DXC subprocess code — §4.3 invariant
+out so shipping plugins never link slangc subprocess code — §4.3 invariant
 3, §4.8 cross-aggregate invariant 3).
 
 The error type follows `reviews/decisions/error-model.md`: a closed
@@ -470,15 +475,15 @@ change.
 // shader/include/glibre/shader/shader.hpp
 #pragma once
 
-#include <array>
+#include <EASTL/array.h>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
-#include <span>
-#include <string>
-#include <string_view>
-#include <vector>
+#include <EASTL/span.h>
+#include <EASTL/string.h>
+#include <EASTL/string_view.h>
+#include <EASTL/vector.h>
 
 #ifndef GLIBRE_SHIPPING
 #define GLIBRE_SHIPPING 0
@@ -501,9 +506,7 @@ enum class Error : std::uint16_t {
     CompilerExitNonZero,
     CompilerTimedOut,
     UnsupportedTarget,
-    DxilEmissionFailed,
-    SpirvEmissionFailed,
-    MetalLibLoweringFailed,
+    MetalLibEmitFailed,
     ReflectionExtractionFailed,
     DescriptorFrequencyAmbiguous,
     DescriptorFrequencyMissing,
@@ -572,7 +575,7 @@ struct PermutationKey {
     friend constexpr bool operator==(PermutationKey, PermutationKey) noexcept = default;
 
     // Total, injective, bit-stable encoding (§4.2 invariant 1).
-    using PackedBytes = std::array<std::byte, 6>;
+    using PackedBytes = eastl::array<std::byte, 6>;
     PackedBytes to_bytes() const noexcept;
     static std::expected<PermutationKey, Error> from_bytes(const PackedBytes&) noexcept;
 
@@ -591,35 +594,36 @@ enum class Stage : std::uint8_t {
     Vertex, Pixel, Compute, Mesh, Amplification, Library,
 };
 
-enum class CompileTarget : std::uint8_t { DXIL, SPIRV, MetalLib };
+// MVP target is MetalLib; DXIL added post-MVP for D3D12/Windows.
+enum class CompileTarget : std::uint8_t { MetalLib, DXIL };
 
 // BLAKE3 of (preprocessed source ∪ resolved key ∪ canonical flags ∪ target).
 struct ShaderHash {
-    std::array<std::byte, 32> bytes{};
+    eastl::array<std::byte, 32> bytes{};
     friend constexpr bool operator==(ShaderHash, ShaderHash) noexcept = default;
 };
 
 // -------- ShaderSource (aggregate root, §4.1) ----------------------------
 
 struct SourceId {
-    std::string project_relative_path;
+    eastl::string project_relative_path;
     friend bool operator==(const SourceId&, const SourceId&) noexcept = default;
 };
 
 struct EntryPoint {
-    std::string name;
+    eastl::string name;
     Stage       stage{Stage::Vertex};
     friend bool operator==(const EntryPoint&, const EntryPoint&) noexcept = default;
 };
 
 struct IncludeNode {
-    std::string project_relative_path;
+    eastl::string project_relative_path;
     ShaderHash  content_hash{};
 };
 
 struct PreprocessedSource {
-    std::vector<std::byte>   bytes;            // post-include byte stream
-    std::vector<IncludeNode> include_closure;  // ordered, acyclic, project-rooted
+    eastl::vector<std::byte>   bytes;            // post-include byte stream
+    eastl::vector<IncludeNode> include_closure;  // ordered, acyclic, project-rooted
     ShaderHash               total_hash{};
 };
 
@@ -630,14 +634,14 @@ public:
          const std::filesystem::path& project_relative);
 
     const SourceId&             id() const noexcept;
-    std::span<const EntryPoint> entry_points() const noexcept;
+    eastl::span<const EntryPoint> entry_points() const noexcept;
     const PreprocessedSource&   preprocessed() const noexcept;
 
 private:
     ShaderSource() = default;
 
     SourceId                id_{};
-    std::vector<EntryPoint> entry_points_{};
+    eastl::vector<EntryPoint> entry_points_{};
     PreprocessedSource      preprocessed_{};
 };
 
@@ -670,20 +674,20 @@ struct BindingSlot {
     std::uint32_t            array_size{1};
     StageMask                stages{};
     DescriptorFrequencyGroup frequency{DescriptorFrequencyGroup::PerDraw};
-    std::string              name;
+    eastl::string              name;
 
     friend bool operator==(const BindingSlot&, const BindingSlot&) noexcept = default;
 };
 
 struct VertexInputElement {
-    std::string   semantic;
+    eastl::string   semantic;
     std::uint32_t semantic_index{0};
     std::uint32_t location{0};
     std::uint32_t format_code{0};   // backend-neutral format ordinal
 };
 
 struct VertexIOLayout {
-    std::vector<VertexInputElement> elements;
+    eastl::vector<VertexInputElement> elements;
 };
 
 struct PushConstantRange {
@@ -694,24 +698,24 @@ struct PushConstantRange {
 };
 
 struct MaterialParameterBlock {
-    std::string              name;
+    eastl::string              name;
     std::uint32_t            size_bytes{0};
-    std::vector<BindingSlot> members;  // members reflected as named scalar/vector slots
+    eastl::vector<BindingSlot> members;  // members reflected as named scalar/vector slots
 };
 
 struct SpecializationConstantSlot {
-    std::string   name;
+    eastl::string   name;
     std::uint32_t id{0};
     std::uint32_t size_bytes{0};
 };
 
 struct ReflectionBlob {
-    std::vector<EntryPoint>                 entry_points;
-    std::vector<BindingSlot>                bindings;        // one frequency tag each
+    eastl::vector<EntryPoint>                 entry_points;
+    eastl::vector<BindingSlot>                bindings;        // one frequency tag each
     VertexIOLayout                          vertex_io;
-    std::vector<PushConstantRange>          push_constants;
+    eastl::vector<PushConstantRange>          push_constants;
     MaterialParameterBlock                  material_parameters;
-    std::vector<SpecializationConstantSlot> spec_constants;
+    eastl::vector<SpecializationConstantSlot> spec_constants;
     std::uint32_t                           rt_payload_bytes{0};
 };
 
@@ -719,7 +723,7 @@ struct ReflectionBlob {
 
 struct DescriptorTable {
     // Ordered by (register_space, register_index, stage_mask) — §4.5 inv 3.
-    std::vector<BindingSlot> slots;
+    eastl::vector<BindingSlot> slots;
 
     friend bool operator==(const DescriptorTable&, const DescriptorTable&) noexcept = default;
 };
@@ -737,8 +741,8 @@ struct RootSignatureSchema {
     DescriptorTable                per_pass;
     DescriptorTable                per_material;
     DescriptorTable                per_draw;
-    std::vector<PushConstantRange> push_constants;
-    std::vector<StaticSampler>     static_samplers;
+    eastl::vector<PushConstantRange> push_constants;
+    eastl::vector<StaticSampler>     static_samplers;
 
     friend bool operator==(const RootSignatureSchema&, const RootSignatureSchema&) noexcept = default;
 };
@@ -762,15 +766,15 @@ private:
 
 struct ShaderArtifact {
     PermutationKey         key{};
-    CompileTarget          target{CompileTarget::DXIL};
+    CompileTarget          target{CompileTarget::MetalLib};
     ShaderHash             hash{};
-    std::vector<std::byte> bytecode;
+    eastl::vector<std::byte> bytecode;
     ReflectionBlob         reflection;
     DescriptorLayout       descriptor_layout;
 };
 
 struct LinkedModule {
-    std::vector<std::byte> bytecode;
+    eastl::vector<std::byte> bytecode;
     ReflectionBlob         reflection;
 };
 
@@ -791,7 +795,7 @@ public:
     // Cooked, read-only shipping handle.
     class Library;
     std::expected<Library, Error>
-    cook(std::span<const PermutationKey> enumerated) const;
+    cook(eastl::span<const PermutationKey> enumerated) const;
 
 private:
     ShaderCache() = default;
@@ -822,7 +826,7 @@ struct Capabilities {
 //
 // The four-operation surface through which the engine talks to a shader
 // source-language family. `compile()` is excluded from shipping builds:
-// the shipping `shader` plugin never invokes DXC or metal-shaderconverter
+// the shipping `shader` plugin never invokes slangc or slangc
 // (§4.3 invariant 3, §4.8 invariant 3).
 
 class IShaderBackend {
@@ -830,7 +834,7 @@ public:
     virtual ~IShaderBackend() = default;
 
 #if !GLIBRE_SHIPPING
-    // DXC + metal-shaderconverter subprocess driver. Excluded from shipping.
+    // slangc + slangc subprocess driver. Excluded from shipping.
     virtual std::expected<ShaderArtifact, Error>
     compile(const ShaderSource&, const PermutationKey&, CompileTarget) = 0;
 #endif
@@ -839,14 +843,14 @@ public:
     reflect(const ShaderArtifact&) = 0;
 
     virtual std::expected<LinkedModule, Error>
-    link(std::span<const ShaderArtifact>) = 0;
+    link(eastl::span<const ShaderArtifact>) = 0;
 
     virtual Capabilities capabilities() const noexcept = 0;
 };
 
 // -------- Stable string mapping for structured logs (error-model.md) ----
 
-constexpr std::string_view to_string(Error e) noexcept {
+constexpr eastl::string_view to_string(Error e) noexcept {
     switch (e) {
         case Error::SourceNotFound:                return "SourceNotFound";
         case Error::SourceParseFailed:             return "SourceParseFailed";
@@ -860,9 +864,7 @@ constexpr std::string_view to_string(Error e) noexcept {
         case Error::CompilerExitNonZero:           return "CompilerExitNonZero";
         case Error::CompilerTimedOut:              return "CompilerTimedOut";
         case Error::UnsupportedTarget:             return "UnsupportedTarget";
-        case Error::DxilEmissionFailed:            return "DxilEmissionFailed";
-        case Error::SpirvEmissionFailed:           return "SpirvEmissionFailed";
-        case Error::MetalLibLoweringFailed:        return "MetalLibLoweringFailed";
+        case Error::MetalLibEmitFailed:            return "MetalLibEmitFailed";
         case Error::ReflectionExtractionFailed:    return "ReflectionExtractionFailed";
         case Error::DescriptorFrequencyAmbiguous:  return "DescriptorFrequencyAmbiguous";
         case Error::DescriptorFrequencyMissing:    return "DescriptorFrequencyMissing";
@@ -885,7 +887,7 @@ constexpr std::string_view to_string(Error e) noexcept {
 
 | Type / function                     | Aggregate | Role at the boundary                       |
 |-------------------------------------|-----------|--------------------------------------------|
-| `ShaderSource` + `EntryPoint` + `PreprocessedSource` | §4.1 | HLSL translation unit + stage manifest. |
+| `ShaderSource` + `EntryPoint` + `PreprocessedSource` | §4.1 | Slang translation unit + stage manifest. |
 | `PermutationKey` + `PermutationIndex` + 4 axis enums | §4.2 | The closed 4-tuple cache / codegen key.  |
 | `ShaderArtifact` + `ShaderHash` + `CompileTarget`    | §4.3 | Sealed compile output, content-addressed. |
 | `ReflectionBlob` + `DescriptorFrequencyGroup` + `BindingSlot` + `VertexIOLayout` + `PushConstantRange` + `MaterialParameterBlock` + `SpecializationConstantSlot` | §4.4 | Canonical bytecode metadata. |
@@ -908,7 +910,7 @@ truth that those schemas serialize to.
 `clang++ -std=c++23 -fsyntax-only` under both `-DGLIBRE_SHIPPING=0` and
 `-DGLIBRE_SHIPPING=1`. The shipping configuration drops the
 `compile()` virtual from the trait, satisfying the §4.3 / §4.8 invariant
-that shipping plugins never link DXC subprocess code.
+that shipping plugins never link slangc subprocess code.
 
 ## 6. Internal Architecture
 
@@ -932,7 +934,7 @@ plugins/shader/
                               #   surface; nothing else in the engine
                               #   includes a `shader` private header.
     src/
-        source/               # §4.1 ShaderSource — HLSL frontend
+        source/               # §4.1 ShaderSource — Slang frontend
             preprocessor.hpp/.cpp     # Tokenizer + #include expander.
                                       #   Build-time only.
             include_resolver.hpp/.cpp # Project-rooted resolver. Rejects
@@ -959,43 +961,23 @@ plugins/shader/
         backend/              # §4.7 IShaderBackend impls
                               #   EXCLUDED from shipping (§4.3 inv 3,
                               #   §4.8 inv 3). #if !GLIBRE_SHIPPING.
-            dxc_hlsl/                 # The sole production backend today.
-                dxc_argv_builder.hpp/.cpp     # Canonicalized flag list
+            slang/                 # The sole production backend.
+                slangc_argv_builder.hpp/.cpp  # Canonicalized flag list
                                               #   (sorted, deduped); feeds
                                               #   the cache key (§4.3 inv 4).
-                dxc_subprocess.hpp/.cpp       # Spawns dxc, captures
+                slangc_subprocess.hpp/.cpp    # Spawns slangc, captures
                                               #   stdout/stderr/exit;
                                               #   translates non-zero exits
                                               #   into shader::Error.
-                dxil_emitter.hpp/.cpp         # Drives `--target dxil`.
-                spirv_emitter.hpp/.cpp        # Drives `--target spirv`.
-                hlsl_backend.cpp              # IShaderBackend impl wiring.
-            metal_converter/          # DXIL → metallib lowering only.
-                metal_subprocess.hpp/.cpp     # Spawns
-                                              #   metal-shaderconverter;
-                                              #   consumes DXIL bytes,
-                                              #   emits metallib bytes.
-                metallib_backend.cpp          # IShaderBackend MetalLib
-                                              #   target; reflection is
-                                              #   borrowed from upstream
-                                              #   DXIL, NEVER re-extracted
-                                              #   from MSL (§4.4 inv 1).
-        reflection/           # §4.4 ReflectionBlob — DXIL parser
-            dxbc_container.hpp/.cpp   # DXIL is a DXBC container of named
-                                      #   parts; this parser walks the part
-                                      #   table (DXIL, RDAT, ISG1/OSG1,
-                                      #   PSV0, RTS0). Hand-rolled — no
-                                      #   third-party library.
-            dxil_metadata.hpp/.cpp    # LLVM-bitcode-shaped metadata reader
-                                      #   for the `DXIL` part: entry-point
-                                      #   list, signature elements, root
-                                      #   signature flags.
-            psv0_reader.hpp/.cpp      # PSV0 part: pipeline-state-validation
-                                      #   table — bind groups, register
-                                      #   ranges, stage masks.
-            spirv_fallback.hpp/.cpp   # Reflection from SPIR-V binaries
-                                      #   (secondary source per §4.4 inv 1)
-                                      #   when DXIL is unavailable.
+                slang_backend.cpp             # IShaderBackend impl wrapping
+                                              #   the slangc subprocess;
+                                              #   emits metallib (MVP) and
+                                              #   DXIL (post-MVP).
+        reflection/           # §4.4 ReflectionBlob — slangc reflection ingester
+            slangc_reflection_ingester.hpp/.cpp # Ingests slangc's native
+                                      #   reflection JSON emitted alongside
+                                      #   the bytecode; produces the
+                                      #   canonical ReflectionBlob.
             frequency_tagger.hpp/.cpp # Maps every reflected binding to one
                                       #   DescriptorFrequencyGroup; refuses
                                       #   ambiguity with
@@ -1051,19 +1033,18 @@ shipping from tooling builds; no in-tree code branches on
 
 The shipping `shader` plugin therefore links only:
 `permutation/` + `reflection/` + `cache/{blake3,cas_store,manifest,
-library}.cpp`. DXC, metal-shaderconverter, the include resolver, and
-the cooker are not in the shipping binary at any link layer (§4.3
-invariant 3, §4.8 invariant 3, §3 refusal 3).
+library}.cpp`. slangc, the include resolver, and the cooker are not in
+the shipping binary at any link layer (§4.3 invariant 3, §4.8 invariant
+3, §3 refusal 3).
 
 ### 6.2 Subprocess flow: `glibre-shadercc`
 
-DXC and `metal-shaderconverter` are wrapped by a single offline driver
+The `slangc` subprocess is wrapped by a single offline driver
 binary, **`glibre-shadercc`**, which lives under `tools/shadercc/` and
 is not part of the `shader` plugin. The plugin's `backend/` code spawns
-this driver as a subprocess; the driver in turn spawns DXC and
-`metal-shaderconverter`. The engine never links DXC, never links
-`metal-shaderconverter`, and never invokes them at runtime — only the
-offline cooker, the editor, and tests reach them, and only via this
+this driver as a subprocess; the driver in turn spawns `slangc`. The
+engine never links slangc and never invokes it at runtime — only the
+offline cooker, the editor, and tests reach it, and only via this
 driver.
 
 ```text
@@ -1071,12 +1052,9 @@ driver.
 
   CompilationPipeline (§4.3) ──► spawn ──► glibre-shadercc
                                                 │
-                                                ├──► spawn ──► dxc
-                                                │              ├─ --target dxil   (DXIL bytes)
-                                                │              └─ --target spirv  (SPIR-V bytes)
-                                                │
-                                                └──► spawn ──► metal-shaderconverter
-                                                               (consumes DXIL  ──► metallib bytes)
+                                                └──► spawn ──► slangc
+                                                              ( --target=metallib  (MVP)
+                                                              | --target=dxil      (post-MVP) )
 
   Outputs ◄── stdout (bytecode bytes, length-prefixed) ──── glibre-shadercc
            ◄── stderr (structured shader::Error JSON) ────
@@ -1087,20 +1065,18 @@ driver.
 
 1. **One subprocess hop per artifact.** The plugin spawns
    `glibre-shadercc` once per `(ShaderSource, PermutationKey,
-   CompileTarget)`; the driver internally chains DXC → metal-converter
-   when the target is `MetalLib`. Without the wrapper, the plugin
-   would need two stat-and-spawn round-trips per Metal artifact and
-   would have to discover both binaries on every invocation.
+   CompileTarget)`; the driver invokes `slangc` once with the
+   target-appropriate flags and returns the bytecode plus paired
+   reflection. There is no transpile chain.
 2. **One canonicalized argv schema.** The driver normalizes flag order
-   and quoting before invoking DXC, so the cache-key inputs (§4.3
+   and quoting before invoking slangc, so the cache-key inputs (§4.3
    invariant 4) come from the driver's stable argv schema, not from
    the plugin's per-call argv builder. Two callers with semantically
    equal flag sets produce byte-equal driver argv.
-3. **One error vocabulary.** The driver maps DXC and
-   metal-shaderconverter exit codes onto the closed `shader::Error`
-   enum (§5 / §10). The plugin parses a stable JSON error envelope
-   from stderr; it never inspects DXC- or metal-shaderconverter-native
-   diagnostics directly.
+3. **One error vocabulary.** The driver maps slangc exit codes onto
+   the closed `shader::Error` enum (§5 / §10). The plugin parses a
+   stable JSON error envelope from stderr; it never inspects
+   slangc-native diagnostics directly.
 4. **Sandbox policy in one place.** The driver runs each compiler
    under macOS `sandbox-exec` (or the platform-equivalent seccomp
    filter on Linux dev hosts) with read access scoped to the project
@@ -1109,7 +1085,7 @@ driver.
    `-Zsb`-disabled time stamps) are pinned in the driver, not the
    plugin (Occam collapse §3.3).
 
-**Engine never links DXC at runtime.** The runtime read path is
+**Engine never links slangc at runtime.** The runtime read path is
 `ShaderCache::Library::get(ShaderHash)` (§4.6, §4.8 invariant 3).
 There is no fallback path that spawns `glibre-shadercc` from a
 shipping process; the driver binary is not bundled into shipping
@@ -1120,66 +1096,42 @@ construction (§5 `#if !GLIBRE_SHIPPING` guard, §4.3 invariant 3).
 **Driver location.** `tools/shadercc/` (a `tools` context plugin per
 `specs/tools/SPEC.md`). The `shader` context owns the *contract* with
 the driver — its argv schema, its stderr JSON envelope, its exit-code
-table — but does not own the driver source. This keeps DXC and
-metal-shaderconverter version-pinning out of the `shader` plugin's
-ABI surface (PHILOSOPHY §1, §10).
+table — but does not own the driver source. This keeps slangc
+version-pinning out of the `shader` plugin's ABI surface
+(PHILOSOPHY §1, §10).
 
-### 6.3 Reflection: parse the DXIL container directly
+### 6.3 Reflection: ingest slangc native reflection
 
-`reflection/` does **not** depend on `dxcompiler.dll`'s reflection
-APIs (no `IDxcContainerReflection`, no `ID3D12ShaderReflection`).
-DXIL artifacts are DXBC containers — a small, well-known wire format
-— and the §4.4 `ReflectionBlob` is built by walking the container's
-part table directly:
+`reflection/` does **not** parse bytecode containers. slangc emits a
+native reflection record alongside each compiled artifact in the same
+subprocess invocation; the §4.4 `ReflectionBlob` is built by ingesting
+that record and tagging each binding with its descriptor frequency.
 
-```text
-DXIL artifact (bytes):
-
-  ┌─ DXBC header (magic "DXBC" + 16-byte hash + version + size) ─┐
-  │                                                                │
-  │  Part 0: ISG1 / "ISGN"  → vertex input signature elements      │
-  │  Part 1: OSG1 / "OSGN"  → output signature elements            │
-  │  Part 2: PSV0           → pipeline state validation table      │
-  │                            (bind ranges, register spaces,      │
-  │                             stage masks, frequency hints)      │
-  │  Part 3: RDAT           → runtime data (RT payloads, lib funcs)│
-  │  Part 4: RTS0           → root signature blob (if present)     │
-  │  Part 5: DXIL           → LLVM bitcode + named metadata        │
-  │                            (entry-point list, push consts)     │
-  │                                                                │
-  └────────────────────────────────────────────────────────────────┘
-```
-
-The parser is split by part:
+The ingester is small:
 
 | Module | Owns | Produces |
 |--------|------|----------|
-| `dxbc_container.hpp/.cpp` | Header validation, part-table walk, bounds-checked slicing of part payloads. | `span<const std::byte>` per part name. Refuses unknown / duplicate parts. |
-| `psv0_reader.hpp/.cpp` | Pipeline-state-validation table parse — the canonical source of bind ranges, register spaces, stage masks, descriptor counts. | Raw `PSV0` records lifted into `BindingSlot`-shaped temporaries (no frequency tag yet). |
-| `dxil_metadata.hpp/.cpp` | Named-metadata walk over the `DXIL` part (LLVM bitcode-shaped). Extracts entry-point list, push-constant root parameters, RT payload sizes. | `EntryPoint` list, `PushConstantRange` list, `rt_payload_bytes`. |
-| `frequency_tagger.hpp/.cpp` | Per-binding frequency assignment from HLSL `[register(..., space=N)]` conventions and from explicit `[frequency(...)]` annotations the engine standardizes. | Each `BindingSlot` annotated with exactly one `DescriptorFrequencyGroup`. |
+| `slangc_reflection_ingester.hpp/.cpp` | Reads the slangc-emitted reflection JSON paired with the bytecode in the same subprocess invocation; lifts each entry-point, binding, vertex-input element, push-constant range, sampler binding, and RT payload size into the canonical `BindingSlot`-shaped temporaries. | `EntryPoint` list, untagged `BindingSlot` set, `VertexIOLayout`, `PushConstantRange` list, `rt_payload_bytes`. |
+| `frequency_tagger.hpp/.cpp` | Per-binding frequency assignment from Slang `[register(..., space=N)]` conventions and from explicit `[frequency(...)]` annotations the engine standardizes. | Each `BindingSlot` annotated with exactly one `DescriptorFrequencyGroup`. |
 | `descriptor_layout.cpp` | Project `ReflectionBlob` onto §4.5 four-frequency tables; sort each table by `(register_space, register_index, stage_mask)`. | `DescriptorLayout` + `RootSignatureSchema`. |
 
-**Determinism.** The container walk uses fixed iteration order (part
-table order on disk); the metadata walk fixes a canonical traversal of
-LLVM named metadata; the frequency tagger is a pure function of its
-inputs. Reflecting the same bytecode twice yields a structurally-equal
-`ReflectionBlob` (§4.4 invariant 2).
+**Determinism.** The ingester walks slangc's reflection record in a
+fixed canonical order; the frequency tagger is a pure function of its
+inputs. Ingesting the same reflection record twice yields a
+structurally-equal `ReflectionBlob` (§4.4 invariant 2).
 
-**MetalLib reflection.** Never re-extracted from MSL or metallib
-itself. The `metal_converter` backend pairs each emitted metallib
-with the upstream DXIL `ReflectionBlob` and stores both in the
-artifact (§4.4 invariant 1, §3 collapse 4). The shipping plugin
-therefore links only the DXIL+SPIR-V branches of `reflection/`; the
-metallib branch needs no reflection code at all.
+**Pairing with bytecode.** Reflection and bytecode are joint outputs
+of one slangc run; the artifact stores both as a unit (§4.4 invariant
+1, §3 collapse 4). Bytecode containers are never re-parsed for
+reflection.
 
 **Ship-time presence.** `reflection/` is in the shipping plugin —
-hot-reload (§8) re-runs the parser on freshly compiled bytecode in
-editor / dev builds, and the runtime descriptor-layout consumer in
-`render` reaches into stored `ReflectionBlob` records via the cache.
-The parser code itself is small (the part-table walk plus PSV0/DXIL
-metadata readers), depends on nothing outside `<cstdint>` /
-`<span>` / `<vector>`, and carries no DXC dynamic linkage.
+hot-reload (§8) re-runs the ingester on freshly emitted reflection
+records in editor / dev builds, and the runtime descriptor-layout
+consumer in `render` reaches into stored `ReflectionBlob` records via
+the cache. The ingester depends on nothing outside `<cstdint>` /
+`<span>` / `<vector>` plus a small JSON reader, and carries no slangc
+dynamic linkage.
 
 ### 6.4 Cache: BLAKE3 keys and the cooker walk
 
@@ -1218,7 +1170,7 @@ cook(span<const PermutationKey> enumerated_keys):
        // resolved set in tuple-field order.
 
     2. For each key k in enumerated_keys:
-       2a. For each (CompileTarget t) in {DXIL, SPIRV, MetalLib}:
+       2a. For each (CompileTarget t) in {MetalLib}:    // MVP; DXIL added post-MVP
            2b. source_hash := ShaderSource::preprocessed().total_hash
            2c. flags_hash  := BLAKE3(canonical_flags(k, t))
            2d. artifact_hash := BLAKE3(source_hash || k.to_bytes() ||
@@ -1263,23 +1215,23 @@ Restating the §6.1 build-system table as a runtime contract:
 
 | Surface | Shipping | Justification |
 |---------|----------|----------------------------|
-| `source/` (HLSL frontend) | **excluded** | §3 refusal 3, §4.3 inv 3 — shipping never opens HLSL. |
+| `source/` (Slang frontend) | **excluded** | §3 refusal 3, §4.3 inv 3 — shipping never opens Slang. |
 | `permutation/` | included | §4.2 — codec is consumed at runtime to map a `PermutationKey` to the cache lookup. Pure value math; no I/O. |
-| `backend/dxc_hlsl/`, `backend/metal_converter/` | **excluded** | §4.3 inv 3, §4.8 inv 3 — DXC and metal-shaderconverter are tooling-only. The whole `IShaderBackend::compile` virtual is `#if`-guarded out of §5, so callers cannot even reference it. |
-| `reflection/` | included | §6.3 — DXIL parser is tiny and dependency-free. Reads stored `ReflectionBlob` records on artifact load; no DXC linkage. |
+| `backend/slang/` | **excluded** | §4.3 inv 3, §4.8 inv 3 — slangc is tooling-only. The whole `IShaderBackend::compile` virtual is `#if`-guarded out of §5, so callers cannot even reference it. |
+| `reflection/` | included | §6.3 — slangc-reflection ingester is tiny and dependency-free. Reads stored `ReflectionBlob` records on artifact load; no slangc linkage. |
 | `cache/{blake3, cas_store, manifest, library}.cpp` | included | §4.6 inv 2 — sole runtime read path. Manifest is mmap'd, CAS files are mmap'd, BLAKE3 is the lookup-key codec. |
 | `cache/cooker.cpp`, `cache/integrity.cpp` | **excluded** | Sole writer is offline (§7.5). Shipping is read-only. |
 | `tools/shadercc/` (`glibre-shadercc` driver) | not bundled | §6.2 — the driver binary is a tooling artifact; it is not redistributed in shipping. |
 
 The shipping `shader.dylib` therefore contains: §4.2 (key codec), the
-DXIL/SPIR-V reflection parser, BLAKE3, the CAS read path, the manifest
+slangc-reflection ingester, BLAKE3, the CAS read path, the manifest
 reader, and `ShaderCache::Library`. Nothing else. PHILOSOPHY §6
 ("zero runtime reflection in shipping") holds for the *engine*: any
 reflection that runs at shipping time is a bounded read of a
-pre-cooked, content-addressed `ReflectionBlob` — never a live DXIL
-parse — but the parser itself ships so the (rare) editor / asset-pipe
-build that wants to re-extract reflection from a bundled artifact
-still has the code.
+pre-cooked, content-addressed `ReflectionBlob` — never a live
+ingestion — but the ingester itself ships so the (rare) editor /
+asset-pipe build that wants to re-ingest reflection from a bundled
+artifact still has the code.
 
 ### 6.6 Dataflow recap (§4 diagram, projected onto §6)
 
@@ -1317,7 +1269,7 @@ The `shader` context persists three on-disk record types via Apache Fory
 schemas under the `data` middleman dylib (`reviews/decisions/fory-codegen.md`).
 Schemas live at `data/schemas/shader/<Type>.fory`; codegen emits
 `glibre::types::shader::*` POD-like structs that the in-memory C++ types
-in §5 serialize into. **HLSL source is never persisted** — it stays
+in §5 serialize into. **Slang source is never persisted** — it stays
 versioned in the project repo. The cache is content-addressable; the
 manifest is a single sidecar pointing into it; reflection rides inside
 each artifact record.
@@ -1360,10 +1312,10 @@ schema glibre.shader.ShaderArtifactRecord {
   field source_hash     : bytes32                             tag 3 since 1   // BLAKE3 of preprocessed source
   field flags_hash      : bytes32                             tag 4 since 1   // BLAKE3 of canonical compile-flag list
   field artifact_hash   : bytes32                             tag 5 since 1   // ShaderHash from §2 (CAS key)
-  field bytecode        : bytes                               tag 6 since 1   // DXIL / SPIR-V / metallib bytes
+  field bytecode        : bytes                               tag 6 since 1   // metallib (MVP) or DXIL (post-MVP) bytes
   field reflection      : glibre.shader.ReflectionRecord      tag 7 since 1
   field descriptors     : glibre.shader.DescriptorLayoutRecord tag 8 since 1
-  field producer_label  : string                              tag 9 since 1   // backend identity (e.g. "hlsl-dxc-1.7")
+  field producer_label  : string                              tag 9 since 1   // backend identity (e.g. "slang-slangc-1.7")
 }
 ```
 
@@ -1421,19 +1373,20 @@ schema glibre.shader.ReflectionRecord {
    `(register_space, register_index, stage_mask)` (§4.5 invariant 3).
    `DescriptorLayoutRecord` tables likewise. No iterator-order from a
    hash container may leak into any field.
-3. **HLSL source never enters a record.** Only the BLAKE3 `source_hash`
+3. **Slang source never enters a record.** Only the BLAKE3 `source_hash`
    appears. The `data/schemas/shader/` files are the only artifacts
-   that ship; the HLSL itself is repo-versioned (§3 collapse 1, §4.6
+   that ship; the Slang itself is repo-versioned (§3 collapse 1, §4.6
    invariant 2).
 4. **Manifest stamps the middleman ABI.** `schema_abi_hash` is the
    value `glibre_types_abi_hash()` returns at cook time. The shader
    loader refuses a manifest whose hash differs from the host's
    (`Error::CacheIntegrity`); together with the dynamic linker's SONAME
    check this catches both schema-additive and schema-breaking drift.
-5. **`metallib` records reuse the upstream DXIL reflection.** A
-   `ShaderArtifactRecord` whose `target == MetalLib` carries the
-   `ReflectionRecord` derived from the DXIL the lowering consumed
-   (§4.4 invariant 1, §4.8 invariant 2). Never re-reflected from MSL.
+5. **Reflection is paired with bytecode at compile time.** A
+   `ShaderArtifactRecord` carries the `ReflectionRecord` slangc emitted
+   alongside the bytecode in the same subprocess invocation
+   (§4.4 invariant 1, §4.8 invariant 2). Bytecode containers are never
+   re-parsed.
 6. **Round-trip equality.** For every record type, Fory deserialize ∘
    serialize is the identity on the in-memory §5 type (golden tests at
    the plan level).
@@ -1519,7 +1472,7 @@ without CAS file) both fail integrity verification with
 
 The `shader` context's hot-reload semantics differ from the engine-wide
 plugin reload protocol (`reviews/decisions/hot-reload-protocol.md`) in
-one fundamental way: **the unit of reload is an HLSL source file, not
+one fundamental way: **the unit of reload is an Slang source file, not
 the `shader` plugin `.dylib`**. The plugin loader's drain → swap →
 migrate → resume state machine governs `.dylib` swaps; `shader` does
 not perform a plugin self-swap as its hot-reload story. Shader source
@@ -1534,8 +1487,8 @@ reasons-to-change (PHILOSOPHY §1).
 Exactly one trigger fires a `shader` hot-reload event in editor / dev
 builds:
 
-1. **HLSL source change.** The editor's filesystem watcher observes a
-   modified `.hlsl` translation unit (or any file in its include
+1. **Slang source change.** The editor's filesystem watcher observes a
+   modified `.slang` translation unit (or any file in its include
    closure, §4.1 invariant 3) under the project source root. The
    watcher calls into the `shader` plugin to re-`open()` the affected
    `ShaderSource` and recompute its `PreprocessedSource.total_hash`.
@@ -1545,7 +1498,7 @@ builds:
 
 The plugin `.dylib` swap path is **not** a `shader` hot-reload trigger.
 The `shader` plugin is reloaded only by the engine-wide loader protocol
-when the plugin's own code (DXC argv builder, reflection extractor,
+when the plugin's own code (slangc argv builder, reflection extractor,
 backend trait implementation) changes — that is a `core`-driven event,
 not a content event, and it inherits `hot-reload-protocol.md` verbatim.
 
@@ -1561,8 +1514,8 @@ in-memory needs migration. Specifically:
 1. **`ShaderCache` entries for unaffected permutations survive
    verbatim.** Cache is keyed by `ShaderHash = BLAKE3(preprocessed
    source ∪ resolved PermutationKey ∪ canonical flags ∪ target)` (§2,
-   §4.6 invariant 1). An edit to `foo.hlsl` changes the `source_hash`
-   only for `(PermutationKey, target)` pairs that include `foo.hlsl`
+   §4.6 invariant 1). An edit to `foo.slang` changes the `source_hash`
+   only for `(PermutationKey, target)` pairs that include `foo.slang`
    in their preprocessed closure. All other permutations retain their
    prior `ShaderHash`, prior bytecode, prior `ReflectionBlob`, and
    prior `DescriptorLayout` — bit-equal across the swap.
@@ -1631,7 +1584,7 @@ of the trigger itself in shipping; the other three are recompile-time
 failures that surface to the editor and leave the previous-good
 artifact bound.
 
-1. **Shipping build refuses to invoke DXC.** In any build with
+1. **Shipping build refuses to invoke slangc.** In any build with
    `GLIBRE_SHIPPING == 1`, the entire `CompilationPipeline`
    translation unit is excluded (§4.3 invariant 3, §4.8 invariant 3),
    and the filesystem watcher is not registered. A reload-on-source
@@ -1642,7 +1595,7 @@ artifact bound.
    that ABI. If a request nonetheless reaches the plugin (for
    example, via the engine-wide test harness mistakenly enabled), it
    is rejected with `Error::ShippingCompilationAttempted`.
-2. **DXC subprocess failure.** The subprocess invocation fails
+2. **slangc subprocess failure.** The subprocess invocation fails
    (`Error::CompilerInvocationFailed`), exits non-zero
    (`Error::CompilerExitNonZero`), or times out
    (`Error::CompilerTimedOut`) — see §10 for the closed enum. The
@@ -1650,7 +1603,7 @@ artifact bound.
    is discarded; the prior CAS entry remains the live artifact for
    that `(PermutationKey, target)`.
 3. **Reflection or descriptor-layout failure on the new bytecode.**
-   The new DXIL reflects but yields a `ReflectionBlob` whose bindings
+   The new bytecode reflects but yields a `ReflectionBlob` whose bindings
    include an unassigned descriptor frequency
    (`Error::DescriptorFrequencyAmbiguous` /
    `DescriptorFrequencyMissing`, §4.4 invariant 3) or whose
@@ -1722,14 +1675,14 @@ filesystem watcher.
 ```cpp
 namespace glibre::shader::test {
 
-// Inject an HLSL diff for `source_id` as if the watcher had observed
+// Inject an Slang diff for `source_id` as if the watcher had observed
 // it; new_bytes replace the file's preprocessed body. Returns the
 // affected permutation set discovered by re-keying through the
 // permutation enumerator.
-std::expected<std::vector<PermutationKey>, Error>
+std::expected<eastl::vector<PermutationKey>, Error>
 inject_source_diff(
     const SourceId&                source_id,
-    std::span<const std::byte>     new_preprocessed_bytes
+    eastl::span<const std::byte>     new_preprocessed_bytes
 ) noexcept;
 
 // Synchronously drive the recompile + reflect + cache-insert chain
@@ -1739,7 +1692,7 @@ inject_source_diff(
 std::expected<glibre::types::shader::ShaderArtifactReplaced, Error>
 recompile_affected(
     const SourceId&                       source_id,
-    std::span<const PermutationKey>       affected,
+    eastl::span<const PermutationKey>       affected,
     CompileTarget                         target
 ) noexcept;
 
@@ -1749,9 +1702,9 @@ recompile_affected(
 The CI matrix exercises four scenarios in a single deterministic
 frame each:
 
-- **Unaffected-permutation survival.** Inject a diff to `foo.hlsl`;
+- **Unaffected-permutation survival.** Inject a diff to `foo.slang`;
   assert that every permutation whose preprocessed closure does
-  *not* include `foo.hlsl` retains its prior `ShaderHash` byte-equal,
+  *not* include `foo.slang` retains its prior `ShaderHash` byte-equal,
   and that `render`'s `PSOCache` does not evict the corresponding
   PSO (zero invalidations on the unaffected set).
 - **Affected-permutation invalidation.** Inject a diff that touches
@@ -1761,7 +1714,7 @@ frame each:
   observer reaction evicts exactly those N PSOs and rebinds them
   through the new hashes.
 - **Each refusal case.** Drive `inject_source_diff` with synthetic
-  inputs that fail at DXC, at reflection, at descriptor derivation,
+  inputs that fail at slangc, at reflection, at descriptor derivation,
   and at cache insert; assert that no `ShaderArtifactReplaced` is
   published and that the prior `ShaderHash` continues to resolve
   through `ShaderCache::get`.
@@ -1817,8 +1770,8 @@ it (§9.4).
 
 `CompilationPipeline` (§4.3) and the cooker (`cache/cooker.cpp`) run
 **only** in the offline build / editor / tests; both are excluded from
-the shipping link (§6.1 build-system gating, §4.3 invariant 3). DXC
-and `metal-shaderconverter` subprocess wall-clock per artifact, total
+the shipping link (§6.1 build-system gating, §4.3 invariant 3). slangc
+and `slangc` subprocess wall-clock per artifact, total
 cook duration over a full permutation enumeration, parallel cook
 saturation on M1 firestorm/icestorm cores, and editor incremental-cook
 latency are tracked separately under the `shader-cook-time-budget`
@@ -1865,7 +1818,7 @@ Rules"). The 32 MiB ceiling decomposes:
 | `ReflectionBlob` records held by resident artifacts     | 4 MiB   | resident, counted |
 | `DescriptorLayout` projections of resident reflections  | (within the 4 MiB above) | resident, counted |
 | Cold-start manifest scratch (decode buffer, drained by phase 9 of the first frame after init) | 4 MiB | transient arena, **not counted** against the ceiling per perf-budget.md Allocator Rule §4 |
-| Cooker / DXC / metal-shaderconverter scratch            | n/a     | shipping-excluded; counted under the editor's tag in dev builds |
+| Cooker / slangc scratch                                 | n/a     | shipping-excluded; counted under the editor's tag in dev builds |
 | GPU-side memory                                         | 0       | `shader` allocates no GPU memory; PSO bytecode residency lives under the `render` 512 MiB tag (perf-budget.md Allocator Rule §5) |
 
 Strict-mode (`GLIBRE_ALLOC_STRICT=1`) returns
@@ -1973,7 +1926,7 @@ refusal there, and vice versa.
 Recovery for every entry is mechanical (`refuse compile`, `fall back
 to prior cache entry`, or `fail the cook with no artifact emission`).
 The §10 contract bans silent retry: the plugin does **not** re-spawn
-DXC on transient subprocess failure, does **not** synthesise a "best
+slangc on transient subprocess failure, does **not** synthesise a "best
 effort" `ReflectionBlob`, and does **not** publish a partially-cooked
 artifact. Retries, when they happen, happen at the cooker / editor
 layer that called us, never inside `shader`.
@@ -1990,31 +1943,29 @@ checklist against the spec without mutating §5).
 | Enumerator (§5) | Trigger | Recovery | Severity |
 |-----------------|---------|----------|----------|
 | **`SourceNotFound`** | `ShaderSource::open` cannot stat the project-relative path, or the path resolves outside the project source root (§4.1 inv 3). | refuse open; caller (cooker / editor) decides whether to retry after a filesystem rename or surface to the user. | `refuse` |
-| **`SourceParseFailed`** *(SourceParseError)* | DXC frontend rejects the HLSL translation unit during preprocessing or parsing — syntax error, unresolved entry-point attribute, malformed `[shader(...)]` annotation (§4.1 inv 1). | refuse compile; capture stderr verbatim into the structured error envelope (§6.2) and surface to the editor; prior artifact (if any) remains live. | `refuse` |
+| **`SourceParseFailed`** *(SourceParseError)* | slangc rejects the Slang translation unit during preprocessing or parsing — syntax error, unresolved entry-point attribute, malformed `[shader(...)]` annotation (§4.1 inv 1). | refuse compile; capture stderr verbatim into the structured error envelope (§6.2) and surface to the editor; prior artifact (if any) remains live. | `refuse` |
 | **`IncludeEscape`** *(IncludeResolutionFailed, escape variant)* | An `#include` resolves outside the project source root, or to an absolute path (§4.1 inv 3). | refuse open; the include graph is never partially admitted — `ShaderSource` construction fails atomically. | `refuse` |
 | **`IncludeCycle`** *(IncludeResolutionFailed, cycle variant)* | The include graph contains a cycle; closure is non-finite (§4.1 inv 3). | refuse open; report the cycle path through the structured error detail. | `refuse` |
 | **`EntryPointMissing`** | `compile` is invoked for an entry point name that the preprocessed `ShaderSource` does not expose. | refuse compile; surfaced to the cooker as a build-graph wiring bug, not a shader bug. | `refuse` |
 | **`EntryPointStageAmbiguous`** | An entry point carries zero or more than one `[shader(...)]` attribute (§4.1 inv 1). | refuse open. | `refuse` |
 | **`PermutationKeyMalformed`** | `PermutationKey::from_bytes` rejects bytes (e.g. enumerator out of declared range) (§4.2). | refuse decode; the cache entry that produced the bytes is quarantined and treated as `CacheCorrupt`. | `refuse` |
 | **`PermutationKeyOutOfRange`** *(PermutationOutOfRange)* | A `PermutationIndex` exceeds the §4.2 cardinality product. | refuse compile; indicates a codegen-table drift between the build that emitted the index and the build that consumes it. | `fatal` |
-| **`CompilerInvocationFailed`** *(DxcInvocationFailed)* | The `glibre-shadercc` driver subprocess cannot be spawned (binary missing, sandbox profile rejected, executable bit missing). | refuse compile; the artifact is not written; in-flight cook is failed — see §8.4 refusal case 2. | `refuse` |
-| **`CompilerExitNonZero`** *(DxcOutputDiagnostic)* | The driver exited non-zero with a structured `shader::Error` JSON envelope on stderr (§6.2). DXC or `metal-shaderconverter` emitted a diagnostic the driver mapped to this arm. | refuse compile; diagnostic JSON is forwarded verbatim into the editor / cooker logs; prior CAS entry remains the live artifact for that `(PermutationKey, target)`. | `refuse` |
+| **`CompilerInvocationFailed`** *(SlangcInvocationFailed)* | The `glibre-shadercc` driver subprocess cannot be spawned (binary missing, sandbox profile rejected, executable bit missing). | refuse compile; the artifact is not written; in-flight cook is failed — see §8.4 refusal case 2. | `refuse` |
+| **`CompilerExitNonZero`** *(SlangcOutputDiagnostic)* | The driver exited non-zero with a structured `shader::Error` JSON envelope on stderr (§6.2). slangc emitted a diagnostic the driver mapped to this arm. | refuse compile; diagnostic JSON is forwarded verbatim into the editor / cooker logs; prior CAS entry remains the live artifact for that `(PermutationKey, target)`. | `refuse` |
 | **`CompilerTimedOut`** *(ShaderCompileTimeout)* | The driver subprocess exceeded the per-invocation wall-clock budget (§9 cook-time budget; pinned in the driver, not overridable from the plugin). | refuse compile; **no in-process retry**; the cooker may re-queue the job at its layer, which is outside this context. | `refuse` |
-| **`UnsupportedTarget`** | The `IShaderBackend` implementation rejects the requested `CompileTarget` (e.g., a non-HLSL backend asked for `MetalLib`). | refuse compile; capability mismatch surfaced through `IShaderBackend::capabilities()`. | `refuse` |
-| **`DxilEmissionFailed`** | DXC produced a non-zero exit *without* a structured diagnostic, or the driver could not parse the DXIL container header it received. | refuse compile; treated as a driver-level integrity error. | `refuse` |
-| **`SpirvEmissionFailed`** | DXC `--target spirv` produced a non-zero exit without a structured diagnostic, or emitted a SPIR-V module that fails the driver's container-shape check. | refuse compile. | `refuse` |
-| **`MetalLibLoweringFailed`** *(MetalShaderConverterFailed)* | `metal-shaderconverter` rejected the DXIL input or emitted a `metallib` whose container shape the driver could not validate (§3 collapse 4 — DXIL is the reflection pivot, never re-reflect from MSL). | refuse compile; prior `metallib` artifact (if any) remains the live entry for this permutation. | `refuse` |
-| **`ReflectionExtractionFailed`** *(ReflectionParseError)* | The `reflection/` DXIL parser (§6.3) cannot walk the container — unknown part FourCC, truncated parts table, malformed bind-table (§4.4). | refuse publish (the artifact is *not* inserted into the cache); prior `ReflectionBlob` for the prior artifact remains live; surfaces as §8.4 refusal case 3. | `refuse` |
+| **`UnsupportedTarget`** | The slangc backend does not yet support the requested `CompileTarget` (e.g. `DXIL` before post-MVP support lands). | refuse compile; capability mismatch surfaced through `IShaderBackend::capabilities()`. | `refuse` |
+| **`MetalLibEmitFailed`** *(SlangcFailed)* | slangc emitted no `metallib`, or emitted a `metallib` whose container shape failed driver validation. | refuse compile; prior `metallib` artifact (if any) remains the live entry for this permutation. | `refuse` |
+| **`ReflectionExtractionFailed`** *(ReflectionParseError)* | The `reflection/` slangc-reflection ingester (§6.3) cannot ingest the reflection record paired with the bytecode — malformed JSON, unknown binding kind, truncated bind-table (§4.4). | refuse publish (the artifact is *not* inserted into the cache); prior `ReflectionBlob` for the prior artifact remains live; surfaces as §8.4 refusal case 3. | `refuse` |
 | **`DescriptorFrequencyAmbiguous`** *(DescriptorLayoutInvalid, ambiguous variant)* | A binding in the new `ReflectionBlob` carries no, or multiple, `DescriptorFrequencyGroup` annotations (§4.4 inv 3). | refuse publish; same path as `ReflectionExtractionFailed`. | `refuse` |
 | **`DescriptorFrequencyMissing`** *(DescriptorLayoutInvalid, missing variant)* | A binding lacks any `DescriptorFrequencyGroup` resolution after the §4.5 `DescriptorLayout::derive` pass. | refuse publish. | `refuse` |
-| **`LinkFailed`** | `IShaderBackend::link` rejected a SPIR-V spec-constant bake — entry-point set is incoherent, or specialization constants conflict across modules (§4.7 op `link`). | refuse compile of the linked module; per-module artifacts remain valid. | `refuse` |
+| **`LinkFailed`** | `IShaderBackend::link` rejected a spec-constant bake — entry-point set is incoherent, or specialization constants conflict across modules (§4.7 op `link`). | refuse compile of the linked module; per-module artifacts remain valid. | `refuse` |
 | **`SpecializationConstantMissing`** | A spec-constant referenced by the entry-point set is not bound at link time. | refuse link. | `refuse` |
 | **`CacheLookupMiss`** *(CacheMiss)* | `ShaderCache::lookup` finds no manifest entry for the requested `ShaderHash`. **This is the success case in disguise**: it is the only `Error` arm that callers are *expected* to handle non-fatally — the cooker's response is to enqueue a compile, the runtime's response is to refuse the bind (§4.6 inv 2 — runtime is read-only). | tooling: enqueue compile through `CompilationPipeline`. shipping: refuse bind; `render` falls back to its own missing-PSO policy (§render SPEC §8). | `fallback` |
 | **`CacheCorrupt`** | A CAS file under the cache root fails its BLAKE3 self-check, or a manifest entry references a hash whose CAS file is absent (§4.6 inv 3). | refuse load of the corrupt entry; the cooker is required to re-cook from source — there is no in-place repair. Prior valid entries in the same manifest remain live. | `fatal` |
 | **`CacheIntegrity`** | A `ShaderHash` collision against a non-byte-equal payload during cooker insert, or a manifest-vs-CAS skew detected by the integrity walk (§4.6 inv 3). | refuse insert; the in-flight artifact is dropped; prior hash continues to resolve — see §8.4 refusal case 4. | `fatal` |
 | **`CacheReadOnlyViolation`** | The shipping `shader.dylib` observed a write attempt against the cache root (§4.6 inv 2; §4.8 inv 3). | refuse the write; abort the offending caller — this is a build-system bug, never a runtime user fault. | `fatal` |
 | **`CapabilityNotSupported`** | A permutation requires a capability (mesh shaders, RT, work graphs, wave intrinsics, fp16) that the active backend does not advertise via `IShaderBackend::capabilities()` (§4.7 op `capabilities`). | refuse compile; the offline permutation enumerator (§6) is responsible for not asking — surfacing this at compile is a defense-in-depth check. | `refuse` |
-| **`ShippingCompilationAttempted`** *(ShippingBuildCannotCompile)* | Any code path inside a `GLIBRE_SHIPPING == 1` build invokes the (link-excluded) `IShaderBackend::compile` — only reachable if a test harness or stray dev tool is mistakenly enabled in shipping (§4.3 inv 3, §4.8 inv 3, §6.5, §8.4 refusal case 1). | refuse with this enumerator and abort the calling thread; shipping has no DXC binary, no `metal-shaderconverter` binary, and no `glibre-shadercc` driver bundled — there is no recovery path that a runtime could take. | `fatal` |
+| **`ShippingCompilationAttempted`** *(ShippingBuildCannotCompile)* | Any code path inside a `GLIBRE_SHIPPING == 1` build invokes the (link-excluded) `IShaderBackend::compile` — only reachable if a test harness or stray dev tool is mistakenly enabled in shipping (§4.3 inv 3, §4.8 inv 3, §6.5, §8.4 refusal case 1). | refuse with this enumerator and abort the calling thread; shipping has no slangc binary, no `glibre-shadercc` driver bundled — there is no recovery path that a runtime could take. | `fatal` |
 
 #### 10.2.1 Spike-list enumerator added to §5
 
@@ -2022,7 +1973,7 @@ Spike #79 enumerated one failure mode that is **not** present in the
 §5 declaration as of this revision:
 
 - **`ArtifactSizeExceeded`** — the driver emitted a bytecode artifact
-  (DXIL / SPIR-V / `metallib`) whose serialized payload exceeds the
+  (`metallib` MVP, `DXIL` post-MVP) whose serialized payload exceeds the
   per-artifact ceiling pinned in §9 (cook-time budget) and §7.5 (cooked
   `ShaderLibrary` layout). Trigger: cooker insert observes
   `payload.size() > artifact_size_ceiling` after the driver returns.
@@ -2043,15 +1994,14 @@ violated; this temporary mapping is unit-tested and deleted when
 ### 10.3 Shipping-build refusal blanket rule
 
 Per §4.3 inv 3, §4.8 inv 3, §6.5, and §8.4 refusal case 1, the
-shipping `shader.dylib` does not link DXC, does not link
-`metal-shaderconverter`, and does not bundle the `glibre-shadercc`
-driver. The §5 public header `#if !GLIBRE_SHIPPING`-guards
-`IShaderBackend::compile` itself, so a shipping caller cannot reference
-the operation at compile time.
+shipping `shader.dylib` does not link slangc and does not bundle the
+`glibre-shadercc` driver. The §5 public header `#if !GLIBRE_SHIPPING`-
+guards `IShaderBackend::compile` itself, so a shipping caller cannot
+reference the operation at compile time.
 
 The blanket runtime rule is therefore:
 
-> **Any DXC or `metal-shaderconverter` invocation attempted from a
+> **Any slangc invocation attempted from a
 > `GLIBRE_SHIPPING == 1` process — by any code path, including test
 > harnesses mistakenly enabled in shipping — fails with
 > `Error::ShippingCompilationAttempted`** (§5 alias of spike #79's
@@ -2073,9 +2023,9 @@ the first place.
 - Closed enum source-of-truth: §5 (the §10 table tracks the §5
   declaration; both are amended together when a new arm lands).
 - Hot-reload refusal projection: §8.4 (refusal cases 1–4).
-- Subprocess error envelope: §6.2 (driver maps DXC and
-  `metal-shaderconverter` exit codes onto this enum).
-- Reflection refusal path: §6.3 (DXIL container parse).
+- Subprocess error envelope: §6.2 (driver maps slangc exit codes onto
+  this enum).
+- Reflection refusal path: §6.3 (slangc native reflection ingestion).
 - Cache integrity walk: §6.4, §4.6 invariant 3.
 - Shipping-cut linkage: §6.5.
 - Engine-wide error policy: `reviews/decisions/error-model.md`
@@ -2086,20 +2036,19 @@ the first place.
 
 GitHub `type:user-story` issues this spec closes:
 
-- #319 — Author and validate an HLSL translation unit
+- #319 — Author and validate an Slang translation unit
   (Catch2: `shader_source_open_validates_entry_points`)
-- #321 — Resolve HLSL include closure with escape and cycle detection
+- #321 — Resolve Slang include closure with escape and cycle detection
   (Catch2: `shader_source_include_closure_rejects_escape_and_cycle`)
 - #323 — Encode and enumerate the 4-axis `PermutationKey` deterministically
   (Catch2: `permutation_key_encoding_is_total_injective_and_bit_stable`)
-- #325 — Compile HLSL to DXIL via DXC subprocess
+- #325 — Compile Slang to DXIL via slangc subprocess (post-MVP)
   (Catch2: `compilation_pipeline_emits_dxil_via_subprocess`)
-- #327 — Compile HLSL to SPIR-V via DXC subprocess
-  (Catch2: `compilation_pipeline_emits_spirv_via_dxc_subprocess`)
-- #330 — Lower DXIL to MetalLib via `metal-shaderconverter` subprocess
-  (Catch2: `compilation_pipeline_lowers_dxil_to_metallib_via_subprocess`)
-- #332 — Extract canonical `ReflectionBlob` from compiled DXIL
-  (Catch2: `reflection_blob_extracts_canonical_metadata_from_dxil`)
+- #327 — [CLOSED — SPIR-V deferred until Vulkan]
+- #330 — Compile Slang to MetalLib via slangc subprocess
+  (Catch2: `compilation_pipeline_emits_metallib_via_subprocess`)
+- #332 — Extract canonical `ReflectionBlob` from slangc native reflection
+  (Catch2: `reflection_blob_extracts_canonical_metadata_from_slangc`)
 - #334 — Derive `DescriptorLayout` partitioned by frequency group
   (Catch2: `descriptor_layout_derive_partitions_bindings_by_frequency`)
 - #336 — Cook the resolved permutation set into a content-addressable
@@ -2108,7 +2057,7 @@ GitHub `type:user-story` issues this spec closes:
 - #339 — Resolve a cached `ShaderArtifact` by hash without invoking
   any compiler
   (Catch2: `shader_cache_get_resolves_artifact_without_compiling`)
-- #341 — Hot-reload swap on HLSL source edit via
+- #341 — Hot-reload swap on Slang source edit via
   `ShaderArtifactReplaced` event
   (Catch2: `shader_hot_reload_publishes_artifact_replaced_for_affected_set_only`)
 - #342 — Refuse shader compilation in shipping builds at link and

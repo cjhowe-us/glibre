@@ -19,7 +19,8 @@
     "fmt",
     "xxhash",
     "blake3",
-    "directx-shader-compiler"
+    "shader-slang",
+    "eastl"
   ],
   "features": {
     "tests":  { "description": "Build Catch2 test suite",  "dependencies": ["catch2"] },

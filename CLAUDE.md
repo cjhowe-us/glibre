@@ -2,9 +2,8 @@
 
 ## Project
 
-Glibre — C++23/26 no-code game engine. macOS-first. Plugin-based.
-SDL3 + Metal 4 (via metal-cpp) + HLSL (DXC + metal-shaderconverter).
-macOS 26 / Apple Silicon baseline.
+Glibre — C++23/26 no-code game engine. macOS-first. Plugin-based. SDL3 + Metal 4 (via metal-cpp) +
+Slang. macOS 26 / Apple Silicon baseline.
 
 ## Workflow
 
@@ -45,10 +44,10 @@ macOS 26 / Apple Silicon baseline.
 
 ## Tech Stack (locked)
 
-C++23, CMake ≥ 3.28 + Ninja, vcpkg manifest mode, clang ≥ 18, SDL3,
-Metal 4 via metal-cpp (no Obj-C++ in engine code), HLSL via DXC +
-metal-shaderconverter, Jolt, meshoptimizer, Draco, Apache Fory,
-FreeImage, FreeType, FBX SDK, Dear ImGui, Catch2, spdlog.
+C++23, CMake ≥ 4.3.0 + Ninja, vcpkg manifest mode, clang ≥ 21, SDL3, Metal 4 via metal-cpp, Slang,
+Jolt, meshoptimizer, Draco, Apache Fory, FreeImage, HarfBuzz, FBX SDK, Catch2, spdlog, **EASTL**
+(game-focused container + allocator library replacing `std::` containers / strings / smart pointers
+/ optional / variant / tuple / function — see PHILOSOPHY.md §11).
 
 ## Repo Layout
 
@@ -56,7 +55,7 @@ FreeImage, FreeType, FBX SDK, Dear ImGui, Catch2, spdlog.
 - `plugins/<name>/` — each domain ships as its own `.dylib`.
 - `tools/` — `glibre-editor`, `glibre-cook`, `glibre-codegen`.
 - `runtime/` — shipping game runtime entry.
-- `shaders/` — stock HLSL.
+- `shaders/` — Slang.
 - `tests/` — Catch2.
 - `specs/<context>/SPEC.md` — bounded-context specs.
 - `plans/{mvp,post-mvp,long-term}.md` — phase plans linking issues.
@@ -76,8 +75,3 @@ Treat as research input only. Re-derive every conclusion. Do not port.
 - No runtime reflection in shipping builds.
 - No serialized render-graph files (render graph is C++ code).
 - No Obj-C++ in engine code (use metal-cpp).
-
-## Memory
-
-Project memory at
-`/Users/cjhowe/.claude/projects/-Users-cjhowe-Code-glibre/memory/`.

@@ -21,7 +21,7 @@
    shipping builds. ECS archetype storage, component access, schema
    serialization, plugin manifest types, visual graphs (logic,
    material, effects), shader permutations all emit hand-written-shape
-   C++ / HLSL at build time. No third-party ECS library; the engine
+   C++ / Slang at build time. No third-party ECS library; the engine
    owns its archetype layout end-to-end.
 7. **Determinism by default**. Physics + ECS world snapshots byte-equal
    across hosts and runs. No platform intrinsics in simulation. Fixed
@@ -32,6 +32,22 @@
    mismatch.
 10. **Occam's razor at every decision**. Two collapsing requirements
     become one primitive. Record the collapse in the spec.
+11. **EASTL replaces the C++ standard library for runtime data
+    structures**. All containers, strings, smart pointers, `optional`,
+    `variant`, `tuple`, `pair`, and `function` come from `eastl::`,
+    not `std::`. Reasons: explicit allocator-by-value (per-system
+    arenas, no global heap), no exceptions in the hot path, frame /
+    fixed / inline allocators, slot-map and intrusive list primitives,
+    deterministic iteration where required, debug instrumentation that
+    matches game-development workloads. `std::` is retained only for
+    language/runtime utilities EASTL does not own: `std::expected`,
+    `std::format`, `std::chrono`, `std::filesystem`, `std::thread` /
+    `std::mutex` / `std::atomic`, `std::source_location`,
+    `std::span` (when interop with non-EASTL APIs is required),
+    type-traits / concepts, `std::move` / `std::forward`. Public
+    plugin ABI surfaces never expose `std::` containers or
+    `eastl::` containers — they cross the boundary as POD spans /
+    handles only (see plugin-abi decision record).
 
 ## Anti-patterns we reject
 

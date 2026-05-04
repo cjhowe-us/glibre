@@ -23,7 +23,7 @@ platform (SDL3 + metal-cpp surface) ────┐
    ↓                                    │
 data (Fory schemas + reflection)        │
    ↓                                    │
-shader (DXC + msc + reflection)         │
+shader (slangc + reflection)            │
    ↓                                    │
 render (graph + Metal 4 + mesh-shader gbuffer + RT shadow)
    ↓
@@ -47,7 +47,7 @@ in once GitHub repo is provisioned.
 | 2 | core     | ECS + plugin loader + hot-reload + frame loop     | TBD   |
 | 3 | platform | SDL3 window/input + metal-cpp surface + watcher   | TBD   |
 | 4 | data     | Apache Fory schemas + reflection + migration      | TBD   |
-| 5 | shader   | HLSL → DXC → metal-shaderconverter + reflection   | TBD   |
+| 5 | shader   | Slang → slangc → metallib + reflection            | TBD   |
 | 6 | render   | Render graph + Metal 4 backend + mesh-shader gbuffer | TBD |
 | 7 | render   | Hybrid-RT shadow pass                             | TBD   |
 | 8 | geometry | meshoptimizer meshlets + Draco compression + pak  | TBD   |

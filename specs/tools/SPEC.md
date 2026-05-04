@@ -23,7 +23,7 @@ emitting Dear ImGui draw lists into the `RenderFrame` extract that
 visualiser) are deferred post-MVP and will use `imgui-node-editor` as
 sub-panels under this same shell. Tools **refuses** to own anything
 outside that seam: it does not own rendering primitives, swapchains or
-GPU resources (those are `render`); it does not own HLSL or material
+GPU resources (those are `render`); it does not own Slang or material
 graph compilation (`shader` and the future `material` plugin); it does
 not own simulation — neither physics, animation runtime, nor any other
 sim system (`physics`, `sim`, future per-domain plugins); it does not
@@ -331,7 +331,7 @@ deferred behind PHILOSOPHY §5 (greatly reduced MVP scope).
 | Harmonius surface | Cited file(s) | Routed to / deferred |
 |-------------------|----------------|----------------------|
 | Logic / gameplay graph editor (typed visual programming, AOT compile, multi-frame coroutines, validation, debug step-through) | `requirements/tools/logic-graph.md` (R-15.8.1 .. R-15.8.13), `design/tools/visual-editors.md` (Logic Graph Runtime sections) | **Refused** (post-MVP). Glibre uses C++23/26 plugins as the gameplay-authoring substrate (PHILOSOPHY §6 — static codegen, zero runtime reflection in shipping). When/if a logic graph re-enters, it returns as its own `logic-graph` plugin that hosts its node-editor sub-panels under the tools MVP shell using `imgui-node-editor`; tools merely supplies the dock slot. |
-| Shader / material graph editor (typed pin DAG, real-time preview, function subgraphs, parameter inspector, instance variation) | `requirements/tools/material-editor.md` (R-15.3.1 .. R-15.3.6), `requirements/tools/logic-graph.md` R-15.8.5 (shader graph variant), `design/tools/visual-editors.md` (Shader Graph sections) | **Refused** (post-MVP). HLSL authoring + AIR / metallib compilation lives in the `shader` plugin; the eventual material-graph authoring UI lives in the future `material` plugin and re-uses `imgui-node-editor` as a sub-panel under the tools shell. |
+| Shader / material graph editor (typed pin DAG, real-time preview, function subgraphs, parameter inspector, instance variation) | `requirements/tools/material-editor.md` (R-15.3.1 .. R-15.3.6), `requirements/tools/logic-graph.md` R-15.8.5 (shader graph variant), `design/tools/visual-editors.md` (Shader Graph sections) | **Refused** (post-MVP). Slang authoring + AIR / metallib compilation lives in the `shader` plugin; the eventual material-graph authoring UI lives in the future `material` plugin and re-uses `imgui-node-editor` as a sub-panel under the tools shell. |
 | Animation editor (timeline, curve editor, skeleton viewer, blend space, animation state machine, retargeting UX) | `requirements/tools/animation-editor.md` (R-15.4.1 .. R-15.4.x), `design/tools/visual-editors.md` (animation sections), `requirements/tools/specialized-editors.md` R-15.21.2 .. R-15.21.4 | **Refused** (post-MVP). Animation runtime + retargeting are owned by the future `animation` plugin (a `sim` peer); its authoring UI re-enters as an animation-plugin sub-panel under the tools shell. |
 | Behaviour tree / quest graph / state-machine / dialogue / ability-combo graph editors | `requirements/tools/specialized-editors.md` R-15.21.3 .. R-15.21.7, `design/tools/visual-editors.md` (state-machine + behavior-tree + quest sections) | **Refused** (post-MVP). The execution runtimes for these are gameplay-framework concerns, not tools concerns; their graph editors re-enter as `game-framework` plugin sub-panels. The data fields that those graphs reference are already inspectable via the Fory-reflected `Inspector` (Occam #2). |
 | Level-editor world-authoring tools (CSG additive / subtractive primitives + boolean ops, terrain sculpt brushes, hydraulic / thermal erosion, terrain material painting, spline-mesh distribution, foliage / vegetation paint, biome rules, water bodies, light / reflection probe placement) | `requirements/tools/level-editor.md` (R-15.2.1 entity-placement / drag-drop is **kept** in the asset browser; R-15.2.2 .. R-15.2.7 are refused), `requirements/tools/world-building.md` (R-15.6.1 .. R-15.6.x), `design/tools/level-world.md` (entire) | **Refused** (post-MVP). World-authoring is the future `world-edit` plugin (a `tools`-shaped peer that loads its own panels under the same shell). The MVP tools shell only provides drag-and-drop of `AssetHandle`s onto entity inspectors and the viewport — no brushes, no procedural rules, no terrain. |
@@ -1063,18 +1063,18 @@ versioned schema is migrated by `data`.
 
 #pragma once
 
-#include <array>
+#include <EASTL/array.h>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
 #include <memory>
-#include <span>
-#include <string_view>
+#include <EASTL/span.h>
+#include <EASTL/string_view.h>
 #include <type_traits>
 #include <utility>
-#include <variant>
-#include <vector>
+#include <EASTL/variant.h>
+#include <EASTL/vector.h>
 
 // ---------------------------------------------------------------------------
 // Stand-in declarations from sibling contexts. The real definitions live
@@ -1108,14 +1108,14 @@ enum class Error : std::uint16_t {
 }  // namespace core
 
 struct ErrorContext {
-    std::string_view file{};
+    eastl::string_view file{};
     int              line{0};
-    std::string_view detail{};
+    eastl::string_view detail{};
 };
 
 class Error {
 public:
-    using Variant = std::variant<core::Error /*, tools::Error inserted in core */>;
+    using Variant = eastl::variant<core::Error /*, tools::Error inserted in core */>;
 
     template <class E>
     constexpr Error(E e, ErrorContext ctx = {}) noexcept
@@ -1170,23 +1170,23 @@ namespace glibre::types {
 // reached by the inspector. Read-only; codegen-emitted; stripped to
 // nullptr in shipping builds.
 struct SchemaId {
-    std::string_view fqn{};
+    eastl::string_view fqn{};
     constexpr bool operator==(const SchemaId&) const noexcept = default;
 };
 
 using SchemaVersion = std::uint32_t;
 
 struct ReflectionField {
-    std::string_view name{};
+    eastl::string_view name{};
     std::uint16_t    tag{0};
-    std::string_view type_name{};   // builtin or another FQN
+    eastl::string_view type_name{};   // builtin or another FQN
     SchemaVersion    since{0};
 };
 
 struct ReflectionBlob {
     SchemaId                          schema{};
     SchemaVersion                     version{0};
-    std::span<const ReflectionField>  fields{};   // tag-sorted ascending
+    eastl::span<const ReflectionField>  fields{};   // tag-sorted ascending
 };
 
 }  // namespace glibre::types
@@ -1195,7 +1195,7 @@ struct ReflectionBlob {
 #if !defined(GLIBRE_HAVE_PLATFORM_INPUT)
 namespace glibre::platform {
 // Forward-declared opaque InputEvent. The real definition lives in
-// `specs/platform/SPEC.md` §5 as a closed `std::variant` over
+// `specs/platform/SPEC.md` §5 as a closed `eastl::variant` over
 // KeyDown / KeyUp / MouseMove / MouseButtonEv / Wheel / TextInput /
 // GamepadAxisEv / GamepadBtnEv. Tools consumes by const reference.
 struct InputEvent;
@@ -1246,7 +1246,7 @@ enum class Error : std::uint16_t {
     Refused,                 // catch-all closed-sum refusal arm — concurrent drag, second viewport, mode-change races.
 };
 
-[[nodiscard]] constexpr std::string_view to_string(Error e) noexcept;
+[[nodiscard]] constexpr eastl::string_view to_string(Error e) noexcept;
 
 // ---------------------------------------------------------------------------
 // 5.2 EditorMode — closed sum (§4.1 inv. 2, §4.10 inv. 2). Drives whether
@@ -1263,7 +1263,7 @@ enum class EditorMode : std::uint8_t {
     Recording,
 };
 
-[[nodiscard]] constexpr std::string_view to_string(EditorMode m) noexcept;
+[[nodiscard]] constexpr eastl::string_view to_string(EditorMode m) noexcept;
 
 // ---------------------------------------------------------------------------
 // 5.3 Stable string id type for Panels and LayoutProfiles.
@@ -1273,12 +1273,12 @@ enum class EditorMode : std::uint8_t {
 // ---------------------------------------------------------------------------
 
 struct PanelId {
-    std::string_view value{};
+    eastl::string_view value{};
     friend constexpr bool operator==(const PanelId&, const PanelId&) noexcept = default;
 };
 
 struct LayoutProfileName {
-    std::string_view value{};
+    eastl::string_view value{};
     friend constexpr bool operator==(const LayoutProfileName&, const LayoutProfileName&) noexcept = default;
 };
 
@@ -1300,7 +1300,7 @@ class Viewport;        // opaque Viewport — the one panel that blits a
 
 struct PanelDesc {
     PanelId          id{};
-    std::string_view title{};
+    eastl::string_view title{};
     bool             closeable{true};
     bool             dockable{true};
 };
@@ -1310,7 +1310,7 @@ struct PanelDesc {
 // draw-list buffer routed to `render::RenderFrame`; it is forbidden to
 // allocate, mutate game-world storage, or hold engine-wide singletons.
 // Returning an error aborts the panel for this frame; the host logs.
-using PanelDrawFn = std::function<glibre::Result<void>() /* noexcept */>;
+using PanelDrawFn = eastl::function<glibre::Result<void>() /* noexcept */>;
 
 // ---------------------------------------------------------------------------
 // 5.5 Selection (§4.3) — deterministically-ordered set of GameWorld
@@ -1322,7 +1322,7 @@ using PanelDrawFn = std::function<glibre::Result<void>() /* noexcept */>;
 
 class Selection {
 public:
-    [[nodiscard]] std::span<const glibre::core::Entity> entities() const noexcept;
+    [[nodiscard]] eastl::span<const glibre::core::Entity> entities() const noexcept;
     [[nodiscard]] std::size_t                           size()     const noexcept;
     [[nodiscard]] bool                                  empty()    const noexcept;
     [[nodiscard]] bool                                  contains(glibre::core::Entity) const noexcept;
@@ -1395,7 +1395,7 @@ public:
     [[nodiscard]] glibre::core::Entity                   entity()        const noexcept;
     [[nodiscard]] glibre::core::TypeId                   component()     const noexcept;
     [[nodiscard]] const glibre::types::ReflectionBlob*   reflection()    const noexcept;
-    [[nodiscard]] std::span<const ReflectedField>        fields()        const noexcept;
+    [[nodiscard]] eastl::span<const ReflectedField>        fields()        const noexcept;
 
     InspectorView(const InspectorView&)            = delete;
     InspectorView& operator=(const InspectorView&) = delete;
@@ -1410,22 +1410,22 @@ protected:
 // an EditCommand value rather than mutating the component directly.
 class ReflectedField {
 public:
-    [[nodiscard]] std::string_view                     name()      const noexcept;
-    [[nodiscard]] std::string_view                     type_name() const noexcept;
+    [[nodiscard]] eastl::string_view                     name()      const noexcept;
+    [[nodiscard]] eastl::string_view                     type_name() const noexcept;
     [[nodiscard]] std::uint16_t                        tag()       const noexcept;
 
     // Read the current value as an opaque byte view through the
     // registry's ReflectionBlob accessor; the bytes are owned by the
     // game-world component storage and outlive the call only until the
     // next phase-5 boundary.
-    [[nodiscard]] glibre::Result<std::span<const std::byte>>
+    [[nodiscard]] glibre::Result<eastl::span<const std::byte>>
         read() const noexcept;
 
     // Produce an EditCommand that, when applied, writes `bytes` into
     // the field. The command flows through CommandStack (§4.7); the
     // inspector itself never mutates component storage.
     [[nodiscard]] glibre::Result<EditCommand>
-        write(std::span<const std::byte> bytes) const noexcept;
+        write(eastl::span<const std::byte> bytes) const noexcept;
 
     ReflectedField(const ReflectedField&)            = delete;
     ReflectedField& operator=(const ReflectedField&) = delete;
@@ -1466,9 +1466,9 @@ enum class GizmoConstraint : std::uint8_t {
     YZ,
 };
 
-[[nodiscard]] constexpr std::string_view to_string(Gizmo)           noexcept;
-[[nodiscard]] constexpr std::string_view to_string(GizmoFrame)      noexcept;
-[[nodiscard]] constexpr std::string_view to_string(GizmoConstraint) noexcept;
+[[nodiscard]] constexpr eastl::string_view to_string(Gizmo)           noexcept;
+[[nodiscard]] constexpr eastl::string_view to_string(GizmoFrame)      noexcept;
+[[nodiscard]] constexpr eastl::string_view to_string(GizmoConstraint) noexcept;
 
 // Snap quantisation rule. `mode` selects the active state; the
 // per-axis fields are read only when `mode == UniformPerAxis` /
@@ -1536,8 +1536,8 @@ class AssetBrowser {
 public:
     // Read-only listing of paths surfaced by `content` rooted at
     // `subpath`. Returns a borrowed view valid until the next refresh.
-    [[nodiscard]] glibre::Result<std::span<const glibre::content::AssetHandle>>
-        list(std::string_view subpath) const noexcept;
+    [[nodiscard]] glibre::Result<eastl::span<const glibre::content::AssetHandle>>
+        list(eastl::string_view subpath) const noexcept;
 
     // Look up the cached thumbnail for `handle`; returns nullptr if
     // not yet captured. Capture is scheduled by the editor and
@@ -1578,18 +1578,18 @@ namespace edit {
 struct ComponentEdit {
     glibre::core::Entity   entity{};
     glibre::core::TypeId   component{};
-    std::vector<std::byte> previous_bytes{};
-    std::vector<std::byte> next_bytes{};
+    eastl::vector<std::byte> previous_bytes{};
+    eastl::vector<std::byte> next_bytes{};
 };
 
 struct EntityAddComponent {
     glibre::core::TypeId   component{};
-    std::vector<std::byte> bytes{};
+    eastl::vector<std::byte> bytes{};
 };
 
 struct EntityAdd {
     glibre::core::Entity            parent{};   // optional; bits == 0 means root
-    std::vector<EntityAddComponent> components{};
+    eastl::vector<EntityAddComponent> components{};
 };
 
 struct EntityRemove {
@@ -1612,7 +1612,7 @@ struct AssetSlotBind {
 
 }  // namespace edit
 
-using EditCommandPayload = std::variant<
+using EditCommandPayload = eastl::variant<
     edit::ComponentEdit,
     edit::EntityAdd,
     edit::EntityRemove,
@@ -1623,7 +1623,7 @@ using EditCommandPayload = std::variant<
 // and redo restore selection deterministically (§4.7 inv. 5).
 struct SelectionSnapshot {
     std::uint64_t                                hash{0};
-    std::vector<glibre::core::Entity>            entities{};
+    eastl::vector<glibre::core::Entity>            entities{};
 };
 
 class EditCommand {
@@ -1754,12 +1754,12 @@ struct AssertionOp {
     glibre::core::Entity       entity{};
     glibre::core::TypeId       component{};
     std::uint16_t              field_tag{0};
-    std::span<const std::byte> expected_bytes{};
+    eastl::span<const std::byte> expected_bytes{};
 };
 
 struct SelectionOp {
     std::uint64_t                         tick{0};
-    std::span<const glibre::core::Entity> entities{};
+    eastl::span<const glibre::core::Entity> entities{};
 };
 
 struct CommandPushOp {
@@ -1769,7 +1769,7 @@ struct CommandPushOp {
 
 }  // namespace trace
 
-using TraceOp = std::variant<
+using TraceOp = eastl::variant<
     trace::InputEventOp,
     trace::SchedulerTickOp,
     trace::AssertionOp,
@@ -1784,8 +1784,8 @@ using TraceOp = std::variant<
 class TraceFile {
 public:
     // Open a new recording; truncates if `path` already exists.
-    [[nodiscard]] static glibre::Result<std::unique_ptr<TraceFile>>
-        open_for_write(std::string_view path) noexcept;
+    [[nodiscard]] static glibre::Result<eastl::unique_ptr<TraceFile>>
+        open_for_write(eastl::string_view path) noexcept;
 
     // Append a single op. Serialisation is Fory-archived; schema
     // version is co-owned with `specs/e2e/SPEC.md`.
@@ -1795,7 +1795,7 @@ public:
     // leave a truncated but well-formed prefix file.
     [[nodiscard]] glibre::Result<void> close() noexcept;
 
-    [[nodiscard]] std::string_view path()    const noexcept;
+    [[nodiscard]] eastl::string_view path()    const noexcept;
     [[nodiscard]] std::uint64_t   op_count() const noexcept;
 
     TraceFile(const TraceFile&)            = delete;
@@ -1816,7 +1816,7 @@ public:
     // Begin a recording; writes a fresh TraceFile prefix and
     // transitions EditorMode → Recording (§4.9 inv. 5 — the recorder
     // is the only EditorMode writer outside the toolbar).
-    [[nodiscard]] glibre::Result<void> begin(std::string_view path) noexcept;
+    [[nodiscard]] glibre::Result<void> begin(eastl::string_view path) noexcept;
 
     // End a recording; closes the TraceFile and transitions back to
     // the previous EditorMode (typically Edit).
@@ -1832,7 +1832,7 @@ public:
         std::uint16_t        field_tag{0};
     };
     [[nodiscard]] glibre::Result<void>
-        set_assertion_templates(std::span<const AssertionTemplate>) noexcept;
+        set_assertion_templates(eastl::span<const AssertionTemplate>) noexcept;
 
     TraceRecorder(const TraceRecorder&)            = delete;
     TraceRecorder& operator=(const TraceRecorder&) = delete;
@@ -1853,14 +1853,14 @@ namespace events {
 struct SelectionChanged { std::uint64_t snapshot_hash{0}; };
 struct ModeChanged      { EditorMode previous{EditorMode::Edit}; EditorMode current{EditorMode::Edit}; };
 struct LayoutSwitched   { LayoutProfileName previous{}; LayoutProfileName current{}; };
-struct TraceStarted     { std::string_view path{}; };
-struct TraceStopped     { std::string_view path{}; std::uint64_t op_count{0}; };
+struct TraceStarted     { eastl::string_view path{}; };
+struct TraceStopped     { eastl::string_view path{}; std::uint64_t op_count{0}; };
 struct CommandPushed    { std::size_t undo_depth{0}; std::size_t redo_depth{0}; };
 struct CommandUndone    { std::size_t undo_depth{0}; std::size_t redo_depth{0}; };
 
 }  // namespace events
 
-using EditorEvent = std::variant<
+using EditorEvent = eastl::variant<
     events::SelectionChanged,
     events::ModeChanged,
     events::LayoutSwitched,
@@ -1885,7 +1885,7 @@ struct EditorHostDesc {
 
     // Optional path to the LayoutProfile JSON the editor loads at
     // startup; empty = ship default.
-    std::string_view startup_profile_path{};
+    eastl::string_view startup_profile_path{};
 };
 
 class EditorHost {
@@ -1894,7 +1894,7 @@ public:
     // `game_world`. Registers the default Panel set (Scene, Inspector,
     // Assets, Console, Profiler, Viewport, Toolbar). Returns a host
     // handle whose lifetime spans plugin load → unload.
-    [[nodiscard]] static glibre::Result<std::unique_ptr<EditorHost>>
+    [[nodiscard]] static glibre::Result<eastl::unique_ptr<EditorHost>>
         create(const EditorHostDesc& desc) noexcept;
 
     // World accessors. The EditorWorld is owned by the host and
@@ -1938,10 +1938,10 @@ public:
         activate_profile(LayoutProfileName name) noexcept;
 
     [[nodiscard]] glibre::Result<void>
-        save_profile(LayoutProfileName name, std::string_view path) noexcept;
+        save_profile(LayoutProfileName name, eastl::string_view path) noexcept;
 
     [[nodiscard]] glibre::Result<void>
-        load_profile(LayoutProfileName name, std::string_view path) noexcept;
+        load_profile(LayoutProfileName name, eastl::string_view path) noexcept;
 
     // Per-frame entry. Called by the engine plugin manifest at the
     // editor world's phase boundaries; it drains the input pump,
@@ -1950,7 +1950,7 @@ public:
     // and applies any phase-9 EditorMode transition.
     [[nodiscard]] glibre::Result<void>
         tick(glibre::render::RenderFrame& extract,
-             std::span<const glibre::platform::InputEvent> input) noexcept;
+             eastl::span<const glibre::platform::InputEvent> input) noexcept;
 
     EditorHost(const EditorHost&)            = delete;
     EditorHost& operator=(const EditorHost&) = delete;
@@ -2323,7 +2323,7 @@ read through `glibre::types::ReflectionBlob` from the `data` context
    `TypeId`; it is invalidated wholesale on game-plugin reload by the
    §8.3.2 observer callback.
 3. For each `ReflectedField` row, `read_field` returns a
-   `std::span<const std::byte>` into the registry's read-only blob;
+   `eastl::span<const std::byte>` into the registry's read-only blob;
    the row's draw closure decodes that span according to the field's
    `type_name` (`f32`, `vec3f`, `string`, nested FQN, …) and renders
    the ImGui widget. The inspector aggregate has no `T*`-typed
@@ -2727,7 +2727,7 @@ schema glibre.tools.SelectionSnapshot {
 
 **`CommandKind` (closed sum, mirrors §5 `EditCommandPayload`).**
 The `kind` byte is a stable u8 discriminant matching the variant order
-of the `EditCommandPayload` `std::variant` declared in §5.10:
+of the `EditCommandPayload` `eastl::variant` declared in §5.10:
 
 | `kind` value | Variant                  | `payload_bytes` schema FQN                  |
 |--------------|--------------------------|---------------------------------------------|
@@ -2965,7 +2965,7 @@ plus a third rule for the closed `CommandKind` discriminant:
    Closed-sum schema bump: the discriminant byte is **append-only**
    in value (new variant gets `kind = 5`, never reuses 0..4); a new
    `data/schemas/tools/<NewVariant>Payload.fory` ships alongside;
-   the §5.10 `EditCommandPayload` `std::variant` gains a
+   the §5.10 `EditCommandPayload` `eastl::variant` gains a
    corresponding alternative in the same authoring change so
    `kind` byte ↔ variant index stays 1:1. The codegen tool refuses
    to emit a `CommandKind` table whose discriminant assignment does
@@ -4349,7 +4349,7 @@ invoke_panel_safely(PanelId id, const PanelDrawFn& draw) noexcept {
         // contract violation. Stamp the exception's what() into the
         // ErrorContext::detail; the log helper surfaces it.
         return std::unexpected(make_refused("imgui-assert", id,
-                                            std::string_view{e.what()}));
+                                            eastl::string_view{e.what()}));
     } catch (...) {
         // Catch-all defends against non-std exceptions (Objective-C++
         // bridge fall-through, etc.). Refuses to leak.

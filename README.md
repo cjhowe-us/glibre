@@ -2,7 +2,7 @@
 
 C++23/26 no-code game engine. macOS-first (macOS 26 / Apple Silicon
 baseline for Metal 4). Plugin-based. SDL3 + Metal 4 (via metal-cpp) +
-HLSL (DXC + metal-shaderconverter).
+Slang (slangc native pipeline).
 
 See:
 

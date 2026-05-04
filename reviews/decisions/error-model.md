@@ -39,7 +39,7 @@ and no unwinding.
    `std::expected<T, glibre::Error>`. "Public boundary" = any symbol
    exported from `glibre-core` or any plugin dylib, plus any header
    reachable from outside its owning context.
-2. `glibre::Error` is a tagged union (`std::variant`) over per-context
+2. `glibre::Error` is a tagged union (`eastl::variant`) over per-context
    error enums. Each context owns its enum (`enum class
    render::Error`, `physics::Error`, …) and lists its variants in
    that context's SPEC §10. New contexts add a new enum and extend
@@ -63,8 +63,8 @@ and no unwinding.
 // core/include/glibre/error.hpp
 #pragma once
 #include <expected>
-#include <string_view>
-#include <variant>
+#include <EASTL/string_view.h>
+#include <EASTL/variant.h>
 #include <cstdint>
 
 namespace glibre {
@@ -91,18 +91,18 @@ enum class Error : std::uint16_t {
 }
 
 // Per-context enums declared in their own headers. The engine-wide
-// Error rolls them up as a tagged union; std::variant gives us the
+// Error rolls them up as a tagged union; eastl::variant gives us the
 // tag-plus-payload semantics with no allocation and no RTTI.
 
 struct ErrorContext {
-    std::string_view file;       // __FILE__
+    eastl::string_view file;       // __FILE__
     int              line;       // __LINE__
-    std::string_view detail;     // optional human hint, never load-bearing
+    eastl::string_view detail;     // optional human hint, never load-bearing
 };
 
 class Error {
 public:
-    using Variant = std::variant<
+    using Variant = eastl::variant<
         core::Error,
         render::Error
         // physics::Error, data::Error, shader::Error, ...

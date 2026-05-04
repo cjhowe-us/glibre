@@ -687,14 +687,14 @@ mapping is grounded.
 
 #pragma once
 
-#include <array>
+#include <EASTL/array.h>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
-#include <span>
-#include <string_view>
-#include <variant>
+#include <EASTL/span.h>
+#include <EASTL/string_view.h>
+#include <EASTL/variant.h>
 
 namespace glibre {
 
@@ -1214,7 +1214,7 @@ public:
 class Archetype {
 public:
     ArchetypeKey                          key;
-    std::pmr::vector<std::unique_ptr<Chunk>> chunks;   // PerContextAllocator-tagged.
+    std::pmr::vector<eastl::unique_ptr<Chunk>> chunks;   // PerContextAllocator-tagged.
     std::pmr::vector<ColumnDescriptor>    columns;     // emitted from registry.
     std::pmr::vector<Entity>              row_to_entity;
 };
@@ -1319,7 +1319,7 @@ Critical-path perf (per `perf-budget.md`):
   (0.40 ms sim + 0.05 ms submit per `perf-budget.md` Per-Context
   Budget Table, plus a handful of cycles for the `switch` itself).
 - The `switch` dispatches through a function-pointer table populated
-  at process start; no virtual calls, no `std::variant<>` visiting.
+  at process start; no virtual calls, no `eastl::variant<>` visiting.
 
 ### 6.6 `plugin/` — `dlopen` + Manifest Read + ABI Hash Gate
 
@@ -1357,11 +1357,11 @@ Internal data structures:
 // core/src/plugin/loader.hpp — internal.
 
 struct LoadedPlugin {
-    std::string             fqn;               // PluginManifest.name
+    eastl::string             fqn;               // PluginManifest.name
     std::filesystem::path   dylib_path;
     void*                   dl_handle;
     PluginManifest          manifest;          // deserialized once at load.
-    std::array<void*, 4>    entry_points;      // dlsym'd at load.
+    eastl::array<void*, 4>    entry_points;      // dlsym'd at load.
     std::pmr::vector<TypeId>    owned_types;
     std::pmr::vector<SystemId>  owned_systems;
     // ... mirrors PassDecl / PanelDecl ownership for rollback.

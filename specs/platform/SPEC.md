@@ -312,9 +312,9 @@ SDL3 reported them; splitting the two queues into independent
 aggregates would re-introduce the cross-family ordering bug we are
 collapsing away.
 
-`InputEvent` is a closed `std::variant` over: `KeyDown`, `KeyUp`,
+`InputEvent` is a closed `eastl::variant` over: `KeyDown`, `KeyUp`,
 `MouseMove`, `MouseButton`, `Wheel`, `TextInput`, `GamepadAxis`,
-`GamepadButton`. `WindowEvent` is a closed `std::variant` over:
+`GamepadButton`. `WindowEvent` is a closed `eastl::variant` over:
 `Resized`, `DpiChanged`, `Minimized`, `Restored`, `FocusGained`,
 `FocusLost`, `CloseRequested`, `DisplayChanged`. Both sums are
 sealed at compile time; adding a variant is a deliberate central
@@ -360,7 +360,7 @@ kept apart — path canonicalization, OS watch delivery, and
 content-hash dedup — because they only have value when delivered
 together; consumers only care about the deduped stream.
 
-`FileEvent` is a closed `std::variant` over: `Created`, `Modified`,
+`FileEvent` is a closed `eastl::variant` over: `Created`, `Modified`,
 `Deleted`, `Renamed { from, to }`. Every payload carries a
 `CanonicalPath` value object (UTF-8 absolute path with symlinks,
 junctions, and case folded per platform rule).
@@ -454,7 +454,7 @@ together.
 Invariants:
 
 1. **Argv / env / cwd are read-only snapshots.** They are captured
-   once at startup and exposed as `std::span<const std::string_view>`
+   once at startup and exposed as `eastl::span<const eastl::string_view>`
    / equivalent. Mutation through the aggregate is forbidden;
    out-of-band `setenv` use is unsupported and undefined for
    engine code.
@@ -576,16 +576,16 @@ The header is verified compileable with
 // SDL3 / metal-cpp / POSIX never escape into a sibling context.
 #pragma once
 
-#include <array>
+#include <EASTL/array.h>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
-#include <optional>
-#include <span>
-#include <string_view>
+#include <EASTL/optional.h>
+#include <EASTL/span.h>
+#include <EASTL/string_view.h>
 #include <utility>
-#include <variant>
+#include <EASTL/variant.h>
 
 // Engine-wide error type, defined in core/include/glibre/error.hpp.
 // Forward-declared here so this header is self-contained for syntax
@@ -602,7 +602,7 @@ namespace glibre::platform {
 // 5.1  Closed sum of typed failures (§4.7)
 // ---------------------------------------------------------------------------
 //
-// Variant-of-tags: `Error` is a `std::variant` so the
+// Variant-of-tags: `Error` is an `eastl::variant` so the
 // `IoFailure { OsCode }` payload survives without losing the closed-sum
 // shape. Each non-payload arm is a zero-sized tag struct; the engine-
 // wide `glibre::Error` rolls this whole sum into one of its arms.
@@ -619,7 +619,7 @@ struct Interrupted       { constexpr bool operator==(const Interrupted&)      co
 struct Unsupported       { constexpr bool operator==(const Unsupported&)      const noexcept = default; };
 struct IoFailure         { OsCode code{}; constexpr bool operator==(const IoFailure&) const noexcept = default; };
 
-using Error = std::variant<
+using Error = eastl::variant<
     NotFound,
     PermissionDenied,
     AlreadyExists,
@@ -641,16 +641,16 @@ public:
     // Construct after canonicalization. Rejects relative / non-UTF-8 /
     // non-absolute inputs. The only path shape accepted by FileIo /
     // FileWatcher (§4.3 inv #1, §4.6 inv #1).
-    [[nodiscard]] static auto from_absolute(std::string_view utf8_abs) noexcept
+    [[nodiscard]] static auto from_absolute(eastl::string_view utf8_abs) noexcept
         -> Result<CanonicalPath>;
 
-    [[nodiscard]] auto view() const noexcept -> std::string_view { return view_; }
+    [[nodiscard]] auto view() const noexcept -> eastl::string_view { return view_; }
 
     constexpr bool operator==(const CanonicalPath&) const noexcept = default;
 
 private:
-    constexpr explicit CanonicalPath(std::string_view v) noexcept : view_{v} {}
-    std::string_view view_{};  // backed by an internal arena owned by platform.
+    constexpr explicit CanonicalPath(eastl::string_view v) noexcept : view_{v} {}
+    eastl::string_view view_{};  // backed by an internal arena owned by platform.
 };
 
 struct LogicalSize  { std::uint32_t width{1}; std::uint32_t height{1}; constexpr bool operator==(const LogicalSize&)  const noexcept = default; };
@@ -717,7 +717,7 @@ public:
 
     // Engine-side drain. Returns the number of events written into `out`.
     // Never blocks; never reorders within a single device.
-    [[nodiscard]] auto drain(std::span<T> out) noexcept -> std::size_t;
+    [[nodiscard]] auto drain(eastl::span<T> out) noexcept -> std::size_t;
 
 private:
     EventQueue() noexcept = default;
@@ -747,13 +747,13 @@ struct KeyUp        { KeyCode key; ScanCode scan; ModifierMask mods; };
 struct MouseMove    { float x; float y; float dx; float dy; };
 struct MouseButtonEv{ MouseButton button; bool pressed; float x; float y; std::uint8_t click_count; };
 struct Wheel        { float dx; float dy; bool flipped; };
-struct TextInput    { std::array<char, 32> utf8; std::uint8_t length; };  // §3 collapse: IME commit lives here.
+struct TextInput    { eastl::array<char, 32> utf8; std::uint8_t length; };  // §3 collapse: IME commit lives here.
 struct GamepadAxisEv{ std::uint8_t device; GamepadAxis axis; float value; };  // value in [-1, 1].
 struct GamepadBtnEv { std::uint8_t device; GamepadBtn button; bool pressed; };
 
 }  // namespace input
 
-using InputEvent = std::variant<
+using InputEvent = eastl::variant<
     input::KeyDown,
     input::KeyUp,
     input::MouseMove,
@@ -779,7 +779,7 @@ struct DisplayChanged  { WindowId window; DisplayId display; };
 
 }  // namespace window_event
 
-using WindowEvent = std::variant<
+using WindowEvent = eastl::variant<
     window_event::Resized,
     window_event::DpiChanged,
     window_event::Minimized,
@@ -824,7 +824,7 @@ private:
 // ---------------------------------------------------------------------------
 
 struct WindowDesc {
-    std::string_view title{};
+    eastl::string_view title{};
     LogicalSize      size{1280, 720};
     bool             resizable{true};
     bool             fullscreen{false};
@@ -909,7 +909,7 @@ struct Renamed  { CanonicalPath from; CanonicalPath to; };
 
 }  // namespace file_event
 
-using FileEvent = std::variant<
+using FileEvent = eastl::variant<
     file_event::Created,
     file_event::Modified,
     file_event::Deleted,
@@ -932,7 +932,7 @@ public:
     // Drain events that arrived for this token since the last call.
     // Internal I/O thread feeds the buffer (§4.3 inv #5); take_events
     // never blocks the main thread.
-    [[nodiscard]] auto take_events(WatchToken, std::span<FileEvent> out) noexcept
+    [[nodiscard]] auto take_events(WatchToken, eastl::span<FileEvent> out) noexcept
         -> Result<std::size_t>;
 
 private:
@@ -981,8 +981,8 @@ public:
     // §4.5 inv #5: single-instance accessor.
     [[nodiscard]] static auto get() noexcept -> Process&;
 
-    [[nodiscard]] auto argv()             const noexcept -> std::span<const std::string_view>;
-    [[nodiscard]] auto env(std::string_view name) const noexcept -> std::optional<std::string_view>;
+    [[nodiscard]] auto argv()             const noexcept -> eastl::span<const eastl::string_view>;
+    [[nodiscard]] auto env(eastl::string_view name) const noexcept -> eastl::optional<eastl::string_view>;
     [[nodiscard]] auto cwd()              const noexcept -> CanonicalPath;
     [[nodiscard]] auto executable_path()  const noexcept -> CanonicalPath;
     [[nodiscard]] auto pid()              const noexcept -> std::uint32_t;
@@ -1043,7 +1043,7 @@ public:
 
     // Once Ready, take the result. Calling before Ready returns
     // Error::Interrupted; calling twice returns Error::AlreadyExists.
-    [[nodiscard]] auto take_result() noexcept -> Result<std::span<const std::byte>>;
+    [[nodiscard]] auto take_result() noexcept -> Result<eastl::span<const std::byte>>;
 
 private:
     friend class FileIo;
@@ -1067,15 +1067,15 @@ public:
 
     // Synchronous primitives. Asserted off-main-thread in debug builds
     // (§4.6 inv #2). Public surface accepts only CanonicalPath.
-    [[nodiscard]] auto read_all(CanonicalPath) noexcept                                 -> Result<std::span<const std::byte>>;
-    [[nodiscard]] auto write_atomic(CanonicalPath, std::span<const std::byte>) noexcept -> Result<void>;  // §4.6 inv #4.
+    [[nodiscard]] auto read_all(CanonicalPath) noexcept                                 -> Result<eastl::span<const std::byte>>;
+    [[nodiscard]] auto write_atomic(CanonicalPath, eastl::span<const std::byte>) noexcept -> Result<void>;  // §4.6 inv #4.
     [[nodiscard]] auto stat_path(CanonicalPath) noexcept                                -> Result<Stat>;
-    [[nodiscard]] auto list_dir(CanonicalPath, std::span<DirEntry> out) noexcept        -> Result<std::size_t>;
+    [[nodiscard]] auto list_dir(CanonicalPath, eastl::span<DirEntry> out) noexcept        -> Result<std::size_t>;
     [[nodiscard]] auto remove(CanonicalPath) noexcept                                   -> Result<void>;
 
     // Bounded-async primitives. Poll-only; never callbacks (§4.6 inv #7).
     [[nodiscard]] auto read_async(CanonicalPath) noexcept                                     -> Result<IoToken>;
-    [[nodiscard]] auto write_atomic_async(CanonicalPath, std::span<const std::byte>) noexcept -> Result<IoToken>;
+    [[nodiscard]] auto write_atomic_async(CanonicalPath, eastl::span<const std::byte>) noexcept -> Result<IoToken>;
 
 private:
     FileIo() noexcept = default;
@@ -1199,7 +1199,7 @@ auto destroy_metal_view(LayerHandle) noexcept -> void;
 // Read-back the layer's drawable size and DPI in one call. Used by
 // Window to refresh its DpiScale snapshot after DpiChanged events.
 [[nodiscard]] auto query_layer_metrics(void* layer) noexcept
-    -> Result<std::pair<PhysicalSize, DpiScale>>;
+    -> Result<eastl::pair<PhysicalSize, DpiScale>>;
 
 }  // namespace glibre::platform::surface::detail
 ```
@@ -1313,7 +1313,7 @@ public:
     // Drains pending raw events from the OS into the supplied span;
     // returns the number written. Called only by the watcher I/O
     // thread, never by the engine.
-    [[nodiscard]] virtual auto poll_raw(std::span<RawEvent> out) noexcept
+    [[nodiscard]] virtual auto poll_raw(eastl::span<RawEvent> out) noexcept
         -> std::size_t                            = 0;
 };
 
@@ -1399,7 +1399,7 @@ Layout inside `fileio/`:
   `Impl` holds a pointer to a slot in a `Slot[]` array indexed by
   the request id, and lets the caller poll. The `Slot` carries:
   - `std::atomic<IoToken::State>` state,
-  - `std::span<const std::byte>` result_bytes (filled before state
+  - `eastl::span<const std::byte>` result_bytes (filled before state
     transitions to `Ready`, with `memory_order_release`),
   - a `Result<void>` error code for failure cases.
 - `fileio/worker.cpp` — exactly one worker thread per `FileIo`
@@ -1580,7 +1580,7 @@ constructor or static factory. After construction:
 
 The synchronous `FileIo::read_all` is the lone exception: it must
 allocate to return the file contents. The aggregate returns the
-allocated buffer as `std::span<const std::byte>` and the platform
+allocated buffer as `eastl::span<const std::byte>` and the platform
 library owns the backing storage in a per-call arena released on
 the next `read_all` from the same `FileIo` instance. Callers that
 need to keep the bytes copy them out before the next call; this is
@@ -1777,7 +1777,7 @@ what triggers refusal*.
 |------------------------------------|----------------------------|-----------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------|
 | `Window` / `Display` / `Surface`   | Yes — opaque pass-through  | Re-acquired from OS by Q::register; `WindowId` numeric value is preserved across swap. | Empty (no in-memory state to reshape; OS owns the bytes).                            |
 | `EventQueue<T>` / `Pump`           | Yes — opaque pass-through  | Buffered events drain to the engine before phase 8 (already true per §4.2 inv #1).      | Empty (queue contents are by construction empty at the barrier).                     |
-| `FileWatcher`                      | Yes — opaque pass-through  | Subscription list (`std::span<CanonicalPath>`) preserved; native fds re-acquired and replayed as fresh `Created` events. | Empty in plugin memory; fresh-event replay is a Q::register responsibility, not a typed migration. |
+| `FileWatcher`                      | Yes — opaque pass-through  | Subscription list (`eastl::span<CanonicalPath>`) preserved; native fds re-acquired and replayed as fresh `Created` events. | Empty in plugin memory; fresh-event replay is a Q::register responsibility, not a typed migration. |
 | `Clock` / `Instant` / `WallTime`   | Yes — pass-through          | Monotonic origin is OS-owned; the in-process `Clock` accessor is rebuilt by Q::register but `Instant::count()` values remain comparable across the swap (same OS source). | Empty.                                                                               |
 | `Process`                          | Yes — pass-through          | Argv / env / cwd / pid recaptured by Q::register from `getpid` / `argv` / `environ`; installed signal handlers are re-installed by Q against the same `SignalHandlerFn` symbols (which now live in Q's text segment). | Empty.                                                                               |
 | `FileIo` / `IoToken`               | Yes — pass-through          | In-flight `IoToken`s are **drained to terminal state** by P::drain before swap (§8.4 refusal #1). The bounded I/O thread pool is torn down by P::drain and re-spun by Q::register. | Empty (no surviving plugin-side bytes; OS file handles are scoped to single tokens). |
@@ -1850,7 +1850,7 @@ When the platform `.dylib` itself is the outgoing plugin P:
      torn down. This is the only meaningful "wait for in-flight
      work" responsibility platform has.
   3. Capture the `FileWatcher`'s subscription list as
-     `std::span<CanonicalPath>` into a middleman-typed singleton
+     `eastl::span<CanonicalPath>` into a middleman-typed singleton
      (re-derived by Q in step 4 — see *fresh-event replay* below).
      Native fd / FSEvents stream handles are released; the OS
      subscription list is *not* preserved at the OS layer because
@@ -1959,9 +1959,9 @@ reads them — they are loader-internal). The types:
 1. `glibre::types::platform::WindowSurvival` —
    `(WindowId, WindowDesc)` per open window.
 2. `glibre::types::platform::WatcherSurvival` —
-   `std::span<CanonicalPath>` of subscription roots.
+   `eastl::span<CanonicalPath>` of subscription roots.
 3. `glibre::types::platform::SignalSurvival` —
-   `std::span<Signal>` of installed handlers (the function-pointer
+   `eastl::span<Signal>` of installed handlers (the function-pointer
    identity is recovered from the symbol name in Q, not stored).
 4. `glibre::types::platform::FileIoSurvival` — `FileIoConfig`
    (the bounded-async budget the rebuilt pool must match).

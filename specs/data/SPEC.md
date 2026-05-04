@@ -563,12 +563,12 @@ not redefine them.
 
 #pragma once
 
-#include <array>
+#include <EASTL/array.h>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
-#include <span>
-#include <string_view>
+#include <EASTL/span.h>
+#include <EASTL/string_view.h>
 
 // glibre::Error and glibre::Result<T> live in <glibre/error.hpp>; only
 // forward-declared here so this stub stays self-contained.
@@ -586,7 +586,7 @@ namespace glibre::types {
 // per-type interning table (§4.5 inv. 3); SchemaId itself is a borrow.
 // Per §4.1 inv. 1.
 struct SchemaId {
-    std::string_view fqn{};
+    eastl::string_view fqn{};
 
     constexpr bool operator==(const SchemaId&) const noexcept = default;
     constexpr auto operator<=>(const SchemaId&) const noexcept = default;
@@ -596,7 +596,7 @@ struct SchemaId {
 using SchemaVersion = std::uint32_t;
 
 // Blake3-256 of the canonicalized .fory bytes (§4.4 inv. 2).
-using SchemaSourceHash = std::array<std::byte, 32>;
+using SchemaSourceHash = eastl::array<std::byte, 32>;
 
 // ---- error.hpp ----------------------------------------------------------
 
@@ -788,15 +788,15 @@ struct SystemDecl {
 };
 
 struct PassDecl {
-    std::string_view                  name{};
+    eastl::string_view                  name{};
     std::uint8_t                      render_phase{0};   // 6 or 7
-    std::span<const std::string_view> inputs{};
-    std::span<const std::string_view> outputs{};
+    eastl::span<const eastl::string_view> inputs{};
+    eastl::span<const eastl::string_view> outputs{};
 };
 
 struct PanelDecl {
-    std::string_view id{};
-    std::string_view title{};
+    eastl::string_view id{};
+    eastl::string_view title{};
     std::uint8_t     area{0};
 };
 
@@ -1119,7 +1119,7 @@ lookup and `FQN`-then-`from_version` deterministic iteration order
 when the chain is walked.
 
 **Storage.** The per-`FQN` migration entries live as a contiguous
-`std::span<const MigrationEntry>` inside the registry entry for that
+`eastl::span<const MigrationEntry>` inside the registry entry for that
 type (§4.5; §5 §registry.hpp). Codegen emits them in
 `from_version`-ascending order so the dispatcher can index by
 `from_version - 1` without sorting at runtime.
@@ -2041,8 +2041,8 @@ struct SchemaRegistryChange {
         RegistryReplaced = 2,   // Mode B: full SchemaRegistry instance() swap
     };
     Kind                              kind{Kind::EntriesAppended};
-    std::span<const SchemaId>         affected_fqns{};   // sorted ascending
-    std::span<const MigrationReport>  reports{};         // one per migrated FQN
+    eastl::span<const SchemaId>         affected_fqns{};   // sorted ascending
+    eastl::span<const MigrationReport>  reports{};         // one per migrated FQN
 };
 
 // Subscribers observe a fully-swapped, fully-migrated registry.
@@ -2376,7 +2376,7 @@ enum class ErrorTag : std::uint16_t {
 };
 
 // Closed sum. Plain-aggregate layout so the C-ABI trampolines in §5
-// can return it without dragging std::variant across the boundary.
+// can return it without dragging eastl::variant across the boundary.
 struct Error {
     ErrorTag tag{};
 
@@ -2535,7 +2535,7 @@ the §11 acceptance criteria.
 | `SchemaUnknown` | An envelope whose `FQN` is `glibre.test.NeverRegistered`; assertion on `at.schema == "glibre.test.NeverRegistered"`. |
 | `MigrationStepMissing` | A registry whose chain for an FQN at version 4 starts at step `(2 → 3)`; deserialize a `v1` payload and assert `step_from == 1`, `step_to == 2`. |
 | `MigrationCycle` | A test-only `Foryc` invocation against a synthetic chain `[(1→2), (2→1)]`; assertion on the codegen exit code and the `(step_from = 2, step_to = 1)` payload. |
-| `EnvelopeTruncated` | A `std::span<const std::byte>` smaller than `sizeof(EnvelopeHeader)`; assertion on `at.offset == src.size()`. |
+| `EnvelopeTruncated` | An `eastl::span<const std::byte>` smaller than `sizeof(EnvelopeHeader)`; assertion on `at.offset == src.size()`. |
 
 Each fixture asserts both (a) the correct arm fires and (b) the
 payload fields it claims to populate are non-default. Arms whose

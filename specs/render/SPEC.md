@@ -19,7 +19,7 @@ owns frame-phase 6 (`cull-extract` — building the immutable
 and submitting the Metal 4 command buffer); it consumes inputs from the
 ECS via the snapshot bus and signals the present fence consumed by
 `platform`'s phase 9. Render refuses to own anything outside that seam.
-HLSL→AIR/metallib compilation belongs to `shader`; material graph
+Slang→AIR/metallib compilation belongs to `shader`; material graph
 authoring, codegen and the bindless material parameter schema belong to
 the future `material` plugin (consumed via opaque material handles);
 VFX particle/cloth/fluid simulation belongs to the future `vfx` plugin
@@ -234,7 +234,7 @@ owning context per §1:
 
 | Harmonius surface | Cited file(s) | Routed to |
 |-------------------|----------------|-----------|
-| HLSL → AIR / metallib compilation, shader-variant cook, DXC subprocess management, `metal-shaderconverter` invocation | `requirements/rendering/gpu-abstraction-layer.md` R-2.1.17, `design/rendering/shader-variants.md`, `design/rendering/pipeline-state-cache.md` (cook-time half) | `shader` plugin. Render consumes opaque `PSO` handles. |
+| Slang → AIR / metallib compilation, shader-variant cook, slangc subprocess management, `slangc` invocation | `requirements/rendering/gpu-abstraction-layer.md` R-2.1.17, `design/rendering/shader-variants.md`, `design/rendering/pipeline-state-cache.md` (cook-time half) | `shader` plugin. Render consumes opaque `PSO` handles. |
 | Material graph authoring, material-codegen, custom material functions, the bindless material parameter buffer schema, fabric / clearcoat / SSS / hair / eye / skin / weathering / refraction / emissive surface graphs | `requirements/rendering/advanced-materials.md` R-2.12.1..R-2.12.9, `requirements/rendering/character-rendering.md` R-2.8.1..R-2.8.8, `requirements/rendering/lighting.md` R-2.4.3..R-2.4.9 (codegen aspects) | `material` plugin. Render consumes opaque `MaterialHandle` indices and binds them bindlessly without inspecting their contents. |
 | Particle systems, GPU sim of cloth / fluid / hair strands, ocean FFT, volumetric clouds, weather state machine, OpenVDB volume sim, decals as a simulated system, breaking-wave deformation | `requirements/rendering/environment.md` R-2.7.1..R-2.7.9, `requirements/rendering/character-rendering.md` R-2.8.3 (compute strand sim half), `requirements/rendering/stylized-effects.md` R-2.11.x (the simulation half) | `vfx` plugin. Render consumes already-resident GPU buffers / meshes published by `vfx` and draws them via standard `Pass` nodes. |
 | Mesh import, meshlet building, BLAS construction / compaction, vertex streaming, Draco decode, virtualised geometry residency, geometry LOD policy, hair-card LOD, mesh-proxy generation | `design/rendering/meshlets.md` (cook half), `requirements/rendering/advanced-rendering.md` R-2.5.1 (BLAS build + compaction at cook), `requirements/rendering/character-rendering.md` R-2.8.2 (LOD policy half) | `geometry` (cook + LOD policy) + `content` (residency, streaming). Render consumes immutable mesh / BLAS handles. |
@@ -357,7 +357,7 @@ binder (§3.2 collapse #8); the lambda never sees raw heap
 addresses or implicit globals.
 
 **Identity & lifetime.** Same as the owning `RenderGraph`. The
-lambda captures only POD or `std::span` slices into the
+lambda captures only POD or `eastl::span` slices into the
 `RenderFrame`; no owning heap allocations.
 
 **Public-boundary invariants.**
@@ -522,7 +522,7 @@ init from a manifest emitted by `shader`'s cook.
    and sufficient; identical keys must map to byte-equal pipeline
    bytecode. A miss creates exactly one PSO, never two.
 2. **Render owns residency, not authoring.** The cache never
-   compiles HLSL or transcodes AIR; that is `shader`'s job
+   compiles Slang or transcodes AIR; that is `shader`'s job
    (§3.3). A miss whose `shader_hash` is unknown returns
    `render::Error::PipelineCompileFailed` rather than invoking
    a compiler.
@@ -758,17 +758,17 @@ returned through `Result<T>` and consumed by `glibre::log_error`.
 
 #pragma once
 
-#include <array>
+#include <EASTL/array.h>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
 #include <memory>
-#include <span>
-#include <string_view>
+#include <EASTL/span.h>
+#include <EASTL/string_view.h>
 #include <type_traits>
-#include <variant>
+#include <EASTL/variant.h>
 
 namespace glibre {
 
@@ -792,14 +792,14 @@ enum class Error : std::uint16_t {
 }  // namespace core
 
 struct ErrorContext {
-    std::string_view file;
+    eastl::string_view file;
     int              line  = 0;
-    std::string_view detail;
+    eastl::string_view detail;
 };
 
 class Error {
 public:
-    using Variant = std::variant<core::Error /*, render::Error inserted in core */>;
+    using Variant = eastl::variant<core::Error /*, render::Error inserted in core */>;
 
     template <class E>
     constexpr Error(E e, ErrorContext ctx = {}) noexcept
@@ -864,7 +864,7 @@ enum class Error : std::uint16_t {
     CapabilityNotSupported,
 };
 
-[[nodiscard]] constexpr std::string_view to_string(Error e) noexcept;
+[[nodiscard]] constexpr eastl::string_view to_string(Error e) noexcept;
 
 // -----------------------------------------------------------------------
 // Capability flags — init-time queried, never branched on in shader hot
@@ -1067,7 +1067,7 @@ enum class ResourceLifetime : std::uint8_t {
 };
 
 struct ResourceDesc {
-    std::string_view debug_name;
+    eastl::string_view debug_name;
     ResourceFormat   format       = ResourceFormat::Unknown;
     std::uint32_t    width        = 0u;
     std::uint32_t    height       = 0u;
@@ -1114,7 +1114,7 @@ enum class PassPriority : std::uint16_t {
 struct Bindings;  // opaque; bodies recover typed views from it.
 
 using PassExecuteFn =
-    std::function<Result<void>(MetalCommandBuffer&, const Bindings&) /* noexcept */>;
+    eastl::function<Result<void>(MetalCommandBuffer&, const Bindings&) /* noexcept */>;
 
 // -----------------------------------------------------------------------
 // GraphBuilder — fluent surface plugins use to declare passes. Per-pass
@@ -1123,7 +1123,7 @@ using PassExecuteFn =
 // -----------------------------------------------------------------------
 
 struct PassDesc {
-    std::string_view name;
+    eastl::string_view name;
     Queue            queue         = Queue::Graphics;
     PassPriority     priority      = PassPriority::StandardQuality;
     Capability       requires_caps = Capability::None;  // unset bits ⇒ compile-time skip.
@@ -1155,14 +1155,14 @@ public:
 
     [[nodiscard]] Result<void>
         add_raster_pass(const PassDesc&,
-                        std::span<const ResourceAccess> reads,
-                        std::span<const ResourceAccess> writes,
+                        eastl::span<const ResourceAccess> reads,
+                        eastl::span<const ResourceAccess> writes,
                         PassExecuteFn                   execute) noexcept;
 
     [[nodiscard]] Result<void>
         add_compute_pass(const PassDesc&,
-                         std::span<const ResourceAccess> reads,
-                         std::span<const ResourceAccess> writes,
+                         eastl::span<const ResourceAccess> reads,
+                         eastl::span<const ResourceAccess> writes,
                          PassExecuteFn                   execute) noexcept;
 
     // Ray-trace pass — RT-shadow / AO / reflection bodies declare TLAS
@@ -1172,8 +1172,8 @@ public:
     [[nodiscard]] Result<void>
         add_rt_pass(const PassDesc&,
                     TLASHandle                       tlas,
-                    std::span<const ResourceAccess>  reads,
-                    std::span<const ResourceAccess>  writes,
+                    eastl::span<const ResourceAccess>  reads,
+                    eastl::span<const ResourceAccess>  writes,
                     PassExecuteFn                    execute) noexcept;
 
 private:
@@ -1193,7 +1193,7 @@ private:
 
 class RenderGraph {
 public:
-    [[nodiscard]] static Result<std::unique_ptr<RenderGraph>>
+    [[nodiscard]] static Result<eastl::unique_ptr<RenderGraph>>
         create(MetalDevice&, ViewHandle) noexcept;
 
     [[nodiscard]] GraphBuilder begin(const RenderFrame&) noexcept;
@@ -1213,7 +1213,7 @@ protected:
 
 // -----------------------------------------------------------------------
 // PSOCache — keyed by (shader_hash, state_hash). Render owns residency,
-// not authoring (`shader` plugin compiles HLSL → AIR / metallib).
+// not authoring (`shader` plugin compiles Slang → AIR / metallib).
 // -----------------------------------------------------------------------
 
 struct PSOKey {
@@ -1232,7 +1232,7 @@ struct PSOKeyHash {
 class PSOCache {
 public:
     [[nodiscard]] Result<PSOHandle> get(PSOKey) noexcept;
-    [[nodiscard]] Result<void>      warm(std::span<const PSOKey>) noexcept;
+    [[nodiscard]] Result<void>      warm(eastl::span<const PSOKey>) noexcept;
 
     void invalidate_by_shader_hash(std::uint64_t shader_hash) noexcept;
     void evict_lru(std::size_t target_size) noexcept;
@@ -1256,7 +1256,7 @@ struct DeviceDesc {
 
 class MetalDevice {
 public:
-    [[nodiscard]] static Result<std::unique_ptr<MetalDevice>>
+    [[nodiscard]] static Result<eastl::unique_ptr<MetalDevice>>
         create(const DeviceDesc&) noexcept;
 
     [[nodiscard]] CapabilitySet capabilities() const noexcept;
@@ -1274,7 +1274,7 @@ protected:
 
 class MetalQueue {
 public:
-    [[nodiscard]] Result<std::unique_ptr<MetalCommandBuffer>>
+    [[nodiscard]] Result<eastl::unique_ptr<MetalCommandBuffer>>
         acquire_command_buffer() noexcept;
 
     [[nodiscard]] Result<void> submit(MetalCommandBuffer&) noexcept;
@@ -1290,7 +1290,7 @@ protected:
 
 class MetalCommandBuffer {
 public:
-    [[nodiscard]] Result<void> push_debug_group(std::string_view name) noexcept;
+    [[nodiscard]] Result<void> push_debug_group(eastl::string_view name) noexcept;
     [[nodiscard]] Result<void> pop_debug_group() noexcept;
 
     [[nodiscard]] Queue queue_role() const noexcept;
@@ -1375,7 +1375,7 @@ protected:
 class RenderFrame {
 public:
     [[nodiscard]] std::uint64_t              frame_counter() const noexcept;
-    [[nodiscard]] std::span<const ViewHandle> views()        const noexcept;
+    [[nodiscard]] eastl::span<const ViewHandle> views()        const noexcept;
 
     ~RenderFrame();
     RenderFrame(const RenderFrame&)            = delete;

@@ -36,7 +36,7 @@ routes through `data`'s Fory pipeline per
 conforming to those schemas, never a definer of them), the
 serialization runtime itself (Fory generators + the `glibre-types`
 middleman live in `data`), shader compilation (`shader` owns
-HLSL→AIR/metallib; content only carries the resulting bytecode blobs
+Slang→AIR/metallib; content only carries the resulting bytecode blobs
 as opaque payloads), mesh-internal geometry processing such as
 meshlet building, BLAS construction, or LOD chain authoring
 (`geometry` owns those — content delegates to geometry from inside
@@ -118,8 +118,8 @@ texture / mesh GPU-format processing
 (`requirements/content-pipeline/asset-processing.md` R-12.2.1 BCn / ASTC,
 R-12.2.2 LOD chains, R-12.2.3 meshlet building, R-12.2.4 vertex-cache
 opt, R-12.2.5 lightmap UVs), shader-graph compilation
-(`requirements/content-pipeline/asset-processing.md` R-12.2.7 graph→HLSL,
-R-12.2.9 HLSL→DXIL/SPIR-V/MSL), the VFS / GPU-DirectStorage / archive
+(`requirements/content-pipeline/asset-processing.md` R-12.2.7 graph→Slang,
+R-12.2.9 Slang→metallib via slangc; DXIL post-MVP for D3D12), the VFS / GPU-DirectStorage / archive
 chain (`requirements/content-pipeline/streaming-io.md` R-12.5.1, R-12.5.3,
 R-12.5.4 mip streaming, R-12.5.5 mesh-LOD streaming, R-12.5.8 pak
 archives, R-12.5.9 LZ4 / Zstd codec selection, R-12.5.10 CDN
@@ -230,7 +230,7 @@ the owning context per §1:
 | GPU upload, descriptor heap updates, BCn / ASTC / ETC2 block compression, mip-level streaming with sparse binding, GPU DirectStorage / Metal I/O direct-to-GPU DMA, descriptor heap updates for texture hot-reload | `requirements/content-pipeline/asset-processing.md` R-12.2.1 (block compression), `requirements/content-pipeline/streaming-io.md` R-12.5.3 (GPU direct storage), R-12.5.4 (mip streaming + sparse binding), `requirements/content-pipeline/hot-reload.md` R-12.4.2 (descriptor-heap update half) | `render` plugin. Content emits canonical-layout pixel data and metadata; `render` decides upload cadence, format selection, descriptor binding, and sparse residency. |
 | Audio source decode, encoding to runtime formats (Opus / ADPCM / PCM), DSP, mixing, sources, decode timing | `requirements/content-pipeline/asset-import.md` R-12.1.3 (audio source decode), `requirements/content-pipeline/asset-processing.md` R-12.2.6 (Opus / ADPCM / PCM encoding) | `audio` plugin. The cook delivers cooked encoded blobs (already-encoded by `audio`'s offline tool) under content-addressed storage; content does not decode WAV / FLAC / Ogg Vorbis at MVP. |
 | Schema authoring, codegen, the serialization runtime itself (Fory generator + the `glibre-types` middleman dylib, ABI hash, migration registry) | Implicit across `requirements/content-pipeline/asset-versioning.md` R-12.7.1 (binary format authoring), `design/content-pipeline/asset-pipeline.md` (§ "Core Data Structures" treats schema as part of `harmonius_content`) | `data` plugin per `reviews/decisions/fory-codegen.md`. Content is a producer of bytes conforming to schemas authored in `data/schemas/<ctx>/<Type>.fory`; it never defines a schema. |
-| HLSL authoring, shader-graph→HLSL emit, DXC / Metal Shader Converter invocation, PSO swap, shader hot-reload error overlay | `requirements/content-pipeline/asset-processing.md` R-12.2.7 (graph→HLSL), R-12.2.9 (HLSL→DXIL/SPIR-V/MSL), `requirements/content-pipeline/hot-reload.md` R-12.4.3 (shader hot-reload + PSO swap) | `shader` plugin. Content carries the resulting bytecode blobs as opaque payloads inside cooked artifacts. |
+| Slang authoring, shader-graph→Slang emit, slangc invocation, PSO swap, shader hot-reload error overlay | `requirements/content-pipeline/asset-processing.md` R-12.2.7 (graph→Slang), R-12.2.9 (Slang→metallib via slangc; DXIL post-MVP for D3D12), `requirements/content-pipeline/hot-reload.md` R-12.4.3 (shader hot-reload + PSO swap) | `shader` plugin. Content carries the resulting bytecode blobs as opaque payloads inside cooked artifacts. |
 | Mesh-internal geometry processing: meshlet building (max-64-verts / max-124-tris partitioning), vertex-cache reordering, automatic LOD chain authoring (edge-collapse + silhouette preservation), BLAS construction / compaction, lightmap UV unwrapping | `requirements/content-pipeline/asset-processing.md` R-12.2.2 (LOD chains), R-12.2.3 (meshlets), R-12.2.4 (vertex-cache opt), R-12.2.5 (lightmap UVs) | `geometry` plugin. Content invokes `geometry` from inside the cook step (the FBX importer's normalize → process pipeline calls into geometry to produce `MeshArtifact`'s meshlet / LOD / BLAS structures) and stores the result; it never owns the algorithm. |
 | File-watching mechanics (`FSEvents` / `inotify` / `ReadDirectoryChangesW` / `kqueue` adapters), debounce / dedup of raw OS events, async I/O abstraction (Tokio / `io_uring` / IOCP / GCD), `FileIo` primitives | `requirements/content-pipeline/hot-reload.md` R-12.4.1 (platform-native FS notifications), `requirements/content-pipeline/streaming-io.md` R-12.5.2 (Tokio direct I/O) | `platform` plugin. Content subscribes to a `WatchEdge` seam and consumes `FileEvent` deliveries; the watcher itself, the OS event coalescing, and the file-IO abstraction live in `platform`. |
 | Networked CDN / DLC / live-ops asset distribution, pak-archive layout, LZ4 / Zstd compression codec selection at runtime, central-directory O(1) lookup, expansion-pack mounting, virtual file system unifying loose / archive / HTTP backings | `requirements/content-pipeline/streaming-io.md` R-12.5.1 (VFS), R-12.5.8 (pak archives), R-12.5.9 (per-chunk codec selection), R-12.5.10 (CDN download-on-demand) | Post-MVP. A future `delivery` context. The MVP CAS is loose `cooked/<prefix>/<hash>` files mmap'd by the residency manager; archive / VFS / CDN concerns re-enter as additional reader views over the same hashes without changing the cook pipeline. |
@@ -734,7 +734,7 @@ schema). Internally it carries:
 - `ref` — reference-counted membership in the resident set; the
   count is owned by `ResidencyManager`.
 
-Public surface: `view() -> std::expected<std::span<const
+Public surface: `view() -> std::expected<eastl::span<const
 std::byte>, content::Error>` (returns the cooked bytes), `kind()`,
 explicit copy/move semantics that bump/drop the residency
 ref-count. The handle never exposes a path, never exposes a
@@ -757,7 +757,7 @@ decrements it. Generation tagging makes use-after-swap a
 2. **`view()` returns bytes for a `Resident` slot or an error.**
    While a handle's `ref` is non-zero, its slot cannot be
    evicted (§4.1.7 invariant 3); `view()` therefore yields a
-   stable `std::span<const std::byte>` for the lifetime of the
+   stable `eastl::span<const std::byte>` for the lifetime of the
    handle's outstanding ref. No partial / torn / mid-eviction
    view is ever exposed.
 3. **Type-keyed.** `AssetHandle<T>::view()` returns bytes
@@ -935,7 +935,7 @@ public boundary at the seams between them:
    aggregate above exposes a `path` or a raw `ContentHash` to the
    runtime; runtime code names assets by `AssetId`, holds opaque
    `AssetHandle<T>` values, and resolves through the
-   `ResidencyManager` to a typed `std::span<const std::byte>`. The
+   `ResidencyManager` to a typed `eastl::span<const std::byte>`. The
    manifest is the single resolution point; the CAS is the single
    byte-storage point; residency is the single in-RAM-mapping
    point.
@@ -975,7 +975,7 @@ Cross-context invariants enforced by this surface:
 
 - Every fallible operation returns `glibre::Result<T>` =
   `std::expected<T, glibre::Error>` per
-  `reviews/decisions/error-model.md`. `content::Error` is a `std::variant`
+  `reviews/decisions/error-model.md`. `content::Error` is an `eastl::variant`
   over the two closed sums declared in §2 (`ImporterError`,
   `ResidencyError`); `core` rolls this into the engine-wide
   `glibre::Error` arm when the content plugin lands.
@@ -1038,14 +1038,14 @@ implementation translation units include the real headers.
 
 #pragma once
 
-#include <array>
+#include <EASTL/array.h>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <memory>
-#include <span>
-#include <string_view>
-#include <variant>
+#include <EASTL/span.h>
+#include <EASTL/string_view.h>
+#include <EASTL/variant.h>
 
 // -----------------------------------------------------------------------
 // Stand-in declarations from sibling contexts. The real definitions live
@@ -1060,14 +1060,14 @@ implementation translation units include the real headers.
 namespace glibre {
 
 struct ErrorContext {
-    std::string_view file{};
+    eastl::string_view file{};
     int              line{0};
-    std::string_view detail{};
+    eastl::string_view detail{};
 };
 
 class Error {
 public:
-    using Variant = std::variant<int /* per-context Error enums appended in core */>;
+    using Variant = eastl::variant<int /* per-context Error enums appended in core */>;
 
     template <class E>
     constexpr Error(E e, ErrorContext ctx = {}) noexcept
@@ -1099,7 +1099,7 @@ struct Deleted  { /* opaque */ };
 struct Renamed  { /* opaque */ };
 }  // namespace file_event
 
-using FileEvent = std::variant<
+using FileEvent = eastl::variant<
     file_event::Created,
     file_event::Modified,
     file_event::Deleted,
@@ -1140,7 +1140,7 @@ enum class ResidencyError : std::uint16_t {
 // `Error` is the single content-internal sum. Each arm carries one of the
 // two closed enums declared above; `core` rolls this into `glibre::Error`'s
 // variant when the content plugin lands.
-using Error = std::variant<ImporterError, ResidencyError>;
+using Error = eastl::variant<ImporterError, ResidencyError>;
 
 // Convenience: every public fallible function in this surface returns Result<T>.
 template <class T>
@@ -1154,7 +1154,7 @@ using Result = ::glibre::Result<T>;
 // addressed inside the CAS (§4.1.5 inv #1) and the cache key over which
 // the cook pipeline deduplicates (§4.1.3 inv #3).
 struct ContentHash {
-    std::array<std::byte, 32> bytes{};
+    eastl::array<std::byte, 32> bytes{};
     [[nodiscard]] friend constexpr bool operator==(ContentHash, ContentHash) noexcept = default;
 };
 
@@ -1165,7 +1165,7 @@ struct ContentHash {
 // `Manifest` records both so a future scan can decide cache-hit-vs-recook
 // without re-deriving every ingredient (§4.1.6 composition).
 struct CookKey {
-    std::array<std::byte, 32> bytes{};
+    eastl::array<std::byte, 32> bytes{};
     [[nodiscard]] friend constexpr bool operator==(CookKey, CookKey) noexcept = default;
 };
 
@@ -1178,17 +1178,17 @@ class AssetId {
 public:
     constexpr AssetId() noexcept = default;
 
-    [[nodiscard]] static auto from_string(std::string_view s) noexcept
+    [[nodiscard]] static auto from_string(eastl::string_view s) noexcept
         -> Result<AssetId>;
 
-    [[nodiscard]] auto view()    const noexcept -> std::string_view { return view_; }
+    [[nodiscard]] auto view()    const noexcept -> eastl::string_view { return view_; }
     [[nodiscard]] auto is_empty() const noexcept -> bool { return view_.empty(); }
 
     [[nodiscard]] friend constexpr bool operator==(const AssetId&, const AssetId&) noexcept = default;
 
 private:
-    constexpr explicit AssetId(std::string_view v) noexcept : view_{v} {}
-    std::string_view view_{};
+    constexpr explicit AssetId(eastl::string_view v) noexcept : view_{v} {}
+    eastl::string_view view_{};
 };
 
 // Compile-time-stable enumeration of the artifact classes content owns
@@ -1217,7 +1217,7 @@ enum class FontFormat    : std::uint8_t { Ttf, Otf };
 struct SourceAsset {
     // Workspace-relative path under `assets/source/...`. Stored as a
     // borrowed view; backing memory is owned by the cook session arena.
-    std::string_view path{};
+    eastl::string_view path{};
 
     SourceKind       kind{SourceKind::Mesh};
     // The concrete container/format. Use `mesh_format` / `texture_format` /
@@ -1230,12 +1230,12 @@ struct SourceAsset {
     } format{};
 
     // BLAKE3 of the raw on-disk bytes captured at scan/watcher delivery.
-    std::array<std::byte, 32> source_hash{};
+    eastl::array<std::byte, 32> source_hash{};
 
     // Construct from a workspace-relative path. Refuses out-of-root /
     // unknown-extension inputs with `ImporterError::SourceNotFound` /
     // `MalformedPayload` lifted into `glibre::Error`.
-    [[nodiscard]] static auto from_path(std::string_view workspace_relative) noexcept
+    [[nodiscard]] static auto from_path(eastl::string_view workspace_relative) noexcept
         -> Result<SourceAsset>;
 };
 
@@ -1261,14 +1261,14 @@ struct NormalizeParams {
     // step and fed into `CookKey` directly. Content does not interpret
     // these fields here — each importer pulls a typed view inside its
     // own translation unit.
-    std::span<const std::byte> canonical_bytes{};
+    eastl::span<const std::byte> canonical_bytes{};
 };
 
 // Each importer carries an immutable `importer_version` — a BLAKE3 over
 // (SDK version, normalize-params vocabulary, post-process options
 // vocabulary). One ingredient of `CookKey` (§4.1.3 component #2).
 struct ImporterVersion {
-    std::array<std::byte, 32> bytes{};
+    eastl::array<std::byte, 32> bytes{};
     [[nodiscard]] friend constexpr bool operator==(ImporterVersion, ImporterVersion) noexcept = default;
 };
 
@@ -1303,7 +1303,7 @@ protected:
 // FBX SDK ingress — the only mesh path for MVP (§3.2 collapse #1).
 class FbxImporter final : public Importer {
 public:
-    [[nodiscard]] static auto create() noexcept -> Result<std::unique_ptr<FbxImporter>>;
+    [[nodiscard]] static auto create() noexcept -> Result<eastl::unique_ptr<FbxImporter>>;
 
     // Reads the mesh source asset, normalizes vertex/index streams and
     // skeleton/scene hierarchy, delegates meshlet / LOD / BLAS work to
@@ -1313,7 +1313,7 @@ public:
                                   const NormalizeParams&    params,
                                   ImporterArena&            out_arena,
                                   const CancellationToken&  cancel) noexcept
-        -> Result<std::span<const std::byte>>;
+        -> Result<eastl::span<const std::byte>>;
 
     ~FbxImporter();
 
@@ -1326,7 +1326,7 @@ private:
 // FreeImage ingress — every texture format MVP cares about (§3.2 collapse #1).
 class FreeImageImporter final : public Importer {
 public:
-    [[nodiscard]] static auto create() noexcept -> Result<std::unique_ptr<FreeImageImporter>>;
+    [[nodiscard]] static auto create() noexcept -> Result<eastl::unique_ptr<FreeImageImporter>>;
 
     // Decodes the texture source asset into the engine's canonical pixel
     // layout plus extracted metadata; returns the bytes of the
@@ -1335,7 +1335,7 @@ public:
                                   const NormalizeParams&    params,
                                   ImporterArena&            out_arena,
                                   const CancellationToken&  cancel) noexcept
-        -> Result<std::span<const std::byte>>;
+        -> Result<eastl::span<const std::byte>>;
 
     ~FreeImageImporter();
 
@@ -1348,7 +1348,7 @@ private:
 // FreeType ingress — TTF/OTF glyph metrics + atlas baking (§3.2 collapse #1).
 class FreeTypeImporter final : public Importer {
 public:
-    [[nodiscard]] static auto create() noexcept -> Result<std::unique_ptr<FreeTypeImporter>>;
+    [[nodiscard]] static auto create() noexcept -> Result<eastl::unique_ptr<FreeTypeImporter>>;
 
     // Extracts glyph metrics + a baked SDF/bitmap atlas; returns the bytes
     // of the `glibre.content.FontArtifact` precursor in `out_arena`.
@@ -1356,7 +1356,7 @@ public:
                                   const NormalizeParams&    params,
                                   ImporterArena&            out_arena,
                                   const CancellationToken&  cancel) noexcept
-        -> Result<std::span<const std::byte>>;
+        -> Result<eastl::span<const std::byte>>;
 
     ~FreeTypeImporter();
 
@@ -1373,7 +1373,7 @@ private:
 // Canonical serialization of cook-step processing parameters
 // (e.g. `geometry`'s meshlet/LOD configuration as supplied to the cook).
 struct ProcessingParams {
-    std::span<const std::byte> canonical_bytes{};
+    eastl::span<const std::byte> canonical_bytes{};
 };
 
 // Sorted tuple of (tool_name, tool_version) pairs the cook transitively
@@ -1381,8 +1381,8 @@ struct ProcessingParams {
 // over `tool_name`; identical tool_name/tool_version pair occurrences are
 // deduplicated before hashing.
 struct ToolVersionPair {
-    std::string_view tool_name;
-    std::string_view tool_version;
+    eastl::string_view tool_name;
+    eastl::string_view tool_version;
 };
 
 // Construct a `CookKey` from its declared inputs (§4.1.3 inv #1, #2).
@@ -1390,11 +1390,11 @@ struct ToolVersionPair {
 // function rejects denormalized representations (e.g. NaN floats inside
 // `params.canonical_bytes`) before hashing rather than producing a
 // distinct key for one logical input.
-[[nodiscard]] auto make_cook_key(const std::array<std::byte, 32>&  source_hash,
+[[nodiscard]] auto make_cook_key(const eastl::array<std::byte, 32>&  source_hash,
                                  ImporterVersion                    importer_version,
                                  const NormalizeParams&             normalize_params,
                                  const ProcessingParams&            processing_params,
-                                 std::span<const ToolVersionPair>   downstream_tool_versions) noexcept
+                                 eastl::span<const ToolVersionPair>   downstream_tool_versions) noexcept
     -> Result<CookKey>;
 
 // -----------------------------------------------------------------------
@@ -1411,7 +1411,7 @@ struct ToolVersionPair {
 // The Fory FQN of the artifact class. Aliased here for readability;
 // `data` owns the schema-id type per `reviews/decisions/fory-codegen.md`.
 struct ArtifactSchemaId {
-    std::string_view fqn{};   // e.g. "glibre.content.MeshArtifact"
+    eastl::string_view fqn{};   // e.g. "glibre.content.MeshArtifact"
     std::uint32_t    version{0};
 };
 
@@ -1419,7 +1419,7 @@ struct CookedAsset {
     // The Fory-serialized bytes of one of the per-class artifact schemas.
     // Storage is owned by the cook session's staging arena until the CAS
     // write commits.
-    std::span<const std::byte> payload{};
+    eastl::span<const std::byte> payload{};
 
     ArtifactSchemaId schema{};
 
@@ -1430,7 +1430,7 @@ struct CookedAsset {
 // Compute `content_hash`, validate `schema` against the registry, and
 // produce a `CookedAsset` ready for CAS write. Wrong FQN / wrong version
 // is `ImporterError::MalformedPayload` (§4.1.4 inv #2).
-[[nodiscard]] auto seal_cooked_asset(std::span<const std::byte> payload,
+[[nodiscard]] auto seal_cooked_asset(eastl::span<const std::byte> payload,
                                      ArtifactSchemaId           schema) noexcept
     -> Result<CookedAsset>;
 
@@ -1447,20 +1447,20 @@ struct CookedAsset {
 struct CasConfig {
     // Workspace-rooted absolute path to `cooked/`. Validated at create()
     // time against `platform::CanonicalPath`.
-    std::string_view cooked_root{};
+    eastl::string_view cooked_root{};
 };
 
 // Read view of a CAS-resident artifact: an mmap region surfaced as a
 // const byte span. Lifetime is bounded by the residency mapping that
 // produced it (§4.1.7 inv #5).
 struct CasReadView {
-    std::span<const std::byte> bytes{};
+    eastl::span<const std::byte> bytes{};
 };
 
 class CAS {
 public:
     [[nodiscard]] static auto create(const CasConfig&) noexcept
-        -> Result<std::unique_ptr<CAS>>;
+        -> Result<eastl::unique_ptr<CAS>>;
 
     // Atomic write: the bytes land at a collision-free temp path, are
     // fsynced, then `rename(2)`d onto `cooked/<prefix>/<hash>`. Idempotent
@@ -1502,14 +1502,14 @@ struct DependencyEdge {
     // path (workspace-relative under `assets/source/`).
     AssetId          parent;
     AssetId          child_asset_id;        // empty if the child is a source path
-    std::string_view child_source_path;     // empty if the child is an asset
+    eastl::string_view child_source_path;     // empty if the child is an asset
 };
 
 struct ManifestEntry {
     AssetId                          asset_id;
     ContentHash                      content_hash{};
     CookKey                          cook_key{};
-    std::span<const DependencyEdge>  edges{};
+    eastl::span<const DependencyEdge>  edges{};
 };
 
 class Manifest {
@@ -1517,8 +1517,8 @@ public:
     // Open / validate the persistent manifest at workspace root. Missing
     // file ⇒ empty manifest (first run); malformed payload ⇒
     // `ImporterError::MalformedPayload`.
-    [[nodiscard]] static auto open(std::string_view workspace_root) noexcept
-        -> Result<std::unique_ptr<Manifest>>;
+    [[nodiscard]] static auto open(eastl::string_view workspace_root) noexcept
+        -> Result<eastl::unique_ptr<Manifest>>;
 
     // Resolve a logical name to a current cooked content hash.
     // Stale snapshot (asset_id no longer current) ⇒
@@ -1530,7 +1530,7 @@ public:
     // change to `asset_id` (transitive through the dependency graph).
     // Bounded by the manifest's transitive dependents (§4.1.10 inv #4).
     [[nodiscard]] auto dependents_of(AssetId asset_id) const noexcept
-        -> Result<std::span<const AssetId>>;
+        -> Result<eastl::span<const AssetId>>;
 
     // Lookup the per-entry record (asset_id, hash, key, edges) used by
     // the editor / cook session. Missing entry ⇒ `ManifestStale`.
@@ -1596,7 +1596,7 @@ struct ResidencySlot {
 class ResidencyManager {
 public:
     [[nodiscard]] static auto create(const MemoryBudget&, CAS&) noexcept
-        -> Result<std::unique_ptr<ResidencyManager>>;
+        -> Result<eastl::unique_ptr<ResidencyManager>>;
 
     // Enqueue an async load. Admission may trigger progressive eviction
     // before the new mapping is admitted (§4.1.7 inv #1). Failure modes:
@@ -1619,7 +1619,7 @@ public:
     // `AssetHandle<T>::view()`; non-Resident states surface as the
     // appropriate `ResidencyError` (§4.1.7 inv #5; §4.1.8 inv #2).
     [[nodiscard]] auto view_of(ResidencySlot slot) const noexcept
-        -> Result<std::span<const std::byte>>;
+        -> Result<eastl::span<const std::byte>>;
 
     ~ResidencyManager();
     ResidencyManager(const ResidencyManager&)            = delete;
@@ -1671,7 +1671,7 @@ public:
     // §4.1.8 inv #2). Hot-reload swap is observed on the next call once
     // the new hash is `Resident` (§4.1.8 inv #4).
     [[nodiscard]] auto view() const noexcept
-        -> Result<std::span<const std::byte>>;
+        -> Result<eastl::span<const std::byte>>;
 
     [[nodiscard]] auto kind()       const noexcept -> SourceKind;
     [[nodiscard]] auto asset_id()   const noexcept -> AssetId       { return asset_id_; }
@@ -1738,11 +1738,11 @@ public:
     // Register a subscription with `platform`'s file watcher. Duplicate
     // subscriptions for the same path collapse at registration time
     // (§4.1.10 inv #1).
-    [[nodiscard]] static auto subscribe(std::string_view source_subtree,
+    [[nodiscard]] static auto subscribe(eastl::string_view source_subtree,
                                         DebouncePolicy   policy) noexcept
         -> Result<WatchEdge>;
 
-    [[nodiscard]] auto path()           const noexcept -> std::string_view { return path_; }
+    [[nodiscard]] auto path()           const noexcept -> eastl::string_view { return path_; }
     [[nodiscard]] auto debounce()       const noexcept -> DebouncePolicy   { return policy_; }
 
     // Translate one platform-delivered `FileEvent` into the set of
@@ -1750,7 +1750,7 @@ public:
     // Pure of source-tree I/O (§4.1.10 inv #3).
     [[nodiscard]] auto translate(const ::glibre::platform::FileEvent& ev,
                                  const Manifest&                       manifest,
-                                 std::span<RecookRequest>              out) const noexcept
+                                 eastl::span<RecookRequest>              out) const noexcept
         -> Result<std::size_t>;
 
     WatchEdge(WatchEdge&&) noexcept;
@@ -1762,7 +1762,7 @@ public:
 private:
     WatchEdge() noexcept = default;
 
-    std::string_view path_{};
+    eastl::string_view path_{};
     DebouncePolicy   policy_{};
     struct Impl;
     Impl* impl_{nullptr};
@@ -1798,7 +1798,7 @@ public:
     [[nodiscard]] static auto begin(Manifest&         manifest,
                                     CAS&              cas,
                                     ResidencyManager& residency) noexcept
-        -> Result<std::unique_ptr<CookSession>>;
+        -> Result<eastl::unique_ptr<CookSession>>;
 
     // Enqueue a recook request. Duplicate `AssetId`s within a session
     // collapse to one cook step (§4.1.9 inv #4).
@@ -1873,7 +1873,7 @@ re-declare them.
 ### 5.3 Error types
 
 The closed sum is `glibre::content::Error` declared above —
-`std::variant<ImporterError, ResidencyError>`. Each enumerator maps to
+`eastl::variant<ImporterError, ResidencyError>`. Each enumerator maps to
 one §4 invariant:
 
 | Enumerator                          | Raised when                                                    | Origin                          |
@@ -2116,7 +2116,7 @@ and the budget ceiling is hard (§4.1.7 inv #1). The flow is:
    (`residency/slot.cpp`).
 2. **Slot state branch.** If the slot is `Resident` and ref-count
    was non-zero on entry, `view()` returns the live
-   `std::span<const std::byte>` immediately — no I/O, no eviction
+   `eastl::span<const std::byte>` immediately — no I/O, no eviction
    pressure. If `Unloaded` or `Pending`, the manager enqueues a
    `LoadRequest{content_hash, screen_coverage, deadline}` onto
    `residency/load_queue.cpp` and returns a pending sentinel; the
@@ -3107,7 +3107,7 @@ namespace glibre::content::test {
 // came from `platform`'s watcher; the next CookSession picks it up.
 RecookRequestId enqueue_synthetic_file_event(
     std::filesystem::path source_path,
-    std::span<const std::byte> new_source_bytes
+    eastl::span<const std::byte> new_source_bytes
 ) noexcept;
 
 // Forces a CookSession to commit at the next phase 8 entry.
@@ -3623,7 +3623,7 @@ importers do not bleed onto the game loop.
 ## 10. Failure Modes & Error Model
 
 Content's failure surface is the closed sum `glibre::content::Error`
-declared in §5.3 — `std::variant<ImporterError, ResidencyError>` — and
+declared in §5.3 — `eastl::variant<ImporterError, ResidencyError>` — and
 every public boundary in §5 returns
 `Result<T> = std::expected<T, glibre::Error>` per
 `reviews/decisions/error-model.md`. §10 fills four slots that §5.3

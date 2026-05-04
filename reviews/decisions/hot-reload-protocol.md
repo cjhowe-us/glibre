@@ -388,7 +388,7 @@ namespace glibre::core::test {
 // multiple reloads. Returns the request id so the caller can block
 // on the matching HotReloadCompleted/Refused event.
 ReloadRequestId enqueue_hot_reload(
-    std::string_view plugin_fqn,
+    eastl::string_view plugin_fqn,
     std::filesystem::path replacement_dylib_path
 ) noexcept;
 

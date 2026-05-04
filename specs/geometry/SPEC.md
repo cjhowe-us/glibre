@@ -25,7 +25,7 @@ Geometry refuses to own anything outside that seam. Frame submission,
 command-buffer recording, mesh-shader dispatch, TLAS build/refit, and
 the render graph belong to `render` (geometry only supplies the BLAS
 recipe and the GPU-resident buffers behind the handles render binds);
-HLSL → AIR/metallib compilation, PSO authoring, and shader permutation
+Slang → AIR/metallib compilation, PSO authoring, and shader permutation
 belong to `shader`; skeletal deformation, blend shapes, IK, and any
 pose-driven mesh mutation belong to the deferred `animation` plugin
 (geometry meshes are pose-rigid; the animation plugin will write into a
@@ -312,7 +312,7 @@ are **out of scope** for this spec.
 |-------------------|---------------------|-----------|
 | Two-phase HZB occlusion culling, task / mesh-shader cluster + triangle culling, mesh-shader-fallback compute compaction + multi-draw-indirect, visibility-buffer raster + deferred fullscreen material pass | `requirements/geometry/meshlet-pipeline.md` R-3.1.2, R-3.1.3, R-3.1.4, R-3.1.7 | `render`. Geometry only supplies the cooked streams + `BLASRecipe` + per-meshlet bounds / cone / SSE that the cull / raster / shade passes consume. |
 | `MTLAccelerationStructure` build / refit, TLAS assembly + per-frame refit, BLAS compaction, ray-traced shadows / AO / reflections | `requirements/geometry/meshlet-pipeline.md` (none directly), `design/rendering/render-effects.md` F-2.5.1 / R-2.5.1, `design/rendering/meshlets.md` BLAS section | `render`. Geometry ships `BLASRecipe`; render builds the AS. |
-| HLSL → AIR / metallib compilation, PSO authoring, shader-permutation cook, descriptor-frequency-group binders | (no direct harmonius geometry IDs; cited via `world-geometry.md` § RF-5) | `shader` plugin. Geometry never compiles or authors a shader. |
+| Slang → AIR / metallib compilation, PSO authoring, shader-permutation cook, descriptor-frequency-group binders | (no direct harmonius geometry IDs; cited via `world-geometry.md` § RF-5) | `shader` plugin. Geometry never compiles or authors a shader. |
 | Material-graph authoring, material-codegen, custom material functions, the bindless material parameter buffer schema | (cited via `requirements/foliage.md` shading rules; harmonius treats material as a separate plugin) | `material` plugin (deferred). Geometry meshes carry an opaque `MaterialHandle` slot per submesh; geometry never inspects it. |
 | Skeletal deformation, blend shapes, IK, pose-driven mesh mutation, bone-chain foliage wind preserving cluster AABBs (R-3.3.9 *animation half*) | `requirements/geometry/foliage.md` R-3.3.9 (animation half), `design/animation/skeletal.md` § "Bone chain for Nanite-style foliage" (line ~1867) | `animation` plugin (deferred). Geometry meshes are pose-rigid; the animation plugin will write into a separate skinning buffer, never into our cooked streams. The cooked stream's *bind-pose* bounds remain stable, which is exactly what RF-9 asks for. |
 | GPU-driven foliage instancing + compute culling, density-map / rule procedural placement, billboard / impostor LOD with crossfade, GPU vertex-shader wind from a wind field, character-vegetation interaction buffer, dense-foliage cluster-DAG path with masked blend + opacity micromasks (R-3.3.8 *placement / runtime half*), procedural grass blade meshing, dedicated tree-shading pipeline with subsurface leaf transmission | `requirements/geometry/foliage.md` R-3.3.1 .. R-3.3.9, `design/geometry/world-geometry.md` § "Foliage" (line ~74), § "Foliage Types" (line ~790) | `foliage` plugin (deferred post-MVP). The cooked-pak format already accommodates masked-blend submeshes and opacity micromasks (R-3.3.8 *format half*) so foliage can ride the existing `MeshletPak`; placement, wind, grass, and impostor authoring are not geometry concerns. |
@@ -357,7 +357,7 @@ indices, attribute streams, submesh ranges, material slots). Distinct
 from optimisation policy (§4.1.2) and from cluster shape (§4.1.3).
 
 **Composition.** The pre-optimisation snapshot of one authored mesh:
-position stream (`std::span<const f32>` xyz), index stream (`u32`),
+position stream (`eastl::span<const f32>` xyz), index stream (`u32`),
 optional per-vertex attribute streams (normal, tangent, UV0..UVn,
 colour, vertex weights), `Submesh` ranges (each carrying an opaque
 `MaterialSlot` index baked at author time), and the source-asset
@@ -1170,17 +1170,17 @@ per-context error enum returned through `Result<T>` and consumed by
 
 #pragma once
 
-#include <array>
+#include <EASTL/array.h>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
 #include <memory>
-#include <span>
-#include <string_view>
+#include <EASTL/span.h>
+#include <EASTL/string_view.h>
 #include <type_traits>
-#include <variant>
+#include <EASTL/variant.h>
 
 namespace glibre {
 
@@ -1204,14 +1204,14 @@ enum class Error : std::uint16_t {
 }  // namespace core
 
 struct ErrorContext {
-    std::string_view file;
+    eastl::string_view file;
     int              line  = 0;
-    std::string_view detail;
+    eastl::string_view detail;
 };
 
 class Error {
 public:
-    using Variant = std::variant<core::Error /*, geometry::Error inserted in core */>;
+    using Variant = eastl::variant<core::Error /*, geometry::Error inserted in core */>;
 
     template <class E>
     constexpr Error(E e, ErrorContext ctx = {}) noexcept
@@ -1296,7 +1296,7 @@ enum class Error : std::uint16_t {
     GpuBufferAllocFailed,
 };
 
-[[nodiscard]] constexpr std::string_view to_string(Error e) noexcept;
+[[nodiscard]] constexpr eastl::string_view to_string(Error e) noexcept;
 
 // -----------------------------------------------------------------------
 // Format / quantisation enums. Bytes-on-disk are determined by these +
@@ -1477,7 +1477,7 @@ class CookManifest;      // §4.1.8  — per-mesh build record.
 class DecodedBuffer {
 public:
     [[nodiscard]] AttributeKind              kind()         const noexcept;
-    [[nodiscard]] std::span<const std::byte> bytes()        const noexcept;
+    [[nodiscard]] eastl::span<const std::byte> bytes()        const noexcept;
     [[nodiscard]] std::size_t                decoded_size() const noexcept;
 
     DecodedBuffer(DecodedBuffer&&) noexcept;
@@ -1514,7 +1514,7 @@ public:
     [[nodiscard]] std::uint32_t         page_count()  const noexcept;
     [[nodiscard]] Result<ResidencyHint>
         page_hint(std::uint32_t page_index) const noexcept;
-    [[nodiscard]] Result<std::span<const std::byte>>
+    [[nodiscard]] Result<eastl::span<const std::byte>>
         page_bytes(std::uint32_t page_index) const noexcept;
 
     ~PakReader();
@@ -1533,13 +1533,13 @@ protected:
 // -----------------------------------------------------------------------
 
 struct DecodePoolDesc {
-    std::array<std::size_t, kAttributeKindCount> per_attribute_max_bytes{};
+    eastl::array<std::size_t, kAttributeKindCount> per_attribute_max_bytes{};
     std::uint16_t slot_count_per_attribute = 0u;
 };
 
 class DecodePool {
 public:
-    [[nodiscard]] static Result<std::unique_ptr<DecodePool>>
+    [[nodiscard]] static Result<eastl::unique_ptr<DecodePool>>
         create(const DecodePoolDesc&) noexcept;
 
     [[nodiscard]] Result<DecodedBuffer>
@@ -1616,7 +1616,7 @@ enum class BLASBuildFlags : std::uint16_t {
 }
 
 struct BLASRecipeView {
-    std::span<const BLASGeometryDescriptor> geometries{};
+    eastl::span<const BLASGeometryDescriptor> geometries{};
     BLASBuildFlags                          flags = BLASBuildFlags::PreferFastTrace;
 };
 
@@ -1647,14 +1647,14 @@ struct MeshletGroupView {
 // -----------------------------------------------------------------------
 
 struct MeshSourceMetadata {
-    std::string_view source_path;     // e.g. "art/props/crate.fbx"
-    std::string_view author;          // optional; logged on cook only.
-    std::string_view tool_version;    // optional; cook driver tag.
+    eastl::string_view source_path;     // e.g. "art/props/crate.fbx"
+    eastl::string_view author;          // optional; logged on cook only.
+    eastl::string_view tool_version;    // optional; cook driver tag.
 };
 
 struct MeshRegistrationDesc {
-    std::span<const std::byte> pak_bytes;          // memory-mapped, read-only.
-    std::string_view           pak_path;
+    eastl::span<const std::byte> pak_bytes;          // memory-mapped, read-only.
+    eastl::string_view           pak_path;
     MeshSourceMetadata         source_metadata{};
 };
 
@@ -1669,7 +1669,7 @@ class GeometryRegistry {
 public:
     [[nodiscard]] static Result<GeometryRegistry*> instance() noexcept;
 
-    [[nodiscard]] static Result<std::unique_ptr<GeometryRegistry>>
+    [[nodiscard]] static Result<eastl::unique_ptr<GeometryRegistry>>
         create(DecodePoolDesc initial_pool_desc) noexcept;
 
     // --- Mesh registration -------------------------------------------------
@@ -1694,7 +1694,7 @@ public:
     [[nodiscard]] Result<MeshletGroupView>
         resolve_group(MeshletGroupHandle) const noexcept;
 
-    [[nodiscard]] Result<std::span<const MeshletGroupView>>
+    [[nodiscard]] Result<eastl::span<const MeshletGroupView>>
         lod0_groups(MeshHandle) const noexcept;
 
     // --- GPU buffers -------------------------------------------------------
@@ -1719,7 +1719,7 @@ public:
                             std::uint32_t            page_index,
                             DecodedBuffer            position,
                             DecodedBuffer            index,
-                            std::span<DecodedBuffer> attributes) noexcept;
+                            eastl::span<DecodedBuffer> attributes) noexcept;
 
     // --- Decode pool -------------------------------------------------------
     [[nodiscard]] DecodePool&       decode_pool() noexcept;
@@ -1776,12 +1776,12 @@ struct CookOptions {
     MeshletBuildOptions meshlet_build{};
     DracoEncodeOptions  draco{};
     PakWriterOptions    pak{};
-    std::string_view    output_pak_path;
-    std::string_view    manifest_path;
+    eastl::string_view    output_pak_path;
+    eastl::string_view    manifest_path;
 };
 
 struct CookedMesh {
-    std::string_view pak_path;
+    eastl::string_view pak_path;
     FormatHash       format_hash         = FormatHash::Unknown;
     std::uint64_t    source_content_hash = 0u;
     std::uint32_t    page_count          = 0u;
@@ -1803,14 +1803,14 @@ struct CookedMesh {
 // content-hash + FormatHash match the engine's compiled hash; the
 // driver skips re-cook in that case (§4.1.8 invariant 1).
 [[nodiscard]] Result<bool>
-    cook_is_up_to_date(std::string_view manifest_path,
+    cook_is_up_to_date(eastl::string_view manifest_path,
                        std::uint64_t    source_content_hash,
                        FormatHash       engine_format_hash) noexcept;
 
 // Pak inspection — used by the editor's content browser and by the
 // CI determinism gate (cook on host A, cook on host B, byte-compare).
 [[nodiscard]] Result<PakHeaderInfo>
-    inspect_pak(std::span<const std::byte> pak_bytes) noexcept;
+    inspect_pak(eastl::span<const std::byte> pak_bytes) noexcept;
 
 }  // namespace cook
 

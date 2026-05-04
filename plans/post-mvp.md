@@ -26,4 +26,4 @@ to issue numbers.
 - Visual scripting depends on `core` plugin + hot-reload (already in
   MVP).
 - Cross-platform delays until macOS feature surface stabilizes; SDL3
-  and HLSL/DXC choices keep this unblocked.
+  and Slang/slangc choices keep this unblocked.

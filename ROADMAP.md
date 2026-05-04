@@ -17,7 +17,7 @@ MVP contexts (each = one plugin + one spec + one epic):
 - `platform` — SDL3 window/input, file watcher, Metal 4 surface (via
   metal-cpp).
 - `data` — Apache Fory schemas, reflection, migration.
-- `shader` — HLSL → DXC → metal-shaderconverter; HLSL reflection.
+- `shader` — Slang → slangc → metallib (Apple Silicon / Metal 4); slangc native reflection.
 - `render` — declarative render graph, Metal 4 backend (metal-cpp),
   mesh shader gbuffer, deferred lighting, hybrid-RT shadows, present.
 - `geometry` — meshoptimizer meshlets + Draco mesh(let) compression
@@ -40,7 +40,7 @@ Layered onto MVP without core rewrite. Each item independent:
 - Virtualized geometry — cluster DAG, screen-space-error LOD, streaming.
 - Hybrid RT expansion — AO, reflections, GI probes, denoisers.
 - Visual scripting (logic graph) editor + codegen-to-C++.
-- Material graph editor + HLSL fragment codegen.
+- Material graph editor + Slang fragment codegen.
 - Effects/VFX graph + GPU compute particles.
 - Render graph editor (read-only viewer first).
 - Skeletal animation + state machines.

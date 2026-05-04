@@ -50,8 +50,8 @@ editor-IPC story) without dragging an IDL VM at runtime.
    private dependency of `glibre-types.dylib`.
 4. The middleman dylib exposes:
    - POD-like generated struct types (`glibre::types::Transform`, …).
-   - `glibre::types::serialize<T>(const T&, std::span<std::byte>)` and
-     `deserialize<T>(std::span<const std::byte>) -> std::expected<T,
+   - `glibre::types::serialize<T>(const T&, eastl::span<std::byte>)` and
+     `deserialize<T>(eastl::span<const std::byte>) -> std::expected<T,
      glibre::Error>` — thin generated wrappers over Fory.
    - `glibre::types::Schema` registry: per-type `(fqn, version,
      blake3-hash-of-schema-source)` entries.
@@ -282,7 +282,7 @@ This is captured as an open question (below) and converted to a
 3. **Reserved-tag enforcement**: machine-checked in `glibre-foryc`,
    or convention only? Lean toward enforced; cost is one diff against
    the prior committed schema.
-4. **Cross-dylib `std::span` of `std::byte`**: C++23 ABI for these is
+4. **Cross-dylib `eastl::span` of `std::byte`**: C++23 ABI for these is
    stable on the chosen libc++ version (clang on macOS), but document
    the libc++ minimum in the data SPEC §5.
 5. **Determinism of float fields**: ban NaN payloads at deserialize

@@ -1087,16 +1087,16 @@ owns the codec.
        "<glibre/physics/physics.hpp>. The middleman seam owns Jolt types."
 #endif
 
-#include <array>
+#include <EASTL/array.h>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
 #include <memory>
-#include <span>
-#include <string_view>
+#include <EASTL/span.h>
+#include <EASTL/string_view.h>
 #include <type_traits>
-#include <variant>
+#include <EASTL/variant.h>
 
 namespace glibre {
 
@@ -1123,14 +1123,14 @@ enum class Error : std::uint16_t {
 namespace physics { enum class Error : std::uint16_t; }  // declared below.
 
 struct ErrorContext {
-    std::string_view file;
+    eastl::string_view file;
     int              line  = 0;
-    std::string_view detail;
+    eastl::string_view detail;
 };
 
 class Error {
 public:
-    using Variant = std::variant<core::Error /*, physics::Error inserted in core */>;
+    using Variant = eastl::variant<core::Error /*, physics::Error inserted in core */>;
 
     template <class E>
     constexpr Error(E e, ErrorContext ctx = {}) noexcept
@@ -1151,7 +1151,7 @@ using Result = std::expected<T, Error>;
 #if !defined(GLIBRE_HAVE_CORE_MATH)
 struct Vec3 { float x = 0.0f, y = 0.0f, z = 0.0f; };
 struct Quat { float x = 0.0f, y = 0.0f, z = 0.0f, w = 1.0f; };
-struct Mat4 { std::array<float, 16> m{}; };
+struct Mat4 { eastl::array<float, 16> m{}; };
 #endif  // GLIBRE_HAVE_CORE_MATH
 
 #if !defined(GLIBRE_HAVE_CORE_ECS)
@@ -1213,7 +1213,7 @@ enum class Error : std::uint16_t {
     HotReloadStateUnmigratable,     // schema bump invalidates a live world.
 };
 
-[[nodiscard]] constexpr std::string_view to_string(Error e) noexcept;
+[[nodiscard]] constexpr eastl::string_view to_string(Error e) noexcept;
 
 // -----------------------------------------------------------------------
 // physics::Warning — non-fatal surface; logged but not returned. Listed
@@ -1341,7 +1341,7 @@ enum class LayerInteraction : std::uint8_t {
 // body lives in the physics dylib; callers populate via the methods.
 class LayerFilter {
 public:
-    [[nodiscard]] static Result<std::unique_ptr<LayerFilter>>
+    [[nodiscard]] static Result<eastl::unique_ptr<LayerFilter>>
         create(std::uint16_t layer_count) noexcept;
 
     [[nodiscard]] Result<void>
@@ -1374,7 +1374,7 @@ struct PhysicsConfig {
     bool                          ccd_enabled          = true;
     std::uint64_t                 rng_seed             = 0u;
     WorldBudgets                  budgets              = {};
-    std::shared_ptr<LayerFilter>  layer_filter         = {};
+    eastl::shared_ptr<LayerFilter>  layer_filter         = {};
     // Content-hash of the canonicalised config bytes; written by `data` at
     // load and matched against persisted PhysicsSnapshot at restore time.
     std::uint64_t                 content_hash         = 0u;
@@ -1388,7 +1388,7 @@ struct PhysicsConfig {
 struct ShapeBlob {
     std::uint64_t              content_hash   = 0u;  // BLAKE3 of the cooked bytes.
     std::uint16_t              schema_version = 0u;
-    std::span<const std::byte> bytes          = {};
+    eastl::span<const std::byte> bytes          = {};
 };
 
 // -----------------------------------------------------------------------
@@ -1507,7 +1507,7 @@ struct ContactManifold {
     Vec3                         normal_world = {};
     MaterialId                   material_a   = {};
     MaterialId                   material_b   = {};
-    std::array<ContactPoint, 4>  points       = {};
+    eastl::array<ContactPoint, 4>  points       = {};
     std::uint8_t                 point_count  = 0u;
 };
 
@@ -1532,7 +1532,7 @@ struct JointBrokenEvent {
 
 // Generic ContactEvent — sealed sum of the above; downstream code may
 // match on the variant for unified handling.
-using ContactEvent = std::variant<
+using ContactEvent = eastl::variant<
     CollisionStarted,
     CollisionPersisted,
     CollisionEnded,
@@ -1559,7 +1559,7 @@ struct QueryHit {
 
 // QueryFilter callback — pure (read-only over ECS, §4.1.10 inv 5).
 // Returns true to keep the candidate, false to reject.
-using QueryPredicateFn = std::function<bool(const QueryHit&) /* noexcept */>;
+using QueryPredicateFn = eastl::function<bool(const QueryHit&) /* noexcept */>;
 
 struct QueryFilter {
     std::uint64_t                layer_mask         = ~std::uint64_t{0};
@@ -1568,7 +1568,7 @@ struct QueryFilter {
     bool                         hit_kinematic      = true;
     bool                         hit_dynamic        = true;
     QueryPredicateFn             predicate          = {};
-    std::span<const ecs::Entity> ignore_entities    = {};
+    eastl::span<const ecs::Entity> ignore_entities    = {};
 };
 
 struct ShapeCastDesc {
@@ -1583,44 +1583,44 @@ public:
     // Ray cast — directional. The caller scales `direction` by max
     // distance. Returned hits are written into `out` (caller-owned)
     // up to its capacity; `Result` carries the populated subspan.
-    [[nodiscard]] Result<std::span<QueryHit>>
+    [[nodiscard]] Result<eastl::span<QueryHit>>
         raycast(Vec3 origin,
                 Vec3 direction,
                 const QueryFilter&,
-                std::span<QueryHit> out) const noexcept;
+                eastl::span<QueryHit> out) const noexcept;
 
     // Sphere overlap — non-sweeping; returns every body whose AABB +
     // narrowphase intersects the sphere.
-    [[nodiscard]] Result<std::span<QueryHit>>
+    [[nodiscard]] Result<eastl::span<QueryHit>>
         sphere_overlap(Vec3 centre,
                        float radius,
                        const QueryFilter&,
-                       std::span<QueryHit> out) const noexcept;
+                       eastl::span<QueryHit> out) const noexcept;
 
     // Capsule sweep — oriented; the QueryHit::distance is the sweep-T
     // at first contact in [0, 1].
-    [[nodiscard]] Result<std::span<QueryHit>>
+    [[nodiscard]] Result<eastl::span<QueryHit>>
         capsule_sweep(Vec3 centre_a,
                       Vec3 centre_b,
                       float radius,
                       Vec3 sweep,
                       const QueryFilter&,
-                      std::span<QueryHit> out) const noexcept;
+                      eastl::span<QueryHit> out) const noexcept;
 
     // Generic shape cast — used by post-MVP character controllers /
     // vehicle wheels; `desc.sweep` controls direction and length.
-    [[nodiscard]] Result<std::span<QueryHit>>
+    [[nodiscard]] Result<eastl::span<QueryHit>>
         shape_cast(const ShapeCastDesc&,
                    const QueryFilter&,
-                   std::span<QueryHit> out) const noexcept;
+                   eastl::span<QueryHit> out) const noexcept;
 
     // Closest-point — single hit; `Result` carries an empty span if the
     // filter rejects every candidate.
-    [[nodiscard]] Result<std::span<QueryHit>>
+    [[nodiscard]] Result<eastl::span<QueryHit>>
         closest_point(Vec3 point,
                       float max_distance,
                       const QueryFilter&,
-                      std::span<QueryHit> out) const noexcept;
+                      eastl::span<QueryHit> out) const noexcept;
 
     ~PhysicsQueries();
     PhysicsQueries(const PhysicsQueries&)            = delete;
@@ -1693,16 +1693,16 @@ struct SnapshotJoint {
 class PhysicsSnapshot {
 public:
     [[nodiscard]] const SnapshotHeader&             header() const noexcept;
-    [[nodiscard]] std::span<const SnapshotBody>     bodies() const noexcept;
-    [[nodiscard]] std::span<const SnapshotJoint>    joints() const noexcept;
+    [[nodiscard]] eastl::span<const SnapshotBody>     bodies() const noexcept;
+    [[nodiscard]] eastl::span<const SnapshotJoint>    joints() const noexcept;
 
     // Fory bridge — `data` codegens these. Writer / reader are total:
     // success ⇒ canonical bytes / restored snapshot, failure ⇒ typed
     // error.
-    [[nodiscard]] Result<std::span<const std::byte>> to_bytes() const noexcept;
+    [[nodiscard]] Result<eastl::span<const std::byte>> to_bytes() const noexcept;
 
-    [[nodiscard]] static Result<std::unique_ptr<PhysicsSnapshot>>
-        from_bytes(std::span<const std::byte>) noexcept;
+    [[nodiscard]] static Result<eastl::unique_ptr<PhysicsSnapshot>>
+        from_bytes(eastl::span<const std::byte>) noexcept;
 
     ~PhysicsSnapshot();
     PhysicsSnapshot(const PhysicsSnapshot&)            = delete;
@@ -1753,7 +1753,7 @@ class PhysicsWorld {
 public:
     // Construction — fails fast on ConfigInvalid / ABI hash mismatch /
     // budget overflow. Captures `config` by value (immutable for life).
-    [[nodiscard]] static Result<std::unique_ptr<PhysicsWorld>>
+    [[nodiscard]] static Result<eastl::unique_ptr<PhysicsWorld>>
         create(ecs::World&, PhysicsConfig config) noexcept;
 
     // Phase-3 entry point — advances the accumulator and drains owed
@@ -1797,7 +1797,7 @@ public:
     // Snapshot — produces an opaque PhysicsSnapshot rooted in this
     // world's tick. Restore is total: it resets the world to the
     // captured tick or returns a typed error.
-    [[nodiscard]] Result<std::unique_ptr<PhysicsSnapshot>>
+    [[nodiscard]] Result<eastl::unique_ptr<PhysicsSnapshot>>
         snapshot() const noexcept;
     [[nodiscard]] Result<void>
         restore(const PhysicsSnapshot&) noexcept;
@@ -2137,7 +2137,7 @@ round-trip in §8.6 passes.
    the BLAS-invalidation walk during `PhysicsWorldReplaced` (§8.5),
    the `joints/joint_break.cpp` impulse-threshold walk, and the
    `queries/physics_queries.cpp` overlap-result append. The sort is
-   a `std::ranges::sort` over a `std::span<BodyId>` materialised
+   a `std::ranges::sort` over an `eastl::span<BodyId>` materialised
    into a phase-3-arena scratch buffer; the arena resets at
    substep entry. Hash-table iteration order, archetype-chunk
    order, and Jolt's internal pair list never reach an output that
@@ -2196,7 +2196,7 @@ chasing through the §5 surface and the §3.3 refusals.
 2. **Queries return spans into caller arenas.** `PhysicsQueries::
    ray_cast(...)`, `shape_cast(...)`, `overlap(...)`, and
    `closest_point(...)` accept a caller-supplied
-   `std::span<QueryHit>` output buffer and write **at most**
+   `eastl::span<QueryHit>` output buffer and write **at most**
    `out.size()` rows, returning the actual count (§4.1.10
    invariant 2 — plain-data results, no Jolt internals). Callers
    are expected to source the buffer from a per-context arena

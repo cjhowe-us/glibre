@@ -410,7 +410,7 @@ hash, or the inner error string.
    The MVP loader supports unload only via process restart. The
    first hot-reload plan will make `glibre_plugin_unregister`
    mandatory and decide whether the registries should keep
-   per-plugin ownership records as a `std::vector` or a tagged
+   per-plugin ownership records as an `eastl::vector` or a tagged
    side-table. Defer.
 2. **Cross-plugin direct symbol use** is forbidden in this record,
    but a future scripting-plugin spike may need an explicit cross-

@@ -475,7 +475,7 @@ trace may carry. Adding a variant is a deliberate central
 edit; this is what keeps the parser, the recorder (in
 `tools`), the replay driver, and the runner in lockstep.
 
-**Composition.** Closed `std::variant` over:
+**Composition.** Closed `eastl::variant` over:
 
 - `InputOp` — see §4.1.5.
 - `AssertState` — predicate `(component_path,
@@ -677,7 +677,7 @@ collapse from §3.2 #2 is load-bearing: harmonius scattered
 four injection paths; e2e enumerates exactly three and gates
 each by `RunnerHost`.
 
-**Composition.** Closed `std::variant` over:
+**Composition.** Closed `eastl::variant` over:
 
 - `InProcess` — the `ReplayDriver` is linked directly into
   the binary under test and substitutes for the SDL3-backed
@@ -728,7 +728,7 @@ runs to which `InjectionLayer`s are permitted. Tightening
 or relaxing the policy is a central edit; e2e never invents
 silent permissions.
 
-**Composition.** Closed `std::variant` over:
+**Composition.** Closed `eastl::variant` over:
 
 - `dev-headless` — developer machine, no display server in
   use for this run.
@@ -1171,16 +1171,16 @@ the closed sum `e2e::Error` defined below.
 
 #pragma once
 
-#include <array>
+#include <EASTL/array.h>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
-#include <optional>
-#include <span>
-#include <string_view>
+#include <EASTL/optional.h>
+#include <EASTL/span.h>
+#include <EASTL/string_view.h>
 #include <type_traits>
-#include <variant>
+#include <EASTL/variant.h>
 
 // Engine-wide error type, declared in core/include/glibre/error.hpp.
 // Forward-declared here so this header is self-contained for syntax
@@ -1200,13 +1200,13 @@ namespace glibre::platform {
 
 class CanonicalPath {
 public:
-    [[nodiscard]] static auto from_absolute(std::string_view utf8_abs) noexcept
+    [[nodiscard]] static auto from_absolute(eastl::string_view utf8_abs) noexcept
         -> ::glibre::Result<CanonicalPath>;
-    [[nodiscard]] auto view() const noexcept -> std::string_view { return view_; }
+    [[nodiscard]] auto view() const noexcept -> eastl::string_view { return view_; }
     constexpr bool operator==(const CanonicalPath&) const noexcept = default;
 private:
-    constexpr explicit CanonicalPath(std::string_view v) noexcept : view_{v} {}
-    std::string_view view_{};
+    constexpr explicit CanonicalPath(eastl::string_view v) noexcept : view_{v} {}
+    eastl::string_view view_{};
 };
 
 class InputEvent;   // sealed sum from platform §4.2; opaque at the e2e seam.
@@ -1220,7 +1220,7 @@ namespace glibre::e2e {
 // 5.1  Closed sum of typed failures (§4.1.13)
 // ---------------------------------------------------------------------------
 //
-// `Error` is a `std::variant` so payload-bearing arms (`AssertFailed`,
+// `Error` is an `eastl::variant` so payload-bearing arms (`AssertFailed`,
 // `BinaryCrash`) survive without losing the closed-sum shape. Each
 // payload-free arm is a zero-sized tag struct. The engine-wide
 // `glibre::Error` variant rolls this whole sum into one of its arms
@@ -1242,7 +1242,7 @@ struct AssertOpId {
 struct ArtefactRef {
     // Non-owning view into the runner's per-run artefact bundle.
     // Resolved against `TraceReport::artefact_root` by the consumer.
-    std::string_view relative_path{};
+    eastl::string_view relative_path{};
     constexpr bool operator==(const ArtefactRef&) const noexcept = default;
 };
 
@@ -1274,7 +1274,7 @@ struct BinaryCrash {
     constexpr bool operator==(const BinaryCrash&) const noexcept = default;
 };
 
-using Error = std::variant<
+using Error = eastl::variant<
     TraceParse,
     EnvDrift,
     AssertFailed,
@@ -1293,7 +1293,7 @@ using Result = ::glibre::Result<T>;
 // ---------------------------------------------------------------------------
 
 struct Blake3Hash {
-    std::array<std::uint8_t, 32> bytes{};
+    eastl::array<std::uint8_t, 32> bytes{};
     constexpr bool operator==(const Blake3Hash&) const noexcept = default;
 };
 
@@ -1305,7 +1305,7 @@ struct EnvHash {
 
 // GoldenStore-relative path identifying a reference blob (§4.1.10 inv 2).
 struct GoldenRef {
-    std::string_view relative_path{};  // e.g. "render/cube/frame_42.png"
+    eastl::string_view relative_path{};  // e.g. "render/cube/frame_42.png"
     constexpr bool operator==(const GoldenRef&) const noexcept = default;
 };
 
@@ -1316,7 +1316,7 @@ struct WorldId {
 
 // AssertState predicate target — component path inside a named world.
 struct ComponentPath {
-    std::string_view view{};  // e.g. "world/player/Health.value"
+    eastl::string_view view{};  // e.g. "world/player/Health.value"
     constexpr bool operator==(const ComponentPath&) const noexcept = default;
 };
 
@@ -1346,7 +1346,7 @@ struct PixelTolerance {
     PixelTier             tier{PixelTier::Default};
     float                 max_delta_e{0.0f};        // CIEDE2000.
     float                 max_diff_fraction{0.0f};  // [0, 1].
-    std::span<const RegionMask> mask{};             // empty = whole frame.
+    eastl::span<const RegionMask> mask{};             // empty = whole frame.
     constexpr bool operator==(const PixelTolerance& rhs) const noexcept {
         // Spans compare by data+size; sufficient for value-object equality
         // in the same translation-unit context.
@@ -1362,7 +1362,7 @@ struct PixelTolerance {
 // 5.4  TraceOp sealed sum (§4.1.4)
 // ---------------------------------------------------------------------------
 //
-// Closed `std::variant`; adding a variant is a deliberate central edit
+// Closed `eastl::variant`; adding a variant is a deliberate central edit
 // (§4.1.4 inv 1). Each variant is data; the runner is the dispatcher
 // (§4.1.4 inv 4). No embedded executable expression in any variant.
 
@@ -1378,7 +1378,7 @@ struct AssertState {
     WorldId       world{};
     ComponentPath path{};
     // Fory-encoded expected value blob; parsed once into the trace arena.
-    std::span<const std::byte> expected_fory{};
+    eastl::span<const std::byte> expected_fory{};
 };
 
 struct AssertScreenshot {
@@ -1396,14 +1396,14 @@ struct AssertEcsSnapshot {
 struct AssertLogContains {
     AssertOpId       id{};
     bool             is_regex{false};
-    std::string_view needle{};  // substring or ECMAScript regex.
+    eastl::string_view needle{};  // substring or ECMAScript regex.
 };
 
 struct End {
     constexpr bool operator==(const End&) const noexcept = default;
 };
 
-using TraceOp = std::variant<
+using TraceOp = eastl::variant<
     InputOp,
     AssertState,
     AssertScreenshot,
@@ -1471,7 +1471,7 @@ public:
     [[nodiscard]] auto engine_version() const noexcept -> EngineVersion;
     [[nodiscard]] auto plugin_abi_hash() const noexcept -> Blake3Hash;     // middleman dylib hash.
     [[nodiscard]] auto asset_pack_hash() const noexcept -> Blake3Hash;     // BLAKE3 over cooked bundle.
-    [[nodiscard]] auto locale()          const noexcept -> std::string_view;  // BCP-47.
+    [[nodiscard]] auto locale()          const noexcept -> eastl::string_view;  // BCP-47.
     [[nodiscard]] auto window_size()     const noexcept -> ManifestLogicalSize;
     [[nodiscard]] auto dpi_scale()       const noexcept -> ManifestDpiScale;
     [[nodiscard]] auto rng_seed()        const noexcept -> RngSeed;
@@ -1485,7 +1485,7 @@ public:
 
     // Every GoldenStore-relative path the trace references.
     // Checked for existence at gate time (§4.1.3 inv 3).
-    [[nodiscard]] auto golden_refs() const noexcept -> std::span<const GoldenRef>;
+    [[nodiscard]] auto golden_refs() const noexcept -> eastl::span<const GoldenRef>;
 
     TraceManifest(const TraceManifest&)            = delete;
     TraceManifest& operator=(const TraceManifest&) = delete;
@@ -1531,12 +1531,12 @@ public:
     [[nodiscard]] auto op_count() const noexcept -> std::size_t;
 
     // Iterate the full ordered (FrameIndex, TraceOp) stream in record order.
-    [[nodiscard]] auto ops() const noexcept -> std::span<const FramedOp>;
+    [[nodiscard]] auto ops() const noexcept -> eastl::span<const FramedOp>;
 
     // Slice ops whose frame == `frame`. Returned span is contiguous;
     // intra-frame order preserved (§4.1.1 inv 1, §4.1.5 inv 3).
     [[nodiscard]] auto ops_at(FrameIndex frame) const noexcept
-        -> std::span<const FramedOp>;
+        -> eastl::span<const FramedOp>;
 
 private:
     Trace() noexcept = default;
@@ -1556,14 +1556,14 @@ struct GoldenImage {
     // 8-bit-per-channel sRGB; rows are tightly packed, BGRA order in
     // memory to match Metal swapchain readback. Pointer is non-owning;
     // lifetime tied to the GoldenStore that vended it.
-    std::span<const std::byte> bytes{};
+    eastl::span<const std::byte> bytes{};
     std::uint32_t              width{0};
     std::uint32_t              height{0};
 };
 
 struct EcsSnapshotRef {
     // Non-owning Fory-encoded reference blob (§4.1.10 reference shape).
-    std::span<const std::byte> bytes{};
+    eastl::span<const std::byte> bytes{};
 };
 
 class GoldenStore {
@@ -1619,7 +1619,7 @@ public:
     // in recorded order (§4.1.6 inv 1, 4); never re-yields, never reads
     // wall-clock. Empty span when the frame has no inputs.
     [[nodiscard]] auto advance(FrameIndex frame) noexcept
-        -> std::span<const ::glibre::platform::InputEvent* const>;
+        -> eastl::span<const ::glibre::platform::InputEvent* const>;
 
     // Adapts this driver to the platform::InputDriver seam (§3.3,
     // §4.2 cross-aggregate inv 5). The returned reference is valid
@@ -1659,7 +1659,7 @@ struct OsAutomation {
 
 }  // namespace injection
 
-using InjectionLayer = std::variant<
+using InjectionLayer = eastl::variant<
     injection::InProcess,
     injection::PerProcess,
     injection::OsAutomation>;
@@ -1673,7 +1673,7 @@ struct CiIsolated     { constexpr bool operator==(const CiIsolated&)     const n
 
 }  // namespace host
 
-using RunnerHost = std::variant<
+using RunnerHost = eastl::variant<
     host::DevHeadless,
     host::DevInteractive,
     host::CiHeadless,
@@ -1715,7 +1715,7 @@ struct Aborted {
 
 }  // namespace report_status
 
-using ReportStatus = std::variant<
+using ReportStatus = eastl::variant<
     report_status::Passed,
     report_status::Failed,
     report_status::Aborted>;
@@ -1729,7 +1729,7 @@ public:
     [[nodiscard]] auto host()           const noexcept -> const RunnerHost&;
     [[nodiscard]] auto frames_observed()const noexcept -> std::uint64_t;
     [[nodiscard]] auto wall_duration()  const noexcept -> std::chrono::nanoseconds;
-    [[nodiscard]] auto artefacts()      const noexcept -> std::span<const ArtefactRef>;
+    [[nodiscard]] auto artefacts()      const noexcept -> eastl::span<const ArtefactRef>;
     [[nodiscard]] auto artefact_root()  const noexcept -> const ::glibre::platform::CanonicalPath&;
 
     TraceReport(TraceReport&&) noexcept;
@@ -1825,9 +1825,9 @@ public:
 struct TraceRunnerConfig {
     InjectionLayer layer{injection::InProcess{}};
     // Optional override; when unset the runner calls detect_runner_host().
-    std::optional<RunnerHost> host{};
+    eastl::optional<RunnerHost> host{};
     // Path to a prior TraceReport for divergence-mode runs (§4.1.12 inv 2).
-    std::optional<::glibre::platform::CanonicalPath> compare_to{};
+    eastl::optional<::glibre::platform::CanonicalPath> compare_to{};
 };
 
 class TraceRunner {
@@ -1852,7 +1852,7 @@ public:
     // emits a DivergenceReport when the two runs diverge. Returns the
     // single-run TraceReport when they agree.
     [[nodiscard]] auto run_with_compare(const Trace& trace) noexcept
-        -> Result<std::variant<TraceReport, DivergenceReport>>;
+        -> Result<eastl::variant<TraceReport, DivergenceReport>>;
 
     // Stable non-zero exit codes — the public CI contract (§4.1.13 inv 4).
     [[nodiscard]] static constexpr auto exit_code(const Error& e) noexcept
@@ -1905,7 +1905,7 @@ public:
     // Evaluate the gate for `story` against `reports`. Returns
     // QaReady iff every report's status is Passed (§4.1.14 inv 1, 4).
     [[nodiscard]] static auto evaluate(UserStoryRef                       story,
-                                       std::span<const TraceReport* const> reports) noexcept
+                                       eastl::span<const TraceReport* const> reports) noexcept
         -> Result<ClosureDecision>;
 
     ClosureGate()                              = delete;
@@ -2369,7 +2369,7 @@ to the §8.7 "no per-frame allocation" expectation that hot-reload
 tests gate on. It also avoids cross-process heap traffic: the
 `PerProcess` / `OsAutomation` RPC channel writes Fory blobs into
 fixed-capacity ring buffers in `binary_under_test/child_process_adapter.cpp`,
-not into a heap-backed std::vector<std::byte>.
+not into a heap-backed eastl::vector<std::byte>.
 
 ### 6.8 Threading topology
 
@@ -3704,7 +3704,7 @@ The §9.2 64 MiB cap is a single number that decomposes:
 | `Trace` arena (one per loaded trace, §6.7)                          | 16 MiB    | Backs every `InputEvent` decode, every `expected_fory` blob, every `GoldenRef` string for the active trace.  |
 | `GoldenStore` LRU cache (`golden/store.cpp`, §6.7)                  | 24 MiB    | Fixed-capacity, sized at `open()` from `GoldenStoreConfig`. Evicts oldest goldens when an `AssertScreenshot` references one not resident. |
 | Screenshot diff scratch (one buffer, reused per comparison, §6.7)   | 16 MiB    | Member of `assert/screenshot.cpp`'s evaluator; sized to one full 1920×1080 BGRA8 frame plus diff PNG.         |
-| SPSC rings (encoder, RPC reader if PerProcess / OsAutomation, §6.8) | 4 MiB     | Fixed-capacity ring buffers; not heap-backed `std::vector` — see §6.7 last paragraph.                        |
+| SPSC rings (encoder, RPC reader if PerProcess / OsAutomation, §6.8) | 4 MiB     | Fixed-capacity ring buffers; not heap-backed `eastl::vector` — see §6.7 last paragraph.                        |
 | `TraceReport` builder + per-run artefact-ref vector                 | 4 MiB     | `runner/report.cpp` reserves capacity at `TraceRunner::create` time from `manifest.golden_refs.size()`.       |
 | **Resident hot-set total**                                          | **64 MiB**| Equals §9.2 row 3.                                                                                            |
 
@@ -3809,7 +3809,7 @@ engine's `perf-budget.yml`.
 Per `reviews/decisions/error-model.md`, every public e2e boundary
 returns `glibre::Result<T>` and never throws. The closed sum below
 is the canonical taxonomy of failures e2e is allowed to surface; the
-`std::variant`-typed `e2e::Error` declared in §5.1 is the in-code
+`eastl::variant`-typed `e2e::Error` declared in §5.1 is the in-code
 realisation of this taxonomy and contributes one arm to the
 engine-wide `glibre::Error` variant. The implementation plan that
 introduces `core/error.hpp` reconciles the §5 enumerator names with
