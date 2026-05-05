@@ -55,11 +55,11 @@ new family. Concretely the aggregate owns:
    is the test-fixture goldens lives at `tests/platform/error/` and
    is the single audit point a reviewer reads to verify "no integer
    leaks across the §5 surface".
-5. The Fory schema for the *log/replay carrier* — a small,
-   stable-on-the-wire `(tag, os_code, prefix)` triple that
-   `glibre::log_error` and the e2e replay harness use to round-trip
-   a `platform::Error` through `spdlog`'s structured field set
-   without losing variant identity.
+5. The spdlog structured-field carrier for log/replay (no Fory schema;
+   see §7.2 for the demotion) — a small, stable `(tag, os_code,
+   prefix)` triple that `glibre::log_error` and the e2e replay
+   harness emit as spdlog key-value fields, preserving variant
+   identity without any wire serialisation step.
 
 What this aggregate explicitly **refuses to own**:
 
@@ -221,8 +221,12 @@ together make missing-arm handling a compile error.
 Four free functions in `engine/platform/src/detail/error/`, one per
 OS source. They are free functions — not member functions of a
 "translator class" — to make the SRP boundary mechanical: each
-function depends on exactly one OS header, has zero state, and is
-trivially callable from the signal-safe path (§6.2).
+function depends on exactly one OS header, is a pure transform over
+its input `OsCode` plus one well-defined side-effect (stamping the
+per-thread TLS prefix slot via `set_prefix`; skipped on the
+signal-handler path per §6.2), and is trivially callable from the
+signal-safe path (§6.2). No global heap state, no cross-thread
+state, no I/O — exactly one process-local write per call.
 
 ```cpp
 // engine/platform/src/detail/error/translators.hpp
@@ -253,6 +257,8 @@ namespace glibre::platform::detail::error {
 //   as kern_return_t before NSException wraps them) and by
 //   FSEvents-stream-level failures the kernel reports directly.
 //   Rare on the success path; documented for completeness.
+// int (not kern_return_t) avoids <mach/mach.h> in the public header;
+// static_assert(sizeof(kern_return_t) == sizeof(int)) lives in the .cpp.
 [[nodiscard]] auto mach_to_error(int kern_return) noexcept
     -> Error;
 
@@ -318,6 +324,21 @@ auto current_prefix() noexcept -> const char*;
 auto set_prefix(const char* literal) noexcept -> void;
 auto reset_prefix() noexcept -> void;
 
+// Internal-helper: pre-touches all three TLS slots (prefix pointer,
+// prose buffer, source_tag pointer — see §9.2) via one
+// set_prefix(prefix::none) / reset per slot to force lazy-linker
+// resolver materialisation before any signal handler is installed.
+// Any __thread write resolves the lazy linker entry equally; using
+// prefix::none keeps each slot in the canonical zero-state convention
+// used elsewhere in the design (callers can pointer-equal against
+// prefix::none to detect "no active prefix"). Two concrete callers
+// at MVP: FileIo, Process. Any future signal-installing plugin
+// (e.g. networking) adds itself here per §6.2's ownership rule —
+// the two-concrete-users gate has been satisfied; future entries do
+// not require new gate analysis. Called once in
+// glibre_plugin_register before Process::install_signal.
+auto pre_touch_all() noexcept -> void;
+
 }  // namespace glibre::platform::detail::error
 ```
 
@@ -335,7 +356,9 @@ variant: adding a new prefix is a deliberate edit reviewed against
 SPEC §10.6 (logging severity table needs a row for it) and the
 relevant aggregate's §10.3 sub-section. New prefixes do not bump the
 ABI hash (they live in the TU-local `.rodata`, not in
-`glibre-types.dylib`); they do bump the *log schema* version (§7).
+`glibre-types.dylib`); they do bump the spdlog field-set contract
+(§7.2) — adding, removing, or renaming a structured field requires
+an MVP-bump just like a versioned schema would have.
 
 ### 3.4 Closed-sum invariants enforced by the design
 
@@ -480,8 +503,11 @@ glibre::Result<Frame> begin_frame(Window& w) noexcept {
             // Composition rule 2: map at the boundary that crosses
             // contexts. Render branches on platform's TLS prefix to
             // discriminate IoFailure variants.
-            if (auto* p = std::get_if<platform::Error>(&e.code());
-                p && std::get_if<platform::IoFailure>(p) &&
+            // eastl::get_if is the required accessor for eastl::variant
+            // (PHILOSOPHY §11 — std::get_if is not specialised for
+            // eastl::variant and will not compile).
+            if (auto* p = eastl::get_if<platform::Error>(&e.code());
+                p && eastl::get_if<platform::IoFailure>(p) &&
                 detail::error::current_prefix() ==
                     detail::error::prefix::surface_lost) {
                 return std::unexpected(glibre::Error{render::Error::DeviceLost});
@@ -608,6 +634,21 @@ a signal handler:
   against an already-resolved slot, which *is* safe.
 - `std::unexpected` wrap: constexpr; safe.
 
+**Ordering contract within `glibre_plugin_register`:** (1) pre-touch
+all three TLS slots (prefix pointer, prose buffer, source_tag pointer
+— see §9.2) via `detail::error::pre_touch_all()` — this calls
+`set_prefix(prefix::none)` on each slot (or equivalently
+`reset_prefix()`), resolving the lazy linker entry on the calling
+thread and leaving each slot at the canonical non-null sentinel
+(§3.3 internal-helper); (2)
+install signal handlers via `Process::install_signal`. Reversing
+the order can produce a signal-handler invocation that races against
+the lazy resolver — UB on macOS (lazy stub is not
+async-signal-safe). Each plugin that triggers signal-eligible OS
+calls owns this ordering; the platform error aggregate provides the
+`detail::error::pre_touch_all()` helper that performs step (1) as a
+single call.
+
 The signal-safe construction discipline is a single test: the e2e
 crash-capture fixture installs `SIGSEGV`, dereferences a null
 pointer, and asserts that the captured `platform::Error` round-trips
@@ -647,76 +688,22 @@ stored as components, not stored as singletons, not stored in any
 plugin-private heap. SPEC §7.1 confirms: zero `.fory` schemas,
 zero persistent state.
 
-### 7.2 Log / replay carrier — `PlatformErrorRecord`
+### 7.2 Logging — spdlog structured fields (no Fory schema)
 
-For `glibre::log_error` to emit a structured spdlog record, and for
-the e2e replay harness (`specs/e2e/SPEC.md`) to capture a
-`platform::Error` into the trace stream, a small Fory schema
-serialises the *log carrier* — not the error value itself. The
-carrier's purpose is single-shot logging / replay, never
-reconstruction of a live `Error` (the variant is rebuilt only for
-replay assertions, never returned to engine code).
+Platform error logging uses spdlog structured fields directly, consistent
+with SPEC §7's "platform contributes zero schemas" invariant. No Fory
+schema file exists at `data/schemas/platform/`; no ABI hash contribution
+is made. `glibre::log_error` formats a `platform::Error` by visiting the
+variant arms and emitting key-value spdlog fields (arm name, `os_code`
+when present, current TLS prefix, source tag, monotonic timestamp, thread
+ID) without any codegen or wire serialisation step.
 
-```fory
-// data/schemas/platform/PlatformErrorRecord.fory
-//
-// Wire shape used by glibre::log_error and by the e2e replay
-// trace stream. Stable on the wire; field tags immutable per
-// fory-codegen.md migration rules.
-type PlatformErrorRecord {
-    1: required uint8       arm_tag;        // 0..6 matching variant index
-                                            // (NotFound, PermissionDenied,
-                                            //  AlreadyExists, Interrupted,
-                                            //  Unsupported, IoFailure, OsCode)
-    2: optional int32       os_code;        // present when arm_tag == 5 or 6
-    3: optional string      prefix;         // diagnostic prefix literal (§3.3)
-    4: optional string      source_tag;     // "posix" / "sdl" / "mach" / "appkit"
-    5: optional string      detail;         // SDL prose / NSException name (cold-path only)
-    6: required uint64      monotonic_ns;   // Clock::now() at construction
-    7: required uint32      thread_id;      // POSIX TID for cross-thread audit
-}
-```
-
-Schema rules (per `fory-codegen.md`):
-
-- `SchemaVersion` starts at 1; field tag numbers immutable.
-- Removing a field moves the tag to the reserved set.
-- Adding a field bumps the schema version and adds a one-step
-  migrate function (pure, allocator-arena-only).
-- The schema lives at `data/schemas/platform/PlatformErrorRecord.fory`
-  and contributes to `glibre_types_abi_hash()` via `glibre-types.dylib`.
-
-### 7.3 ABI hash contribution
-
-The `PlatformErrorRecord` schema is the **only** platform-context
-contribution to `glibre_types_abi_hash()` from the error aggregate
-(SPEC §7's "platform contributes nothing to AbiHash" line is an
-MVP-scope statement; once log replay lands the ledger gains this
-one entry). Per `plugin-abi.md`, any change to the record's field
-tags / types triggers an ABI hash bump and forces every plugin
-(including the platform plugin itself) to be rebuilt against the
-new `glibre-types.dylib`.
-
-The closed `platform::Error` variant *itself* — its arm count, its
-arm names, its tag-discriminant indices — does **not** live in
-`glibre-types.dylib` (the variant is part of the platform plugin's
-private surface, not a middleman type). However, the
-`PlatformErrorRecord::arm_tag` field encodes the variant's arm
-ordering, so adding a new arm to `platform::Error` requires:
-
-1. Bumping the schema version (`PlatformErrorRecord` v1 → v2).
-2. Adding a migrate function that maps every old-schema record's
-   `arm_tag` to the new index (almost always identity if the new
-   arm is appended).
-3. The ABI hash bump that the schema-version edit triggers.
-4. Barrier-time validation at hot-reload (§8): the platform plugin
-   refuses to swap if the live engine's `arm_tag` enumeration
-   disagrees with the loaded plugin's compiled-in mapping.
-
-This is the single load-bearing reason `platform::Error`'s arm
-ordering is documented in §3.1 alongside the variant declaration —
-the order is the wire-format order, not just an implementation
-detail.
+**Resolution note (§12):** the earlier design draft introduced
+`data/schemas/platform/PlatformErrorRecord.fory` and claimed it
+contributed to `glibre_types_abi_hash()`, directly contradicting SPEC §7.
+The conflict was resolved by demotion — `PlatformErrorRecord` is a plain
+C++ struct used only as a transient spdlog-field carrier, not a Fory
+schema, not a `glibre-types.dylib` entry. SPEC §7 requires no amendment.
 
 ## 8. Hot-reload
 
@@ -728,23 +715,26 @@ detail.
 | Translator function pointers                | Re-resolved by Q's `register` (the new platform plugin's text segment owns the translator code). Engine code never holds a translator function pointer; it calls them by name only. |
 | TLS prefix slot                             | Reset to `prefix::none` at the start of the next phase 1 input drain. Pre-swap pointer values point to literals in P's `.rodata` and become invalid after `dlclose(P)`; reset is the load-bearing rule. |
 | Diagnostic prose TLS slot                   | Reset alongside the prefix slot. Any unread prose is lost across the swap; this is acceptable because the engine never branches on prose, only logs it.                            |
-| `PlatformErrorRecord` schema                | Survives via `glibre-types.dylib` middleman. Migrate function runs at phase 8 step 3 if the schema version bumped (§7.2).                                                            |
-| Closed-sum invariant validation             | At swap step 2 (ABI hash check): the loaded plugin's compiled-in arm count and ordering must match `glibre-types.dylib`'s `PlatformErrorRecord::arm_tag` enumeration. Mismatch = `core::Error::PluginAbiHashMismatch`. |
+| Log carrier (`PlatformErrorRecord` C++ struct) | Stateless transient struct; no schema, no migrate. Rebuilt from the variant on each log call. Nothing to carry across the swap.                                                  |
+| Closed-sum invariant validation             | At swap step 2 (ABI hash check): platform contributes nothing to `glibre_types_abi_hash()` (SPEC §7). The arm-count static_assert (§8.2) catches structural drift at compile time rather than reload time. |
 
 ### 8.2 Barrier-time validation
 
 When the platform plugin reloads (SPEC §8.3), the loader runs the
 following error-aggregate-specific checks at swap step 2:
 
-1. **ABI hash check** (already required by `plugin-abi.md`). Covers
-   the `PlatformErrorRecord` schema; covers `glibre-types.dylib`
-   identity.
+1. **ABI hash check** (already required by `plugin-abi.md`). Platform
+   contributes nothing to `glibre_types_abi_hash()` (SPEC §7), so this
+   check passes trivially for the error aggregate. It is retained as a
+   barrier step to cover `glibre-types.dylib` identity for other
+   contexts loaded at the same barrier.
 2. **Arm-count compile-time check.** The new platform plugin
    compiles in a `static_assert` that
-   `eastl::variant_size_v<platform::Error> == ARM_COUNT_LITERAL`
-   matching the wire-format arm count from `glibre-types.dylib`.
+   `eastl::variant_size_v<platform::Error> == 7u`
+   (the canonical seven-arm count per §3.1).
    A mismatch is a compile error in the plugin's build, not a
-   runtime check; the runtime check is the ABI hash.
+   runtime check. Because platform contributes no schema to
+   `glibre-types.dylib`, this is a plugin-internal guard only.
 3. **Prefix-literal residence check.** Any TLS slot still holding a
    prefix literal pointer from the outgoing plugin P must be reset
    *before* `dlclose(P)`, or the next read returns a dangling
@@ -755,10 +745,10 @@ following error-aggregate-specific checks at swap step 2:
 
 ### 8.3 What survives, what is discarded
 
-- **Survives:** the `platform::Error` variant *type* (it's a
-  middleman-relevant shape via `PlatformErrorRecord::arm_tag`); the
-  schema version and migrate chain; the engine-wide
-  `glibre::Error`'s platform arm slot.
+- **Survives:** the `platform::Error` variant *type* (its seven-arm
+  closed sum; arm ordering is an implementation detail of the plugin,
+  not a middleman contract); the engine-wide `glibre::Error`'s
+  platform arm slot.
 - **Discarded:** in-flight prose / prefix TLS slot contents
   (acceptable; reset on next access); cached translator function
   pointers (engine never caches them); any plugin-private translator
@@ -875,7 +865,7 @@ follows the SPEC §10.8 second-consumer rule, never the
 | Caller calls `sdl_to_error` with `nullptr` msg                  | Returns `OsCode { 0 }` with prefix `sdl_empty`. No crash; the null pointer is checked before `strstr`-style scan.                                                                                       |
 | Caller calls `mach_to_error` with `KERN_SUCCESS`                | Returns `OsCode { 0 }` (success-misuse path); debug assert fires.                                                                                                                                       |
 | Caller calls `ns_to_error(nullptr)` from outside `bridge.mm`    | Build error: the symbol is link-private to `bridge.mm.o` via internal-linkage `inline` definition. A call from another TU does not link.                                                                |
-| Caller adds a new public arm without bumping `PlatformErrorRecord` | Compile error: the wire-format `arm_tag` enumeration is generated from `platform::Error`'s declaration order via codegen; a new arm without a schema bump fails the codegen consistency check. |
+| Caller adds a new public arm without updating the compile-time count | Compile error: the plugin-internal `static_assert(eastl::variant_size_v<platform::Error> == 7u)` fires when arm count drifts; no codegen tool, no Fory schema bump required. |
 
 ### 10.3 Concurrency-mode failure
 
@@ -917,10 +907,10 @@ Every translator test asserts:
 1. The returned arm matches the row's expected variant.
 2. The TLS prefix matches the row's expected prefix literal
    (pointer-equality against `prefix::xxx`, not string equality).
-3. The arm round-trips through `PlatformErrorRecord` Fory
-   serialisation and deserialisation byte-equal.
-4. `eastl::variant_size_v<platform::Error>` matches the
-   `PlatformErrorRecord::arm_tag` enum size at compile time.
+3. Emitting the arm via `glibre::log_error` into a spdlog test-sink
+   produces the expected structured-field set — every arm emits the
+   expected field set; no field is omitted; no extra field is added.
+4. `STATIC_REQUIRE(eastl::variant_size_v<platform::Error> == 7u)` — the Catch2 compile-time assertion emitted in each translator test TU. Distinct from assertions 1–3 (which are runtime `REQUIRE`s): `STATIC_REQUIRE` evaluates at compile time within the unit-test TU, not at test-runner execution time. This is also distinct from the §11.5 CMake-level compile-fail grep test, which covers the standalone `static_assert` in production code; this row covers the unit-test TU's static guard. No runtime carrier-emission check; no arm_tag enumeration.
 
 ### 11.2 Cross-aggregate uniformity tests
 
@@ -938,11 +928,21 @@ of the seven variants. No fixture may surface a `core::Error` /
 
 Live under `tests/e2e/platform/error_round_trip/`. Constructs a
 known sequence of `platform::Error` values (one per arm, one per
-prefix), serialises each through `PlatformErrorRecord`, captures
-into a `.glibre-trace`, and asserts the trace deserialises into
-the original arm + prefix. The test exercises the §7 wire-format
-contract end-to-end and is the single fixture that breaks on a
-schema-version regression.
+prefix) and emits each via `glibre::log_error` into a spdlog
+test-sink configured to capture structured key-value fields. The
+fixture then asserts:
+
+- Each arm produces the expected structured-field set (arm name,
+  `os_code` when present, `prefix`, `source_tag`, monotonic
+  timestamp, thread ID).
+- No field is omitted and no extra field is added.
+- The captured field values round-trip through a `.glibre-trace`
+  replay assertion without loss of variant identity.
+
+This test exercises the §7.2 spdlog-field contract end-to-end and
+is the single fixture that breaks when a structured field is added,
+removed, or renamed (the spdlog field-set contract bump described
+in §3.3).
 
 ### 11.4 Performance tests
 
@@ -954,9 +954,11 @@ matching §9.3.
 Under `tests/platform/error/compile_fail/`, using
 `add_test(... CONFIGURATIONS CompileFail)` in CMake:
 
-- A test that adds a hypothetical 8th arm to `platform::Error`
-  without bumping the schema must fail the codegen consistency
-  check.
+- Compile-fail test asserts `static_assert(eastl::variant_size_v<platform::Error> == 7u)`
+  fires when a developer adds an 8th arm to the closed sum without
+  bumping the assertion. Test captures compiler output and greps for
+  the static_assert message. No codegen tool involved; no schema bump
+  required.
 - A test that calls `ns_to_error` from a non-`bridge.mm` TU must
   fail at link.
 - A test that uses `try { } catch (...)` inside engine code must
@@ -974,7 +976,11 @@ include a fuzz story).
 
 ## 12. Open questions
 
-- [OPEN] Should the diagnostic prefix slot widen from `const char*`
+**Legend:** Each entry is tagged [BLOCKING IMPLEMENTATION] (must close
+before first plan PR merges against this design), [NON-BLOCKING]
+(can close incrementally after implementation begins), or [RESOLVED].
+
+- [NON-BLOCKING] Should the diagnostic prefix slot widen from `const char*`
   (literal pointer) to `eastl::string_view` (literal pointer + length)
   to make spdlog formatting allocation-free in all cases? Current
   literals are NUL-terminated; spdlog can format them via `%s`. The
@@ -983,29 +989,42 @@ include a fuzz story).
   `task-breakdown-error-perf` plan when CI gate timings land.
   No platform-aggregate-side residue if deferred.
 
-- [OPEN] Should `PlatformErrorRecord::arm_tag` be a generated
-  enumeration from `platform::Error`'s declaration (codegen-driven)
-  or a hand-maintained `uint8_t` index list? Codegen is tighter
-  (drift-impossible) but introduces a build-time dependency between
-  `glibre-types-codegen` and the platform plugin's translation unit.
-  Hand-maintained is simpler at MVP but invites drift. Resolution
-  gate: the fory-codegen plan that introduces
-  `data/schemas/platform/PlatformErrorRecord.fory` decides at
-  authoring time. Until then the schema's `arm_tag` is hand-maintained
-  with a unit test asserting parity (§11.1 row #4).
+- [RESOLVED] `PlatformErrorRecord` Fory schema / ABI hash
+  contribution. An earlier draft of this design introduced
+  `data/schemas/platform/PlatformErrorRecord.fory` and claimed it
+  contributed to `glibre_types_abi_hash()`, contradicting SPEC §7's
+  "platform contributes zero schemas" and "contributes nothing to
+  AbiHash" invariants. Resolved in this document by demotion:
+  `PlatformErrorRecord` is a plain C++ struct used only as a transient
+  spdlog-field carrier; no Fory schema, no ABI hash entry. SPEC §7
+  requires no amendment. See §7.2 for the updated description.
 
-- [OPEN] Promotion of `IoFailure` prefix `surface_lost` to a
+- [BLOCKING IMPLEMENTATION] SPEC §9.2 stale enumerator — `platform::Error::OutOfBudget`.
+  SPEC §9.2 (line 2109 of SPEC.md) references
+  `std::unexpected{platform::Error::OutOfBudget}` as if `OutOfBudget`
+  is a named arm of the closed sum, but the closed sum (§3.1, SPEC
+  §5.1) has exactly seven arms and does not include `OutOfBudget`.
+  Budget saturation is correctly modelled as
+  `IoFailure { OsCode }` with prefix `"out-of-budget"` per §3.3 and
+  SPEC §10.3.6. The correct form is
+  `// Translator stamps "out-of-budget" into the TLS prefix slot via set_prefix() before constructing OsCode.`
+  `std::unexpected{ platform::Error{ IoFailure{ OsCode{ .value = 0 } } } }`.
+  **Blocks platform-error implementation PR**: SPEC §9.2 must be
+  amended before the first plan runs against this design.
+  Track amendment via a follow-up spike to correct SPEC §9.2.
+
+- [NON-BLOCKING] Promotion of `IoFailure` prefix `surface_lost` to a
   first-class `SurfaceLost` arm. Same shape as SPEC §10.8 entry —
   trigger is a second consumer beyond render needing typed dispatch.
   Mirrored here so the spike audit captures the gate. No platform-
   aggregate-side residue if deferred.
 
-- [OPEN] Promotion of `IoFailure` prefix `watcher_unavailable` to a
+- [NON-BLOCKING] Promotion of `IoFailure` prefix `watcher_unavailable` to a
   first-class `WatcherUnavailable` arm. Same shape as SPEC §10.8;
   trigger is the editor / hot-reload coordinator landing. Mirrored
   here. No residue.
 
-- [OPEN] Cross-thread prefix propagation for FileIo / FileWatcher
+- [NON-BLOCKING] Cross-thread prefix propagation for FileIo / FileWatcher
   (§6.4). Each sibling aggregate decides its own SPSC-slot layout;
   the design here only requires that they not rely on the consumer
   thread's TLS for prefix discrimination. Resolution gate: the
@@ -1013,7 +1032,7 @@ include a fuzz story).
   decides whether to copy the prefix into the slot or to add a
   per-row prefix column. No platform-error-aggregate-side residue.
 
-- [OPEN] Should the signal-safe path also stamp `source_tag`
+- [NON-BLOCKING] Should the signal-safe path also stamp `source_tag`
   (§5.4)? Currently both prefix and source_tag stamps are skipped
   in signal context to avoid the lazy-resolver hazard (§6.2). If
   pre-touching one slot makes the other equally cheap, the
