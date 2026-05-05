@@ -55,11 +55,11 @@ new family. Concretely the aggregate owns:
    is the test-fixture goldens lives at `tests/platform/error/` and
    is the single audit point a reviewer reads to verify "no integer
    leaks across the §5 surface".
-5. The Fory schema for the *log/replay carrier* — a small,
-   stable-on-the-wire `(tag, os_code, prefix)` triple that
-   `glibre::log_error` and the e2e replay harness use to round-trip
-   a `platform::Error` through `spdlog`'s structured field set
-   without losing variant identity.
+5. The spdlog structured-field carrier for log/replay (no Fory schema;
+   see §7.2 for the demotion) — a small, stable `(tag, os_code,
+   prefix)` triple that `glibre::log_error` and the e2e replay
+   harness emit as spdlog key-value fields, preserving variant
+   identity without any wire serialisation step.
 
 What this aggregate explicitly **refuses to own**:
 
@@ -221,8 +221,12 @@ together make missing-arm handling a compile error.
 Four free functions in `engine/platform/src/detail/error/`, one per
 OS source. They are free functions — not member functions of a
 "translator class" — to make the SRP boundary mechanical: each
-function depends on exactly one OS header, has zero state, and is
-trivially callable from the signal-safe path (§6.2).
+function depends on exactly one OS header, is a pure transform over
+its input `OsCode` plus one well-defined side-effect (stamping the
+per-thread TLS prefix slot via `set_active_prefix`; skipped on the
+signal-handler path per §6.2), and is trivially callable from the
+signal-safe path (§6.2). No global heap state, no cross-thread
+state, no I/O — exactly one process-local write per call.
 
 ```cpp
 // engine/platform/src/detail/error/translators.hpp
@@ -337,7 +341,9 @@ variant: adding a new prefix is a deliberate edit reviewed against
 SPEC §10.6 (logging severity table needs a row for it) and the
 relevant aggregate's §10.3 sub-section. New prefixes do not bump the
 ABI hash (they live in the TU-local `.rodata`, not in
-`glibre-types.dylib`); they do bump the *log schema* version (§7).
+`glibre-types.dylib`); they do bump the spdlog field-set contract
+(§7.2) — adding, removing, or renaming a structured field requires
+an MVP-bump just like a versioned schema would have.
 
 ### 3.4 Closed-sum invariants enforced by the design
 
@@ -613,6 +619,17 @@ a signal handler:
   against an already-resolved slot, which *is* safe.
 - `std::unexpected` wrap: constexpr; safe.
 
+**Ordering contract within `glibre_plugin_register`:** (1) pre-touch
+all four TLS prefix slots by performing one no-op
+`set_active_prefix(nullptr)` per slot — this resolves the lazy
+linker entry on the calling thread; (2) install signal handlers via
+`Process::install_signal`. Reversing the order can produce a
+signal-handler invocation that races against the lazy resolver — UB
+on macOS (lazy stub is not async-signal-safe). Each plugin that
+triggers signal-eligible OS calls owns this ordering; the platform
+error aggregate provides the `error::tls::detail::pre_touch_all()`
+helper that performs step (1) as a single call.
+
 The signal-safe construction discipline is a single test: the e2e
 crash-capture fixture installs `SIGSEGV`, dereferences a null
 pointer, and asserts that the captured `platform::Error` round-trips
@@ -871,10 +888,12 @@ Every translator test asserts:
 1. The returned arm matches the row's expected variant.
 2. The TLS prefix matches the row's expected prefix literal
    (pointer-equality against `prefix::xxx`, not string equality).
-3. The arm round-trips through `PlatformErrorRecord` Fory
-   serialisation and deserialisation byte-equal.
-4. `eastl::variant_size_v<platform::Error>` matches the
-   `PlatformErrorRecord::arm_tag` enum size at compile time.
+3. Emitting the arm via `glibre::log_error` into a spdlog test-sink
+   produces the expected structured-field set — every arm emits the
+   expected field set; no field is omitted; no extra field is added.
+4. `eastl::variant_size_v<platform::Error>` equals the number of
+   distinct `arm_tag` values the structured-field carrier emits, as
+   verified by a compile-time `static_assert`.
 
 ### 11.2 Cross-aggregate uniformity tests
 
@@ -892,11 +911,21 @@ of the seven variants. No fixture may surface a `core::Error` /
 
 Live under `tests/e2e/platform/error_round_trip/`. Constructs a
 known sequence of `platform::Error` values (one per arm, one per
-prefix), serialises each through `PlatformErrorRecord`, captures
-into a `.glibre-trace`, and asserts the trace deserialises into
-the original arm + prefix. The test exercises the §7 wire-format
-contract end-to-end and is the single fixture that breaks on a
-schema-version regression.
+prefix) and emits each via `glibre::log_error` into a spdlog
+test-sink configured to capture structured key-value fields. The
+fixture then asserts:
+
+- Each arm produces the expected structured-field set (arm name,
+  `os_code` when present, `prefix`, `source_tag`, monotonic
+  timestamp, thread ID).
+- No field is omitted and no extra field is added.
+- The captured field values round-trip through a `.glibre-trace`
+  replay assertion without loss of variant identity.
+
+This test exercises the §7.2 spdlog-field contract end-to-end and
+is the single fixture that breaks when a structured field is added,
+removed, or renamed (the spdlog field-set contract bump described
+in §3.3).
 
 ### 11.4 Performance tests
 
