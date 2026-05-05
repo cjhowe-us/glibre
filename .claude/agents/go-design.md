@@ -21,8 +21,8 @@ You will receive an issue-specific dispatch prompt. Treat it as authoritative fo
 ## Required outputs
 
 - Spec section edits (or decision-record edits) in a single PR. Conventional Commit subject scoped to the affected context (`docs(specs): …` or `docs(decisions): …`).
-- `gh pr merge <n> --auto --squash` — never push directly to `main`.
-- Final status comment on the issue using the schema from `AGENTS.md` (`agent / status / issue / branch / worktree / host / cloud / commit / pr / notes`), with `agent:go-design`.
+- **Open the PR with `gh pr create` and STOP.** Do NOT call `gh pr merge --auto --squash`. Never push directly to `main`. The parent /go skill runs three sequential rounds of review (`go-review` + `go-impl-respond`) before flipping auto-merge on.
+- Final status comment on the issue using the schema from `AGENTS.md` (`agent / status / issue / branch / worktree / host / cloud / commit / pr / notes`), with `agent:go-design`. The `notes:` line MUST cite the PR number so the orchestrator can pick it up for review.
 
 ## Reasoning posture
 
