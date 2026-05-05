@@ -124,6 +124,7 @@ Glibre-native requirements added beyond harmonius:
 ```text
 FileIo (root, owned by platform)
 ├── PathRoots                  roots_       (sandbox-root registry; §3.2)
+├── PathInterner               interner_    (uint32_t ↔ CanonicalPath map; §3.5a)
 ├── eastl::array<Worker, N>    workers_     (N = FileIoConfig.io_thread_budget; §3.4)
 ├── RequestRing<Request>       requests_    (SPSC for N==1 MVP, MPSC for N>1 post-MVP — see §3.5; bounded)
 ├── eastl::array<Slot, M>      slots_       (M = N * queue_depth; §3.6)
@@ -351,6 +352,28 @@ worker 0 and worker 1 blocks on a semaphore from worker 0 — the
 full MPSC promotion is post-MVP). Saturation is computed the same
 way regardless of ring type.
 
+**Worker-0 → Worker-1 dispatch primitive (MVP N=2).** When worker 0
+dequeues a `Request` from the main SPSC `requests_` ring, it first
+checks whether its own sub-pool has a free slot for that request type.
+If worker 0's sub-pool is saturated, it forwards the request to worker 1
+via a dedicated **per-pool SPSC ring** (`detail/worker_dispatch_ring.hpp`,
+capacity = `queue_depth / 2`). Worker 1 dequeues exclusively from this
+secondary ring; it does not touch `requests_` directly. The secondary
+ring's capacity of `queue_depth / 2` gives worker 0's wake-up budget
+room to cover half the inflight requests it can service-and-forward before
+blocking.
+
+Saturation contract: if the `worker_dispatch_ring` is full (worker 1 is
+not draining), worker 0 returns `core::Error::OutOfBudget` to the caller
+via the slot's completion path — the same saturation contract as the main
+`requests_` ring per §10.2. Worker 0 does NOT block waiting for worker 1
+to drain; it refuses immediately.
+
+This topology is specific to `N = 2` MVP and the SPSC ring. For N > 1
+post-MVP, the separate MPSC ring (§3.5, N > 1 block) replaces both the
+main SPSC ring and the `worker_dispatch_ring`; the dispatch logic moves
+into the MPSC ring's N-consumer head protocol.
+
 A request is a fixed-size POD:
 
 ```cpp
@@ -360,13 +383,77 @@ struct Request {
         WriteAtomic,
     };
     Op                            op;
-    CanonicalPath                 path;           // string_view backed by interner arena
+    // 3 bytes implicit padding to align path_index to 4 B
+    std::uint32_t                 path_index;     // interner slot id — see §3.5a
     eastl::span<const std::byte>  bytes_in;       // Write only; nullptr for Read
     // Note: slot_index is NOT stored here — worker receives it as a
     // parameter; storing it in Request wastes 4 B + 3 B alignment pad.
     // See §3.6 layout table rationale.
 };
+// Request layout: Op(1) + 3 pad + path_index(4) + bytes_in(16) = 24 B
+static_assert(sizeof(Request) == 24, "Request must be 24 B (§3.6 layout table)");
 ```
+
+The public `read_async(CanonicalPath p)` / `write_atomic_async(CanonicalPath p, ...)` API
+continues to accept `CanonicalPath` — the path-interner mapping (§3.5a) is performed by
+`FileIo` internally before the `Request` is pushed onto the ring. Workers receive the
+`path_index` and look up the canonical string via the interner's reader-snapshot; they
+never store or copy the `CanonicalPath` string in the `Request` struct itself.
+
+### 3.5a Path interner
+
+`FileIo` maintains a per-instance **path interner** that maps stable `uint32_t` ids to
+`CanonicalPath` values. Its sole purpose is to allow `Request` (a fixed-size POD carried
+through the ring) to reference a path by a 4-byte id rather than by an inline
+`eastl::string_view` (16 B — which would inflate `Request` past the size budget and push
+`Slot` above one cache line).
+
+```cpp
+// platform/src/fileio/path_interner.hpp — internal.
+struct PathInterner {
+    // Bimap: id → CanonicalPath (for worker lookup) and
+    //        CanonicalPath → id (for caller-side intern lookup).
+    // eastl::flat_map provides sorted-vector layout; O(log N) lookup.
+    // N ≤ alive open paths across all in-flight requests; at MVP N ≤ 32
+    // (= M, the slot count), so the map is tiny and cache-resident.
+    eastl::flat_map<std::uint32_t, CanonicalPath> by_id;
+    eastl::flat_map<CanonicalPath, std::uint32_t> by_path;
+    std::uint32_t                                 next_id{0};
+};
+```
+
+Design rules:
+
+- **Single-writer, reader-snapshot.** The interner is written exclusively on the
+  caller thread (the engine driver thread that calls `read_async` / `write_atomic_async`).
+  The caller holds a mutex-guarded exclusive lock while inserting a new entry. Workers
+  receive the `path_index`; they look up `by_id[path_index]` under a read-lock
+  (a single shared reader snapshot suffices for MVP because the map is written only
+  before the `Request` is pushed — the worker sees the entry before it pops the ring,
+  ordered by the ring's push-before-pop memory contract).
+- **Intern on enqueue, release on slot reclaim.** A new `CanonicalPath` is interned at
+  `read_async` / `write_atomic_async` time (before the `Request` is written). The
+  interner entry is retained until the slot is returned to `free_slots_` — at that point
+  the caller thread removes the entry (under exclusive lock). This keeps the interner
+  size ≤ M (slot count) at all times.
+- **Reverse hash-index for O(1) intern.** The `by_path` flat_map provides the
+  `CanonicalPath → id` reverse lookup needed to intern without inserting a duplicate.
+  At MVP the map is tiny; if a profile shows the O(log N) lookup is a bottleneck,
+  `by_path` can be replaced with an open-addressing hash table — the implementation PR
+  may pick the alternate without a spec change, since the observable contract (4-byte id
+  in `Request`) is unchanged.
+- **No allocation in the request ring.** The interner holds the `CanonicalPath` strings
+  in the platform sub-arena (§9); the `Request` POD contains only the 4-byte id.
+  Enqueue is allocation-free after the interner insert (which may allocate into the
+  arena, but only once per distinct path per flight — the common case is re-use of an
+  already-interned path with zero allocation).
+
+Two concrete consumers that drive the interner:
+
+1. `data::deserialize<T>` path resolver calls `FileIo::read_async` with the asset's
+   canonical path; the interner maps it to an id for the duration of the read.
+2. Shader cache lookup path in `shader` calls `FileIo::read_async` / `write_atomic_async`
+   with the blake3-keyed cache file path; same interner flow.
 
 `Request::bytes_in` is **caller-owned** for the duration of the
 operation. The caller MUST keep the buffer live until
@@ -403,8 +490,13 @@ Slot count `M = N * queue_depth` with default `queue_depth = 16` →
 | (padding)      | —                           | 4 B  | implicit; aligns `result_bytes` to 8 B    |
 | `result_bytes` | `span<const byte>` (16 B)   | 16 B | ptr + size; filled before state=Ready      |
 | `err`          | `Result<void>` (~16 B)      | 16 B | failure arm if state=Ready and err set     |
-| `req`          | `Request` (~24 B)           | 24 B | op + path + bytes_in (slot_index dropped)  |
+| `req`          | `Request` (24 B)            | 24 B | Op(1)+3pad+path_index(4)+bytes_in(16)      |
 | **Total**      |                             | **64 B** | fits one M1 cache line (§3.6 layout table; SPEC §6.5 / §9.2)  |
+
+`Request` layout detail: `Op` (uint8_t, 1 B) + 3 B implicit padding + `path_index`
+(uint32_t, 4 B) + `bytes_in` (eastl::span = 16 B) = **24 B**. The path interner (§3.5a)
+is what enables `path` to be a 4-byte id rather than a 16-byte `CanonicalPath` (eastl::string_view).
+`static_assert(sizeof(Request) == 24)` in `request.hpp` is the compile-time gate.
 
 The `prefix` (8 B pointer for async error transport) is **not** stored in
 `Slot` — adding it inline would push the struct to 72 B, violating the
@@ -419,11 +511,17 @@ within the Slot and limits the free-list to 65 535 entries. The maximum
 plausible slot count is `io_thread_budget_max (8) × queue_depth_max (128)
 = 1 024`; `uint16_t` is far above this ceiling.
 
-`Request::slot_index` (`uint32_t`, 4 B) is dropped from §3.5's `Request`
+`Request::slot_index` (`uint32_t`, 4 B) is dropped from the `Request`
 struct — the worker receives the slot index as a separate parameter and
 the Slot is addressed via `slots_[i]` directly; storing it redundantly
-inside `Request` wastes 4 B + 3 B alignment padding. The `static_assert`
-in `token.hpp` is the implementation gate.
+inside `Request` wastes 4 B + 3 B alignment padding.
+
+`Request::path` was previously a `CanonicalPath` (eastl::string_view = 16 B), which
+inflated `Request` to 40 B and pushed `Slot` to 80 B — violating the one-cache-line
+invariant. The path interner (§3.5a) replaces the inline string_view with a stable
+`uint32_t path_index` (4 B), restoring `Request` to 24 B and `Slot` to 64 B. The
+`static_assert(sizeof(Request) == 24)` in `request.hpp` and `static_assert(sizeof(Slot) <= 64)`
+in `token.hpp` are the compile-time gates.
 
 Pool footprint: `64 × 32 + 8 × 32 = 2 KiB + 256 B = 2.25 KiB` resident
 at default config; bounded by the §9 8 MiB sub-arena.
@@ -522,8 +620,10 @@ share one body:
 3. Pop a slot from `free_slots_`. Empty →
    `IoFailure { OsCode { ENOBUFS } }` with diagnostic prefix
    `"out-of-budget"` (§10.3.6).
-4. Build the `Request` directly into `slots_[i].req`; set
-   `state = InFlight`, `abandoned = false`.
+4. Intern `p` via the path interner (§3.5a): look up `path_index = interner.intern(p)`
+   (insert if absent; exclusive lock; returns a stable `uint32_t`). Build the
+   `Request` directly into `slots_[i].req` using `path_index` (not the raw
+   `CanonicalPath`); set `state = InFlight`, `abandoned = false`.
 5. Push slot index onto `requests_` ring. The push is non-blocking
    and infallible because the ring has the same capacity as
    `free_slots_` — if we got a slot, the ring has room.
@@ -1511,3 +1611,21 @@ gate's tolerance band.
   `FileIoConfig` amendment from the BLOCKING entry above, or as a
   separate doc-only patch. Not blocking the implementation PR since
   §3.5 governs all implementation decisions.
+
+- **[BLOCKING IMPLEMENTATION] Path interner data structure choice**:
+  `FileIo` owns a per-instance path interner (§3.5a) that maps stable
+  `uint32_t` ids to `CanonicalPath` values. The interner is what enables
+  `Request` to carry a 4-byte `path_index` instead of a 16-byte
+  `CanonicalPath` (eastl::string_view), keeping `Slot` at 64 B. Two
+  concrete consumers drive the interner:
+  (1) `data::deserialize<T>` path resolver — calls `read_async` with
+  asset canonical paths; (2) shader cache lookup path — calls
+  `read_async` / `write_atomic_async` with blake3-keyed cache file paths.
+  Default data structure: `eastl::flat_map<uint32_t, CanonicalPath>`
+  (by_id) + `eastl::flat_map<CanonicalPath, uint32_t>` (by_path, reverse
+  index for O(1) intern lookup at insert time). The implementation PR
+  may substitute an open-addressing hash table for `by_path` if benchmarks
+  show O(log N) lookup is a hot path — the observable contract (4-byte
+  `path_index` in `Request`, ≤ M entries at any time) is unchanged by
+  the substitution. Gate: `static_assert(sizeof(Request) == 24)` in
+  `request.hpp` must pass before the first async enqueue test is written.
