@@ -761,20 +761,31 @@ this aggregate.
 ### 9.2 Per-cook total budget
 
 The cooker walks the resolved permutation set (SPEC §6.4 step 1).
-For an MVP project size of ~10 k artifacts and an 8-wide worker pool
-on M1, total cook wall-clock is bounded by:
+The worker-pool sizing and scheduling policy are deferred to the
+cooker-design spike (#710); §6.2 of this design provides background
+context only. Using `N` = artifact count, `P` = pool width, and
+`T` = per-job typical wall-clock, the cook total is bounded by:
 
 ```text
-total ≈ ceil(artifacts / pool_size) × per_job_typical
-      ≈ ceil(10000 / 8) × 0.9 s
-      ≈ ~1100 s typical
-      ≈ ~18 min
+total ≈ ceil(N / P) × T
 ```
 
+For planning purposes (non-binding datum from spike #710's harness —
+subject to the cooker spike's final contract):
+
+```text
+  N ≈ 10 000 artifacts (MVP project estimate)
+  P ≈ 8 workers (M1 baseline: 4 firestorm + 4 icestorm cores)
+  T ≈ 0.9 s (per-job typical; §9.1)
+
+  → total ≈ ceil(10 000 / 8) × 0.9 s ≈ ~1 100 s ≈ ~18 min
+```
+
+These numbers are planning datums, not design commitments. The
+`shader-cook-time-budget` spike owns the final contract; this design
+records only the per-job constraint (`T`) that contributes to it.
 This is offline build cost and is **not** part of the per-frame
-budget (`reviews/decisions/perf-budget.md`). The
-`shader-cook-time-budget` spike owns the contract; this design
-records only the per-job constraint that contributes to it.
+budget (`reviews/decisions/perf-budget.md`).
 
 ### 9.3 In-flight memory ceiling
 
@@ -854,7 +865,7 @@ when the pipeline calls into that sibling.
 |------------|---------|----------|----------|
 | `EntryPointMissing` | The requested job names a non-existent entry point on the source. | refuse compile; pipeline propagates from `IShaderBackend::compile` argument check before spawn. | refuse |
 | `EntryPointStageAmbiguous` | Source carries an entry point with zero or multiple `[shader(...)]` tags (caught by §4.1, surfaced through pipeline). | refuse compile; defer to source aggregate's resolution. | refuse |
-| `PermutationKeyMalformed` | `key.is_well_formed()` is `false` at job construction — enumerator bits outside the declared axis range (§4.2). | refuse compile; the key is malformed before any spawn; pipeline returns without touching the driver. | refuse |
+| `PermutationKeyMalformed` | Primary trigger (SPEC §10.2): `PermutationKey::from_bytes` rejects bytes during cache-aggregate deserialization — enumerator bits outside the declared axis range (§4.2); the cache entry is quarantined and treated as `CacheCorrupt` by the cache aggregate. Defense-in-depth: the pipeline also checks `key.is_well_formed()` at job construction and refuses compile before spawn if the caller somehow passes a malformed key that evaded the cache-aggregate decode step. | Primary path: refuse decode (cache aggregate); cache entry quarantined as `CacheCorrupt`. Defense-in-depth path: refuse compile; pipeline returns without touching the driver; no cache state modified. | refuse |
 | `PermutationKeyOutOfRange` | A `PermutationIndex` exceeds the §4.2 cardinality product — codegen-table drift between the build that emitted the index and the build that consumes it. | refuse compile; fatal because it indicates a mismatched code-generation table that cannot be resolved without a rebuild. | fatal |
 | `CompilerInvocationFailed` | `posix_spawn` failed; sandbox profile rejected; driver binary missing or not executable; envelope parse failed (driver protocol violation). | refuse compile; no retry; surface to caller for human triage. | refuse |
 | `CompilerExitNonZero` | Driver exited non-zero; `errors[]` non-empty; slang frontend or backend diagnostic. | refuse compile; forward `errors[]` JSON verbatim to editor / cooker logs; prior CAS entry remains live for that key. | refuse |
@@ -945,7 +956,7 @@ Per `error-model.md`:
   `CompilerTimedOut`, `MetalLibEmitFailed`,
   `ShippingCompilationAttempted` (`fatal` — also aborts the thread).
   (`CacheReadOnlyViolation` is not pipeline-emitted; it belongs to the
-  cache aggregate — see §10.1 "not emit" list.)
+  cache aggregate — see the "does not emit" paragraph at the end of §10.1.)
 - `warn` severity: `CompilerExitNonZero` (Slang diagnostic — author
   bug, not engine bug), `EntryPointMissing`,
   `EntryPointStageAmbiguous`.
