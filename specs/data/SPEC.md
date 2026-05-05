@@ -603,14 +603,71 @@ using SchemaSourceHash = eastl::array<std::byte, 32>;
 // Closed sum of every failure the data context can raise at a public
 // boundary (§10). Per error-model.md §"Composition Rules" #2 callers
 // translate these into their own context's enum at the call site.
+// §5 uses the same ErrorTag + Error struct shape defined in §10.1.
+// The 5-arm `enum class Error` stub that previously appeared here was
+// a draft; it is superseded by the 9-arm closed sum below. See §10.1
+// for the normative definition with full payload fields and per-arm
+// trigger / recovery / severity documentation.
 namespace data {
-enum class Error : std::uint16_t {
-    AbiHashMismatch,         // §4.4 inv. 3 — hash compared at plugin load
-    SchemaMigrationFailure,  // §4.7 inv. 4 — chain step returned unexpected
-    DeserializeError,        // §4.8 inv. 5 — newer-than-host or malformed
-    ReservedTagViolation,    // §4.1 inv. 3, §4.2 inv. 4 — codegen-time
-    SchemaRegistryConflict,  // §4.5 inv. 1 — duplicate FQN at static-init
+
+// Wire-time location attached to DeserializeError / EnvelopeTruncated.
+// `offset` is the byte index within the inbound payload at which
+// decoding stopped, measured from the start of the EnvelopeHeader
+// (§4.8 inv. 2). Non-payload arms set this to a sentinel — see §10.2.
+struct WireSite {
+    SchemaId      schema{};       // the FQN the envelope claimed
+    SchemaVersion version{0};     // the version the envelope claimed
+    std::uint32_t offset{0};      // byte index where decode failed
 };
+
+// Tag values are stable across patch releases (§10 closing paragraph).
+// Removing or reordering an arm is an ABI break (§4.3 inv. 3).
+enum class ErrorTag : std::uint16_t {
+    AbiHashMismatch          = 1,  // §4.4 inv. 3 — hash compared at plugin load
+    SchemaMigrationFailure   = 2,  // §4.7 inv. 4 — chain step returned unexpected
+    DeserializeError         = 3,  // §4.8 inv. 5 — newer-than-host or malformed
+    ReservedTagViolation     = 4,  // §4.1 inv. 3, §4.2 inv. 4 — codegen-time
+    SchemaRegistryConflict   = 5,  // §4.5 inv. 1 — duplicate FQN at static-init
+    SchemaUnknown            = 6,  // FQN not in live registry at deserialize
+    MigrationStepMissing     = 7,  // coverage gap: no chain entry for inbound version
+    MigrationCycle           = 8,  // back-edge detected in migration chain
+    EnvelopeTruncated        = 9,  // physical truncation before/during envelope read
+};
+
+// Closed sum. Plain-aggregate layout so the C-ABI trampolines (§4.3 inv. 4)
+// can return it through std::expected without crossing a non-trivial type
+// boundary. See §10.1 for full payload-field documentation and §10.2 for
+// the per-arm trigger / recovery / severity / core::Error mapping table.
+struct Error {
+    ErrorTag tag{};
+
+    // Set on tags 3, 6, 9; default-constructed on every other arm.
+    WireSite at{};
+
+    // Set on tags 2, 7, 8: identifies the migration step that
+    // refused, the missing step in the chain, or the back-edge of
+    // the detected cycle. (from == 0, to == 0) on every other arm.
+    SchemaId      step_schema{};
+    SchemaVersion step_from{0};
+    SchemaVersion step_to{0};
+
+    // Set on tag 1: the host's compiled-in hash and the offending
+    // plugin's compiled-in hash, hex form (§4.4 inv. 5). Both
+    // borrow from glibre-types.dylib .rodata; lifetime is process-
+    // scoped. std::string_view (not eastl::string_view) per
+    // PHILOSOPHY §11 final sentence: public plugin ABI surfaces use
+    // POD views only; std::string_view is stable across the dylib
+    // boundary because both sides compile against the same libc++
+    // (reviews/decisions/plugin-abi.md §"Registration Entry-Point
+    // Signature"). Empty string_views on every other arm.
+    std::string_view host_hash{};
+    std::string_view plugin_hash{};
+
+    // Set on tag 4 (ReservedTagViolation): the tag number whose
+    // reuse was attempted; 0 on every other arm.
+    std::uint16_t reserved_tag{0};
+};
+
 }  // namespace data
 
 // ---- reflection.hpp (editor / tools only) -------------------------------
