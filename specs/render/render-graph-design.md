@@ -6,7 +6,7 @@
 > §4.1.x, §5 (`GraphBuilder` + `RenderGraph` + `ExecutionPlan` surface),
 > §6.2.2 (phase 7 build/compile/record), §6.3 (concurrency), §9.3
 > (CPU phase-7 budget), §10 (graph-build / barrier / cycle errors), and
-> §11 (acceptance stories #380 #381 #382 #383 #384 #385 #400 #401 #402)
+> §11 (acceptance stories #380 #381 #382 #383 #384 #385 #386 #391 #392 #396 #401 #402)
 > in place. Cites `reviews/decisions/error-model.md`,
 > `reviews/decisions/perf-budget.md`,
 > `reviews/decisions/plugin-abi.md`,
@@ -613,16 +613,16 @@ struct PassDesc {
     Capability       requires_caps = Capability::None;
 };
 
-struct ResourceAccess {
-    VirtualResourceHandle resource;
-    AccessKind            access;
-};
-
 using PassExecuteFn =
-    eastl::function<Result<void>(MetalCommandBuffer&, const Bindings&)>;
+    eastl::function<Result<void>(MetalCommandBuffer&, const Bindings&) /* noexcept */>;
 
 class GraphBuilder {
 public:
+    struct ResourceAccess {
+        VirtualResourceHandle resource;
+        AccessKind            access;
+    };
+
     [[nodiscard]] Result<VirtualResourceHandle>
         declare_transient(const ResourceDesc&) noexcept;
     [[nodiscard]] Result<VirtualResourceHandle>
@@ -1092,7 +1092,7 @@ audit):
 | `PassDeclaredUseUnused`          | (debug-build only)    | §3.6 invariant: a declared resource was never read or written. Asserted in debug; warned in shipping.                                     | none (debug abort) | `warn` | `tests/render/failure/declared_use_unused.cpp`        |
 | `PassUndeclaredAccess`           | `GraphResourceUnknown`| §3.4 step 2 + record-time wrapper hook: a pass body recorded access to an undeclared resource.                                            | `abort-frame` (debug) / `abort-engine` (release CI gate). | `error`  | `tests/render/failure/graph_resource_unknown.cpp`     |
 | `BarrierConflict`                | `BarrierViolation`    | §3.4 step 4: writer→reader pair the planner cannot satisfy (e.g. WAW on aliased subresource without `declared_use`).                       | `abort-engine`  | `error`  | `tests/render/failure/barrier_violation.cpp`           |
-| `TransientPoolExhausted`         | `ResourceAllocFailed` (component) | §3.5 alias planner total exceeds 256 MiB transient row.                                                                       | `lower-tier`    | `warn`   | `tests/render/failure/resource_alloc_lower_tier.cpp`   |
+| `TransientPoolExhausted`         | `ResourceResidencyExceeded` (component failure) | §3.5 alias planner total exceeds 256 MiB transient row.                                                                       | `lower-tier`    | `warn`   | `tests/render/failure/resource_alloc_lower_tier.cpp`   |
 | `ResourceResidencyExceeded`      | `ResourceResidencyExceeded` | §3.5 alias planner peaks above 512 MiB ceiling (when summed with persistent + RT; rare, only when settings push tier high). | `lower-tier` | `warn` | `tests/render/failure/residency_exceeded_lower_tier.cpp` |
 | `CapabilityNotSupported`         | (composite §10.3)     | `add_rt_pass` called when `Capability::HardwareRayTrace` is absent.                                                                       | `disable-feature` | `warn`   | `tests/render/failure/rt_capability_missing.cpp`       |
 
