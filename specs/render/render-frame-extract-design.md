@@ -44,8 +44,9 @@ the phase-6 walk that reads the ECS and produces the immutable
    `const RenderFrame&`).
 6. The **failure surface for the walk** — the typed `render::Error`
    variants that can fire while reading ECS storage and writing the
-   snapshot (`ArenaExhausted`, `BadHandle`, `MissingComponent` mapped
-   to `SPEC.md` §10's existing closed sum; no new variants).
+   snapshot (`TransientPoolExhausted`, `ResourceImportRefused`,
+   `PassUnsupportedConfig` mapped to `SPEC.md` §10's existing closed
+   sum; no new variants).
 
 This aggregate **refuses to own**:
 
@@ -440,8 +441,9 @@ Slot index       Generation         Role at frame N
 ```
 
 `FrameHandle` (`SPEC.md` §5 `Handle<tags::frame>`) packs (24-bit
-generation, 40-bit slot index but in practice only 0 / 1 / 2 are
-populated). The generation bumps on each acquisition; a stale handle
+generation, 40-bit slot index). In the 3-slot MVP pool, only slot
+indices 0, 1, and 2 are used; bits [2..39] of the slot field are
+always 0. The generation bumps on each acquisition; a stale handle
 references a generation that has been overwritten and `valid()` returns
 false against the slot's current generation.
 
@@ -455,9 +457,9 @@ auto acquire_slot(SlotPool& pool, std::uint64_t frame_counter)
 The function selects the slot whose role is `FREE` (the `(N-2) mod 3`
 slot) and bumps its generation. If no slot is free — i.e. phase 9 of
 frame `N-2` has not retired yet because the GPU is wedged — the
-function returns `render::Error::FrameSlotStarvation`, mapped per §10
-below to `abort-frame` (the previous frame is re-presented; the next
-frame retries). This is the phase-6 leg of the `GpuTimeout` /
+function returns `render::Error::FenceTimeout`, mapped per §10 below
+to `abort-frame` (the previous frame is re-presented; the next frame
+retries). This is the phase-6 leg of the `GpuTimeout` /
 `PresentTimeout` recovery path (`SPEC.md` §10.3).
 
 Retire path (`SPEC.md` §6.2.2 step 4 + frame-phases row 9): when
@@ -573,7 +575,7 @@ beyond the pin pair without a separate amendment spike.
 | Slot acquisition + retire  | Hot — twice per frame.       | §3.6 above. Two atomic operations per frame (acquire = generation bump; retire = arena reset signal). Cost ~50 ns total.                                        |
 | Pin / unpin                | **Cold — observer-driven.** Editor / e2e / tools open and close pins around a frame inspection. Not on the per-frame hot path. | §3.6, §4 above. Atomic increment / decrement on `pin_count_`.                                                                                                   |
 | Per-archetype subscription | **Cold — init / hot-reload register.** Render's `glibre_plugin_register` calls `World::subscribe_archetype<...>()` once per archetype the extract walk reads. The subscription installs the const-iterator factory in the ECS query cache so step 3.3 can iterate without re-walking the archetype table from scratch. | `SPEC.md` §8.3 + §6.1 (`plugin.cpp` register body).                                                                                                              |
-| Arena resize policy        | Cold — process init.         | §9 below. The 1 MiB-per-slot arena is sized at process init from `RenderSettings.per_view_draw_budget × 4`. Out-of-arena returns `ArenaExhausted` per §10 below. |
+| Arena resize policy        | Cold — process init.         | §9 below. The 1 MiB-per-slot arena is sized at process init from `RenderSettings.per_view_draw_budget × 4`. Out-of-arena returns `render::Error::TransientPoolExhausted` per §10 below. |
 | Schema migration of the snapshot bytes | **N/A — never serialised.** | §7 below. The snapshot has no on-disk form; PHILOSOPHY anti-pattern.                                                                                            |
 
 The split rule (`SPEC.md` §6.1): one file per reason-to-change. Extract
@@ -638,10 +640,10 @@ zero.
 The pin contract is **frame-scoped only**. An observer that pins a
 frame N snapshot must release the pin before phase 9 of frame N+2 (=
 when slot `N mod 3` would otherwise become `FREE` for frame N+3). A
-pin that lives longer than that triggers `FrameSlotStarvation` on
-the next acquisition — listed as a refusal under `SPEC.md` §10
-`abort-frame` and tested by
-`tests/render/extract/pin_overlong_starvation.cpp`.
+pin that lives longer than that causes the slot-starvation condition:
+`acquire_slot` returns `render::Error::FenceTimeout` on the next
+acquisition — listed as a refusal under `SPEC.md` §10 `abort-frame`
+and tested by `tests/render/extract/pin_overlong_starvation.cpp`.
 
 ## 7. Persistence + ABI
 
@@ -774,13 +776,17 @@ Per `hot-reload-protocol.md` step 1, the outgoing plugin's
 `glibre_plugin_drain(World&)` runs synchronously on the driver thread
 at phase 8. For the render-frame-extract aggregate, drain does:
 
-1. Walk the slot pool. For each slot in `READ` role, wait for its
-   `pin_count_` to reach zero (deferral path; §8.5 below). The wait
-   is bounded by the protocol's drain timeout (`hot-reload-protocol.md`
-   §"Drain — `glibre_plugin_drain`"). On timeout, drain returns
-   `core::Error::HotReloadRefused` with cause
-   `core::Error::PluginInitFailed`; the prior plugin remains live.
-2. For each `READ`-role slot whose pin reached zero, retire it
+1. Walk the slot pool. For each slot in `READ` role, read
+   `pin_count_` atomically (no blocking wait — the driver thread must
+   not spin or sleep; see `reviews/decisions/hot-reload-protocol.md §"Step 1 — Drain"`). If any slot carries a
+   non-zero pin count, drain **returns immediately** with
+   `core::Error::HotReloadRefused` (the one-frame deferral path
+   described in §8.5 below). The loader's `pending_reloads` counter is
+   not decremented; the request re-queues for the next phase 8. No
+   slot is retired and no subscription is released in the deferred
+   case — steps 2 and 3 are skipped until pin_count_ reaches zero on a
+   subsequent attempt.
+2. For each `READ`-role slot whose `pin_count_` is zero, retire it
    (arena reset, role flip to `FREE`).
 3. Release the four archetype subscriptions: call
    `World::unsubscribe_archetype<...>()` for renderable, light, probe,
@@ -824,9 +830,11 @@ state. The contract:
 
 1. At phase 8 entry, drain reads `pin_count_` for every slot. A
    non-zero count anywhere triggers a one-frame deferral: drain returns
-   the special status `core::Error::HotReloadRefused` with cause
-   `core::Error::PluginInitFailed::PinDeferred` (the inner cause is
-   render-specific; see `SPEC.md` §8.4).
+   `core::Error::HotReloadRefused` (the flat enumerator for a reload
+   that was refused — here used to signal the deferred state before
+   the 3-attempt escalation; see `SPEC.md` §8.4 and
+   `reviews/decisions/error-model.md` §Type Sketch for the flat
+   `core::Error` enum — there is no nested `PinDeferred` variant).
 2. The loader's `pending_reloads` counter is **not** decremented; the
    request stays in the queue. The next phase 8 (one frame later)
    re-attempts.
@@ -837,7 +845,12 @@ state. The contract:
    the loader escalates to `core::Error::HotReloadRefused` proper
    (per the protocol's drain-timeout rule). At that point, render's
    reload is refused and the prior plugin remains live; the operator
-   must close whichever observer is holding the pin.
+   must close whichever observer is holding the pin. The 3-attempt
+   threshold is loader-side policy: the loader tracks the attempt
+   count externally in its per-request state; drain always returns
+   the same `core::Error::HotReloadRefused` enumerator on deferral
+   and on final refusal — the loader uses its own counter to
+   discriminate deferral (re-queue) from refusal (drop request).
 
 The pin-deferral path is exercised by the test fixture
 `tests/render/extract/pin_defers_reload.cpp` (§11 below).
@@ -923,7 +936,7 @@ The 256 B/row figure for the renderable SoA is a row-major upper bound
 ~200 KiB headroom. If profiling at scale shows the headroom shrinking,
 the next perf-budget amendment widens the per-slot arena to 2 MiB
 (× 3 slots = 6 MiB total — still negligible against 512 MiB cell).
-**Out-of-arena returns `render::Error::ArenaExhausted`** per §10
+**Out-of-arena returns `render::Error::TransientPoolExhausted`** per §10
 below; tested by `tests/render/extract/arena_exhausted_lower_tier.cpp`.
 
 `reviews/decisions/perf-budget.md` Allocator Rule 4 ("transient arena
@@ -956,7 +969,7 @@ sum carries the load.
 
 ### 10.1 Variant-by-variant
 
-| Variant                                | Trigger (extract walk)                                                                                              | §10 routing in `SPEC.md`                       | Recovery (per `SPEC.md` §10.2)                          | Test fixture (under `tests/render/extract/`)  |
+| Condition                              | Trigger (extract walk)                                                                                              | §10 routing in `SPEC.md`                       | Recovery (per `SPEC.md` §10.2)                          | Test fixture (under `tests/render/extract/`)  |
 |----------------------------------------|---------------------------------------------------------------------------------------------------------------------|-----------------------------------------------|---------------------------------------------------------|-----------------------------------------------|
 | `ArenaExhausted`                       | `RenderFrameSlot::arena_.allocate(N)` returns `nullptr` because the bump pointer would exceed the per-slot 1 MiB limit. The renderable SoA is the dominant consumer; a scene whose visible-set or meshlet-bounds count exceeds the §9.2 sizing trips this. | Maps to **`render::Error::TransientPoolExhausted`** (existing `SPEC.md` §10 enum). Different aggregate (resources/transient_pool, the GPU-side pool); same enumerator because the arena is the CPU-side mirror of that resource role. The trigger column in `SPEC.md` §10.3 row `ResourceAllocFailed` is widened to include the snapshot arena via this design. | `lower-tier` — drop `RenderSettings.quality_tier` one step; the next frame's per_view_draw_budget shrinks; cull retains fewer rows; arena fits. | `arena_exhausted_lower_tier.cpp`              |
 | `MissingComponent`                     | Walk step 3 encounters an entity in the renderable archetype whose `MaterialComponent` is the sentinel "unset" handle (e.g. material was hot-unloaded mid-frame, before phase 8). | Maps to **`render::Error::PassUnsupportedConfig`** (existing). The column write would otherwise emit a default handle; we refuse and return the error so the missing component is loud, not silent. | `abort-frame` — skip phase 7 for this frame; previous frame is re-presented; the next frame retries (the reload will have completed by then or the entity will have been respawned). | `missing_component_abort_frame.cpp`           |
@@ -1026,7 +1039,7 @@ the contract handed to the leaf author.
 | `frame_extract_snapshot_immutable_post_finalise`       | After `cull_extract_run` returns, an attempt to write into the snapshot's SoA columns is a compile error (the public surface returns `const RenderFrame&`). | §3.1, `SPEC.md` §4.1.1 invariant 1 |
 | `frame_extract_self_contained_no_ecs_pointers`         | An adversarial harness destroys the source `World` after extract returns; phase 7 reads the snapshot through `submit_frame` without dereferencing destroyed memory. (ASan is the verifier.) | §3.5             |
 | `frame_extract_triple_buffer_pipelining`               | A 3-frame run with phase 7 deliberately delayed produces three slots in distinct roles at the moment phase 6 of frame 4 begins; phase 6 of frame 4 acquires a `FREE` slot. | §3.6             |
-| `frame_extract_slot_starvation_returns_error`          | A 4-frame run with all three slots held in `READ` (forced via observer pins) makes phase 6 of frame 4 return `render::Error::FenceTimeout` mapped from `FrameSlotStarvation`. | §3.6, §10        |
+| `frame_extract_slot_starvation_returns_error`          | A 4-frame run with all three slots held in `READ` (forced via observer pins) makes phase 6 of frame 4 return `render::Error::FenceTimeout` (the slot-starvation condition). | §3.6, §10        |
 | `frame_extract_pin_defers_reload`                      | An observer pin held across phase 8 makes the loader defer the reload one frame; `DiagnosticOverlay` shows the deferral; releasing the pin lets the next phase 8 succeed. | §8.5             |
 | `frame_extract_pin_overlong_refuses_reload`            | A pin held across 4 phase 8s makes the 4th attempt return `core::Error::HotReloadRefused`; the prior plugin remains live. | §8.5             |
 | `frame_extract_hot_reload_carrying_state_empty`        | After a hot-reload swap, the next phase-6 walk produces a snapshot whose `frame_counter` increments by exactly 1 (no double-count, no skip), and whose contents match what a non-reloaded walk would produce. | §8.6             |
