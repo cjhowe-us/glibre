@@ -131,13 +131,15 @@ subroutines, each called exactly once per `open`:
 
 ```text
 open(project_root, project_relative)
-  └── 1. resolve(project_root, project_relative) → AbsolutePath
-      └── 2. ingest_closure(AbsolutePath) → (normalized_bytes,
-                                              ordered_includes)
-          └── 3. scan_entry_points(normalized_bytes) → entry_points
-              └── 4. hash_total(normalized_bytes,
-                                ordered_includes) → ShaderHash
+  1. abs          := resolve(project_root, project_relative)    → AbsolutePath
+  2. (bytes, inc) := ingest_closure(abs)                       → (normalized_bytes, ordered_includes)
+  3. eps          := scan_entry_points(bytes)                  → entry_points
+  4. hash         := hash_total(bytes, inc)                    → ShaderHash
 ```
+
+`open` is the sole caller of all four subroutines. They are not
+chained — each subroutine receives its inputs from `open` directly,
+not from the return value of its predecessor.
 
 Each subroutine has no side effects beyond reading from the project
 source root and allocating against the `ContextTag::shader` arena
@@ -300,7 +302,7 @@ walk(abs):
     visited.insert(abs)
     closure_order.append(IncludeNode{
         project_relative_path = relative_to_root(abs),
-        content_hash          = blake3(bytes_of(abs))   # per-file hash
+        content_hash          = blake3(raw)              # per-file hash; raw = pre-normalization bytes
     })
 ```
 
@@ -342,9 +344,12 @@ invariant 2 (byte-equal preprocessed content → equal
    same file authored on macOS / Linux. The on-disk file is never
    rewritten.
 4. **Trailing newline.** A file without a terminating LF gets one
-   appended in the normalized byte stream. The file's `content_hash`
-   stored in `IncludeNode` reflects the post-normalization bytes; the
-   on-disk file is never rewritten.
+   appended in the normalized byte stream. The on-disk file is never
+   rewritten. Note: `IncludeNode.content_hash` is the BLAKE3 of
+   **pre-normalization bytes** (`raw` from the §3.4 walker, before
+   LF-normalization and trailing-newline append); it is deliberately
+   distinct from the post-normalization bytes that enter `out_bytes`.
+   See §7.3 for the rationale.
 5. **No `#line` markers.** The normalizer does **not** emit `#line`
    pragmas at include splice points. Re-derivation: slangc receives
    the spliced byte stream but also receives the include closure
@@ -381,7 +386,7 @@ scan_entry_points(normalized_bytes):
         stage     := parse_stage(stage_str)        # one of §5 Stage
                                                    # else EntryPointStageAmbiguous
         name      := next_identifier_after_attribute()
-                                                   # else EntryPointMissing
+                                                   # else SourceParseFailed
         if (any preceding [shader(...)] for the same function name):
             raise EntryPointStageAmbiguous (detail = name)
         out.append(EntryPoint{ name, stage })
@@ -398,7 +403,16 @@ has exactly one stage attribute"):
 - A stage string that does not parse to a §5 `Stage` →
   `EntryPointStageAmbiguous` (detail attaches the offending string).
 - An attribute with no following function declaration →
-  `EntryPointMissing`.
+  `SourceParseFailed` (detail = "orphaned [shader(...)] attribute;
+  no function declaration follows"). Re-derivation: an orphaned
+  attribute is a structural parse error in the Slang source that
+  makes the author's intent unknowable. SPEC §10.2 scopes
+  `SourceParseFailed` to "malformed `[shader(...)]` annotation"
+  open-time errors — this is the canonical arm for ingestion-time
+  scan failures, distinct from the compile-time `EntryPointMissing`
+  arm which fires when the caller asks the `CompilationPipeline` to
+  compile a named entry point the `ShaderSource` manifest does not
+  expose.
 
 The scanner runs against the post-include normalized bytes, so an
 entry point declared in an included file is enumerated from the
@@ -470,6 +484,23 @@ behaviour annotations and pre-/post-conditions.
 ### 4.1 Types (locked from SPEC §5)
 
 ```cpp
+// C++ [class.friend] §11.8.4 requires that a qualified friend name refer
+// to a previously-declared entity in the named namespace.  The forward-
+// declaration block below MUST appear before class ShaderSource.  It is
+// guarded by GLIBRE_E2E so shipping builds see no test symbols (§8.5).
+#if defined(GLIBRE_E2E)
+namespace glibre::shader {
+    class ShaderSource;
+    enum class Error : std::uint16_t;
+    struct SourceId;
+}
+namespace glibre::shader::test {
+std::expected<glibre::shader::ShaderSource, glibre::shader::Error>
+make_shader_source_from_bytes(eastl::span<const std::byte>,
+                               glibre::shader::SourceId);
+} // namespace glibre::shader::test
+#endif
+
 namespace glibre::shader {
 
 struct SourceId {
@@ -503,6 +534,19 @@ public:
     const SourceId&               id()             const noexcept;
     eastl::span<const EntryPoint> entry_points()   const noexcept;
     const PreprocessedSource&     preprocessed()   const noexcept;
+
+private:
+    // Private constructor used only by the test factory and by open().
+    ShaderSource(SourceId, eastl::vector<EntryPoint>, PreprocessedSource);
+
+#if defined(GLIBRE_E2E)
+    // Grants the test-support factory access to the private constructor.
+    // The forward declaration above (in glibre::shader::test) must appear
+    // before this class definition — see §8.5 ordering note.
+    friend std::expected<ShaderSource, Error>
+        glibre::shader::test::make_shader_source_from_bytes(
+            eastl::span<const std::byte>, SourceId);
+#endif
 };
 
 }  // namespace glibre::shader
@@ -754,13 +798,26 @@ behaviour the watcher triggers.
 
 The `platform` `FileWatcher` (#719) observes a `.slang` file change
 under the project source root and emits a `(SourceId, AbsolutePath)`
-event. The `shader` plugin's editor / dev-build wrapper (a small
-adapter inside `source/`) reacts by:
+event.
+
+**Module boundary.** The two objects involved have distinct locations:
+
+- `ShaderSource::open` — the re-ingestion entry point — is
+  implemented in `plugins/shader/source/` and is the only object this
+  design adds to the `source/` sub-module.
+- The watcher-event handler (`on_source_changed`), the inverse index
+  (`included_by`), and `fire_recompile` all live in
+  `plugins/shader/cache/` — either in `cache/cooker.cpp` directly or
+  in a dedicated `cache/source_watcher_adapter.cpp`. The dependency
+  direction is **`cache/ → source/`**; `source/` does not import from
+  `cache/`.
+
+The handler running inside `cache/`:
 
 ```text
 on_source_changed(source_id, abs_path):
     new_source := ShaderSource::open(project_root, source_id.project_relative_path)
-                  // §3.2 → §3.4 → §3.6 → §3.7
+                  // calls into source/ — §3.2 → §3.4 → §3.6 → §3.7
     if new_source is unexpected:
         log_warn(error)                     # SPEC §8.4 refusal
         return                              # prior ShaderSource stays live
@@ -780,7 +837,8 @@ on_source_changed(source_id, abs_path):
 `fire_recompile` path lives in `cache/cooker.cpp` (the cooker is the
 sole writer; SPEC §6.4) and is governed by SPEC §8.5
 (`ShaderArtifactReplaced` event). The watcher integration adapter is
-the sole new code added by this design beyond the four §3 subroutines.
+the sole new code added by this design beyond the four §3 subroutines,
+and it lives entirely inside `cache/`.
 
 ### 8.2 Re-ingestion is the cheapest refresh
 
@@ -812,10 +870,12 @@ On a watcher tick for `lib/common.slang`:
    `total_hash` changes.
 
 The inverse index is **not** part of `ShaderSource`'s state; it lives
-in the cooker / editor adapter (the same place that calls
-`fire_recompile`). `ShaderSource` exposes the closure via
-`preprocessed().include_closure` for the adapter to populate the
-index.
+in `cache/` alongside the cooker / watcher adapter (the same code that
+calls `fire_recompile`). The dependency direction is
+**`cache/ → source/`** — `cache/` reads `ShaderSource`'s closure and
+maintains the inverse index; `source/` is unaware of `cache/`.
+`ShaderSource` exposes the closure via `preprocessed().include_closure`
+for the adapter to populate the index.
 
 ### 8.4 Refusal cases
 
@@ -830,8 +890,8 @@ refusal arms attributable to `ShaderSource` are:
 | `IncludeEscape`              | An edit introduced an absolute path or `..`-escape in an `#include`.                                        |
 | `IncludeCycle`               | An edit introduced a cycle in the include graph.                                                            |
 | `EncodingInvalid`            | The file is no longer valid UTF-8 (e.g. a binary blob accidentally saved over the source).                  |
+| `SourceParseFailed`          | An edit introduced an orphaned `[shader(...)]` attribute with no following function declaration (§3.6 scanner). Note: a file with zero entry-point annotations is not a refusal — it is a valid library Slang TU. |
 | `EntryPointStageAmbiguous`   | An edit introduced two `[shader(...)]` attributes on one function or an unrecognised stage string.          |
-| `EntryPointMissing`          | An edit removed every entry-point annotation (rare; the file remains a "library" Slang TU).                 |
 
 In each case the new `ShaderSource` is discarded, no
 `ShaderArtifactReplaced` event is published, and the prior cache
@@ -843,12 +903,65 @@ expectation).
 ### 8.5 Test hooks
 
 `shader::test::inject_source_diff` (SPEC §8.6, `#if defined(GLIBRE_E2E)`)
-admits the same in-process trigger the watcher uses. `ShaderSource`
-exposes a friend-shaped test-only constructor that takes a
-synthesised byte stream in lieu of reading from disk; the
-normalization (§3.5), closure walk (§3.4), scan (§3.6), and hash
-(§3.7) all run identically. This is the entry point §8.6's bullet
-"inject an Slang diff for `source_id`" hooks into.
+admits the same in-process trigger the watcher uses. The production `ShaderSource` class definition carries **one**
+conditionally-compiled test-specific member: the `GLIBRE_E2E`-guarded
+`friend` declaration that grants the test-support factory access to the
+private constructor (§4.1 snippet). Outside that single guard, the
+aggregate header is unconditionally clean; keeping the bulk of
+test-framework concerns out of the aggregate header is required by SRP
+(two reasons to change: ingestion algorithm changes vs.
+test-double scaffolding changes).
+
+The bulk of the test scaffolding lives in a dedicated test-support header
+`tests/shader/source/shader_source_test_support.hpp` — compiled only
+when `GLIBRE_E2E` is defined — which declares:
+
+```cpp
+namespace glibre::shader::test {
+
+/// Constructs a ShaderSource from a synthesised byte stream without
+/// reading from disk. Normalization (§3.5), closure walk (§3.4),
+/// scan (§3.6), and hash (§3.7) run identically to ShaderSource::open.
+/// Available only in E2E builds (GLIBRE_E2E).
+std::expected<ShaderSource, shader::Error>
+make_shader_source_from_bytes(eastl::span<const std::byte> raw,
+                               SourceId id);
+
+} // namespace glibre::shader::test
+```
+
+`make_shader_source_from_bytes` requires access to `ShaderSource`'s
+private constructor. Because a `friend` declaration must appear inside
+the class definition — a C++ language invariant — the aggregate header
+`shader_source.hpp` carries **one** conditional guard:
+
+```cpp
+#if defined(GLIBRE_E2E)
+friend std::expected<ShaderSource, Error>
+    glibre::shader::test::make_shader_source_from_bytes(
+        eastl::span<const std::byte>, SourceId);
+#endif
+```
+
+**Forward-declaration ordering (C++ [class.friend] §11.8.4):** A
+qualified friend name must refer to a previously-declared entity in
+the named namespace. Consequently, `shader_source.hpp` must contain a
+`GLIBRE_E2E`-guarded forward-declaration block for
+`make_shader_source_from_bytes` in `namespace glibre::shader::test`
+placed *before* the `ShaderSource` class definition. The §4.1 snippet
+shows this ordering: the forward-declaration block appears immediately
+before `class ShaderSource {`. Implementors must preserve this
+ordering — placing the `class ShaderSource` definition before the
+forward declaration produces ill-formed code under [class.friend]
+§11.8.4.
+
+This is the only test-framework concern in the aggregate header. The
+rest of the `ShaderSource` class definition is unconditionally clean;
+shipping builds see no test-support symbols (both `GLIBRE_E2E` blocks
+compile to nothing). The full factory definition lives in
+`tests/shader/source/shader_source_test_support.hpp`, which is
+included only from E2E test translation units. The §8.6
+"inject an Slang diff for `source_id`" bullet calls this factory.
 
 ## 9. Performance
 
@@ -940,8 +1053,8 @@ actions. All severities are `refuse` per SPEC §10.1 unless noted.
 | `IncludeEscape`              | §3.2      | An `#include` resolved to an absolute path, contained `..`-escapes leaving the project root, or pointed at a symlink whose canonical target leaves the root. | Re-author the include using a project-relative form. Path layout is a project policy, not negotiable.                    | `refuse`              |
 | `IncludeCycle`               | §3.4      | The include graph contains a cycle. The cycle path is attached to the diagnostic detail.                                                | Break the cycle (introduce a header-shared declaration or split the file). The detail string is `a -> b -> c -> a`.        | `refuse`              |
 | `EncodingInvalid`            | §3.5      | A file is not valid UTF-8 after BOM strip, or is empty.                                                                                  | Re-save the file as UTF-8. Editors that default to UTF-8-BOM are accepted; non-UTF-8 encodings are rejected.              | `refuse`              |
-| `EntryPointMissing`          | §3.6      | An attribute `[shader(...)]` is followed by no function declaration.                                                                    | Add the function declaration immediately after the attribute, or remove the attribute.                                    | `refuse`              |
-| `EntryPointStageAmbiguous`   | §3.6      | An entry-point function carries zero or more than one `[shader(...)]` attribute, or carries an unrecognised stage string.                | Use exactly one of the §5 `Stage` values.                                                                                  | `refuse`              |
+| `SourceParseFailed`          | §3.6      | An attribute `[shader(...)]` is followed by no function declaration (orphaned attribute). SPEC §10.2 scopes `SourceParseFailed` to "malformed `[shader(...)]` annotation" — an orphaned attribute is exactly that. Note: zero stage attributes on a function is not a refusal; it produces an empty `entry_points()` and is a valid library TU. | Remove the orphaned attribute or add the function declaration immediately after it.                                    | `refuse`              |
+| `EntryPointStageAmbiguous`   | §3.6      | An entry-point function carries more than one `[shader(...)]` attribute, or carries an unrecognised stage string.                        | Use exactly one of the §5 `Stage` values.                                                                                  | `refuse`              |
 
 The shader-error sibling spike is **not separately filed**; SPEC §10
 is the closed-sum source of truth for the entire context.
@@ -960,10 +1073,14 @@ constructed past the failing step. Specifically:
   the watcher tick reaction is the caller) remains live.
 - `EncodingInvalid`: the normalizer fails before §3.6 / §3.7 run; no
   closure or hash is finalised.
-- `EntryPointMissing` / `EntryPointStageAmbiguous`: the closure walk
-  has completed and `out_bytes` is well-formed, but the scanner's
-  refusal aborts `open` before §3.7 runs. The `total_hash` is never
-  finalised; the `ShaderSource` value never becomes addressable.
+- `SourceParseFailed` (orphaned-attribute trigger) / `EntryPointStageAmbiguous`:
+  the closure walk has completed and `out_bytes` is well-formed, but
+  the scanner's refusal aborts `open` before §3.7 runs. The
+  `total_hash` is never finalised; the `ShaderSource` value never
+  becomes addressable. Note: `EntryPointMissing` is a
+  `CompilationPipeline`-emitted arm (SPEC §10.2), not a
+  `ShaderSource::open`-emitted arm; ingestion-time orphaned-attribute
+  failures use `SourceParseFailed` per the §10.1 table above.
 
 This matches SPEC §8.4 ("the new artifact is not published; the
 prior cache state remains live"). The editor's viewport overlay
@@ -1025,7 +1142,7 @@ content; checked-in goldens for the resulting `ShaderHash`).
 | `source.open_rejects_zero_stage_annotated_function`  | (positive: not enumerated)        | Helper function with no `[shader(...)]`; `entry_points()` is empty. |
 | `source.open_rejects_two_stage_attribute`            | `EntryPointStageAmbiguous`        | A function with two `[shader("vertex")]` `[shader("pixel")]`.       |
 | `source.open_rejects_unknown_stage_string`           | `EntryPointStageAmbiguous`        | `[shader("ray-something")]`.                                        |
-| `source.open_rejects_attribute_without_function`     | `EntryPointMissing`               | `[shader("vertex")]` followed by EOF.                                |
+| `source.open_rejects_attribute_without_function`     | `SourceParseFailed`               | `[shader("vertex")]` followed by EOF.                                |
 | `source.hash_is_byte_stable_across_runs`             | (positive, determinism)           | Run `open` 100 times; assert all `total_hash` equal.                |
 | `source.hash_is_byte_stable_across_hosts`            | (positive, determinism)           | Cross-host CI matrix: macOS arm64 vs macOS x86_64; assert equal hash. |
 | `source.hash_changes_on_byte_change`                 | (positive)                        | Two files differing by one byte; assert different hashes.            |
