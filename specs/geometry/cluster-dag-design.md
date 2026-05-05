@@ -132,7 +132,7 @@ by the design below or explicitly refused with rationale. Inputs
 | Harmonius — "Uniform LOD — each LOD level is a complete independent meshlet set."                                | **Refused / collapsed.** Glibre uses a *cluster-DAG* not "uniform LOD per level" because uniform-LOD prevents partial-detail cuts. The DAG admits cuts that mix bands across the mesh (§3.5), giving fine detail near silhouettes and coarse detail behind. The "uniform" property is preserved as a degenerate case (every band has exactly one group) but is not the contract.                                                       |
 | Harmonius — "BLAS parity — ray-traced geometry equals rasterized geometry."                                      | **Refused / re-routed.** `SPEC.md` §4.2 invariant 3 fixes BLAS at LOD0 *only*; the rasteriser may pick a coarser band per view but ray tracing always sees LOD0. This is a stronger contract than parity (which would force ray tracing to match the per-view cut, an `O(views)` BLAS rebuild per frame). LOD0-only is what makes BLAS refit affordable per `perf-budget.md` §"render" row.                                            |
 | Harmonius — "Cluster hierarchy cone-over-N vs per-meshlet cones" (open Q #1).                                    | **Resolved: per-meshlet cones, plus per-group bounding-sphere only.** §3.3 below: `MeshletGroup` carries one `BoundingSphere` for frustum / occlusion (no group cone). Per-meshlet `BoundingCone` lives on `Meshlet` (`SPEC.md` §4.1.3) and feeds the cull pass (#770), not cut selection. Group-level cones would add ABI surface for an optimisation cull already does at meshlet granularity; collapsed.                              |
-| Harmonius — "When a mesh changes LOD count after hot-reload, how are existing render instances migrated" (Q #3). | **Resolved.** §8 below restates the migrate body from `SPEC.md` §8.4: handle bit-identity preserved, group-index re-resolution via stable `group_id` recorded in the cluster-DAG bytes (§7.1.2 `BLASRecipeRecord` shape; the DAG record carries the same key per group). The first post-swap frame's `select_lod_group` rebuilds cut state from scratch.                                                                            |
+| Harmonius — "When a mesh changes LOD count after hot-reload, how are existing render instances migrated" (Q #3). | **Resolved.** §8 below restates the migrate body from `SPEC.md` §8.4: handle bit-identity preserved, group-index re-resolution via stable `group_id` recorded in the cluster-DAG bytes (§7.1.2 `group_id — stable 64-bit identifier`; the DAG record carries the same key per group). The first post-swap frame's `select_lod_group` rebuilds cut state from scratch.                                                                            |
 | Harmonius — `LodGroup { level, screen_error, meshlets, bounds }` shape.                                          | **Covered with refinements.** `MeshletGroup` (§3.3) carries band, SSE, meshlet range, group sphere, plus parent/child edge lists and the watertight bit mask harmonius omits. The omission is what would have broken Q-3.1.6.                                                                                                                                                                                                       |
 | Harmonius — "DAG hierarchy with watertight cut invariant."                                                       | **Covered.** §3.5 watertight-cut algorithm + §4 invariants (`SPEC.md` §4.1.4 inv 1, §4.1.5 inv 1–4) re-stated below as design contracts.                                                                                                                                                                                                                                                                                            |
 | Harmonius — "DAG mutated post-import for streaming reasons."                                                     | **Refused.** `SPEC.md` §4.1.5 invariant: DAG immutable post-cook; runtime form is reconstructed from pak bytes at `register_mesh`; never rebuilt. Streaming changes residency bits (§4.1.13), not topology. PHILOSOPHY §6 (no runtime reflection) reinforces — the DAG topology is part of the cooked artefact.                                                                                                                       |
@@ -170,17 +170,13 @@ MeshletGroup (one node of the DAG; entity record inside ClusterDAG)
 ├── meshlet_range     : { uint32_t first, uint32_t count }   (slice into pak's meshlet table)
 ├── bounds            : BoundingSphere               (encloses all constituent meshlet spheres)
 ├── screen_space_error: float                        (projected pixel error at cook reference distance)
-├── parent_count      : uint16_t                     (degree into parent_csr_; 0 at coarsest band)
-├── child_count       : uint16_t                     (degree into child_csr_; 0 at LOD0)
+├── parent_count      : uint8_t                      (degree into parent_csr_; 0 at coarsest band)
+├── child_count       : uint8_t                      (degree into child_csr_; 0 at LOD0)
 ├── watertight_mask   : uint32_t                     (per-edge bit; 1 = edge may be cut watertight)
 ├── material          : MaterialHandle               (LOD0 cover only carries material; coarser bands inherit)
 └── reserved          : uint32_t                     (zero; reserves alignment slot for future additive field)
 
-CutState (per (View, MeshHandle) pair; render-owned scratch)
-├── frame_counter   : uint64_t                       (last frame this state was updated)
-├── selected_group  : MeshletGroupHandle             (coarsest admissible group from prior frame)
-├── prev_threshold  : float                          (pixel threshold used last frame)
-└── stale           : bool                           (true after pak hot-reload; forces full walk next frame)
+// CutState is render-owned scratch — see §3.8 for its struct definition.
 ```
 
 `ClusterDAG` is a sibling aggregate of `MeshletGroup` in the §4.1
@@ -191,13 +187,6 @@ because their invariants are inseparable. The cook-time
 in §7 below; the runtime form is a `const`-pointer view over the
 mmap'd pak bytes — geometry never copies the DAG into engine-owned
 memory.
-
-`CutState` is **owned by render's per-view scratch arena** (`render`
-SPEC §4.1.4), not by geometry. Geometry specifies its shape and
-update recurrence so render's cull pass (#770) can implement it
-without inventing a private data layout. The struct is POD; ABI
-exposure is via `eastl::span<const std::byte>` reads only —
-geometry's public surface (`SPEC.md` §5) does not name the type.
 
 ### 3.2 Band layout — CSR for cache-friendly traversal
 
@@ -248,9 +237,15 @@ exactly the fields cut selection and watertight validation need:
   .screen_space_reference_distance`). Strictly tightens with finer
   band per §4.1.4 invariant 2; cut selection compares against
   view's pixel threshold.
-- **`parent_count` / `child_count`** — degrees into the CSR edge
-  arrays. `LOD0` groups have `parent_count >= 1` and `child_count
-  == 0`; coarsest-band groups have `parent_count == 0`.
+- **`parent_count` / `child_count`** (`uint8_t` each) — degrees into
+  the CSR edge arrays. `LOD0` groups have `parent_count >= 1` and
+  `child_count == 0`; coarsest-band groups have `parent_count == 0`.
+  `uint8_t` matches the on-disk `MeshletGroupRecord` encoding (§7.1.1
+  `parent_count` / `child_count` are each 1 byte), which is the source
+  of truth because the runtime form is a const-pointer view over the
+  mmap'd pak bytes. The MVP fan-out cap of ≤ 4 makes `u8` sufficient.
+  Implementation note: `static_assert(sizeof(MeshletGroup) == 64)` is
+  required to catch any accidental widening of these fields.
 - **`watertight_mask`** — `u32` bit field with one bit per outgoing
   edge (parent + child); bit `i` = 1 means the corresponding edge
   may be crossed by a runtime cut without producing a T-junction.
@@ -368,9 +363,9 @@ fully resident.
    `selected_group` immediately. This is the temporal-coherence
    fast path; on stable scenes it dominates frame-to-frame
    (§5.1 below). `O(1)` work.
-3. **Coarsest-first descent.** Starting from any group at the
-   coarsest band (`band_offsets_[8] - 1`, walking leftward across
-   the band), evaluate the **admission predicate**:
+3. **Coarsest-first descent.** Iterate **all** groups in the coarsest
+   band (indices `[band_offsets_[7], band_offsets_[8])`) and evaluate
+   the **admission predicate** for each:
 
    ```
    admissible(g) ⇔ SSE(g) ≤ T  ∧  fully_resident(g) == true
@@ -379,7 +374,13 @@ fully resident.
    The "fully resident" test reads the residency atomic for every
    page that contains a constituent meshlet; whole-group containment
    (`SPEC.md` §4.1.6 invariant 1) means this is one atomic load
-   per group.
+   per group. Note: `select_lod_group` operates directly against the
+   `ResidencyState` table (`SPEC.md` §4.1.13) during DAG descent —
+   not against `MeshletGroupView.fully_resident`. The
+   `MeshletGroupView.fully_resident` bool is a snapshot of that same
+   atomic populated by `resolve_group` at resolve time; it is a
+   read-only projection for cull-pass consumers, not an input to the
+   cut algorithm.
 4. **Descend on inadmissibility.** If no group at band `k` is
    admissible, descend to band `k - 1` via child edges:
 
@@ -456,12 +457,12 @@ CutState_{n+1} = select_lod_group(mesh, T_{n+1}, V_{n+1})
                  .with_stale(false)
 ```
 
-`stale` is forced `true` on three events: (a) initial allocation;
-(b) pak hot-reload publishes `MeshReplaced` (`SPEC.md` §8.5
-observer responsibility 1); (c) view-handle reuse across frames.
-Each forces a full walk on the next call. `CutState` lives in
-render's per-view scratch arena (`render` SPEC §4.1.4); geometry
-specifies the layout but never allocates it.
+`stale` is forced `true` on initial allocation (a). The remaining
+stale-trigger events are render's observer responsibilities and are
+enumerated in `SPEC.md` §8.5 observer responsibility 1; geometry
+does not own them. Each forces a full walk on the next call.
+`CutState` lives in render's per-view scratch arena (`render` SPEC
+§4.1.4); geometry specifies the layout but never allocates it.
 
 Concurrency: `CutState` is accessed by exactly one thread at a
 time (the cull-pass worker for `View` `v`). No atomics needed; the
@@ -500,9 +501,27 @@ Failure shape (per `error-model.md` and `SPEC.md` §10):
 
 `MeshletGroupView` is the only public projection of a DAG node; it
 strips parent/child adjacency and the watertight mask (those are
-internal). The view is POD with the §3.3 fields plus
-`MeshletGroupHandle` and `meshlet_count` already published in
-SPEC §5 line 1630–1639.
+internal). The struct is POD and carries exactly eight fields
+(authoritative: `SPEC.md` §5 lines 1630–1639): six sourced from §3.3
+stored fields — `MeshletGroupHandle handle`, `LODBand band`,
+`BoundingSphere bounds`, `float screen_space_error`,
+`MaterialHandle material`, `uint32_t meshlet_count` — plus two
+view-time-derived fields populated by `resolve_group` at resolve time:
+`BoundingCone cone` and `bool fully_resident`.
+
+- **`BoundingCone cone{}`** — the aggregate bounding cone over the
+  group's constituent meshlet cones, computed at resolve time by
+  `resolve_group`. `§3.3` deliberately omits a group-level cone
+  (per the §2 refusal "Cluster hierarchy cone-over-N vs per-meshlet
+  cones"), so `cone` is not a stored field in the DAG; it is derived
+  from the constituent `Meshlet::cone` values during view projection.
+  If the constituent cones are degenerate or inconsistent,
+  `resolve_group` emits the degenerate-cone sentinel.
+- **`bool fully_resident`** — a snapshot of the group's whole-page
+  residency at resolve time. `resolve_group` reads the same
+  `ResidencyState` atomic that `select_lod_group` reads during DAG
+  descent (see §3.6 step 3) and records the result here. Cull-pass
+  consumers use this field; they do not re-read the residency atomic.
 
 **No exception path.** `-fno-exceptions` per
 `error-model.md` §"Decision" item 3; `select_lod_group` returns
@@ -1091,7 +1110,7 @@ at least one test in §11.1–§11.6. The mapping is:
 | §4.1.4 inv 2 (SSE monotonicity)        | `cluster-dag-rejects-non-monotonic-sse`                  |
 | §4.1.4 inv 3 (LOD0 covers source)      | `cluster-dag-rejects-incomplete-lod0-cover` (shared)     |
 | §4.1.4 inv 4 (group bounds enclose)    | `cluster-dag-rejects-degenerate-bounds`                  |
-| §4.2 inv 2 (DAG acyclic + monotonic)   | both above                                               |
+| §4.2 inv 2 (DAG acyclic + monotonic)   | `cluster-dag-rejects-cycle`, `cluster-dag-rejects-non-monotonic-sse` |
 | §5 `select_lod_group`                  | `select-lod-group-*` (eight tests)                       |
 | §5 `resolve_group`                     | `resolve-group-*` (two tests)                            |
 | §5 `lod0_groups`                       | `lod0-groups-returns-cover-only`                         |
