@@ -339,11 +339,16 @@ ReflectionBlob (input)
 [Pass 7] Per-table cap check                     ── len(slots) ≤ 31 per group (Metal 4 baseline)
     │                                               failure: BindingOverflow (new §10 arm)
     ▼
-[Pass 8] Cross-table completeness check          ── assert Σ len(per_*.slots) + len(static_samplers)
-    │                                                       + (1 if push-constant synthetic slot) ==
+[Pass 8] Cross-table completeness check          ── assert Σ len(per_*.slots) - (1 if synthetic slot present)
+    │                                                       + len(static_samplers) ==
     │                                                       len(reflection.bindings); i.e. no binding
     │                                                       was silently dropped or double-counted
     │                                                       across the first seven passes.
+    │                                                       (The synthetic PerDraw slot 0 is derived
+    │                                                       from reflection.push_constants, not from
+    │                                                       reflection.bindings, so it is subtracted
+    │                                                       from Σ len(per_*.slots) before comparing
+    │                                                       against reflection.bindings.)
     │                                               failure: DescriptorFrequencyAmbiguous
     │                                               (double-counted slot or DescriptorFrequencyMissing
     │                                               if a slot was silently dropped — this pass is
@@ -1415,8 +1420,8 @@ condition **must** map onto the closest-fit existing arm
 (`DescriptorFrequencyAmbiguous` for the four arms above) so the
 closed-sum guarantee at the public boundary is never violated.
 This temporary mapping is unit-tested and deleted when the §5
-amendment lands. Each site is tagged `TODO(#881)` referencing the
-tracking spike opened under sub-epic #69.
+amendment lands. Note: delete each temporary proxy mapping when
+sub-epic #69 §5 amendment lands (tracked in spike #881).
 
 ### 10.3 Cross-arm refusal interactions
 
