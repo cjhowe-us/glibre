@@ -78,6 +78,25 @@ manifest:
 # Frames 4..7:  swap to the *escape* fixture, assert IncludeEscape.
 # Frames 8..11: swap to the *cycle* fixture pair, assert IncludeCycle.
 # Frame  12:    End.
+#
+# Cross-scenario project-state sharing (INTENTIONAL).
+# The three Gherkin scenarios in this trace share one mutable live
+# project: Scenario 2 (frames 4..7) replaces `shaders/main.slang` in
+# the project left behind by Scenario 1 (frames 0..3); Scenario 3
+# (frames 8..11) imports `shaders/a.slang` and `shaders/b.slangi` into
+# the same live project now containing the escape `main.slang`.  There
+# is no explicit per-scenario isolation reset because `TraceRunner`
+# §4.1.7 in `specs/e2e/SPEC.md` does not yet define a reset primitive.
+# This coupling is deliberate within this trace's scope: the three
+# scenarios test orthogonal error paths on the same project instance,
+# so the shared state does not invalidate any assertion.
+#
+# Once the TraceRunner isolation primitive design is resolved (see spike
+# [SPIKE] iterate-e2e-trace-runner-isolation-design, filed to inform
+# specs/e2e/SPEC.md §4.1.7), authors should decide whether each
+# scenario should receive a clean project snapshot.  Until that spike
+# lands, shared mutable state across scenario boundaries is the accepted
+# pattern for single-file multi-scenario traces.
 # -----------------------------------------------------------------------------
 stream:
 
