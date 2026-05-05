@@ -754,7 +754,7 @@ struct StagedMeshletGroup {
     std::uint32_t                   page_index;      // owning PakPage
     LODBand                         band;            // used for LOD0 cross-check (§4.1.3 step 6)
     eastl::array<std::uint32_t, kAttributeKindCount> draco_decoded_byte_length{};
-    // decode-pool-max derivation (§4.1.3 step 4)
+    // decode-pool-max derivation (design §4.1.3 step 4)
 };
 
 struct StagedDracoStream {
@@ -1405,7 +1405,7 @@ session, not against a per-frame ceiling).
 | `page_streams(page_index)` accessor      | **≤ 1 µs**               | Page header parse + stream-table span construction; one cache line for header, one for table prefix.                                      |
 | `page_stream_bytes(page_index, stream_index)` accessor | **≤ 100 ns**             | Stream-table O(1) + range check + span return.                                                                                            |
 | `page_hint(page_index)` accessor         | **≤ 50 ns**              | Hint-table O(1) byte read.                                                                                                                |
-| Per-page CRC32C verification (decode-time) — **warm cache** | **≤ 5 µs / 16 KiB** | `__crc32cd` intrinsics on M1; 2 GB/s sustained throughput at warm-cache rates; 16 KiB / 2 GB/s = ~8 µs, giving ≤ 5 µs headroom for typical sub-16-KiB pages. |
+| Per-page CRC32C verification (decode-time) — **warm cache** | **≤ 10 µs / 16 KiB** | `__crc32cd` intrinsics on M1; 2 GB/s sustained throughput at warm-cache rates; 16 KiB / 2 GB/s = ~8 µs; ceiling of 10 µs adds ~25 % headroom for pipeline stalls and sub-16-KiB alignment rounding. |
 | Per-page CRC32C verification (decode-time) — **full 64 KiB, warm cache** | **≤ 40 µs** | 64 KiB / 2 GB/s = ~32 µs at hardware ceiling; 40 µs ceiling adds 25 % headroom for pipeline stalls. Cold-cache cost (~30 µs additional for a fresh 64 KiB cold DRAM fetch) is folded into the decode-pool's 5 ms p99 cluster-decode latency (`SPEC.md` §9.4) and not tracked here. |
 
 The 0.5 ms-per-pak load ceiling × 200 props in the S1 fixture =
