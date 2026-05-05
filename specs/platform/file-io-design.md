@@ -220,7 +220,7 @@ struct Slot {
     Result<void>                         err;          // failure code if state=Ready and err is unexpected
     Request                              req;          // bound at enqueue, read by worker
 };
-static_assert(sizeof(Slot) <= 64, "Slot must fit one cache line (§6.3 / §9.2 / §12)");
+static_assert(sizeof(Slot) <= 64, "Slot must fit one cache line (§3.6 layout table; SPEC §6.5 / §9.2)");
 
 // IoToken::Impl is just &Slot; the public IoToken from §5.11 is a
 // move-only handle that holds slot index + free-list backref.
@@ -404,7 +404,7 @@ Slot count `M = N * queue_depth` with default `queue_depth = 16` →
 | `result_bytes` | `span<const byte>` (16 B)   | 16 B | ptr + size; filled before state=Ready      |
 | `err`          | `Result<void>` (~16 B)      | 16 B | failure arm if state=Ready and err set     |
 | `req`          | `Request` (~24 B)           | 24 B | op + path + bytes_in (slot_index dropped)  |
-| **Total**      |                             | **64 B** | fits one M1 cache line (§6.3 / §9.2)  |
+| **Total**      |                             | **64 B** | fits one M1 cache line (§3.6 layout table; SPEC §6.5 / §9.2)  |
 
 The `prefix` (8 B pointer for async error transport) is **not** stored in
 `Slot` — adding it inline would push the struct to 72 B, violating the
@@ -427,20 +427,6 @@ in `token.hpp` is the implementation gate.
 
 Pool footprint: `64 × 32 + 8 × 32 = 2 KiB + 256 B = 2.25 KiB` resident
 at default config; bounded by the §9 8 MiB sub-arena.
-
-`prefix` for async-path error transport is kept in a **parallel array**
-`prefixes_[M]` (one `const char*` per slot, 8 B × 32 = 256 B; cold path
-only) to preserve the Slot 64 B invariant. See §3.9 for the transport
-contract. The parallel-array access is release/acquire-ordered via the
-`state` field transition — no separate synchronization needed.
-
-Pool footprint: `64 × 32 + 256 = 2.25 KiB` resident at default config;
-bounded by the §9 8 MiB sub-arena.
-
-`next_free` as `uint16_t` limits the free-list to 65 535 entries. The
-maximum plausible slot count is `io_thread_budget_max (8) × queue_depth_max
-(128) = 1 024`; `uint16_t` is far above this ceiling and documents the
-constraint at the type level.
 
 ### 3.7 Synchronous primitives — POSIX direct
 
@@ -1498,3 +1484,30 @@ gate's tolerance band.
   enablement is post-MVP per PHILOSOPHY §5 / plans/mvp.md; the MVP
   `N = 2` path uses a SPSC ring with dispatcher semantics (§3.5).
   Track at `[SPIKE] iterate-platform-mpsc-ring`.
+
+- **[OPEN] `FileIoConfig` SPEC §5.11 widening — `project_root` /
+  `user_root` / `cache_root` / `read_arena_bytes` / `queue_depth`**
+  [BLOCKING IMPLEMENTATION]: SPEC §5.11 declares `FileIoConfig` with
+  a single field (`io_thread_budget`). This design adds five additional
+  fields without amending the SPEC: `project_root (CanonicalPath)`,
+  `user_root (CanonicalPath)`, `cache_root (CanonicalPath)`,
+  `read_arena_bytes (std::size_t)`, and `queue_depth (uint32_t)` — see
+  §4.1 `FileIoConfig` block. An implementer reading SPEC §5.11 alone
+  gets the wrong API shape. Two concrete consumers drive the widening:
+  (a) editor sandbox bootstrap, which uses `project_root` to scope its
+  writable path set; (b) shipping runtime, which uses `cache_root` as
+  the shader-cache directory. A SPEC §5.11 amendment spike must land
+  (updating §5.11 with the full `FileIoConfig` struct) **before** the
+  first `envelope.cpp` implementation PR so implementers and the SPEC
+  are in sync.
+
+- **[OPEN] SPEC §6.5 `internal-architecture` SPSC-only language is
+  stale** [NON-BLOCKING]: SPEC §6.5 says "single bounded SPSC ring
+  for all N" — that language pre-dates the §3.5 N == 1 SPSC / N > 1
+  MPSC topology split defined in this design. §3.5 is the canonical
+  authority; SPEC §6.5 is an informative sketch and is now inaccurate.
+  The SPEC §6.5 amendment (updating "single bounded SPSC ring" to
+  reflect the SPSC / MPSC topology) can land alongside the
+  `FileIoConfig` amendment from the BLOCKING entry above, or as a
+  separate doc-only patch. Not blocking the implementation PR since
+  §3.5 governs all implementation decisions.
