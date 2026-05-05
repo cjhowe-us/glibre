@@ -776,13 +776,17 @@ Per `hot-reload-protocol.md` step 1, the outgoing plugin's
 `glibre_plugin_drain(World&)` runs synchronously on the driver thread
 at phase 8. For the render-frame-extract aggregate, drain does:
 
-1. Walk the slot pool. For each slot in `READ` role, wait for its
-   `pin_count_` to reach zero (deferral path; §8.5 below). The wait
-   is bounded by the protocol's drain timeout (`hot-reload-protocol.md`
-   §"Drain — `glibre_plugin_drain`"). On timeout, drain returns
-   `core::Error::HotReloadRefused` with cause
-   `core::Error::PluginInitFailed`; the prior plugin remains live.
-2. For each `READ`-role slot whose pin reached zero, retire it
+1. Walk the slot pool. For each slot in `READ` role, read
+   `pin_count_` atomically (no blocking wait — the driver thread must
+   not spin or sleep; see `SPEC.md` §6.3). If any slot carries a
+   non-zero pin count, drain **returns immediately** with
+   `core::Error::HotReloadRefused` (the one-frame deferral path
+   described in §8.5 below). The loader's `pending_reloads` counter is
+   not decremented; the request re-queues for the next phase 8. No
+   slot is retired and no subscription is released in the deferred
+   case — steps 2 and 3 are skipped until pin_count_ reaches zero on a
+   subsequent attempt.
+2. For each `READ`-role slot whose `pin_count_` is zero, retire it
    (arena reset, role flip to `FREE`).
 3. Release the four archetype subscriptions: call
    `World::unsubscribe_archetype<...>()` for renderable, light, probe,
