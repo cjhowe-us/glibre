@@ -947,24 +947,26 @@ The envelope-serdes contributes to four required CI benchmarks
 
 ## 10. Failure Modes
 
-The envelope-serdes failure surface extends SPEC §10's
-`data::Error` closed sum with envelope-specific arms. Per SPEC §10
-the closed sum is open to additions only via spec amendment in the
-same PR; this design proposes the additions below (flagged §12
-[OPEN] #1 as a SPEC §10 amendment).
+The envelope-serdes failure surface maps to the `data::Error` closed
+sum whose authoritative owner is `specs/data/data-error-design.md`
+(PR #838, three-round reviewed). That design's §3.1.1 Occam-collapse
+audit resolves which envelope failure conditions map to which existing
+arms; this table uses that resolution. No new `ErrorTag` arms are
+added by envelope-serdes (see §12 [OPEN] #1 for the full disposition
+record).
 
 | Arm                       | Trigger                                                                                                       | Detection point (§3.4 step) | Payload fields populated                                       | Recovery        | Severity | core::Error mapping             |
 |---------------------------|---------------------------------------------------------------------------------------------------------------|------------------------------|----------------------------------------------------------------|------------------|----------|---------------------------------|
-| `BadMagic`                | `header.magic != kEnvelopeMagic`                                                                              | step 2                       | `at.offset = 0`                                                | refuse decode    | error    | none — passed through           |
-| `EnvelopeTruncated`       | `src.size() < 48`                                                                                              | step 1                       | `at.offset = src.size()`                                       | refuse decode    | error    | none — passed through (already in SPEC §10) |
-| `PayloadTruncated`        | `48 + header.payload_len > src.size()`                                                                         | step 3                       | `at.offset = src.size()`, `at.schema = header_decoded`         | refuse decode    | error    | none — passed through           |
+| `BadMagic` (discriminator only — maps to `EnvelopeTruncated` arm 9) | `header.magic != kEnvelopeMagic`                                                                              | step 2                       | `at.offset = 0`                                                | refuse decode    | error    | `EnvelopeTruncated` (arm 9, per `data-error-design.md` §3.1.1 Occam-collapse) |
+| `EnvelopeTruncated`       | `src.size() < 48`                                                                                              | step 1                       | `at.offset = src.size()`                                       | refuse decode    | error    | none — passed through (already in SPEC §10, arm 9) |
+| `PayloadTruncated` (discriminator only — maps to `EnvelopeTruncated` arm 9) | `48 + header.payload_len > src.size()`                                                                         | step 3                       | `at.offset = src.size()`, `at.schema = header_decoded`         | refuse decode    | error    | `EnvelopeTruncated` (arm 9, per `data-error-design.md` §3.1.1 Occam-collapse) |
 | `SchemaUnknown`           | `schema_fqn_id` ordinal exceeds registry size **and** source-hash fallback returns null                       | step 4                       | `at.offset = 0`, `at.schema = empty`, `at.version = header.version` | refuse decode    | error    | none — passed through (already in SPEC §10) |
 | `SourceHashMismatch`      | Ordinal lookup succeeded but `entry.source_hash != header.source_hash` **and** source-hash fallback returns null — i.e. the inbound save-file/snapshot bytes were stamped against a `.fory` source that is not in the live registry. This reuses SPEC §10 arm 10 (`SourceHashMismatch`, tag = 10); the SPEC arm's existing trigger note covers the phase-8 barrier-diff detection site (Mode-A plugin reload); this design adds a second trigger site: `Envelope<T>::deserialize` step 4 (FallbackBySourceHash). Both detection sites share the same arm and payload layout: `step_schema` (the drifted FQN), `step_from == step_to == 0`. | step 4 (FallbackBySourceHash) | `step_schema = entry.fqn_or_empty`, `step_from = 0`, `step_to = 0`, `host_hash = live_registry_hash_hex`, `plugin_hash = header_source_hash_hex` | refuse decode    | error    | none — passed through (arm 10 in SPEC §10) |
 | `VersionUnsupported`      | `header.version > entry.version` (newer-than-host)                                                            | step 5                       | `at.schema = entry.fqn`, `at.version = header.version`         | refuse decode    | error    | none — passed through; sub-case of `DeserializeError` per SPEC §10 row "DeserializeError" — kept distinct here for log clarity |
 | `MigrationStepMissing`    | Older-version path: chain has no `(N → N+1)` step at the inbound version                                      | step 5 (older-version arm)   | `step_schema`, `step_from = header.version`, `step_to = step_from + 1` | refuse decode    | error    | wrapped to `core::Error::SchemaMigrationFailed` at hot-reload (already in SPEC §10) |
 | `SchemaMigrationFailure`  | Older-version path: a `MigrationFn` body returned `unexpected`                                                | step 5 (older-version arm)   | `step_schema`, `step_from`, `step_to`                          | refuse decode (cold) / refuse load (hot-reload) | error / warn | wrapped to `core::Error::SchemaMigrationFailed` (already in SPEC §10) |
 | `DeserializeError`        | Fory body decoder refused (tag-type mismatch, range check, nested type refusal) — i.e. envelope OK, body bad | step 5 (same-version arm) — body call returned `unexpected` | `at.schema`, `at.version`, `at.offset = 48 + body_offset`      | refuse decode    | error    | none — passed through (already in SPEC §10) |
-| `BufferTooSmall`          | `serialize`: `dst.size() < 48 + computed_payload_len`                                                          | serialize precheck           | `at.offset = dst.size()`                                       | refuse encode    | error    | none — passed through; **new arm** vs SPEC §10 |
+| `BufferTooSmall` (deferred — no ErrorTag arm assigned) | `serialize`: `dst.size() < 48 + computed_payload_len`                                                          | serialize precheck           | `at.offset = dst.size()`                                       | refuse encode    | error    | deferred per `data-error-design.md` §12 [OPEN]; serialize-path will return a `DeserializeError`-shaped tag once a concrete caller requires typed dispatch |
 
 **Recovery vocabulary** (mirrors SPEC §10.2):
 
@@ -1028,9 +1030,9 @@ Malformed-input tests (one Catch2 case per arm in §10):
 
 | Test                                                | Asserts                                                                                                |
 |-----------------------------------------------------|--------------------------------------------------------------------------------------------------------|
-| `envelope_bad_magic`                                | A buffer beginning with `0x00 0x00 0x00 0x00` returns `BadMagic{at.offset = 0}`                        |
+| `envelope_bad_magic`                                | A buffer beginning with `0x00 0x00 0x00 0x00` returns `EnvelopeTruncated{at.offset = 0}` (per `data-error-design.md` §3.1.1 Occam-collapse; `BadMagic` is a discriminator string in §10 prose, not an `ErrorTag` arm) |
 | `envelope_truncated_short_header`                   | A 47-byte buffer returns `EnvelopeTruncated{at.offset = 47}`                                           |
-| `envelope_payload_truncated`                        | A header claiming `payload_len = 1024` followed by 100 bytes returns `PayloadTruncated{at.offset = 148}` |
+| `envelope_payload_truncated`                        | A header claiming `payload_len = 1024` followed by 100 bytes returns `EnvelopeTruncated{at.offset = 148, at.schema = header_decoded}` (per `data-error-design.md` §3.1.1 Occam-collapse; `PayloadTruncated` is a discriminator string in §10 prose, not an `ErrorTag` arm) |
 | `envelope_schema_unknown_ordinal`                   | A header with `schema_fqn_id = 9999` (out of range) and an unknown `source_hash` returns `SchemaUnknown` |
 | `envelope_source_hash_mismatch`                     | A header with a known ordinal but a synthetic `source_hash` returns `SourceHashMismatch` (tag 10)      |
 | `envelope_version_unsupported_newer_than_host`      | A header with `version = entry.version + 1` returns `VersionUnsupported`                               |
@@ -1113,41 +1115,55 @@ context, not `data`.
   5. `payload_length` → `payload_len` rename — snake_case consistency
      (no type change; remains `std::uint32_t`).
 
-  **`data::Error` closed-sum dispositions for §10 failure arms:**
-  Four arms in the §10 table have no SPEC §10.1 `ErrorTag` yet.
-  Dispositions chosen and rationale:
+  **`data::Error` closed-sum dispositions for §10 failure arms**
+  (revised per R3 review — adopting `data-error-design.md` §3.1.1
+  Occam-collapse; the R2 dispositions proposing tags 11, 12, and 13
+  are hereby superseded):
 
-  - `BadMagic` — **new arm, tag = 11.** Distinct externally-observable
-    failure: the 4-byte magic field is wrong before any header field is
-    decoded, so callers routing on tag must distinguish it from
-    `EnvelopeTruncated` (buffer physically short) and `DeserializeError`
-    (header structurally valid, body refused). Payload: `at.offset = 0`.
+  Authoritative source: `specs/data/data-error-design.md` (PR #838,
+  three-round reviewed, R3 0H 0M). That design's §1 declares it the
+  owner of the `ErrorTag` closed sum. Its §3.1.1 Occam-collapse audit
+  explicitly resolves the four envelope-serdes failure conditions:
 
-  - `PayloadTruncated` — **new arm, tag = 12.** Distinct from
-    `EnvelopeTruncated` (tag 9): header decoded cleanly but
-    `48 + header.payload_len > src.size()`. Callers (e.g. the cooker's
-    blob-walker) need to distinguish header-truncation from
-    payload-truncation to produce useful diagnostics. Payload:
-    `at.offset = src.size()`, `at.schema = header_decoded`.
+  - `BadMagic` — **collapsed onto `EnvelopeTruncated` (arm 9)** per
+    `data-error-design.md` §3.1.1: "a wrong magic prefix is physically
+    an early-truncation-shaped failure from the consumer's perspective."
+    Same recovery (refuse decode), same payload (`at.offset = 0`).
+    `BadMagic` survives as a discriminator label in §10 prose and in
+    structured-log `detail` fields; it is **not** a distinct
+    `ErrorTag` arm. No new tag is added.
 
-  - `VersionUnsupported` — **sub-case of `DeserializeError` (tag 3),**
-    option (b). The §10 table already documents this as "sub-case of
-    DeserializeError per SPEC §10 row — kept distinct here for log
-    clarity". The discriminator is: `at.version > entry.version` (the
-    header's claimed version exceeds the host's registered version for
-    that FQN). No new tag is needed; callers that need to distinguish
-    this sub-case check `at.version` and compare against the registry.
-    Payload: `at.schema = entry.fqn`, `at.version = header.version`.
+  - `PayloadTruncated` — **collapsed onto `EnvelopeTruncated` (arm 9)**
+    per `data-error-design.md` §3.1.1: "the two are distinguishable
+    only by `at.schema`-known vs `at.schema`-default; the recovery is
+    identical; the structured log carrier preserves the distinction in
+    the `detail` field for operators." `PayloadTruncated` survives as a
+    discriminator label in §10 prose; it is **not** a distinct
+    `ErrorTag` arm. No new tag is added.
 
-  - `BufferTooSmall` — **new arm, tag = 13.** Serialize-path only;
-    no existing arm covers a serialize pre-check refusal. Callers need
-    a distinct tag to retry with a larger buffer rather than treating
-    the result as a deserialize failure. Payload: `at.offset = dst.size()`.
+  - `VersionUnsupported` — **sub-case of `DeserializeError` (tag 3).**
+    Already consistent with `data-error-design.md` §3.1.1 (unchanged
+    from R2). No new tag is added.
 
-  SPEC §10.1 `ErrorTag` enum must be extended with arms 11, 12, and 13
-  in the same implementation PR. `VersionUnsupported` is not added to
-  the enum; its sub-case is documented in the §10.2 per-arm table via
-  a discriminator note on `DeserializeError`.
+  - `BufferTooSmall` — **deferred** per `data-error-design.md` §12
+    [OPEN] and §3.1.1. Serialize-path refusal currently returns a
+    `DeserializeError`-shaped carrier with `at.offset = dst.size()`.
+    Promotion to a first-class `ErrorTag` arm is deferred until a
+    concrete caller requires typed dispatch. No new tag is added.
+
+  **Consequence for the SPEC §10.1 amendment scope:** No new
+  `ErrorTag` arms are introduced by envelope-serdes. The §10.1
+  enum extension (arms 11, 12, 13) previously listed in this section
+  is **withdrawn**. The only SPEC amendments required by this design
+  are the five structural-delta `EnvelopeHeader` changes listed
+  above.
+
+  **Implementation note for plan authors:** Tests that assert
+  `EnvelopeTruncated` (arm 9) for bad-magic and payload-truncated
+  triggers are correct. Test names (`envelope_bad_magic`,
+  `envelope_payload_truncated`) describe the trigger condition and
+  may be kept; the asserted `ErrorTag` arm is `EnvelopeTruncated`
+  in both cases (see §11.1).
 
 - [OPEN] **#2 — Per-payload CRC.** The envelope reserves no CRC
   field; integrity is currently delegated to the storage layer
