@@ -677,17 +677,31 @@ struct Error {
 // (§4.9). Read-only; never used to dispatch behavior on the hot path
 // (PHILOSOPHY §6, §4.9 inv. 1). Stripped to nullptr in shipping builds
 // (§4.9 inv. 5).
+// See reflection-blob-design.md §4.2 for the canonical definition.
+// Types use eastl:: per PHILOSOPHY §11; std:: containers are not
+// permitted here.
+enum class ReflectionKind : std::uint8_t {
+    Bool = 1, I8, I16, I32, I64, U8, U16, U32, U64, F32, F64,
+    String, Bytes, Enum, Struct, List, Map, SchemaIdRef,
+};
+
 struct ReflectionField {
-    std::string_view name{};
-    std::uint16_t    tag{0};
-    std::string_view type_name{};   // builtin or another FQN
-    SchemaVersion    since{0};
+    eastl::string_view name{};
+    std::uint16_t      tag{0};
+    ReflectionKind     kind{};           // primary kind
+    ReflectionKind     element_kind{};   // List element kind (or unused)
+    ReflectionKind     value_kind{};     // Map value kind (or unused)
+    eastl::string_view type_name{};      // FQN for Enum/Struct/SchemaIdRef
+    SchemaVersion      since{1};         // inv. 2: strictly positive
+    std::uint32_t      byte_offset{0};
+    std::uint32_t      byte_size{0};
 };
 
 struct ReflectionBlob {
-    SchemaId                          schema{};
-    SchemaVersion                     version{0};
-    std::span<const ReflectionField>  fields{};   // tag-sorted ascending
+    SchemaId                              schema{};
+    SchemaVersion                         version{1};
+    eastl::span<const ReflectionField>    fields{};        // tag-sorted ascending
+    eastl::span<const std::uint16_t>      tag_to_index{};  // dense lookup index
 };
 
 // ---- envelope.hpp -------------------------------------------------------

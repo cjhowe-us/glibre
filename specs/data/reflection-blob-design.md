@@ -10,7 +10,7 @@
 > `reviews/decisions/plugin-abi.md`,
 > `reviews/decisions/hot-reload-protocol.md`,
 > `reviews/decisions/perf-budget.md`, and
-> `reviews/decisions/frame-phases.md`. Sibling siblings on `main`:
+> `reviews/decisions/frame-phases.md`. Sibling designs on `main`:
 > `specs/data/envelope-serdes-design.md`,
 > `specs/data/schema-registry-design.md`,
 > `specs/core/type-registry-design.md`. All conclusions independently
@@ -37,7 +37,7 @@ Concretely the aggregate owns, for one `(SchemaId, SchemaVersion)`
 pair:
 
 1. The list of active fields, each described by `(name, tag,
-   type_kind, since, byte_offset, byte_size)` (§3.1).
+   kind, since, byte_offset, byte_size)` (§3.1).
 2. A per-blob name interning table so name strings resolve without
    re-loading source `.fory` files (§3.2).
 3. A per-blob lookup index keyed by `tag` for `O(log N)` field
@@ -76,7 +76,7 @@ What the aggregate **explicitly refuses to own**:
   in the blob would be runtime reflection (refused).
 - **Property paths.** Harmonius R-1.3.3 (`transform.position.x`)
   is **out of MVP scope** — the editor walks one level at a time
-  via `ReflectionField::type_kind == FQN` and a recursive descent
+  via `ReflectionField::kind == FQN` and a recursive descent
   into the nested blob (§3.5). A flattened path-string API is
   post-MVP (§12 [OPEN] #1).
 - **Trait registration.** Harmonius R-1.3.7's "register
@@ -90,7 +90,7 @@ What the aggregate **explicitly refuses to own**:
 - **Attribute / metadata system.** Harmonius R-1.3.6
   (`range`, `display_name`, `serialization hints`) is **deferred
   to post-MVP** (§12 [OPEN] #2); the MVP blob carries `name`, `tag`,
-  `type_kind`, `since`. Display names and ranges live in a future
+  `kind`, `since`. Display names and ranges live in a future
   per-field annotation table.
 - **Persisted format.** The blob is a build artifact, **not** a
   wire-format. It is not a Fory-serialized payload; it is C++
@@ -120,15 +120,15 @@ reflection in shipping builds).
 | Source                                                         | Glibre disposition (MVP) | Coverage site                                                                                                  |
 |----------------------------------------------------------------|--------------------------|----------------------------------------------------------------------------------------------------------------|
 | Harmonius R-1.3.1 — runtime type registry, ≥10k types, O(1)    | **Refused (runtime)**, **Re-derived (editor)** | `core::TypeRegistry` covers ECS storage; `data::SchemaRegistry` (sibling design) covers schema catalog. The `ReflectionBlob` is *not* a runtime registry; it is per-`RegistryEntry` static data the editor reads through the existing `SchemaRegistry::lookup` (`O(log N)` over ~10⁴ FQNs). |
-| Harmonius R-1.3.2 — type descriptors with size / align / drop / clone / default | **Re-derived (narrowed)** | §3.1 — blob carries `byte_offset`, `byte_size`, `type_kind`, `since`. Size and align come from the codegen-emitted struct; drop / clone / default ctor are implicit in the typed C++ struct and **never** type-erased into a thunk table (that would be runtime reflection). |
+| Harmonius R-1.3.2 — type descriptors with size / align / drop / clone / default | **Re-derived (narrowed)** | §3.1 — blob carries `byte_offset`, `byte_size`, `kind`, `since`. Size and align come from the codegen-emitted struct; drop / clone / default ctor are implicit in the typed C++ struct and **never** type-erased into a thunk table (that would be runtime reflection). |
 | Harmonius R-1.3.3 — path-based access (`transform.position.x`), <500 ns, 8 segments | **Refused (MVP)**         | Post-MVP. §3.5 walks one level via the recursive `FQN` field-kind; multi-segment path strings deferred to §12 [OPEN] #1. The editor today drives nesting through its own widget tree, not a path string. |
-| Harmonius R-1.3.4 — uniform collection trait (Vec / HashMap)   | **Refused (MVP)**         | Post-MVP. §3.1 represents `list<T>` and `map<K,V>` as `type_kind` cases the editor renders in MVP as a read-only summary ("3 items"); structural editing of containers via reflection deferred to §12 [OPEN] #3. |
+| Harmonius R-1.3.4 — uniform collection trait (Vec / HashMap)   | **Refused (MVP)**         | Post-MVP. §3.1 represents `list<T>` and `map<K,V>` as `kind` cases the editor renders in MVP as a read-only summary ("3 items"); structural editing of containers via reflection deferred to §12 [OPEN] #3. |
 | Harmonius R-1.3.5 — `DynamicValue` interchange + diff/patch    | **Refused**               | Runtime reflection by definition. The editor reads bytes through the typed `Envelope<T>::deserialize` into a typed value, edits it via widgets, and round-trips through `serialize`. No boxed polymorphic value crosses any boundary. |
 | Harmonius R-1.3.6 — attribute system (range, display_name, …)  | **Deferred (post-MVP)**   | §12 [OPEN] #2 — MVP blob carries no attributes; the editor uses field name verbatim, no per-field range clamping, no ordering reorder. Annotations join the blob as a parallel `eastl::span<const ReflectionAttribute>` once two concrete consumers exist. |
-| Harmonius R-1.3.7 — register trait impls against TypeId        | **Refused**               | Runtime reflection. Glibre uses codegen-emitted typed trampolines (`fory-codegen.md` §"Decision" #4) — there is no runtime trait table. Editor-only "render this kind of field" dispatch is a `switch` over `ReflectionField::type_kind` (§4.3), compiled into the editor binary. |
+| Harmonius R-1.3.7 — register trait impls against TypeId        | **Refused**               | Runtime reflection. Glibre uses codegen-emitted typed trampolines (`fory-codegen.md` §"Decision" #4) — there is no runtime trait table. Editor-only "render this kind of field" dispatch is a `switch` over `ReflectionField::kind` (§4.3), compiled into the editor binary. |
 | Harmonius R-1.3.8 — `Reflect` trait + derive macro             | **Refused**               | Runtime reflection. Glibre's equivalent is `glibre-foryc` codegen: `.fory` schema → C++ struct + (editor-only) `ReflectionBlob`. No vtable, no trait object. |
 | Harmonius R-1.3.9 — `reflect(skip)`, `reflect(rename)`, `reflect(default)` | **Refused (MVP)**         | The `.fory` schema source has no equivalent attributes in MVP. Field ordering, naming, and defaults are implicit in the schema. Post-MVP attribute table (§12 [OPEN] #2) revisits this. |
-| Harmonius R-1.3.10 — sub-traits (Struct / Enum / List / Map)   | **Re-derived (narrowed)** | §3.1 — `ReflectionField::type_kind` is a closed sum the editor switches on. This is a *static dispatch* over codegen-known kinds, not a runtime sub-trait registry. |
+| Harmonius R-1.3.10 — sub-traits (Struct / Enum / List / Map)   | **Re-derived (narrowed)** | §3.1 — `ReflectionField::kind` is a closed sum the editor switches on. This is a *static dispatch* over codegen-known kinds, not a runtime sub-trait registry. |
 | Harmonius R-1.3.11 — `FromReflect`                             | **Refused**               | The editor never builds typed values from a dynamic blob; it edits raw bytes between matched `Envelope<T>::deserialize` / `serialize` calls. `FromReflect` is unnecessary. |
 | SPEC §4.9 inv. 1 — static-only, no hot-path dispatch           | **Covered**               | §4.4 — `GLIBRE_EDITOR`-gated header; `RegistryEntry::reflection` is `nullptr` in shipping (§7.1).                                |
 | SPEC §4.9 inv. 2 — read-only, never patched                    | **Covered**               | §3.6, §6 — all blob storage is `constexpr` or `const`; no API mutates it.                                       |
@@ -140,7 +140,7 @@ reflection in shipping builds).
 | SPEC §7.2.1 `reflection_present : bool` (tag 6)                | **Covered**               | §7.2 — the `SchemaSourceRecord` field is the build-artifact gate; this design pins that the runtime path never branches on it.   |
 | SPEC §8.1 — `ReflectionBlob` interning tables for dropped types do not survive reload | **Covered** | §8 — Mode-A reload: blob spans for dropped FQNs are released after the loader's swap-completion barrier; the editor reloads the blob set on the same frame. |
 | SPEC §9.2 — 4 MiB tools-build sub-ceiling, 0 in shipping       | **Covered**               | §9 — heap accounting; allocation rules.                                                                         |
-| SPEC §10 — closed sum extension                                | **Covered**               | §10 — three new arms (`BlobLoadFailed`, `FQNNotFound`, `FieldOutOfRange`) routed to `tools::Error` in editor builds; SPEC §10 amendment proposed inline. |
+| SPEC §10 — closed sum extension                                | **Covered**               | §10 — four new arms (`BlobLoadFailed`, `FQNNotFound`, `FieldOutOfRange`, `ReflectKindMismatch`) routed to `tools::Error` in editor builds; SPEC §10 amendment proposed inline. |
 | `reviews/decisions/error-model.md` `std::expected<T, glibre::Error>` boundary | **Covered** | §4 surface — every public function returns `std::expected<T, glibre::Error>` with `tools::Error` leaf arms.     |
 | `reviews/decisions/plugin-abi.md` middleman-only ABI surface   | **Covered**               | §7.2 — the editor links the **same** `glibre-types.dylib` symbols runtime does, plus *editor-only* TUs that reference no plugin code.                |
 | `reviews/decisions/hot-reload-protocol.md` swap discipline     | **Covered**               | §8 — blob refresh is observed via `SchemaRegistry`'s post-swap barrier; no second hot-reload mechanism.         |
@@ -323,26 +323,14 @@ without scanning the whole catalog at every panel-frame, the
 codegen emits a **per-context blob span** alongside the per-FQN
 blobs:
 
-```cpp
-namespace glibre::types::reflection_table {
-
-struct ContextPartition {
-    eastl::string_view               context_prefix{};   // e.g. "glibre.physics"
-    eastl::span<const RegistryEntry* const> entries{};   // tag-sorted by FQN; entries with reflection != nullptr
-};
-
-extern const eastl::span<const ContextPartition>
-    glibre_types_reflection_partitions;
-
-}  // namespace glibre::types::reflection_table
-```
-
-The partition span is itself emitted only in editor builds and is
-empty (zero-sized span over a `nullptr` data pointer) in shipping
-builds — the `extern const` declaration always exists so the
-editor's translation units can compile against the same header in
-both build profiles, but the data is zero in shipping (consistent
-with §4.9 inv. 5 and §7.1 below).
+The canonical `ContextPartition` struct and the partition span are
+declared in the editor-gated header described in §4.3 (§4.2 Note;
+§12 [OPEN] #8 tracks the mechanical header relocation). The codegen emits the data in
+`libglibre-editor-reflection.dylib`; shipping builds provide a
+zero-sized span. Callers access partition data exclusively through
+the `all_partitions()` accessor defined in §4.3 — do not use the
+underlying symbol directly. The span is empty in shipping builds
+(consistent with §4.9 inv. 5 and §7.1 below).
 
 Partitioning rule:
 
@@ -415,18 +403,23 @@ The header is split between the `glibre-types.dylib` middleman and
 the editor binary:
 
 - `include/glibre/types/reflection.hpp` — the **types** (`ReflectionField`,
-  `ReflectionBlob`, `ContextPartition`). Always declared; the
+  `ReflectionBlob`). Always declared; the
   `RegistryEntry::reflection` slot needs a forward declaration in
   shipping builds so the registry struct's layout is identical
-  across configurations (§7.1).
+  across configurations (§7.1). `ContextPartition` is **not**
+  in this header — it is editor-only and belongs in
+  `tools/glibre-editor/include/glibre/editor/reflection.hpp`
+  (§4.2 Note; §12 [OPEN] #8).
 - `tools/glibre-editor/include/glibre/editor/reflection.hpp` — the
   **API** (`field_for_tag`, `partitions`, `lookup_blob`, recursion
   helpers). Compiled only when `GLIBRE_EDITOR` is defined.
 
 The runtime translation units never `#include` the editor header.
-A `static_assert(!defined(GLIBRE_EDITOR) || GLIBRE_EDITOR_OK, ...)`
-guard inside the editor TU prevents accidental inclusion via a
-plugin's transitive include graph.
+A `#if !defined(GLIBRE_EDITOR)` / `#  error` guard at the top of the
+editor header prevents accidental inclusion from a non-editor
+translation unit — this is the guard already shown in the §4.3 code
+snippet (the `#error` fires at compile time if the preprocessor
+symbol is absent).
 
 ### 4.2 Types (always declared, in the middleman header)
 
@@ -468,17 +461,32 @@ struct ReflectionBlob {
     constexpr bool operator==(const ReflectionBlob&) const noexcept = default;
 };
 
-struct ContextPartition {
-    eastl::string_view                          context_prefix{};
-    eastl::span<const RegistryEntry* const>     entries{};
-};
-
 }  // namespace glibre::types
 ```
 
-These types are POD-shaped, trivially-copyable, and have no
-non-default constructors. They appear identically in shipping and
-editor builds; only the *data* differs (§7.1).
+> **Note on `ContextPartition` location.** `ReflectionField` and
+> `ReflectionBlob` belong in the always-declared middleman header
+> because the `RegistryEntry::reflection` slot (type
+> `const ReflectionBlob*`) must be visible in the registry struct
+> definition in both shipping and editor builds — the registry
+> layout must be identical across configurations (§7.1). By contrast,
+> `ContextPartition` is **not** referenced by any middleman ABI type;
+> it is an editor-only iteration aggregate used exclusively by the
+> `all_partitions()` / `partition()` functions that live in the
+> `GLIBRE_EDITOR`-gated editor header (§4.3). Its declaration
+> therefore belongs in
+> `tools/glibre-editor/include/glibre/editor/reflection.hpp`, not
+> in `include/glibre/types/reflection.hpp`. The implementation of
+> `all_partitions()` and `partition()` in §4.3 is unchanged; only
+> the declaration home of the `ContextPartition` aggregate moves.
+> (This relocation was identified in the round-2 review; flagged as a
+> §12 [OPEN] #8 to track the mechanical refactor once the
+> implementation plans under #740 begin.)
+
+These types (`ReflectionField`, `ReflectionBlob`) are POD-shaped,
+trivially-copyable, and have no non-default constructors. They
+appear identically in shipping and editor builds; only the *data*
+differs (§7.1).
 
 ### 4.3 Editor-only API (gated behind `GLIBRE_EDITOR`)
 
@@ -523,6 +531,7 @@ namespace glibre::editor::reflection {
     -> eastl::span<const types::RegistryEntry* const>;
 
 // All partitions; iterates the whole catalog grouped by context.
+// NOTE: namespace moves per §12 [OPEN] #8 (ContextPartition relocates out of glibre::types).
 [[nodiscard]] auto all_partitions() noexcept
     -> eastl::span<const types::ContextPartition>;
 
@@ -532,7 +541,7 @@ namespace glibre::editor::reflection {
 Error model: per `reviews/decisions/error-model.md`, all public
 boundaries return `std::expected<T, glibre::Error>`. The
 `tools::Error` enum (declared in `specs/tools/SPEC.md` §5) is
-extended with the three reflection-blob arms in §10. The data
+extended with the four reflection-blob arms in §10. The data
 context's `data::Error` is **not** extended; reflection failures
 surface as editor-context errors because the editor is the only
 caller. (This keeps `data::Error` a leaf about *spine* failures,
@@ -911,17 +920,27 @@ gate-able one. The editor has its own profiling harness
 (`tools/SPEC.md` §10 `.glibre-trace`) that records inspector frame
 times; reflection cost is observable there.
 
-A diagnostic build with `GLIBRE_ALLOC_STRICT=1` (`perf-budget.md`)
-exercises the editor under a synthetic "every component selected"
-fixture and asserts that resident bytes under the
-`tools` context tag stay within budget; reflection's 4 MiB falls
-within `data`'s tag, not `tools`'s, and the same `GLIBRE_ALLOC_STRICT`
-build asserts the 4 MiB ceiling on the `data` tag.
+Reflection blob storage is **static `.rodata`** emitted by
+`glibre-foryc` as `constexpr` / `const` data in TU-local sections.
+`GLIBRE_ALLOC_STRICT` (`perf-budget.md`) is an allocator-fence
+mechanism that observes heap allocations through the engine's
+arena hooks — it cannot introspect `.rodata` sections because no
+allocation call path is exercised. The correct verification mechanism
+for the 4 MiB `.rodata` ceiling is a **linker-map section-size
+check**: the CI recipe for editor builds runs
+`llvm-size --format=sysv` on `libglibre-editor-reflection.dylib`
+and `grep`-asserts that the `__DATA_CONST,__const` and `__TEXT,__const`
+segment contributions from reflection TUs stay under 4 194 304 bytes.
+This check is a build-step assertion (not a runtime assertion) and
+therefore requires no per-run warm-up fixture.
+The exact CI recipe and the linker-map pattern are deferred to
+§12 [OPEN] #4 (already open; this paragraph supersedes the
+`GLIBRE_ALLOC_STRICT` description that incorrectly appeared here).
 
 ## 10. Failure modes
 
 The reflection blob's failure surface extends `tools::Error`
-(`specs/tools/SPEC.md` §5) with three editor-context arms. The
+(`specs/tools/SPEC.md` §5) with four editor-context arms. The
 `data::Error` enum (SPEC §10.1) is **not** extended — reflection
 is editor territory; routing failures into the data context's
 closed sum would violate `error-model.md` §"Composition Rules" #1
@@ -931,8 +950,9 @@ at the call site that crosses the boundary).
 | Arm                                  | Trigger                                                                                                                            | Detection point                                          | Payload fields                                                  | Recovery                                       | Severity | Mapping to engine-wide `glibre::Error` |
 |--------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------|------------------------------------------------------------------|------------------------------------------------|----------|----------------------------------------|
 | `tools::Error::BlobLoadFailed`       | `lookup_blob(fqn)` succeeded at the registry layer but `RegistryEntry::reflection == nullptr`. Fires only in a *misconfigured* editor build (the `GLIBRE_EMIT_REFLECTION` flag was OFF for some `<Type>.cpp` but ON for others). | `editor::reflection::lookup_blob` post-`SchemaRegistry::lookup` null-check. | `schema = fqn`. | refuse query — inspector renders "no descriptor for type" placeholder, asset browser omits the entry. | error    | passed through as the `tools::Error` arm of `glibre::Error::Variant`. |
-| `tools::Error::FQNNotFound`          | `lookup_blob(fqn)` issued for an FQN that has no registry entry. Fires when the editor caches a stale `SchemaId` across a Mode-A reload (§8) or when a plugin holding a referenced FQN unloaded. | `editor::reflection::lookup_blob` after `SchemaRegistry::lookup` returns its `SchemaUnknown` error.    | `schema = fqn`. | refuse query — inspector renders "type unloaded" placeholder; the editor's cache evicts the entry. | error    | passed through as the `tools::Error` arm; never wrapped into `core::Error::HotReloadRefused` because the reload itself succeeded — only the editor's stale cache is the issue. |
+| `tools::Error::FQNNotFound`          | `lookup_blob(fqn)` issued for an FQN that has no registry entry. Fires when the editor caches a stale `SchemaId` across a Mode-A reload (§8) or when a plugin holding a referenced FQN unloaded. | `editor::reflection::lookup_blob` after `SchemaRegistry::lookup` returns `nullptr` (unknown FQN). | `schema = fqn`. | refuse query — inspector renders "type unloaded" placeholder; the editor's cache evicts the entry. | error    | passed through as the `tools::Error` arm; never wrapped into `core::Error::HotReloadRefused` because the reload itself succeeded — only the editor's stale cache is the issue. |
 | `tools::Error::FieldOutOfRange`      | `field_for_tag(blob, tag)` issued with a `tag` not present in the blob (either a reserved tag or a tag never declared). Fires when an `EditCommand` from undo / redo or a network sync references a tag that was retired. | `editor::reflection::field_for_tag` after the dense / sparse lookup misses. | `schema = blob.schema`, `tag = the offending tag`. | refuse query — the `EditCommand` is rejected by the editor's command stack with a `tools::Error::CommandConflict` wrap upstream. | warn     | passed through as the `tools::Error` arm; the `CommandStack` translates to its own `CommandConflict` arm at its boundary (`specs/tools/SPEC.md` §4.7). |
+| `tools::Error::ReflectKindMismatch`  | `resolve_nested(field)` called on a field whose `kind` is a scalar (Bool, I8 … F64, String, Bytes, SchemaIdRef) — kind does not admit nested-blob recursion. Distinct from `FieldOutOfRange` (which signals tag-absence in a blob, not field-kind invalidity). Fires when the editor recurses on a field it has misidentified as a struct or enum. | `editor::reflection::resolve_nested` as an immediate precondition check before any registry call. | `schema = containing blob's schema`, `kind = field.kind`. | refuse query — the editor logs at warn level and skips the recursion; the inspector renders the field as a non-expandable leaf. | warn     | passed through as the `tools::Error` arm. |
 
 `tools::Error` arm definitions (proposed amendment to
 `specs/tools/SPEC.md` §5; flagged as §12 [OPEN] #5):
@@ -947,15 +967,21 @@ enum class Error : std::uint16_t {
     Refused,                 // already in §5
     BlobLoadFailed,          // §10 — new
     FQNNotFound,             // §10 — new
-    FieldOutOfRange,         // §10 — new
+    FieldOutOfRange,         // §10 — new (tag-absence from field_for_tag)
+    ReflectKindMismatch,     // §10 — new (kind-mismatch in resolve_nested)
 };
 }
 ```
 
 The amendment is deliberately additive: the existing five arms are
-unchanged; the three new arms are appended, preserving tag-value
+unchanged; the four new arms are appended, preserving tag-value
 stability for the existing arms (per `error-model.md` "Composition
 Rules" #5 — removing an enumerator is breaking; appending is not).
+`FieldOutOfRange` covers tag-absence (a tag not present in a blob's
+field list); `ReflectKindMismatch` covers kind-mismatch (a field
+whose `kind` does not admit nested-blob recursion). The two arms have
+distinct preconditions and distinct callers, satisfying the
+error-model's per-mode SRP rule (`error-model.md` §"Arm Design").
 
 **Recovery vocabulary** (mirrors SPEC §10.2):
 
@@ -969,21 +995,29 @@ Rules" #5 — removing an enumerator is breaking; appending is not).
   editor's per-panel handler (one `glibre::log_error(err, error)`
   per panel-frame, deduplicated by FQN per `error-model.md`
   §"Logging / Telemetry" #3 spirit).
-- **warn** — `FieldOutOfRange`. The arm is benign (an `EditCommand`
-  that no longer applies); the editor logs once and skips.
+- **warn** — `FieldOutOfRange`, `ReflectKindMismatch`. Both arms are
+  benign: `FieldOutOfRange` signals an `EditCommand` that no longer
+  applies; `ReflectKindMismatch` signals the editor recursed on a
+  field it has misidentified as a struct/enum. The editor logs once
+  and skips in both cases.
 
 **Logging discipline.** Per `error-model.md` §"Logging /
 Telemetry" #1 the reflection layer **does not log** from inside
 `editor::reflection::*`; the calling editor panel logs once.
 
 **Detection sequencing.** `lookup_blob` calls
-`SchemaRegistry::lookup` first; that returns `data::Error::SchemaUnknown`
-if the FQN is unknown. `lookup_blob` translates `SchemaUnknown` to
+`SchemaRegistry::lookup` first; that function returns a **nullable
+pointer** (`nullptr` when the FQN is unknown) — it does not return
+a `data::Error` value (the registry's lookup path is a pure pointer
+return per `schema-registry-design.md` §3, §5). `lookup_blob`
+translates a `nullptr` return from `SchemaRegistry::lookup` into
 `tools::Error::FQNNotFound` at its boundary (the cross-context
 translation rule from `error-model.md` §"Composition Rules" #2).
-Only when the registry returned a valid entry but the
-`reflection` slot is null does `lookup_blob` raise
-`BlobLoadFailed`. The two arms are therefore disjoint.
+Only when the registry returned a non-null entry but the
+`reflection` slot on that entry is null does `lookup_blob` raise
+`BlobLoadFailed`. The two arms are therefore disjoint and there is
+no intermediate `data::Error::SchemaUnknown` arm — that enum arm
+does not exist in `data::Error`'s closed sum (SPEC §10.1).
 
 ## 11. Test plan
 
@@ -1023,7 +1057,7 @@ Lookup correctness:
 | `reflection_lookup_blob_null_slot`                | A test fixture with a null `RegistryEntry::reflection` returns `tools::Error::BlobLoadFailed`                          |
 | `reflection_resolve_nested_struct`                | A field with `kind == Struct` returns the referenced FQN's blob                                                        |
 | `reflection_resolve_nested_enum`                  | A field with `kind == Enum` returns the referenced enum's blob                                                         |
-| `reflection_resolve_nested_scalar_refused`        | A field with a scalar `kind` returns `tools::Error::FieldOutOfRange` from `resolve_nested` (precondition check)        |
+| `reflection_resolve_nested_scalar_refused`        | A field with a scalar `kind` returns `tools::Error::ReflectKindMismatch` from `resolve_nested` (precondition check; distinct from `FieldOutOfRange` which is tag-absence) |
 
 Stripped-build behaviour:
 
@@ -1064,10 +1098,11 @@ Determinism (PHILOSOPHY §7):
 ### 11.3 Performance gates
 
 No CI benchmark runs for reflection (editor-only, soft budget;
-§9.4). The diagnostic `GLIBRE_ALLOC_STRICT=1` build asserts the
-4 MiB heap ceiling on the `data` tag during an editor smoke test
-(part of the editor profile's CI workflow, not the engine's
-shipping perf gate).
+§9.4). The 4 MiB `.rodata` ceiling is verified by the
+**linker-map section-size check** described in §9.4 (exact CI
+recipe deferred to §12 [OPEN] #4); `GLIBRE_ALLOC_STRICT` does
+not apply here because reflection blob storage is static
+`.rodata`, not heap-allocated (see §9.4).
 
 ### 11.4 Trace instrumentation
 
@@ -1127,7 +1162,8 @@ the `tools` context, not `data` (mirroring envelope-serdes-design
   every plugin's `.fory` schema set in CI.
 
 - [OPEN] **#5 — `tools::Error` enum amendment.** §10 proposes
-  three new arms (`BlobLoadFailed`, `FQNNotFound`, `FieldOutOfRange`).
+  four new arms (`BlobLoadFailed`, `FQNNotFound`, `FieldOutOfRange`,
+  `ReflectKindMismatch`).
   The amendment ships with the first plan PR that introduces
   `tools/glibre-editor/src/reflection.cpp`. Owner: tools sub-epic.
   Verify with `tools/SPEC.md` editor: confirm that
@@ -1157,3 +1193,17 @@ the `tools` context, not `data` (mirroring envelope-serdes-design
   rebuilds independently when only the blob shape changes) vs.
   cohesion (same-dylib keeps the registry table and its blobs in
   one TU). Defer to the implementation plan.
+
+- [OPEN] **#8 — `ContextPartition` header relocation.** §4.2 Note
+  establishes that `ContextPartition` belongs in the editor-only
+  header (`tools/glibre-editor/include/glibre/editor/reflection.hpp`),
+  not in the always-declared middleman header
+  (`include/glibre/types/reflection.hpp`). The mechanical refactor —
+  moving the struct declaration and updating all `#include` paths
+  in codegen templates and test fixtures — is deferred until the
+  implementation plans under #740 begin. Owner: the same plan PR
+  that authors `tools/glibre-editor/src/reflection.cpp` and the
+  codegen `reflection_emitter.cpp` stage (sibling spike task-
+  breakdown #740 will sequence it). No ABI impact: `ContextPartition`
+  is not referenced by any middleman ABI type (§4.2); its move is
+  a header-only reorganisation.
