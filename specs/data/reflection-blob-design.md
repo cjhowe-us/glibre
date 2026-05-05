@@ -324,8 +324,8 @@ codegen emits a **per-context blob span** alongside the per-FQN
 blobs:
 
 The canonical `ContextPartition` struct and the partition span are
-declared in the editor-gated header described in §4.2 (inside
-`namespace glibre::types`). The codegen emits the data in
+declared in the editor-gated header described in §4.3 (§4.2 Note;
+§12 [OPEN] #8 tracks the mechanical header relocation). The codegen emits the data in
 `libglibre-editor-reflection.dylib`; shipping builds provide a
 zero-sized span. Callers access partition data exclusively through
 the `all_partitions()` accessor defined in §4.3 — do not use the
@@ -531,6 +531,7 @@ namespace glibre::editor::reflection {
     -> eastl::span<const types::RegistryEntry* const>;
 
 // All partitions; iterates the whole catalog grouped by context.
+// NOTE: namespace moves per §12 [OPEN] #8 (ContextPartition relocates out of glibre::types).
 [[nodiscard]] auto all_partitions() noexcept
     -> eastl::span<const types::ContextPartition>;
 
@@ -540,7 +541,7 @@ namespace glibre::editor::reflection {
 Error model: per `reviews/decisions/error-model.md`, all public
 boundaries return `std::expected<T, glibre::Error>`. The
 `tools::Error` enum (declared in `specs/tools/SPEC.md` §5) is
-extended with the three reflection-blob arms in §10. The data
+extended with the four reflection-blob arms in §10. The data
 context's `data::Error` is **not** extended; reflection failures
 surface as editor-context errors because the editor is the only
 caller. (This keeps `data::Error` a leaf about *spine* failures,
