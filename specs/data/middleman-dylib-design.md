@@ -148,7 +148,8 @@ order:
 1. **`data/runtime/src/*.cpp`** — hand-written runtime translation
    units (`schema_registry.cpp`, `envelope.cpp`,
    `migration_dispatcher.cpp`, `register_migration.cpp`,
-   `arena.cpp`, `abi_hash.cpp`, `plugin_manifest.cpp`; SPEC §6.1.2).
+   `arena.cpp`, `abi_hash.cpp`, `plugin_manifest.cpp`,
+   `static_init_check.cpp`; SPEC §6.1.2).
 
    TU-to-aggregate mapping — which SPEC aggregate each TU implements and
    its single reason to change:

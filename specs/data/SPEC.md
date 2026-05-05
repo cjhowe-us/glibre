@@ -274,7 +274,7 @@ live in their owning contexts.
 2. Exported C entry points are limited to:
    `glibre_types_abi_hash`, `glibre_types_serialize_<fqn>`,
    `glibre_types_deserialize_<fqn>`,
-   `glibre_types_register_migration_<fqn>`,
+   `glibre_types_register_migration`,
    `glibre_types_last_register_error`. Their signatures are stable
    across patch releases; adding a new `<fqn>` is additive and does not
    bump SONAME.
@@ -1051,6 +1051,8 @@ data/runtime/
                              # returns the codegen-embedded constant
     plugin_manifest.cpp      # PluginManifest deserialize helpers
                              # consumed by the core plugin loader
+    static_init_check.cpp    # Phase C invariant assertions (§4.3 inv. 5,
+                             # §4.5, §4.7); constructor priority 65535
   CMakeLists.txt             # contributes to the glibre-types target
   tests/                     # Catch2 unit tests for dispatcher,
                              # registry, envelope, arena
