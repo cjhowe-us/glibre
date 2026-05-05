@@ -128,20 +128,30 @@ held value.
 Sizing and alignment (SPEC §5 lines 569–583):
 
 ```
-sizeof(PermutationKey)  = 4 bytes  (one byte per axis except FeatureSet)
-alignof(PermutationKey) = 1 byte   (no padding required)
+sizeof(PermutationKey)  = 6 bytes
+alignof(PermutationKey) = 2 bytes  (driven by FeatureSet's uint16_t member)
 
-Field                       Type            Size      Offset
+Field                       Type            Size      Offset   Notes
 shading_model               ShadingModel    1 byte    0
-features                    FeatureSet      2 bytes   1
-render_path                 RenderPath      1 byte    3
-lod_tier                    LODTier         1 byte    4
+(implicit padding)          —               1 byte    1        inserted by compiler for uint16_t align
+features                    FeatureSet      2 bytes   2
+render_path                 RenderPath      1 byte    4
+lod_tier                    LODTier         1 byte    5
                                             -----
-                                            5 bytes (logical)
-
-Note: actual sizeof = 6 because FeatureSet is u16 with align 2; the
-PackedBytes encoding (§3.5) re-flattens to 6 bytes byte-for-byte.
+                                            6 bytes (actual struct layout)
 ```
+
+**Important:** `FeatureSet` wraps a `std::uint16_t`, which requires 2-byte alignment.
+The compiler therefore inserts an implicit 1-byte padding slot at offset 1, making
+`offsetof(PermutationKey, features) == 2`, not 1. `sizeof(PermutationKey) == 6` and
+`alignof(PermutationKey) == 2`.
+
+`to_bytes()` explicitly encodes each field into the `PackedBytes` wire format (§3.5)
+and does **not** `memcpy` the struct directly. Any code that reads the wire format
+via a raw `memcpy` of the in-memory struct is a defect — the struct layout and the
+wire layout are deliberately decoupled so that compiler padding never silently corrupts
+wire data. The unit suite asserts `static_assert(offsetof(PermutationKey, features) == 2)`
+to lock down the actual struct layout and catch any future reordering.
 
 Trivially copyable per `std::is_trivially_copyable_v<PermutationKey>`;
 this is asserted by a Catch2 static_assert in the unit suite.
@@ -389,6 +399,21 @@ Round-trip equality (SPEC §4.2 invariant 1, §7.3 #6):
 
 Both directions are unit-tested as goldens (§11).
 
+**Error-boundary scope for `from_bytes`.** `from_bytes` is a **within-plugin** call.
+It is called only by the `shader` plugin's own serialization layer (e.g. loading
+`PermutationKeyRecord` from Fory-serialized disk bytes) and by the cooker tool,
+which links against the same plugin library. It is **never** exposed directly across
+the plugin C ABI boundary. The return type `std::expected<PermutationKey, shader::Error>`
+therefore does not violate error-model.md §Decision item 1, which requires
+`glibre::Error` only at the *engine-wide plugin boundary* (i.e. the public C ABI
+surface in the middleman dylib). At that crossing the caller's adapter is responsible
+for wrapping `shader::Error` into the `glibre::Error` variant (error-model.md
+§Composition Rules item 1). No raw `shader::Error` value ever crosses the C ABI
+directly; the adaptation is documented in §4's "Errors returned at this surface" table
+and repeated here for clarity: any future caller that invokes `from_bytes` from outside
+the shader plugin must route through the `glibre::Error` adapter, not call
+`from_bytes` through a C ABI export.
+
 ### 3.6 Equality, ordering, and iteration
 
 - **Equality** on `PermutationKey` is defaulted (`= default`,
@@ -419,6 +444,28 @@ Both directions are unit-tested as goldens (§11).
   (byte order) and the index is the secondary view. This divergence
   is documented for the day a 9th feature bit lands; today the two
   orders coincide.
+
+  #### §3.6 Warning — bit-count growth boundary
+
+  The implementation MUST include the following guard so that any
+  future addition of a 9th feature bit produces a hard build failure
+  rather than a silent behavioural change in the comparator / cooker:
+
+  ```cpp
+  // In the .cpp implementation file, near permutation_key_byte_less:
+  static_assert(kFeatureBitCount <= 8,
+      "byte-order and mixed-radix index-order diverge when kFeatureBitCount > 8; "
+      "update permutation_key_byte_less, the index codec, and any cooker code "
+      "that assumed the two orders are equivalent before removing this guard.");
+  ```
+
+  When this assert trips, the implementer must:
+  - (a) verify whether the mixed-radix index formula in §3.4 must change;
+  - (b) update `permutation_key_byte_comparator_matches_lex_order` in the
+    unit suite to reflect the diverged ordering;
+  - (c) audit any cooker code that assumed byte order and index order are
+    equivalent and update accordingly.
+  This guard is tracked as §12 OPEN item "static_assert bit-count guard".
 - **Hashing.** `PermutationKey` is *not* a key in a `std::unordered_*`
   container in engine code. EASTL's hash containers in the cooker
   hash the 6 bytes via a small inline mixer (FNV-1a or xxhash;
@@ -1173,6 +1220,16 @@ implementation plan that closes #323 wires this aggregation explicitly.
   (§11.1) covering this generically; whether to add a named
   golden anchored at bit 6 specifically is a style call.
   Resolution gate: code review of the implementation plan.
+- [OPEN] **`static_assert(kFeatureBitCount <= 8)` bit-count guard** —
+  the §3.6 warning section mandates a `static_assert` in the
+  implementation file guarding the invariant that byte order and
+  mixed-radix index order coincide only while `kFeatureBitCount <= 8`.
+  This open item tracks the concrete steps required when that guard
+  trips: (a) verify the mixed-radix index formula (§3.4); (b) update
+  `permutation_key_byte_comparator_matches_lex_order` in the unit
+  suite; (c) audit cooker code that assumed the two orders are
+  equivalent. Resolution gate: whichever implementation plan
+  introduces the 9th feature bit must close this item first.
 
 ---
 

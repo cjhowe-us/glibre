@@ -569,7 +569,11 @@ enum class FeatureBit : std::uint8_t {
     VirtualTexture = 4,
     RT             = 5,
 };
-inline constexpr std::size_t kFeatureBitCount = 6;
+inline constexpr std::size_t   kFeatureBitCount = 6;
+// Bit-mask covering all defined FeatureBit positions (permutation-key-design.md §3.2.2).
+// Used in from_bytes validation to reject reserved-bit usage.
+inline constexpr std::uint16_t kFeatureBitMask =
+    static_cast<std::uint16_t>((std::uint16_t{1} << kFeatureBitCount) - 1u);   // = 0x003F
 
 class FeatureSet {
 public:
@@ -621,6 +625,29 @@ struct PermutationIndex {
     std::uint32_t value{0};
     friend constexpr bool operator==(PermutationIndex, PermutationIndex) noexcept = default;
 };
+
+// Total number of distinct well-formed permutations (permutation-key-design.md §3.3).
+// = kShadingModelCount × 2^kFeatureBitCount × kRenderPathCount × kLODTierCount = 12 288.
+inline constexpr std::uint32_t kPermutationCrossProductCardinality =
+    static_cast<std::uint32_t>(kShadingModelCount)
+  * (1u << kFeatureBitCount)
+  * static_cast<std::uint32_t>(kRenderPathCount)
+  * static_cast<std::uint32_t>(kLODTierCount);
+
+// Bijection between well-formed PermutationKey values and the dense [0, kPermutationCrossProductCardinality)
+// index range used by codegen table walkers (permutation-key-design.md §3.4).
+// to_index: always succeeds for a well-formed key (callers must ensure is_well_formed()).
+// from_index: returns Error::PermutationKeyOutOfRange when value >= kPermutationCrossProductCardinality.
+PermutationIndex                     to_index(const PermutationKey&)     noexcept;
+std::expected<PermutationKey, Error> from_index(const PermutationIndex&) noexcept;
+
+// Spec-frozen byte comparator for manifest sort / cooker walk (permutation-key-design.md §3.6).
+// Comparator is lexicographic on to_bytes() output.
+// NOTE: when kFeatureBitCount > 8 the byte order and the mixed-radix index order diverge
+// for in-axis adjacency; this comparator is defined by byte order, not index order.
+// A static_assert(kFeatureBitCount <= 8) in the implementation guards this invariant.
+bool permutation_key_byte_less(const PermutationKey& a,
+                               const PermutationKey& b) noexcept;
 
 // -------- Shader stages, targets, content hash ---------------------------
 
