@@ -470,17 +470,32 @@ struct ReflectionBlob {
     constexpr bool operator==(const ReflectionBlob&) const noexcept = default;
 };
 
-struct ContextPartition {
-    eastl::string_view                          context_prefix{};
-    eastl::span<const RegistryEntry* const>     entries{};
-};
-
 }  // namespace glibre::types
 ```
 
-These types are POD-shaped, trivially-copyable, and have no
-non-default constructors. They appear identically in shipping and
-editor builds; only the *data* differs (§7.1).
+> **Note on `ContextPartition` location.** `ReflectionField` and
+> `ReflectionBlob` belong in the always-declared middleman header
+> because the `RegistryEntry::reflection` slot (type
+> `const ReflectionBlob*`) must be visible in the registry struct
+> definition in both shipping and editor builds — the registry
+> layout must be identical across configurations (§7.1). By contrast,
+> `ContextPartition` is **not** referenced by any middleman ABI type;
+> it is an editor-only iteration aggregate used exclusively by the
+> `all_partitions()` / `partition()` functions that live in the
+> `GLIBRE_EDITOR`-gated editor header (§4.3). Its declaration
+> therefore belongs in
+> `tools/glibre-editor/include/glibre/editor/reflection.hpp`, not
+> in `include/glibre/types/reflection.hpp`. The implementation of
+> `all_partitions()` and `partition()` in §4.3 is unchanged; only
+> the declaration home of the `ContextPartition` aggregate moves.
+> (This relocation was identified in the round-2 review; flagged as a
+> §12 [OPEN] #6 to track the mechanical refactor once the
+> implementation plans under #740 begin.)
+
+These types (`ReflectionField`, `ReflectionBlob`) are POD-shaped,
+trivially-copyable, and have no non-default constructors. They
+appear identically in shipping and editor builds; only the *data*
+differs (§7.1).
 
 ### 4.3 Editor-only API (gated behind `GLIBRE_EDITOR`)
 
@@ -913,12 +928,22 @@ gate-able one. The editor has its own profiling harness
 (`tools/SPEC.md` §10 `.glibre-trace`) that records inspector frame
 times; reflection cost is observable there.
 
-A diagnostic build with `GLIBRE_ALLOC_STRICT=1` (`perf-budget.md`)
-exercises the editor under a synthetic "every component selected"
-fixture and asserts that resident bytes under the
-`tools` context tag stay within budget; reflection's 4 MiB falls
-within `data`'s tag, not `tools`'s, and the same `GLIBRE_ALLOC_STRICT`
-build asserts the 4 MiB ceiling on the `data` tag.
+Reflection blob storage is **static `.rodata`** emitted by
+`glibre-foryc` as `constexpr` / `const` data in TU-local sections.
+`GLIBRE_ALLOC_STRICT` (`perf-budget.md`) is an allocator-fence
+mechanism that observes heap allocations through the engine's
+arena hooks — it cannot introspect `.rodata` sections because no
+allocation call path is exercised. The correct verification mechanism
+for the 4 MiB `.rodata` ceiling is a **linker-map section-size
+check**: the CI recipe for editor builds runs
+`llvm-size --format=sysv` on `libglibre-editor-reflection.dylib`
+and `grep`-asserts that the `__DATA_CONST,__const` and `__TEXT,__const`
+segment contributions from reflection TUs stay under 4 194 304 bytes.
+This check is a build-step assertion (not a runtime assertion) and
+therefore requires no per-run warm-up fixture.
+The exact CI recipe and the linker-map pattern are deferred to
+§12 [OPEN] #4 (already open; this paragraph supersedes the
+`GLIBRE_ALLOC_STRICT` description that incorrectly appeared here).
 
 ## 10. Failure modes
 
@@ -933,8 +958,9 @@ at the call site that crosses the boundary).
 | Arm                                  | Trigger                                                                                                                            | Detection point                                          | Payload fields                                                  | Recovery                                       | Severity | Mapping to engine-wide `glibre::Error` |
 |--------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------|------------------------------------------------------------------|------------------------------------------------|----------|----------------------------------------|
 | `tools::Error::BlobLoadFailed`       | `lookup_blob(fqn)` succeeded at the registry layer but `RegistryEntry::reflection == nullptr`. Fires only in a *misconfigured* editor build (the `GLIBRE_EMIT_REFLECTION` flag was OFF for some `<Type>.cpp` but ON for others). | `editor::reflection::lookup_blob` post-`SchemaRegistry::lookup` null-check. | `schema = fqn`. | refuse query — inspector renders "no descriptor for type" placeholder, asset browser omits the entry. | error    | passed through as the `tools::Error` arm of `glibre::Error::Variant`. |
-| `tools::Error::FQNNotFound`          | `lookup_blob(fqn)` issued for an FQN that has no registry entry. Fires when the editor caches a stale `SchemaId` across a Mode-A reload (§8) or when a plugin holding a referenced FQN unloaded. | `editor::reflection::lookup_blob` after `SchemaRegistry::lookup` returns its `SchemaUnknown` error.    | `schema = fqn`. | refuse query — inspector renders "type unloaded" placeholder; the editor's cache evicts the entry. | error    | passed through as the `tools::Error` arm; never wrapped into `core::Error::HotReloadRefused` because the reload itself succeeded — only the editor's stale cache is the issue. |
+| `tools::Error::FQNNotFound`          | `lookup_blob(fqn)` issued for an FQN that has no registry entry. Fires when the editor caches a stale `SchemaId` across a Mode-A reload (§8) or when a plugin holding a referenced FQN unloaded. | `editor::reflection::lookup_blob` after `SchemaRegistry::lookup` returns `nullptr` (unknown FQN). | `schema = fqn`. | refuse query — inspector renders "type unloaded" placeholder; the editor's cache evicts the entry. | error    | passed through as the `tools::Error` arm; never wrapped into `core::Error::HotReloadRefused` because the reload itself succeeded — only the editor's stale cache is the issue. |
 | `tools::Error::FieldOutOfRange`      | `field_for_tag(blob, tag)` issued with a `tag` not present in the blob (either a reserved tag or a tag never declared). Fires when an `EditCommand` from undo / redo or a network sync references a tag that was retired. | `editor::reflection::field_for_tag` after the dense / sparse lookup misses. | `schema = blob.schema`, `tag = the offending tag`. | refuse query — the `EditCommand` is rejected by the editor's command stack with a `tools::Error::CommandConflict` wrap upstream. | warn     | passed through as the `tools::Error` arm; the `CommandStack` translates to its own `CommandConflict` arm at its boundary (`specs/tools/SPEC.md` §4.7). |
+| `tools::Error::ReflectKindMismatch`  | `resolve_nested(field)` called on a field whose `kind` is a scalar (Bool, I8 … F64, String, Bytes, SchemaIdRef) — kind does not admit nested-blob recursion. Distinct from `FieldOutOfRange` (which signals tag-absence in a blob, not field-kind invalidity). Fires when the editor recurses on a field it has misidentified as a struct or enum. | `editor::reflection::resolve_nested` as an immediate precondition check before any registry call. | `schema = containing blob's schema`, `kind = field.kind`. | refuse query — the editor logs at warn level and skips the recursion; the inspector renders the field as a non-expandable leaf. | warn     | passed through as the `tools::Error` arm. |
 
 `tools::Error` arm definitions (proposed amendment to
 `specs/tools/SPEC.md` §5; flagged as §12 [OPEN] #5):
@@ -949,15 +975,21 @@ enum class Error : std::uint16_t {
     Refused,                 // already in §5
     BlobLoadFailed,          // §10 — new
     FQNNotFound,             // §10 — new
-    FieldOutOfRange,         // §10 — new
+    FieldOutOfRange,         // §10 — new (tag-absence from field_for_tag)
+    ReflectKindMismatch,     // §10 — new (kind-mismatch in resolve_nested)
 };
 }
 ```
 
 The amendment is deliberately additive: the existing five arms are
-unchanged; the three new arms are appended, preserving tag-value
+unchanged; the four new arms are appended, preserving tag-value
 stability for the existing arms (per `error-model.md` "Composition
 Rules" #5 — removing an enumerator is breaking; appending is not).
+`FieldOutOfRange` covers tag-absence (a tag not present in a blob's
+field list); `ReflectKindMismatch` covers kind-mismatch (a field
+whose `kind` does not admit nested-blob recursion). The two arms have
+distinct preconditions and distinct callers, satisfying the
+error-model's per-mode SRP rule (`error-model.md` §"Arm Design").
 
 **Recovery vocabulary** (mirrors SPEC §10.2):
 
@@ -971,21 +1003,29 @@ Rules" #5 — removing an enumerator is breaking; appending is not).
   editor's per-panel handler (one `glibre::log_error(err, error)`
   per panel-frame, deduplicated by FQN per `error-model.md`
   §"Logging / Telemetry" #3 spirit).
-- **warn** — `FieldOutOfRange`. The arm is benign (an `EditCommand`
-  that no longer applies); the editor logs once and skips.
+- **warn** — `FieldOutOfRange`, `ReflectKindMismatch`. Both arms are
+  benign: `FieldOutOfRange` signals an `EditCommand` that no longer
+  applies; `ReflectKindMismatch` signals the editor recursed on a
+  field it has misidentified as a struct/enum. The editor logs once
+  and skips in both cases.
 
 **Logging discipline.** Per `error-model.md` §"Logging /
 Telemetry" #1 the reflection layer **does not log** from inside
 `editor::reflection::*`; the calling editor panel logs once.
 
 **Detection sequencing.** `lookup_blob` calls
-`SchemaRegistry::lookup` first; that returns `data::Error::SchemaUnknown`
-if the FQN is unknown. `lookup_blob` translates `SchemaUnknown` to
+`SchemaRegistry::lookup` first; that function returns a **nullable
+pointer** (`nullptr` when the FQN is unknown) — it does not return
+a `data::Error` value (the registry's lookup path is a pure pointer
+return per `schema-registry-design.md` §3, §5). `lookup_blob`
+translates a `nullptr` return from `SchemaRegistry::lookup` into
 `tools::Error::FQNNotFound` at its boundary (the cross-context
 translation rule from `error-model.md` §"Composition Rules" #2).
-Only when the registry returned a valid entry but the
-`reflection` slot is null does `lookup_blob` raise
-`BlobLoadFailed`. The two arms are therefore disjoint.
+Only when the registry returned a non-null entry but the
+`reflection` slot on that entry is null does `lookup_blob` raise
+`BlobLoadFailed`. The two arms are therefore disjoint and there is
+no intermediate `data::Error::SchemaUnknown` arm — that enum arm
+does not exist in `data::Error`'s closed sum (SPEC §10.1).
 
 ## 11. Test plan
 
@@ -1025,7 +1065,7 @@ Lookup correctness:
 | `reflection_lookup_blob_null_slot`                | A test fixture with a null `RegistryEntry::reflection` returns `tools::Error::BlobLoadFailed`                          |
 | `reflection_resolve_nested_struct`                | A field with `kind == Struct` returns the referenced FQN's blob                                                        |
 | `reflection_resolve_nested_enum`                  | A field with `kind == Enum` returns the referenced enum's blob                                                         |
-| `reflection_resolve_nested_scalar_refused`        | A field with a scalar `kind` returns `tools::Error::FieldOutOfRange` from `resolve_nested` (precondition check)        |
+| `reflection_resolve_nested_scalar_refused`        | A field with a scalar `kind` returns `tools::Error::ReflectKindMismatch` from `resolve_nested` (precondition check; distinct from `FieldOutOfRange` which is tag-absence) |
 
 Stripped-build behaviour:
 
