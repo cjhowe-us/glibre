@@ -286,22 +286,23 @@ roles (e.g. trying to `release_persistent` on an imported handle)
 returns `render::Error::ResourceImportRefused` with no state
 mutation.
 
-### 3.3 Public handle catalog (re-statement of `SPEC.md` §5 with sub-tag refinement)
+### 3.3 Public handle catalog (re-statement of `SPEC.md` §5 with sampler-tag refinement)
 
 `SPEC.md` §5 publishes the closed handle catalog. The detailed
 design refines two practical consequences:
 
-1. **`SamplerHandle` is a sub-tag of `tags::argument_buffer`.** The
-   header's `tags::argument_buffer` namespace declares both the
-   per-pass argument-buffer record and the sampler-state record;
-   the sub-discrimination is a private 8-bit field inside the
-   `Handle<tag::argument_buffer>`'s reserved generation byte
-   (`SPEC.md` §5: "24-bit generation"; the upper 8 bits of the
-   generation half stay reserved for sub-tag, leaving 16 bits for
-   the live wrap counter — wraps every 65 535 free-realloc cycles
-   per slot, which exceeds MVP frame counts by 30 minutes of pure
-   realloc churn). This refinement is internal; ABI-wise the
-   public handle stays a `u64`.
+1. **`SamplerHandle` uses a distinct `tags::sampler` phantom type.**
+   Samplers are GPU immutable state objects (no aliasing, no
+   reallocation mid-frame) and have a structurally different lifetime
+   from argument buffers (plugin-shutdown vs. per-pass). Giving
+   samplers their own phantom tag (`Handle<tags::sampler>`) preserves
+   the phantom-tag compile-time enforcement: cross-assignment between
+   `SamplerHandle` and `ArgumentBufferHandle` remains a compile error,
+   and the `SlotTable<MTL::SamplerState*, tags::sampler>` table can
+   use the full 24-bit generation field without reserving bits for
+   sub-tag discrimination (§3.4 below). `tags::sampler` is added to
+   `SPEC.md` §5's handle catalog as part of this refinement (see
+   §10.2 ABI note).
 2. **`RTHandle` (render-target handle) is *not* a separate public
    handle.** Render targets are `VirtualResourceHandle` instances
    whose `usage` includes `ColorAttachment` or `DepthAttachment`
@@ -316,36 +317,38 @@ Public-handle re-statement (binding):
 |-------------|-----|-----------|-------------|
 | `VirtualResourceHandle` | `tags::virtual_resource` | `GraphBuilder::declare_*` | Phase 7 exit (transient), `release_persistent`, importer (imported) |
 | `PhysicalAllocHandle`   | `tags::physical_allocation` | Internal — vended at materialisation; surfaced only to `declare_imported(..., PhysicalAllocHandle)` callers (the importer obtains it via the import-side seam in their own SPEC) | Same as the resource it backs |
-| `ArgumentBufferHandle`  | `tags::argument_buffer` (sub-tag = ArgBuf) | `argbuf_binder_.acquire(pass, frequency_group)` | Per-pass: end of pass record; per-material / per-frame: per the binder (§3.9) |
-| `SamplerHandle`         | `tags::argument_buffer` (sub-tag = Sampler) | `ResourceCatalog::sampler(SamplerDesc)` (cached) | Plugin shutdown |
+| `ArgumentBufferHandle`  | `tags::argument_buffer` | `argbuf_binder_.acquire(pass, frequency_group)` | Per-pass: end of pass record; per-material / per-frame: per the binder (§3.9) |
+| `SamplerHandle`         | `tags::sampler` | `ResourceCatalog::sampler(SamplerDesc)` (cached) | Plugin shutdown |
 | `RingSliceHandle`       | `tags::ring_slice` | `ring_buffer_mgr_.acquire_slice(kind, bytes)` | Frame retire (§3.10) |
 | `HZBHandle`, `ShadowAtlasHandle`, `ClusterCullStateHandle`, `BLASHandle`, `TLASHandle` | per-aggregate tags (`SPEC.md` §5) | Owning aggregate; resource catalog stores the underlying `PhysicalAllocHandle` only | Owning aggregate |
 
-The public surface is exactly `SPEC.md` §5; the table above is a
-read-back-into-context summary of which seam vends and releases
-each kind.
+The public surface is exactly `SPEC.md` §5 (plus `tags::sampler`
+added by this design); the table above is a read-back-into-context
+summary of which seam vends and releases each kind.
 
 ### 3.4 Generation counter — stale-handle detection
 
-Every `SlotTable<T, Tag>` slot carries a 24-bit generation counter;
-a fresh allocation takes the slot's *current* generation, a release
-*increments* the counter, and a `lookup(handle)` validates
-`handle.generation() == slots_[handle.index()].generation_` before
-returning `&slots_[index].value_`. Mismatch returns
-`render::Error::ResourceImportRefused` (semantically: "this borrow
-was rejected because the underlying slot moved on") with a
-debug-build log line carrying the handle's `(index, generation)`,
-the slot's *live* generation, and the most recent producer call site
-(captured in debug builds via `__builtin_FILE` + `__builtin_LINE`
-threaded through the `declare_*` API; release builds skip the
-capture).
+Every `SlotTable<T, Tag>` slot carries a **24-bit generation counter**
+(all 24 bits live — no sub-tag bits reserved). This applies uniformly
+to all five handle tables: `VirtualResource`, `PhysicalAlloc`,
+`ArgumentBuffer`, `Sampler` (using its own `tags::sampler` table per
+§3.3), and `RingSlice`. A fresh allocation takes the slot's *current*
+generation; a release *increments* the counter; `lookup(handle)`
+validates `handle.generation() == slots_[handle.index()].generation_`
+before returning `&slots_[index].value_`. Mismatch returns
+`render::Error::StaleResourceHandle` (generation mismatch = stale
+borrow; see §10) with a debug-build log line carrying the handle's
+`(index, generation)`, the slot's *live* generation, and the most
+recent producer call site (captured in debug builds via
+`__builtin_FILE` + `__builtin_LINE` threaded through the `declare_*`
+API; release builds skip the capture).
 
 Wrap-around safety:
 
 - 24 bits = 16 777 215 unique generations per slot before wrap.
 - At MVP S1 a transient table slot may free + realloc up to 11
   times per frame (one per `View` × 4 views × ~3 declared transients
-  per pass slot in the worst case); 16M / 11 ≈ 1.5M frames =
+  per pass slot in the worst case); 16 777 215 / 11 ≈ 1 525 200 frames
   ≈ 7 hours of continuous gameplay at 60 FPS before any one slot
   could wrap. Per `SPEC.md` §4.1.4 invariant 1 ("transient never
   outlives a frame") and `SPEC.md` §9.6's leak-guard benchmark, no
@@ -353,7 +356,8 @@ Wrap-around safety:
   boundary; wrap-around-after-7-hours therefore cannot strike a
   live observer. Persistent slot generations advance only on
   explicit release; their wrap rate is bounded by user / dev
-  action and is non-issue.
+  action and is non-issue. Sampler slots are released only at
+  plugin shutdown; their generation counter is non-issue in practice.
 - The wrap is **detected, not forbidden**. When a slot's generation
   hits `0xFFFFFF` and the next free attempts to bump, the table
   marks the slot **retired** (alive_=true, gen=0xFFFFFF, value_
