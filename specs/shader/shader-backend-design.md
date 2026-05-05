@@ -22,10 +22,12 @@
 > cases, §9.3 (per-aggregate budget for `IShaderBackend`), and §10.2
 > rows `CompilerInvocationFailed`, `CompilerExitNonZero`,
 > `CompilerTimedOut`, `UnsupportedTarget`, `MetalLibEmitFailed`,
-> `LinkFailed`, `SpecializationConstantMissing`, `CapabilityNotSupported`,
-> `ShippingCompilationAttempted`. Anything not addressed here defers to
-> those sections; anything that appears to contradict them is a defect
-> in this document.
+> `ReflectionExtractionFailed`, `LinkFailed`, `SpecializationConstantMissing`,
+> `CapabilityNotSupported`, `ShippingCompilationAttempted`. This document
+> proposes three additional enumerators (`MetalLibraryCreateFailed`,
+> `FunctionMissing`, `BackendNotFound`) under §10.5 as amendments to
+> SPEC §5. Anything not addressed here defers to those sections;
+> anything that appears to contradict them is a defect in this document.
 
 Refs: spike #757 — `[SPIKE] design-shader-shader-backend-detailed`.
 Parent sub-epic #744 (`[SUB-EPIC] Detailed Designs — shader`). Sibling
@@ -44,8 +46,8 @@ Metal 4 `MTL::Library` / `MTL::Function` handles via metal-cpp
 (offline + dev / editor; the cooked artifact bytes themselves ride
 into shipping through `ShaderCache::Library`).
 
-The aggregate is two responsibilities held in deliberate tension by
-SRP, joined only because they share a single seam:
+The aggregate is three responsibilities held together by SRP because
+all three share the single shader-artifact seam:
 
 1. **Trait surface.** Define the `IShaderBackend` v-table the engine
    compiles against — `compile`, `reflect`, `link`, `capabilities` —
@@ -257,19 +259,22 @@ IShaderBackend (trait, abstract)
     │                                 DescriptorLayout }
     ├── reflect/         — delegates to slangc reflection ingester (#751)
     ├── link/            — combined-module link via slangc spec-const bake
-    ├── capabilities/    — static descriptor (§3.3)
-    └── MetalLibraryLoader (separate service, narrow surface)
-          ├── load_library(MTL::Device*, ShaderArtifact) → MetalLibraryHandle
-          └── lookup_function(MetalLibraryHandle, EntryPoint) → MTL::Function*
+    └── capabilities/    — static descriptor (§3.3)
+MetalLibraryLoader (third responsibility, parallel sibling — §1 item 3)
+    ├── load_library(MTL::Device*, ShaderArtifact) → MetalLibraryHandle
+    └── lookup_function(MetalLibraryHandle, EntryPoint) → MTL::Function*
 ```
 
 `IShaderBackend` is a v-table abstract base with four pure virtuals
 (SPEC §5 lines 832–849). Concrete instances are constructed by the
 plugin's `glibre_plugin_register` entry point and registered into the
 engine's backend registry by name (`"slang-metal"` in MVP). The trait
-is plugin-internal: no `extern "C"` boundary crosses the v-table — the
-`shader` plugin's own translation units construct, register, and
-invoke the trait. The seam lives in
+is plugin-internal: no external caller invokes the trait via C++ vtable
+dispatch — the `shader` plugin's own translation units construct,
+register, and invoke the trait. Cross-plugin callers (cooker in `tools`,
+render-side loader shim in `render`) use the POD `BackendVTable`
+registered in `glibre-types.dylib` (§7.4), not direct C++ vtable
+dispatch. The seam lives in
 `plugins/shader/include/glibre/shader/shader.hpp` (the §5 public
 header) so the cooker, the editor adapter, and the `render`-side
 loader-shim can include it.
@@ -445,9 +450,15 @@ two operations:
 ```cpp
 namespace glibre::shader::backend::metal {
 
-// Opaque RAII handle to one MTL::Library + cached entry-point lookups.
-// The reflection blob is borrowed for the lifetime of the handle so
-// callers can resolve EntryPoint -> MTL::Function without re-parsing.
+// Opaque RAII handle to one MTL::Library + owned reflection metadata.
+// Owns a value copy of the ReflectionBlob taken from the source
+// ShaderArtifact at load_library time.  The caller may release (or evict
+// from the ShaderCache) the originating ShaderArtifact after
+// load_library returns; the handle is self-sufficient for all subsequent
+// lookup_function calls.
+//
+// Lifetime invariant: the handle is valid as long as the object exists.
+// There is no external lifetime dependency on the source artifact.
 class MetalLibraryHandle {
 public:
     MetalLibraryHandle(MetalLibraryHandle&&) noexcept;
@@ -456,15 +467,14 @@ public:
     MetalLibraryHandle& operator=(const MetalLibraryHandle&) = delete;
     ~MetalLibraryHandle();
 
-    // Borrowed; lives as long as the handle.
     [[nodiscard]] MTL::Library*          library()    const noexcept;
     [[nodiscard]] const ReflectionBlob&  reflection() const noexcept;
 
 private:
     friend class MetalLibraryLoader;
-    MetalLibraryHandle(MTL::Library*, const ReflectionBlob*) noexcept;
-    MTL::Library*          lib_{};        // metal-cpp ref-counted; release in ~
-    const ReflectionBlob*  reflection_{}; // borrowed from the artifact
+    MetalLibraryHandle(MTL::Library*, ReflectionBlob) noexcept;
+    MTL::Library*  lib_{};         // metal-cpp ref-counted; release in ~
+    ReflectionBlob reflection_{};  // owned copy; source artifact may be freed
 };
 
 class MetalLibraryLoader {
@@ -506,7 +516,7 @@ load_library(device, artifact):
            translate(err) → MetalLibraryCreateFailed
                             (capture err->localizedDescription() into ErrorContext::detail)
            return unexpected(MetalLibraryCreateFailed)
-    8. return MetalLibraryHandle{ lib, &artifact.reflection }
+    8. return MetalLibraryHandle{ lib, artifact.reflection }   // copy reflection into handle
 
 lookup_function(handle, entry):
     1. NS::AutoreleasePool pool;
@@ -545,6 +555,14 @@ Notes:
   hot-set is bounded (24 MiB in `ContextTag::shader`,
   `perf-budget.md`); driver-resident `MTL::Library` objects live
   under `ContextTag::render`'s 512 MiB ceiling.
+- **Reflection ownership.** `load_library` copies `artifact.reflection`
+  by value into the `MetalLibraryHandle`. After the call the caller
+  is free to release or evict the originating `ShaderArtifact`; the
+  handle has no dangling pointer to the artifact's reflection field.
+  The copy cost is ≤32 KiB per artifact (reflection blob MVP size from
+  §9.2); this is deliberate — it removes an entire class of
+  use-after-free bugs in exchange for one small allocation per PSO
+  cache miss.
 - **No fallback path.** If `newLibrary` returns `null` we refuse
   with `MetalLibraryCreateFailed` and surface metal-cpp's
   `NS::Error*` text into `ErrorContext::detail`. There is no
@@ -578,13 +596,23 @@ mode). The MVP behaviour:
 | ≥ 2       | Full link path: re-spawn `glibre-shadercc` in `--link` mode with the N artifact bytecode buffers as inputs; produce one combined `metallib` + reflection. Refuse with `Error::SpecializationConstantMissing` when an unbound spec-constant is referenced; refuse with `Error::LinkFailed` for general slangc-link errors. |
 
 The link path is **shipping-included for size 0/1** (trivial copy)
-and **shipping-excluded for size ≥ 2** (subprocess required). MVP
+and **shipping-refused for size ≥ 2** (subprocess required). MVP
 is dominated by single-module artifacts; size ≥ 2 is reserved for
 future material-shader composition where the cooker links a base
-permutation with a material-graph-emitted Slang module. The
-shipping cut is enforced by the same `#if !GLIBRE_SHIPPING` guard
-the `compile` virtual carries; the trivial-size paths live behind a
-`size <= 1` branch that compiles unconditionally.
+permutation with a material-graph-emitted Slang module.
+
+The shipping cut for size ≥ 2 is **a runtime branch refusal, not a
+preprocessor guard**. Unlike `compile` (which is a fully separate
+virtual excluded by `#if !GLIBRE_SHIPPING` at the v-table level),
+`link` is a single virtual present in both shipping and non-shipping
+builds. The shipping enforcement is: when `GLIBRE_SHIPPING == 1` and
+`span.size() >= 2`, the `link` implementation immediately returns
+`std::unexpected(Error::ShippingCompilationAttempted)` without
+spawning any subprocess. The trivial size-0 and size-1 paths compile
+unconditionally in both configurations. This distinction matters for
+ABI stability: the vtable slot count differs between shipping and
+non-shipping (`compile` disappears), but the vtable entry for `link`
+is always present.
 
 ### 3.7 Backend registry and lifetime
 
@@ -607,9 +635,16 @@ get_backend(eastl::string_view name) noexcept;
 
 Failure modes:
 
-| Error                                  | Trigger                                                                                                |
-|----------------------------------------|--------------------------------------------------------------------------------------------------------|
-| `Error::CapabilityNotSupported`        | Backend named `name` not registered (defense-in-depth: no other arm fits an unknown source-language family). |
+| Error                       | Trigger                                                                                 |
+|-----------------------------|-----------------------------------------------------------------------------------------|
+| `Error::BackendNotFound`    | No backend is registered under `name`. The name is not a capability question; it is an identity question (did the plugin register that backend?). `CapabilityNotSupported` is semantically wrong here because the backend may exist but fail a capability check; `BackendNotFound` is the distinct arm. *(Proposed amendment — see §10.5.)* |
+
+`Error::CapabilityNotSupported` is reserved for the trait operations
+(`compile`, `link`, `capabilities` gate) where the backend **exists**
+but refuses a `(key, target)` combination because a required feature
+flag is not set. Mixing registry-lookup failures and capability-gate
+failures into the same enumerator was an error in the original design;
+the two are different questions with different operator actions.
 
 Lifetime: the backend instance is constructed in
 `glibre_plugin_register` and destroyed in
@@ -706,15 +741,16 @@ The loader's surface ABI:
 |----------------------------------------|-----------|-------------------------------------------------------|
 | `MetalLibraryLoader::load_library`     | §4.7 (this) | Materialise cached bytes into `MTL::Library`.         |
 | `MetalLibraryLoader::lookup_function`  | §4.7 (this) | Resolve `EntryPoint::name` to `MTL::Function*`.       |
-| `MetalLibraryHandle` (RAII)            | §4.7 (this) | Owning wrapper around `MTL::Library*` + reflection ref. |
+| `MetalLibraryHandle` (RAII)            | §4.7 (this) | Owning wrapper around `MTL::Library*` + owned `ReflectionBlob` copy. |
 
 Borrow rules:
 
 - `load_library` takes a borrowed `MTL::Device*` and a borrowed
-  `const ShaderArtifact&`. The handle it returns retains its own
-  `MTL::Library*` ref; the caller may release the artifact after
-  the call (the bytes were copied into `dispatch_data` and then
-  into the driver's library object).
+  `const ShaderArtifact&`. The handle it returns owns a value copy of
+  `artifact.reflection` and retains its own `MTL::Library*` ref; the
+  caller may release the artifact after the call (the bytecode bytes
+  were copied into `dispatch_data` and then into the driver's library
+  object; the reflection copy is stored inside the handle).
 - `lookup_function` returns a retained `MTL::Function*` the caller
   owns; metal-cpp's reference-counting rules apply.
   `MetalLibraryHandle` does **not** cache the returned functions —
@@ -725,43 +761,24 @@ Borrow rules:
 
 ### 4.3 ABI surface
 
-The `IShaderBackend` v-table is **plugin-internal**: the `shader`
+The `IShaderBackend` C++ vtable is **plugin-internal**: the `shader`
 plugin declares it and instantiates one impl. Cross-plugin calls
-into the trait would violate `reviews/decisions/plugin-abi.md`
-("each plugin links only `glibre-types.dylib`, not other plugins").
+into the trait via C++ vtable dispatch would violate
+`reviews/decisions/plugin-abi.md` ("each plugin links only
+`glibre-types.dylib`, not other plugins").
+
 Cross-context callers (cooker in `tools`, render-side loader shim in
-`render`) reach the trait through an in-process function pointer
-exposed by the `shader` plugin's registration callback:
+`render`) reach the backend through the **POD function-pointer table
+`BackendVTable`** registered in `glibre-types.dylib` at plugin init.
+That table carries only POD spans and handles across the boundary —
+never `std::expected`, `eastl::span`, or types containing
+`eastl::vector` members. The canonical definition, full field list,
+and ABI contract are in **§7.4** (the single source of truth for the
+table layout). This section does not duplicate the struct; see §7.4.
 
-```cpp
-// glibre-types middleman: a POD function-pointer table, byte-stable
-// across plugin versions, exposed by the shader plugin to other
-// plugins via the type registry. The cooker reads this table at
-// register-time; render reads it once during init.
-struct ShaderBackendVTable {
-    std::expected<ShaderArtifact, Error> (*compile)(
-        IShaderBackend*, const ShaderSource&, const PermutationKey&,
-        CompileTarget) noexcept;        // shipping: nullptr
-    std::expected<ReflectionBlob, Error> (*reflect)(
-        IShaderBackend*, const ShaderArtifact&) noexcept;
-    std::expected<LinkedModule, Error> (*link)(
-        IShaderBackend*, eastl::span<const ShaderArtifact>) noexcept;
-    Capabilities (*capabilities)(const IShaderBackend*) noexcept;
-};
-```
-
-Per `reviews/decisions/plugin-abi.md`'s "Public plugin ABI surfaces
-never expose `std::` containers or `eastl::` containers" rule, the
-table crosses through `eastl::span` / POD value-types only. The
-table is registered into `glibre-types.dylib` as a middleman type
-so its layout is hash-stable across plugin reloads
-(§3 collapse / `fory-codegen.md`).
-
-The `MetalLibraryLoader` API does **not** cross the plugin ABI: it
-is invoked by the `render`-side PSO builder which is itself in the
-`render` plugin, and the call goes through an in-process function-
-pointer table registered into `glibre-types.dylib` the same way as
-the trait v-table above. metal-cpp types (`MTL::Device*`,
+The `MetalLibraryLoader` API crosses the plugin boundary via a
+similar POD function-pointer table (`MetalLibraryLoaderVTable`,
+also defined in §7.4). metal-cpp types (`MTL::Device*`,
 `MTL::Library*`, `MTL::Function*`) are opaque pointers across the
 ABI; both contexts compile against the same metal-cpp headers
 (`vcpkg manifest mode`, single SDK version pinned in
@@ -956,6 +973,16 @@ The `IShaderBackend` trait is **plugin-internal** and crosses the
 ABI as a POD function-pointer table per `plugin-abi.md`. The
 function-pointer table layout:
 
+Per `reviews/decisions/plugin-abi.md`, public ABI surfaces crossing
+a plugin boundary must carry **only POD spans and handles** — never
+`std::expected`, `eastl::span`, or types containing `eastl::vector`
+members (such as `ShaderArtifact`, `ReflectionBlob`, `LinkedModule`).
+The function-pointer tables therefore transport every artifact by its
+32-byte `ShaderHash` POD handle; the receiving side resolves the hash
+against its own `ShaderCache` reference to obtain the full object.
+`std::uint16_t` is the raw wire type for the closed `Error` enum;
+the receiver casts to `glibre::shader::Error` after the call.
+
 ```cpp
 namespace glibre::types::shader {
 
@@ -963,30 +990,60 @@ namespace glibre::types::shader {
 // per fory-codegen.md (declarations live in
 // data/schemas/shader/BackendVTable.fory; this is the C++
 // projection).
+//
+// ABI contract (plugin-abi.md): only POD handles cross the boundary.
+// ShaderHash is a 32-byte POD; shader::Error raw value is uint16_t.
+// Callers and callees both hold a ShaderCache reference and resolve
+// hashes to full ShaderArtifact objects on their own side.
 struct BackendVTable {
     // 4-byte tag identifying the source-language family.
-    std::uint32_t backend_tag;          // 0x'slng' for "slang-metal" MVP
+    std::uint32_t backend_tag;          // 0x'736c6e67' ("slng") for "slang-metal" MVP
 
-    // shipping: compile_fn = nullptr (link-time absence)
-    std::expected<glibre::shader::ShaderArtifact, glibre::shader::Error>
-        (*compile_fn)(
-            void* impl,
-            const glibre::shader::ShaderSource&,
-            const glibre::shader::PermutationKey&,
-            glibre::shader::CompileTarget) noexcept;
+#if !GLIBRE_SHIPPING
+    // compile_fn is EXCLUDED from shipping builds by the preprocessor guard.
+    // The field does not exist in the shipping struct; callers compiled with
+    // GLIBRE_SHIPPING=1 cannot reference it at all (compile-time enforcement,
+    // not a runtime nullptr check).  This preserves the shipping invariant from
+    // SPEC §4.3 inv 3 and §4.8 inv 3 at the ABI layer as well as the virtual layer.
+    // On error: writes non-zero error code to *out_error; returns false.
+    // On success: writes the 32-byte ShaderHash of the produced artifact to
+    //   *out_hash; returns true. Caller inserts the artifact into its own cache.
+    bool (*compile_fn)(
+            void*                                         impl,
+            const glibre::shader::ShaderSource*           source,     // borrowed
+            const glibre::shader::PermutationKey*         key,        // borrowed; POD
+            glibre::shader::CompileTarget                 target,     // POD enum : uint8_t
+            glibre::shader::ShaderHash*                   out_hash,   // 32-byte POD out
+            std::uint16_t*                                out_error   // shader::Error raw
+        ) noexcept;
+#endif  // !GLIBRE_SHIPPING
 
-    std::expected<glibre::shader::ReflectionBlob, glibre::shader::Error>
-        (*reflect_fn)(
-            void* impl,
-            const glibre::shader::ShaderArtifact&) noexcept;
+    // Reflect: input artifact identified by its 32-byte hash.
+    // On success: writes the 32-byte ShaderHash of the re-reflected artifact.
+    bool (*reflect_fn)(
+            void*                                         impl,
+            const glibre::shader::ShaderHash*             artifact_hash,  // 32-byte POD
+            glibre::shader::ShaderHash*                   out_hash,
+            std::uint16_t*                                out_error
+        ) noexcept;
 
-    std::expected<glibre::shader::LinkedModule, glibre::shader::Error>
-        (*link_fn)(
-            void* impl,
-            eastl::span<const glibre::shader::ShaderArtifact>) noexcept;
+    // Link: input artifacts identified by an array of 32-byte hashes (POD array).
+    // count: number of hashes in the array.
+    // On success: writes the 32-byte ShaderHash of the produced LinkedModule.
+    bool (*link_fn)(
+            void*                                         impl,
+            const glibre::shader::ShaderHash*             artifact_hashes,  // POD array
+            std::uint32_t                                 count,
+            glibre::shader::ShaderHash*                   out_hash,
+            std::uint16_t*                                out_error
+        ) noexcept;
 
-    glibre::shader::Capabilities (*capabilities_fn)(
-            const void* impl) noexcept;
+    // capabilities_fn: fills the caller-allocated Capabilities struct (5 bools POD).
+    // Always succeeds; no error out-param needed.
+    void (*capabilities_fn)(
+            const void*                                   impl,
+            glibre::shader::Capabilities*                 out_caps   // POD out
+        ) noexcept;
 
     void* impl;     // opaque handle to the SlangMetalBackend instance
 };
@@ -994,26 +1051,48 @@ struct BackendVTable {
 }  // namespace glibre::types::shader
 ```
 
-The `MetalLibraryLoader` exposes a similar table:
+The `MetalLibraryLoader` exposes a similar table. The
+`MetalLibraryHandle` is an opaque integer token (a generation-counter
+index into the shader plugin's internal handle table) at the ABI
+boundary; the receiver does not hold a C++ reference across the
+boundary:
 
 ```cpp
 namespace glibre::types::shader {
 
+// Opaque index into the shader plugin's internal MetalLibraryHandle table.
+// The ABI carries only this 64-bit integer; the plugin maps it to the
+// real handle internally. Valid until the handle is explicitly released
+// via the vtable's release_fn.
+using MetalLibraryToken = std::uint64_t;
+static constexpr MetalLibraryToken kInvalidMetalLibraryToken = 0;
+
 struct MetalLibraryLoaderVTable {
-    std::uint32_t loader_tag;           // 0x'mtll'
+    std::uint32_t loader_tag;           // 0x'6d746c6c' ("mtll")
 
-    std::expected<glibre::shader::backend::metal::MetalLibraryHandle,
-                  glibre::shader::Error>
-        (*load_library_fn)(
-            void*                                       device_opaque,
-            const glibre::shader::ShaderArtifact&) noexcept;
+    // load_library: takes a 32-byte ShaderHash POD; the plugin
+    // resolves it against its own ShaderCache reference.
+    // On success: writes a non-zero MetalLibraryToken to *out_token.
+    // On error: writes the shader::Error raw value to *out_error.
+    bool (*load_library_fn)(
+            void*                                         device_opaque,  // MTL::Device* opaque
+            const glibre::shader::ShaderHash*             artifact_hash,  // 32-byte POD
+            MetalLibraryToken*                            out_token,
+            std::uint16_t*                                out_error
+        ) noexcept;
 
-    // MTL::Function* opaqued to a void* across the ABI; render
-    // re-types it on its side via the same metal-cpp headers.
-    std::expected<void*, glibre::shader::Error>
-        (*lookup_function_fn)(
-            const glibre::shader::backend::metal::MetalLibraryHandle&,
-            const glibre::shader::EntryPoint&) noexcept;
+    // lookup_function: resolves EntryPoint name (null-terminated UTF-8)
+    // from a previously-loaded token. Returns MTL::Function* as void*;
+    // caller re-types via metal-cpp headers.
+    bool (*lookup_function_fn)(
+            MetalLibraryToken                             token,
+            const char*                                   entry_name,     // null-terminated UTF-8
+            void**                                        out_function,   // MTL::Function* as void*
+            std::uint16_t*                                out_error
+        ) noexcept;
+
+    // Release the handle table slot when the PSOCache no longer needs it.
+    void (*release_fn)(MetalLibraryToken token) noexcept;
 };
 
 }  // namespace glibre::types::shader
@@ -1024,6 +1103,15 @@ Both tables are registered into `glibre-types.dylib` by the
 new entry in the table = `ShaderBackendRecord` schema bump =
 middleman ABI hash bump = plugin reload required (`plugin-abi.md`
 versioning rules). MVP locks both tables at the shape above.
+
+**Note on the ABI split.** The in-process `IShaderBackend` virtual
+interface (`§4.1`) continues to use `std::expected<ShaderArtifact, Error>`
+and `eastl::span` — those types never cross a dylib boundary. Only
+the middleman function-pointer tables (`BackendVTable`,
+`MetalLibraryLoaderVTable`) cross the ABI; those use exclusively
+POD: `ShaderHash` (32-byte array), `Capabilities` (5 bools), raw
+`uint16_t` error codes, and opaque pointer/token pairs. This
+matches `plugin-abi.md §"Public plugin ABI surfaces"` exactly.
 
 ---
 
@@ -1186,7 +1274,7 @@ Per-instance and per-call memory bounds.
 | `Capabilities`                            | 8 B (5 bools + 3 padding)    |
 | Per-`compile` transient arena             | ~512 KiB (subprocess scratch + ingest scratch); drains at call return |
 | Per-`compile` returned `ShaderArtifact`   | ~256 KiB (bytecode ≤256 KiB + reflection ≤32 KiB + descriptor layout ≤4 KiB) |
-| `MetalLibraryHandle`                      | ~16 B (one ptr + one ptr) — the `MTL::Library*` itself is driver-side, accounted under `ContextTag::render` |
+| `MetalLibraryHandle`                      | ~32 KiB (one MTL::Library* ptr [8 B] + owned ReflectionBlob copy [≤32 KiB]) — the `MTL::Library*` object itself is driver-side, accounted under `ContextTag::render` |
 | Per-`load_library` transient arena        | ~256 KiB (dispatch_data copy buffer); released after `newLibrary` retains its own copy |
 
 Cook-time concurrency: with N parallel `compile` invocations, peak
@@ -1195,11 +1283,13 @@ default), peak is ~12 MiB — well inside the 32 MiB
 `ContextTag::shader` ceiling (`reviews/decisions/perf-budget.md`).
 
 `MetalLibraryHandle` instances are charged against `ContextTag::render`
-(the holder), not `ContextTag::shader` (the producer). The 16 B
-holder cost is trivial; the driver-resident `MTL::Library` bytes
-(typically ≤256 KiB per library) live in the Metal driver's address
-space and are accounted under `render`'s 512 MiB GPU heap ceiling
-per `perf-budget.md` Allocator Rule §5.
+(the holder), not `ContextTag::shader` (the producer). The ~32 KiB
+holder cost (ptr + reflection copy) is small relative to the driver-
+resident `MTL::Library` bytes (typically ≤256 KiB per library) which
+live in the Metal driver's address space and are accounted under
+`render`'s 512 MiB GPU heap ceiling per `perf-budget.md` Allocator
+Rule §5. The reflection copy trades ~32 KiB per live handle for
+complete freedom from artifact-lifetime coupling.
 
 ### 9.3 Allocator integration
 
@@ -1207,10 +1297,10 @@ Both halves of the aggregate allocate against `ContextTag::shader`
 when they live in the `shader` plugin. The exception:
 `MetalLibraryHandle::library_` is a `MTL::Library*` whose underlying
 bytes live in driver memory under `ContextTag::render`'s tag. The
-shader plugin allocates only the holder pointer + the reflection
-back-pointer (16 B); the holder's destructor calls
-`lib_->release()` which returns the driver-side memory to Metal's
-heap.
+shader plugin (and its caller `render`) allocates the holder pointer
+(8 B) plus the owned `ReflectionBlob` copy (~32 KiB); the holder's
+destructor calls `lib_->release()` which returns the driver-side
+memory to Metal's heap.
 
 Per-call transient arenas drain at call return per `perf-budget.md`
 Allocator Rule §4. The cooker's drain point is "after
@@ -1249,19 +1339,31 @@ amendment note).
 
 ### 10.1 Backend-emitted `shader::Error` arms
 
-| Arm                              | Operation        | Trigger                                                                                                                                                | Operator action                                                                                                                                              | Severity (SPEC §10.1) |
-|----------------------------------|------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------|
-| `CompilerInvocationFailed`       | `compile`        | `glibre-shadercc` driver could not be spawned (binary missing, sandbox profile rejected, executable bit missing).                                       | Verify the driver binary's presence under `tools/shadercc/`; verify the `sandbox-exec` profile; rerun.                                                       | `refuse`              |
-| `CompilerExitNonZero`            | `compile`        | The driver exited non-zero with structured `shader::Error` JSON on stderr (sibling #749 driver envelope).                                              | Read the captured stderr (Slang diagnostic); fix the source.                                                                                                  | `refuse`              |
-| `CompilerTimedOut`               | `compile`        | Driver subprocess exceeded the per-invocation wall-clock budget (cook-time budget pinned in driver).                                                   | Re-queue the job at the cooker's layer; do not retry inside `compile` (`§10.1` no silent retry).                                                              | `refuse`              |
-| `UnsupportedTarget`              | `compile`, `load_library` | The slangc backend does not support the requested `CompileTarget` (e.g. `DXIL` before post-MVP), or `MetalLibraryLoader::load_library` was called with a non-`MetalLib` artifact. | Adjust the target selection in the cooker / loader call site; capability-table mismatch is a build-time wiring bug.                                          | `refuse`              |
-| `MetalLibEmitFailed`             | `compile`        | slangc emitted no metallib, or emitted one whose container shape failed driver validation.                                                            | Re-author the source; the prior metallib (if any) remains the live entry.                                                                                    | `refuse`              |
-| `LinkFailed`                     | `link`           | slangc link rejected a spec-constant bake; entry-point set incoherent; specialization conflict across modules.                                        | Inspect the link argv (sibling #749) and the constituent modules' reflection records; spec-const declarations must agree across linked modules.              | `refuse`              |
-| `SpecializationConstantMissing`  | `link`           | A spec-constant referenced by the entry-point set is not bound at link time.                                                                          | Bind the spec-constant in the calling cooker code; the missing name is in the error detail.                                                                 | `refuse`              |
-| `CapabilityNotSupported`         | `compile`, `get_backend` | `(key, target)` requires a capability the backend does not advertise; or `get_backend` was called with an unknown name.                              | The cooker's permutation enumeration table is out of sync with `Capabilities`; re-walk after the next backend-capabilities query.                            | `refuse`              |
-| `ShippingCompilationAttempted`   | `compile` (link-stripped) | A shipping-process code path tried to dispatch through the (excluded) `compile` virtual. Only reachable if a test harness was mistakenly enabled in shipping (SPEC §6.5, §10.3). | Rebuild the shipping binary without the offending test harness; this is a build-system bug.                                                                  | `fatal`               |
-| **`MetalLibraryCreateFailed`** *(this design's amendment)* | `MetalLibraryLoader::load_library` | `MTL::Device::newLibrary(dispatch_data, NS::Error**)` returned `null`; metal-cpp's `NS::Error*` text is captured into `ErrorContext::detail`. | Re-cook against the current metal-cpp + slangc versions; re-build the shipping binary if metal-cpp was bumped.                                                | `refuse`              |
-| **`FunctionMissing`** *(this design's amendment)* | `MetalLibraryLoader::lookup_function` | `MTL::Library::newFunction` returned `null` for the requested entry-point name; the name was in the artifact's reflection but not in the library. Indicates a slangc emission bug or a stale reflection record.    | Re-cook the artifact; the artifact's reflection and bytecode must agree on entry-point names (SPEC §4.4 inv 1, "reflection paired with bytecode").              | `refuse`              |
+The table below is split into two sub-tables to keep trait operations and registry
+helpers distinct (they have different calling conventions and failure semantics).
+
+#### 10.1a Trait operations (`IShaderBackend` virtuals + `MetalLibraryLoader`)
+
+| Arm                              | Operation               | Trigger                                                                                                                                                | Operator action                                                                                                                                              | Severity |
+|----------------------------------|-------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|----------|
+| `CompilerInvocationFailed`       | `compile`               | `glibre-shadercc` driver could not be spawned (binary missing, sandbox profile rejected, executable bit missing).                                       | Verify the driver binary's presence under `tools/shadercc/`; verify the `sandbox-exec` profile; rerun.                                                       | `refuse` |
+| `CompilerExitNonZero`            | `compile`               | The driver exited non-zero with structured `shader::Error` JSON on stderr (sibling #749 driver envelope).                                              | Read the captured stderr (Slang diagnostic); fix the source.                                                                                                  | `refuse` |
+| `CompilerTimedOut`               | `compile`               | Driver subprocess exceeded the per-invocation wall-clock budget (cook-time budget pinned in driver).                                                   | Re-queue the job at the cooker's layer; do not retry inside `compile` (`§10.1` no silent retry).                                                              | `refuse` |
+| `UnsupportedTarget`              | `compile`, `load_library` | The slangc backend does not support the requested `CompileTarget` (e.g. `DXIL` before post-MVP), or `MetalLibraryLoader::load_library` was called with a non-`MetalLib` artifact. | Adjust the target selection in the cooker / loader call site; capability-table mismatch is a build-time wiring bug.                                          | `refuse` |
+| `MetalLibEmitFailed`             | `compile`               | slangc emitted no metallib, or emitted one whose container shape failed driver validation.                                                            | Re-author the source; the prior metallib (if any) remains the live entry.                                                                                    | `refuse` |
+| `ReflectionExtractionFailed`     | `compile` (step 3)      | The §4.4 ingester (`reflection::ingest`) failed to parse slangc's reflection JSON output — malformed JSON, missing required fields, or schema version mismatch. This arm is reachable whenever `compile` step 3 runs; it propagates the ingester's error up through the backend. | Re-cook the artifact; if the failure recurs, file a bug against the reflection ingester (sibling #751). The in-flight artifact is dropped; no cache insertion. | `refuse` |
+| `LinkFailed`                     | `link`                  | slangc link rejected a spec-constant bake; entry-point set incoherent; specialization conflict across modules; or degenerate empty span (size 0).      | Inspect the link argv (sibling #749) and the constituent modules' reflection records; spec-const declarations must agree across linked modules.              | `refuse` |
+| `SpecializationConstantMissing`  | `link`                  | A spec-constant referenced by the entry-point set is not bound at link time.                                                                          | Bind the spec-constant in the calling cooker code; the missing name is in the error detail.                                                                 | `refuse` |
+| `CapabilityNotSupported`         | `compile`               | `(key, target)` requires a capability the backend does not advertise (e.g. `FeatureBit::RT` when `Capabilities::ray_tracing == false`).               | The cooker's permutation enumeration table is out of sync with `Capabilities`; re-walk after the next backend-capabilities query.                            | `refuse` |
+| `ShippingCompilationAttempted`   | `link` (size ≥ 2 in shipping) | A shipping build's `link` received span.size() ≥ 2; subprocess is not available in shipping. Only reachable if a test harness was mistakenly enabled in shipping (SPEC §6.5, §10.3). | Rebuild the shipping binary without the offending test harness; this is a build-system bug.                                                                  | `fatal`  |
+| **`MetalLibraryCreateFailed`** *(proposed amendment — §10.5)* | `MetalLibraryLoader::load_library` | `MTL::Device::newLibrary(dispatch_data, NS::Error**)` returned `null`; metal-cpp's `NS::Error*` text is captured into `ErrorContext::detail`. | Re-cook against the current metal-cpp + slangc versions; re-build the shipping binary if metal-cpp was bumped.                                                | `refuse` |
+| **`FunctionMissing`** *(proposed amendment — §10.5)* | `MetalLibraryLoader::lookup_function` | `MTL::Library::newFunction` returned `null` for the requested entry-point name; the name was in the artifact's reflection but not in the library. Indicates a slangc emission bug or a stale reflection record.    | Re-cook the artifact; the artifact's reflection and bytecode must agree on entry-point names (SPEC §4.4 inv 1, "reflection paired with bytecode").              | `refuse` |
+
+#### 10.1b Registry helper (`get_backend`)
+
+| Arm                    | Operation     | Trigger                                                                                       | Operator action                                                                                   | Severity |
+|------------------------|---------------|-----------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------|----------|
+| **`BackendNotFound`** *(proposed amendment — §10.5)* | `get_backend` | No backend is registered under the requested name. This is an identity failure (registry miss), not a capability failure. | Verify the `shader` plugin is loaded and that the backend name string matches the registered name (`"slang-metal"` in MVP). This is a wiring bug. | `refuse` |
 
 ### 10.2 Refuse semantics
 
@@ -1313,26 +1415,40 @@ the error and let the caller's boundary log it. This preserves the
 
 ### 10.5 Amendment to SPEC §5 (proposed)
 
-This design proposes adding two new enumerators to the closed
+This design proposes adding **three** new enumerators to the closed
 `enum class shader::Error` declared in SPEC §5 (lines 494–521):
 
 - **`MetalLibraryCreateFailed`** — `MTL::Device::newLibrary`
   returned null; the artifact's bytecode could not be materialised
   into a Metal library on the active device. Recovery: refuse the
-  PSO build; surface the `NS::Error*` description.
+  PSO build; surface the `NS::Error*` description. (`refuse` severity)
 - **`FunctionMissing`** — `MTL::Library::newFunction` returned null
   for an entry-point name listed in the artifact's reflection.
   Recovery: refuse the PSO build; the artifact's reflection vs.
-  bytecode pairing was violated.
+  bytecode pairing was violated. (`refuse` severity)
+- **`BackendNotFound`** — `get_backend(name)` found no registered
+  backend under that name. Separate from `CapabilityNotSupported`
+  (which the backend emits when it exists but refuses a capability
+  check). `BackendNotFound` is a registry-identity failure; operator
+  action: verify the plugin is loaded and the name is correct.
+  (`refuse` severity)
 
-Both arms are `refuse` severity. They are **not** present in §5 as
-of the spec revision this design refines; they must be added in the
-same follow-up plan that lands the §5 amendment for sibling spike
-#79's `ArtifactSizeExceeded` (SPEC §10.2.1). Until that amendment
-lands, the implementer must temporarily map both conditions onto
-`Error::MetalLibEmitFailed` (closest-fit `refuse` arm) so the
-closed-sum guarantee at the public boundary is never violated; this
-mapping is unit-tested and removed when the new arms land.
+Note: `ReflectionExtractionFailed` is already present in SPEC §5's
+closed enum (line 510). This design adds it to §10.1's failure-modes
+table (which previously omitted it despite being a reachable compile
+step 3 arm). No SPEC §5 change needed for that arm.
+
+All three new arms are `refuse` severity. They are **not** present
+in §5 as of the spec revision this design refines; they must be added
+in the same follow-up plan tracked under sub-epic #69. Until that
+amendment lands, the implementer must temporarily map:
+- `MetalLibraryCreateFailed` → `Error::MetalLibEmitFailed`
+- `FunctionMissing` → `Error::MetalLibEmitFailed`
+- `BackendNotFound` → `Error::CapabilityNotSupported`
+
+...so the closed-sum guarantee at the public boundary is never
+violated; these mappings are unit-tested and removed when the new
+arms land.
 
 The amendment is filed under sub-epic #69 (the SPEC-§5 amendment
 sub-epic) in the same PR that lands `MetalLibraryLoader`. This
@@ -1366,6 +1482,8 @@ hashes).
 | `backend.compile_refuses_subprocess_nonzero_exit`                  | `CompilerExitNonZero`                                             | Fixture Slang TU with a deliberate Slang syntax error; assert stderr forwarded into error detail. |
 | `backend.compile_refuses_subprocess_timeout`                       | `CompilerTimedOut`                                                | Fixture driver with a sleep loop; assert wall-clock budget enforced. |
 | `backend.compile_refuses_metallib_emission_failure`                | `MetalLibEmitFailed`                                              | Fixture driver returning empty bytecode; assert refuse.              |
+| `backend.compile_refuses_reflection_extraction_failure`            | `ReflectionExtractionFailed`                                      | Fixture driver returning valid bytecode but malformed reflection JSON; assert `compile` step 3 refuses with `ReflectionExtractionFailed` and no artifact is inserted into the cache. |
+| `registry.get_backend_refuses_unknown_name`                        | `BackendNotFound` (mapped to `CapabilityNotSupported` until §10.5 amendment lands) | Call `get_backend("nonexistent")` after plugin init; assert the correct error arm. |
 | `backend.reflect_re_ingests_idempotently`                          | (positive; §4.4 inv 2)                                            | Call `reflect` twice; assert structurally-equal `ReflectionBlob`.    |
 | `backend.link_size_zero_refuses`                                   | `LinkFailed`                                                       | Empty span input.                                                    |
 | `backend.link_size_one_is_trivial_identity`                        | (positive; §3.6)                                                  | Single-element span; assert no subprocess spawn (test seam counts spawns); assert bytecode bit-equal. |
@@ -1373,8 +1491,9 @@ hashes).
 | `backend.link_refuses_specialization_constant_missing`             | `SpecializationConstantMissing`                                   | Two artifacts with an unbound spec-constant; assert refuse.          |
 | `backend.link_refuses_general_link_error`                          | `LinkFailed`                                                       | Two artifacts with conflicting entry-point sets.                     |
 | `backend.shipping_compile_link_excluded`                           | `ShippingCompilationAttempted` (link-time)                        | Compile with `-DGLIBRE_SHIPPING=1`; assert `IShaderBackend::compile` symbol is absent. |
+| `backend.shipping_link_size_two_refuses`                           | `ShippingCompilationAttempted` (runtime)                          | Compile with `-DGLIBRE_SHIPPING=1`; call `link()` with a span of size 2; assert `unexpected(ShippingCompilationAttempted)` is returned without spawning a subprocess. |
 | `backend.shipping_load_library_linked`                             | (positive; §6.5 surviving cut)                                    | Compile with `-DGLIBRE_SHIPPING=1`; assert `MetalLibraryLoader::load_library` symbol is present. |
-| `loader.load_library_succeeds_with_valid_metallib`                 | (positive; §3.5)                                                  | Mock metal-cpp returns a non-null `MTL::Library*`; assert handle is constructed and reflection is borrowed correctly. |
+| `loader.load_library_succeeds_with_valid_metallib`                 | (positive; §3.5)                                                  | Mock metal-cpp returns a non-null `MTL::Library*`; assert handle is constructed, reflection is **copied** into the handle, and destroying the source artifact afterward does not invalidate the handle. |
 | `loader.load_library_refuses_non_metallib_target`                  | `UnsupportedTarget`                                               | Artifact with `target == CompileTarget::DXIL`.                       |
 | `loader.load_library_refuses_metal_create_failure`                 | `MetalLibraryCreateFailed` (mapped to `MetalLibEmitFailed` until §10.5 amendment lands) | Mock metal-cpp returns null + populates `NS::Error*`; assert error captures the description. |
 | `loader.load_library_releases_on_destruction`                      | (positive; §6.2 RAII)                                             | Mock counts `release` calls; assert exactly one `release` per `MetalLibraryHandle` destruction. |
@@ -1460,11 +1579,13 @@ obligation, PHILOSOPHY §7).
 
 ## 12. Open Questions
 
-- **[OPEN] `MetalLibraryCreateFailed` and `FunctionMissing`
-  enumerator amendment.** §10.5 proposes adding two new
-  `shader::Error` arms. Both must land in the same plan as sibling
-  spike #79's `ArtifactSizeExceeded`; until then, the implementer
-  maps both conditions onto `MetalLibEmitFailed`. Decide whether to
+- **[OPEN] `MetalLibraryCreateFailed`, `FunctionMissing`, and
+  `BackendNotFound` enumerator amendment.** §10.5 proposes adding
+  three new `shader::Error` arms. All three must land in the same
+  plan tracked under sub-epic #69; until then,
+  the implementer maps the conditions as follows: `MetalLibraryCreateFailed`
+  → `MetalLibEmitFailed`, `FunctionMissing` → `MetalLibEmitFailed`,
+  `BackendNotFound` → `CapabilityNotSupported`. Decide whether to
   fast-track the amendment plan or accept the mapping for the first
   implementation iteration.
 
