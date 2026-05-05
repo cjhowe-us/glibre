@@ -324,6 +324,14 @@ auto current_prefix() noexcept -> const char*;
 auto set_prefix(const char* literal) noexcept -> void;
 auto reset_prefix() noexcept -> void;
 
+// Internal-helper: pre-touches all four TLS prefix slots (one
+// set_prefix(nullptr) per slot) to force lazy-linker resolver
+// materialisation before any signal handler is installed.
+// Two callers: any plugin installing signal handlers (FileIo,
+// Process). Called once in glibre_plugin_register before
+// Process::install_signal.
+auto pre_touch_all() noexcept -> void;
+
 }  // namespace glibre::platform::detail::error
 ```
 
@@ -620,15 +628,16 @@ a signal handler:
 - `std::unexpected` wrap: constexpr; safe.
 
 **Ordering contract within `glibre_plugin_register`:** (1) pre-touch
-all four TLS prefix slots by performing one no-op
-`set_active_prefix(nullptr)` per slot — this resolves the lazy
-linker entry on the calling thread; (2) install signal handlers via
-`Process::install_signal`. Reversing the order can produce a
-signal-handler invocation that races against the lazy resolver — UB
-on macOS (lazy stub is not async-signal-safe). Each plugin that
-triggers signal-eligible OS calls owns this ordering; the platform
-error aggregate provides the `error::tls::detail::pre_touch_all()`
-helper that performs step (1) as a single call.
+all four TLS prefix slots via `detail::error::pre_touch_all()` —
+this calls `set_prefix(nullptr)` on each slot, resolving the lazy
+linker entry on the calling thread (§3.3 internal-helper); (2)
+install signal handlers via `Process::install_signal`. Reversing
+the order can produce a signal-handler invocation that races against
+the lazy resolver — UB on macOS (lazy stub is not
+async-signal-safe). Each plugin that triggers signal-eligible OS
+calls owns this ordering; the platform error aggregate provides the
+`detail::error::pre_touch_all()` helper that performs step (1) as a
+single call.
 
 The signal-safe construction discipline is a single test: the e2e
 crash-capture fixture installs `SIGSEGV`, dereferences a null
@@ -846,7 +855,7 @@ follows the SPEC §10.8 second-consumer rule, never the
 | Caller calls `sdl_to_error` with `nullptr` msg                  | Returns `OsCode { 0 }` with prefix `sdl_empty`. No crash; the null pointer is checked before `strstr`-style scan.                                                                                       |
 | Caller calls `mach_to_error` with `KERN_SUCCESS`                | Returns `OsCode { 0 }` (success-misuse path); debug assert fires.                                                                                                                                       |
 | Caller calls `ns_to_error(nullptr)` from outside `bridge.mm`    | Build error: the symbol is link-private to `bridge.mm.o` via internal-linkage `inline` definition. A call from another TU does not link.                                                                |
-| Caller adds a new public arm without bumping `PlatformErrorRecord` | Compile error: the wire-format `arm_tag` enumeration is generated from `platform::Error`'s declaration order via codegen; a new arm without a schema bump fails the codegen consistency check. |
+| Caller adds a new public arm without updating the compile-time count | Compile error: the plugin-internal `static_assert(eastl::variant_size_v<platform::Error> == 7u)` fires when arm count drifts; no codegen tool, no Fory schema bump required. |
 
 ### 10.3 Concurrency-mode failure
 
@@ -937,9 +946,11 @@ matching §9.3.
 Under `tests/platform/error/compile_fail/`, using
 `add_test(... CONFIGURATIONS CompileFail)` in CMake:
 
-- A test that adds a hypothetical 8th arm to `platform::Error`
-  without bumping the schema must fail the codegen consistency
-  check.
+- Compile-fail test asserts `static_assert(eastl::variant_size_v<platform::Error> == 7u)`
+  fires when a developer adds an 8th arm to the closed sum without
+  bumping the assertion. Test captures compiler output and greps for
+  the static_assert message. No codegen tool involved; no schema bump
+  required.
 - A test that calls `ns_to_error` from a non-`bridge.mm` TU must
   fail at link.
 - A test that uses `try { } catch (...)` inside engine code must
@@ -957,7 +968,11 @@ include a fuzz story).
 
 ## 12. Open questions
 
-- [OPEN] Should the diagnostic prefix slot widen from `const char*`
+**Legend:** Each entry is tagged [BLOCKING IMPLEMENTATION] (must close
+before first plan PR merges against this design), [NON-BLOCKING]
+(can close incrementally after implementation begins), or [RESOLVED].
+
+- [NON-BLOCKING] Should the diagnostic prefix slot widen from `const char*`
   (literal pointer) to `eastl::string_view` (literal pointer + length)
   to make spdlog formatting allocation-free in all cases? Current
   literals are NUL-terminated; spdlog can format them via `%s`. The
@@ -976,7 +991,7 @@ include a fuzz story).
   spdlog-field carrier; no Fory schema, no ABI hash entry. SPEC §7
   requires no amendment. See §7.2 for the updated description.
 
-- [OPEN] SPEC §9.2 stale enumerator — `platform::Error::OutOfBudget`.
+- [BLOCKING IMPLEMENTATION] SPEC §9.2 stale enumerator — `platform::Error::OutOfBudget`.
   SPEC §9.2 (line 2109 of SPEC.md) references
   `std::unexpected{platform::Error::OutOfBudget}` as if `OutOfBudget`
   is a named arm of the closed sum, but the closed sum (§3.1, SPEC
@@ -989,18 +1004,18 @@ include a fuzz story).
   amended before the first plan runs against this design.
   Track amendment via a follow-up spike to correct SPEC §9.2.
 
-- [OPEN] Promotion of `IoFailure` prefix `surface_lost` to a
+- [NON-BLOCKING] Promotion of `IoFailure` prefix `surface_lost` to a
   first-class `SurfaceLost` arm. Same shape as SPEC §10.8 entry —
   trigger is a second consumer beyond render needing typed dispatch.
   Mirrored here so the spike audit captures the gate. No platform-
   aggregate-side residue if deferred.
 
-- [OPEN] Promotion of `IoFailure` prefix `watcher_unavailable` to a
+- [NON-BLOCKING] Promotion of `IoFailure` prefix `watcher_unavailable` to a
   first-class `WatcherUnavailable` arm. Same shape as SPEC §10.8;
   trigger is the editor / hot-reload coordinator landing. Mirrored
   here. No residue.
 
-- [OPEN] Cross-thread prefix propagation for FileIo / FileWatcher
+- [NON-BLOCKING] Cross-thread prefix propagation for FileIo / FileWatcher
   (§6.4). Each sibling aggregate decides its own SPSC-slot layout;
   the design here only requires that they not rely on the consumer
   thread's TLS for prefix discrimination. Resolution gate: the
@@ -1008,7 +1023,7 @@ include a fuzz story).
   decides whether to copy the prefix into the slot or to add a
   per-row prefix column. No platform-error-aggregate-side residue.
 
-- [OPEN] Should the signal-safe path also stamp `source_tag`
+- [NON-BLOCKING] Should the signal-safe path also stamp `source_tag`
   (§5.4)? Currently both prefix and source_tag stamps are skipped
   in signal context to avoid the lazy-resolver hazard (§6.2). If
   pre-touching one slot makes the other equally cheap, the
