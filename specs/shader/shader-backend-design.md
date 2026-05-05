@@ -259,19 +259,22 @@ IShaderBackend (trait, abstract)
     │                                 DescriptorLayout }
     ├── reflect/         — delegates to slangc reflection ingester (#751)
     ├── link/            — combined-module link via slangc spec-const bake
-    ├── capabilities/    — static descriptor (§3.3)
-    └── MetalLibraryLoader (separate service, narrow surface)
-          ├── load_library(MTL::Device*, ShaderArtifact) → MetalLibraryHandle
-          └── lookup_function(MetalLibraryHandle, EntryPoint) → MTL::Function*
+    └── capabilities/    — static descriptor (§3.3)
+MetalLibraryLoader (third responsibility, parallel sibling — §1 item 3)
+    ├── load_library(MTL::Device*, ShaderArtifact) → MetalLibraryHandle
+    └── lookup_function(MetalLibraryHandle, EntryPoint) → MTL::Function*
 ```
 
 `IShaderBackend` is a v-table abstract base with four pure virtuals
 (SPEC §5 lines 832–849). Concrete instances are constructed by the
 plugin's `glibre_plugin_register` entry point and registered into the
 engine's backend registry by name (`"slang-metal"` in MVP). The trait
-is plugin-internal: no `extern "C"` boundary crosses the v-table — the
-`shader` plugin's own translation units construct, register, and
-invoke the trait. The seam lives in
+is plugin-internal: no external caller invokes the trait via C++ vtable
+dispatch — the `shader` plugin's own translation units construct,
+register, and invoke the trait. Cross-plugin callers (cooker in `tools`,
+render-side loader shim in `render`) use the POD `BackendVTable`
+registered in `glibre-types.dylib` (§7.4), not direct C++ vtable
+dispatch. The seam lives in
 `plugins/shader/include/glibre/shader/shader.hpp` (the §5 public
 header) so the cooker, the editor adapter, and the `render`-side
 loader-shim can include it.
@@ -758,43 +761,24 @@ Borrow rules:
 
 ### 4.3 ABI surface
 
-The `IShaderBackend` v-table is **plugin-internal**: the `shader`
+The `IShaderBackend` C++ vtable is **plugin-internal**: the `shader`
 plugin declares it and instantiates one impl. Cross-plugin calls
-into the trait would violate `reviews/decisions/plugin-abi.md`
-("each plugin links only `glibre-types.dylib`, not other plugins").
+into the trait via C++ vtable dispatch would violate
+`reviews/decisions/plugin-abi.md` ("each plugin links only
+`glibre-types.dylib`, not other plugins").
+
 Cross-context callers (cooker in `tools`, render-side loader shim in
-`render`) reach the trait through an in-process function pointer
-exposed by the `shader` plugin's registration callback:
+`render`) reach the backend through the **POD function-pointer table
+`BackendVTable`** registered in `glibre-types.dylib` at plugin init.
+That table carries only POD spans and handles across the boundary —
+never `std::expected`, `eastl::span`, or types containing
+`eastl::vector` members. The canonical definition, full field list,
+and ABI contract are in **§7.4** (the single source of truth for the
+table layout). This section does not duplicate the struct; see §7.4.
 
-```cpp
-// glibre-types middleman: a POD function-pointer table, byte-stable
-// across plugin versions, exposed by the shader plugin to other
-// plugins via the type registry. The cooker reads this table at
-// register-time; render reads it once during init.
-struct ShaderBackendVTable {
-    std::expected<ShaderArtifact, Error> (*compile)(
-        IShaderBackend*, const ShaderSource&, const PermutationKey&,
-        CompileTarget) noexcept;        // shipping: nullptr
-    std::expected<ReflectionBlob, Error> (*reflect)(
-        IShaderBackend*, const ShaderArtifact&) noexcept;
-    std::expected<LinkedModule, Error> (*link)(
-        IShaderBackend*, eastl::span<const ShaderArtifact>) noexcept;
-    Capabilities (*capabilities)(const IShaderBackend*) noexcept;
-};
-```
-
-Per `reviews/decisions/plugin-abi.md`'s "Public plugin ABI surfaces
-never expose `std::` containers or `eastl::` containers" rule, the
-table crosses through `eastl::span` / POD value-types only. The
-table is registered into `glibre-types.dylib` as a middleman type
-so its layout is hash-stable across plugin reloads
-(§3 collapse / `fory-codegen.md`).
-
-The `MetalLibraryLoader` API does **not** cross the plugin ABI: it
-is invoked by the `render`-side PSO builder which is itself in the
-`render` plugin, and the call goes through an in-process function-
-pointer table registered into `glibre-types.dylib` the same way as
-the trait v-table above. metal-cpp types (`MTL::Device*`,
+The `MetalLibraryLoader` API crosses the plugin boundary via a
+similar POD function-pointer table (`MetalLibraryLoaderVTable`,
+also defined in §7.4). metal-cpp types (`MTL::Device*`,
 `MTL::Library*`, `MTL::Function*`) are opaque pointers across the
 ABI; both contexts compile against the same metal-cpp headers
 (`vcpkg manifest mode`, single SDK version pinned in
