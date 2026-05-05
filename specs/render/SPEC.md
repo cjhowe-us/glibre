@@ -1261,6 +1261,14 @@ public:
     // overshoot is logged but never refused.
     void evict_lru(std::size_t target_size) noexcept;
 
+    // Register the pipeline descriptor for a state_hash. Must be called
+    // by the pass-registry (GraphBuilder) before any get/pin/warm call
+    // that supplies this state_hash. Idempotent on identical desc;
+    // returns unexpected{PipelineCompileFailed} on collision.
+    [[nodiscard]] Result<void>
+        register_state_descriptor(std::uint64_t  state_hash,
+                                  StateDescriptor desc) noexcept;
+
     // Diagnostic accessors — read-only, lock-free.
     [[nodiscard]] std::size_t live_bytes()  const noexcept;
     [[nodiscard]] std::size_t entry_count() const noexcept;

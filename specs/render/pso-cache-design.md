@@ -103,7 +103,7 @@ only (PHILOSOPHY §"How harmonius is used").
 | `pipeline-state-cache.md` R-2.3.9.7 — hot-reload sends `Invalidate(PsoKey)` to the render thread                       | **Covered (re-cast on shader_hash)**   | §8 below: invalidation is keyed on `shader_hash`, not `PSOKey` — one shader edit invalidates the entire `(shader_hash, *)` slice in one call.|
 | `pipeline-state-cache.md` R-2.3.9.8 — descriptor layout inferred from DXIL / SPIR-V reflection once, cached            | **Refused (shader's job)**             | `shader::DescriptorLayout` (spike #753) owns this. The cache embeds nothing layout-shaped; it pins `MTL::ArgumentEncoder` handles by reference. SPEC §3 refusal restated. |
 | `pipeline-state-cache-test-cases.md` — corruption recovery, GC, cold-start latency, hot-reload latency                 | **Covered**                            | §11 test plan below maps each scenario to a Catch2 test under `tests/render/pso_cache/`.                                                       |
-| `pipeline-state-cache.md` "Per-backend serialization API" — D3D12 / Metal / Vulkan branches                            | **Refused (Metal-only)**                | MVP is Metal 4 only (PHILOSOPHY tech stack). The §6 `IBackendArchive` seam is named so post-MVP `D3D12PipelineLibrary` / `VkPipelineCache` slot in without churning the public surface; the implementation has one body. |
+| `pipeline-state-cache.md` "Per-backend serialization API" — D3D12 / Metal / Vulkan branches                            | **Refused (Metal-only)**                | MVP is Metal 4 only (PHILOSOPHY tech stack). The §7.5 `IBackendArchive` seam is a Metal-internal archive-multiplexing abstraction (read-set vs. write-scratch), not a cross-backend seam — its `borrow_for` return type is `NS::SharedPtr<MTL::BinaryArchive>`, a concrete metal-cpp type. No non-Metal backend is in scope for MVP or post-MVP planning under this design. |
 | `pipeline-state-cache.md` mermaid sequence — Editor → HotReloadManager → RenderThread → PsoCache                       | **Refused (no editor in MVP)**         | §8 below: invalidation source is `shader::ShaderCache::invalidate_by_source_hash` plus `core::HotReloadCompleted` event — no editor-specific path. The cache never observes a "manager" intermediate. |
 
 Glibre-native requirements added beyond harmonius:
@@ -184,6 +184,9 @@ PSOCache (entity, MetalDevice-owned, §4.1.7)
 ├── std::mutex                                build_mutex_      // guards in_flight_ map
 ├── BinaryArchiveSet                          archives_         // §3.5; MTL::BinaryArchive borrows
 ├── ShaderModuleResolver                      shaders_          // §3.5; borrows from shader::ShaderCache
+├── eastl::hash_map<std::uint64_t,            state_descriptor_table_  // §3.5 step 5; keyed by state_hash
+│                   StateDescriptor>                            // populated by register_state_descriptor
+├── std::shared_mutex                         descriptor_mutex_ // guards state_descriptor_table_
 ├── std::atomic<std::size_t>                  live_bytes_       // residency accounting
 ├── const std::size_t                         budget_bytes_     // 64 MiB (SPEC §9.5 row)
 └── DiagnosticOverlay*                        overlay_          // §4.1 SPEC; eviction reporting
@@ -620,10 +623,12 @@ Re-stating §1's refusals against the §3 layout to make the boundaries
 mechanically inspectable in code review:
 
 - **No descriptor-builder.** The `state_descriptor_table_` map at §3.5
-  step 5 is populated by upstream pass-registry code — each `Pass`
-  registers its descriptor under a `state_hash` at register-time.
-  The cache stores the inverse mapping for cold-path lookup; it never
-  authors a descriptor.
+  step 5 is populated via `PSOCache::register_state_descriptor` (§4.1 /
+  §4.3). The caller is the pass-registry — concretely `GraphBuilder`'s
+  plugin-register walk, which calls this method once per static
+  `(pass_class, PSOKey)` table entry during `glibre_plugin_register`.
+  The cache stores the resulting `state_hash → StateDescriptor` mapping
+  for cold-path descriptor lookup; it never authors a descriptor.
 - **No shader resolver.** `shaders_.resolve(shader_hash)` walks
   `shader::ShaderCache::get(ShaderHash)` (#755) under a borrowed
   reference; the cache neither owns nor decodes the result.
@@ -690,6 +695,16 @@ public:
     void
         evict_lru(std::size_t target_size) noexcept;
 
+    // Descriptor-table registration — called by the pass-registry
+    // (GraphBuilder internals) at glibre_plugin_register time for every
+    // static (pass_class → PSOKey) table entry. The cache's §3.5 step 5
+    // cold path requires a descriptor for every state_hash it encounters;
+    // `get` / `pin` / `warm` return unexpected{PipelineCompileFailed}
+    // (detail="unknown_state_hash") if this seam has not been called first.
+    [[nodiscard]] Result<void>
+        register_state_descriptor(std::uint64_t           state_hash,
+                                  StateDescriptor         desc) noexcept;
+
     // Diagnostic accessors — read-only, lock-free.
     [[nodiscard]] std::size_t live_bytes()  const noexcept;
     [[nodiscard]] std::size_t entry_count() const noexcept;
@@ -705,10 +720,11 @@ protected:
 ```
 
 `pin` / `unpin` / `invalidate_by_shader_hash` / `entry_count` /
-`live_bytes` are §5 amendments this design declares; they land in the
-follow-up plan that lifts spike findings into SPEC text. The spike
-issue brief expressly names `MTLBinaryArchive` persistence (§7) and
-`invalidate_by_shader_hash` (§8) as in-scope deliverables.
+`live_bytes` / `register_state_descriptor` are §5 amendments this design
+declares; they land in the follow-up plan that lifts spike findings into
+SPEC text. The spike issue brief expressly names `MTLBinaryArchive`
+persistence (§7) and `invalidate_by_shader_hash` (§8) as in-scope
+deliverables.
 
 ### 4.2 Surface rules
 
@@ -797,6 +813,30 @@ issue brief expressly names `MTLBinaryArchive` persistence (§7) and
 - **`live_bytes() const noexcept`** / **`entry_count() const
   noexcept`** — relaxed atomic loads; no lock acquired. Used by
   §9.6 budget gate and `DiagnosticOverlay`.
+
+- **`register_state_descriptor(state_hash, desc) noexcept ->
+  Result<void>`** — the registration seam that populates
+  `state_descriptor_table_` (§3.1 aggregate member). Called by the
+  pass-registry (concretely `GraphBuilder`'s plugin-register path) for
+  every static `(pass_class → PSOKey)` table entry during
+  `glibre_plugin_register`. Pre-conditions: `state_hash` is the render-
+  context BLAKE3 fingerprint (§3.2.2) for `desc`'s non-shader field set;
+  `desc` is the canonical `MTL::RenderPipelineDescriptor` /
+  `MTL::ComputePipelineDescriptor` configuration produced by the pass
+  class's `describe_pso` factory, with shader functions left null (the
+  cache attaches the `MTL::Library` at build time in §3.5 step 5).
+  Behaviour: idempotent — a second call with the same `state_hash` and
+  byte-equal `desc` is a no-op returning `Result<void>{}`. A collision
+  (same `state_hash`, non-equal `desc`) is a contract violation; returns
+  `unexpected{render::Error::PipelineCompileFailed}` with
+  `detail="state_descriptor_collision"` (this indicates either a
+  `state_hash` function bug or a pass authoring error — it is treated as
+  a fatal configuration error, not a fallback path). Thread-safety: the
+  method acquires `descriptor_mutex_` exclusively; concurrent
+  `get`/`pin` calls share `table_mutex_` (a separate lock), so
+  registration does not stall the hot path. The method is not callable
+  after the first `get`/`pin` call on a given `state_hash` — callers
+  must register before warming.
 
 ## 5. Hot / Cold Path Split
 
@@ -991,8 +1031,19 @@ SPEC §7.2.2 names.
 
 ### 7.5 ABI seam (`IBackendArchive`)
 
-The cache talks to the archive via a one-method interface so the
-post-MVP D3D12 / Vulkan ports plug in without churning the cache:
+The cache talks to the archive via a one-method interface whose purpose
+is **Metal-internal archive multiplexing**: the MVP `BinaryArchiveSet`
+manages a read-side set (the on-disk archives loaded at startup) and a
+write-side scratch archive (the per-process `MTL::BinaryArchive` that
+accumulates newly-built PSOs for `flush_to_disk`). The interface lets
+these two faces be swapped in tests and in debug tooling without the
+`PSOCache` cold path caring which face it is talking to.
+
+The interface is **not** a cross-backend seam. `borrow_for` returns
+`NS::SharedPtr<MTL::BinaryArchive>` — a concrete metal-cpp type — which
+no non-Metal implementation could return. Glibre is Metal-only for MVP
+(PHILOSOPHY tech stack); the interface encapsulates archive-set
+multiplexing, not backend portability.
 
 ```cpp
 namespace glibre::render {
@@ -1001,15 +1052,16 @@ class IBackendArchive {
 public:
     virtual ~IBackendArchive() = default;
 
-    // Add this archive's contents as a candidate during pipeline build.
-    // Returns the metal-cpp-side MTL::BinaryArchive* for descriptor-
-    // attachment (Render: setBinaryArchives:; Compute: setBinaryArchives:).
+    // Return the Metal binary archive that should be attached during
+    // this key's pipeline build (§3.5 step 6, setBinaryArchives:).
+    // Returns nullptr when no on-disk archive covers this key (cache
+    // miss forces a full driver compile).
     [[nodiscard]] virtual NS::SharedPtr<MTL::BinaryArchive>
         borrow_for(PSOKey) const noexcept = 0;
 
-    // Add a freshly-built PSO to the writable set; the writer is
-    // backed by a per-process scratch MTL::BinaryArchive that is
-    // serialised at PSOCache::flush_to_disk() time.
+    // Record a freshly-built PSO into the write-side scratch archive.
+    // The archive accumulates entries across the process lifetime and
+    // is serialised at PSOCache::flush_to_disk() time.
     [[nodiscard]] virtual Result<void>
         add_to_writable(NS::SharedPtr<MTL::PipelineState>, PSOKey) noexcept = 0;
 };
@@ -1018,8 +1070,8 @@ public:
 ```
 
 MVP implementation: `MetalBinaryArchiveSet` under
-`pso_cache/binary_archive.cpp`. Post-MVP `D3D12PipelineLibrarySet`
-slots into the same trait without any change to `PSOCache`.
+`pso_cache/binary_archive.cpp` — manages the read set (opened from the
+on-disk directory per §7.4) and the per-process write scratch archive.
 
 ### 7.6 What is NOT persisted
 
