@@ -707,7 +707,10 @@ The shipping cut (SPEC §6.5) excludes `cache/cooker.cpp` and
 `ShaderCache::compact` are link-included as symbols (so the type
 remains ABI-stable across editor / shipping) but their TUs are empty
 stubs that return `Error::CacheReadOnlyViolation`. The runtime calls
-only `open` and `get`.
+only `Library::open` (shipping-path factory that requires no parent
+`ShaderCache`) and `Library::get`. `ShaderCache::open` is the
+editor/cooker bootstrap path and is never called by the shipping
+runtime.
 
 ## 5. Hot / Cold Path Split
 
