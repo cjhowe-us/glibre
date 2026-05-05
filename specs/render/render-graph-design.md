@@ -607,7 +607,7 @@ and `SPEC.md` §5 must be resolved in favour of the SPEC. Readers
 requiring the full declaration set should consult
 `specs/render/SPEC.md` §5 directly (search for `class GraphBuilder`,
 `class RenderGraph`, `class ExecutionPlan`, `struct PassDesc`,
-`PassExecuteFn`, `struct ResourceAccess`).
+`PassExecuteFn`, `GraphBuilder::ResourceAccess`).
 
 Surface invariants this design imposes on top of the §5 stub:
 
