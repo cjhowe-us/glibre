@@ -75,7 +75,7 @@
 #   window_size:        1280x720
 #   dpi_scale:          1.0
 #   rng_seed:           0x0000_0000_0000_0001
-#   frame_budget:       max_frames=64                # 22 authored × ~2.9× safety
+#   frame_budget:       max_frames=64                # 15 authored × ~4.3× safety
 #   golden_refs:        []                           # AssertEcsSnapshot/Screenshot not used
 #   fixture_layout:     tests/e2e/core/fixtures/component-mutation-components.md
 #
@@ -96,16 +96,19 @@
 #                       registry — that absence is the contract under
 #                       test for block 3.
 #   F2 → debug-overlay: World::spawn() into world A, then immediately
-#                       World::set_component(e, TypeIdOf<A>, A{value=1});
-#                       stores the returned Entity into typed buffer
-#                       `world.A.target_entity`. The set_component call
-#                       creates the {A} archetype on first use (§4.2
-#                       inv 1) and lands the row there.
+#                       World::set_component(new_e, TypeIdOf<A>, A{...});
+#                       on the FIRST press stores the returned Entity
+#                       into world.A.target_entity; on each subsequent
+#                       press appends to a small ring (world.A.scratch_ring)
+#                       leaving target_entity unchanged. The set_component
+#                       call creates the {A} archetype on first use (§4.2
+#                       inv 1) and lands the new entity there.
 #   F3 → debug-overlay: World::set_component(world.A.target_entity,
-#                       TypeIdOf<B>, B{value=42}). The "add" path: the
-#                       row migrates from archetype {A} to archetype
-#                       {A,B}. Captures pre/post state into a typed
-#                       debug-resource record:
+#                       TypeIdOf<B>, B{value=42}). ALWAYS acts on the
+#                       FIXED world.A.target_entity slot — not the ring
+#                       head. The "add" path: the row migrates from
+#                       archetype {A} to archetype {A,B}. Captures
+#                       pre/post state into a typed debug-resource record:
 #                         world.A.last_set_outcome              : core::Error?
 #                                 (None on success; tag on refusal)
 #                         world.A.target_archetype_set          : eastl::array<TypeId, N>
@@ -143,7 +146,7 @@
 #                         world.A.target_archetype_set_after_refusal
 #                                                                : eastl::array<TypeId, N>
 #                       (must equal world.A.target_archetype_set —
-#                        i.e. {A,B} — proving no partial mutation).
+#                        i.e. {A} — proving no partial mutation).
 #   F5 → debug-overlay: World::remove_component(world.A.target_entity,
 #                       TypeIdOf<B>). The "remove" path: the row
 #                       migrates from archetype {A,B} back to archetype
@@ -162,13 +165,31 @@
 #                                 (true iff the swap-remove path
 #                                  executed in the {A,B} archetype
 #                                  during F5)
-#   F6 → debug-overlay: snapshot — re-publish the full debug-resource
-#                       table after F5 so post-removal AssertStates
-#                       see fresh values. (F3, F4, F5 each republish
-#                       internally; F6 is the trailing snapshot for
-#                       the final assertion frame.)
+#   F6 → debug-overlay: snapshot — re-publish the full accumulated
+#                       debug-resource table so the final assertion
+#                       frame sees fresh values after block 3's F4
+#                       refusal call. F3, F4, F5 each republish
+#                       their own captured fields internally; F6 is
+#                       the trailing snapshot that refreshes ALL
+#                       fields (including those populated by F5
+#                       in an earlier frame) after F4's block-3
+#                       refusal runs in frame 11. F6 fires at
+#                       frame 12 — after F4 (frame 11), not
+#                       immediately after F5 (frame 9) — because
+#                       block 3 runs after block 2.
+#   F7 → debug-overlay: World::set_component(scratch_entity,
+#                       TypeIdOf<B>, B{value=43}). Acts on the
+#                       most-recently-spawned entity in
+#                       world.A.scratch_ring (the entity last
+#                       appended by a post-first F2 press). Used
+#                       exclusively to move a bystander entity from
+#                       archetype {A} to {A,B} so that the {A,B}
+#                       archetype holds two rows before F5, making
+#                       the block-2 swap-remove path load-bearing
+#                       (distinguishable from a no-op-on-single-row
+#                       short-circuit).
 #
-# All six debug actions exist behind the `cfg(debug_overlay)` feature
+# All seven debug actions exist behind the `cfg(debug_overlay)` feature
 # gate. They are non-shipping (PHILOSOPHY §6 — no runtime reflection in
 # shipping builds; the codegen column descriptors *themselves* live in
 # the middleman dylib regardless).
@@ -221,7 +242,7 @@
 # ============================================================================
 #
 # Frame 0 establishes the test world before any assertions run. The
-# AssertState at frame 0 is a guard: if F1 (registration of {A, B})
+# AssertState at frame 1 is a guard: if F1 (registration of {A, B})
 # does not run before the world is constructed, every subsequent
 # archetype assertion is meaningless.
 
@@ -249,6 +270,14 @@ op: AssertState
 # And   the public boundary observers see the mutation only after the
 #       migration completes
 # ============================================================================
+#
+# Frame 2 spawns target_entity into archetype {A}. Frame 3 spawns a
+# BYSTANDER entity into {A} as well, so that when frame 5's F3 fires,
+# archetype {A} contains two rows (target_entity + bystander). This
+# makes the block-1 swap-remove assertion (id=8) load-bearing: the
+# bystander row must swap into target_entity's vacated slot during the
+# {A}→{A,B} migration; a conformant implementation cannot short-circuit
+# swap-remove when only one row existed (specs/core/SPEC.md §4.2 inv 4).
 
 frame: 2
 op: InputOp
@@ -256,8 +285,22 @@ op: InputOp
   semantics:      debug-overlay → World::spawn() + World::set_component(
                   e, TypeIdOf<A>, A{value=1}); stores returned Entity
                   into world.A.target_entity. Lands e in archetype {A}.
+                  This is the first F2 press — stores into the fixed
+                  target_entity slot, does not append to scratch_ring.
 
 frame: 3
+op: InputOp
+  event:          KeyDown { key = F2, modifiers = {} }
+  semantics:      debug-overlay → World::spawn() + World::set_component(
+                  bystander_e, TypeIdOf<A>, A{value=2}); appends returned
+                  Entity into world.A.scratch_ring. target_entity is
+                  preserved. Archetype {A} now holds two rows (target_entity
+                  + bystander_e). The bystander's presence makes the
+                  block-1 swap-remove path load-bearing: when F3 migrates
+                  target_entity out of {A}, bystander_e must swap into the
+                  vacated slot — the canonical two-row case (§4.2 inv 4).
+
+frame: 4
 op: AssertState
   id:             2
   world:          A
@@ -265,21 +308,26 @@ op: AssertState
   expected:       eastl::array<TypeId, 1> {
                     [0] = core::TypeId { value = TypeIdOf<A>.value }
                   }
-  evidence:       precondition for block 1 — e starts in archetype {A}.
-                  Encodes the Gherkin `Given an entity e with
-                  components {A}`. Component set is sorted by codegen
+  evidence:       precondition for block 1 — target_entity starts in
+                  archetype {A}. Encodes the Gherkin `Given an entity e
+                  with components {A}`. Component set is sorted by codegen
                   hash (PHILOSOPHY §7); the singleton {A} sorts to
                   itself trivially.
 
-frame: 4
+frame: 5
 op: InputOp
   event:          KeyDown { key = F3, modifiers = {} }
   semantics:      debug-overlay → World::set_component(
                   world.A.target_entity, TypeIdOf<B>, B{value=42}).
-                  Triggers the {A} → {A,B} archetype migration with
-                  atomicity probe armed (see "Atomicity probe" above).
+                  F3 ALWAYS acts on the fixed world.A.target_entity slot
+                  (not the scratch_ring head). Triggers the {A} → {A,B}
+                  archetype migration with atomicity probe armed (see
+                  "Atomicity probe" above). Archetype {A} has two rows
+                  at this point (target_entity + bystander from frame 3);
+                  target_entity's vacated slot is filled by the bystander
+                  via swap-remove — making id=8 load-bearing.
 
-frame: 5
+frame: 6
 op: AssertState
   id:             3
   world:          A
@@ -356,13 +404,17 @@ op: AssertState
   path:           world.A.set_component_swap_remove_observed
   expected:       bool { value = true }
   evidence:       proves the source-archetype swap-remove path
-                  *executed* during the migration — not just that the
-                  post-state happens to be hole-free (which a buggy
-                  no-op-on-single-row case could fake when {A} has
-                  exactly one row). The overlay's structured log
-                  emits `archetype.swap_remove { … }` (specs/core/
-                  SPEC.md §10 logging-at-handler) on every swap-
-                  remove; F3 captures whether ≥ 1 such event fired
+                  *executed* during the block-1 migration. Archetype {A}
+                  held two rows (target_entity + bystander from frame 3)
+                  when F3 fired; the bystander must swap into
+                  target_entity's vacated slot. This makes id=8
+                  load-bearing: a conformant implementation that
+                  short-circuits swap-remove on a single-row archetype
+                  would not fire the swap-remove path here because {A}
+                  had two rows before the migration. The overlay's
+                  structured log emits `archetype.swap_remove { … }`
+                  (specs/core/SPEC.md §10 logging-at-handler) on every
+                  swap-remove; F3 captures whether ≥ 1 such event fired
                   during the call. Reinforces id=7.
 
 op: AssertLogContains
@@ -397,49 +449,56 @@ op: AssertLogContains
 #   (b) the swap-remove path *ran* during the call (id=15 — proves the
 #       column-overwrite work happened, distinguished from a degenerate
 #       no-op that leaves zero holes by virtue of having had only one
-#       row to begin with — though we set up two rows in {A,B} below
-#       to make case (b) load-bearing).
+#       row to begin with — we set up two rows in {A,B} below to make
+#       case (b) load-bearing).
 #
-# To make swap-remove load-bearing in {A,B}, frame 6 spawns a SECOND
-# entity into archetype {A,B} so the {A,B} archetype has two rows
-# before F5. The removal of B from world.A.target_entity then forces
-# the *other* {A,B} row to swap into target_entity's vacated slot —
+# To make swap-remove load-bearing in {A,B}, frame 7 spawns a SECOND
+# entity (scratch_entity) into archetype {A}, and frame 8 (F7 binding)
+# migrates scratch_entity to {A,B}. The {A,B} archetype then has two
+# rows before F5 fires. The removal of B from world.A.target_entity
+# then forces scratch_entity to swap into target_entity's vacated slot —
 # the canonical column-overwrite case (specs/core/SPEC.md §4.2 inv 4
 # "the last row in its chunk swaps into the freed slot").
-
-frame: 6
-op: InputOp
-  event:          KeyDown { key = F2, modifiers = {} }
-  semantics:      debug-overlay → World::spawn() + World::set_component(
-                  new_e, TypeIdOf<A>, A{value=2}). The overlay's F2
-                  records each spawn into a small ring; this second
-                  press *appends* a second entity in archetype {A}
-                  (target_entity is preserved — F2 only mutates a
-                  separate "scratch" entity slot when called after
-                  the first F2 of the trace). Frame 7 follows up
-                  with set_component to land it in {A,B}.
+#
+# Note: after block 1's F3 migration, archetype {A} holds one row
+# (the bystander from frame 3). Frame 7's F2 press appends a SECOND
+# entity to scratch_ring; frame 8's F7 migrates that scratch entity
+# to {A,B}. F7 (not F3) is used here to keep F3 semantics unambiguous:
+# F3 always targets world.A.target_entity; F7 targets the scratch_ring
+# head (most recently appended by a post-first F2 press).
 
 frame: 7
 op: InputOp
-  event:          KeyDown { key = F3, modifiers = {} }
+  event:          KeyDown { key = F2, modifiers = {} }
+  semantics:      debug-overlay → World::spawn() + World::set_component(
+                  scratch_e, TypeIdOf<A>, A{value=3}). This is a
+                  post-first F2 press — appends scratch_e to
+                  world.A.scratch_ring; target_entity is preserved.
+                  Lands scratch_e in archetype {A}. Frame 8 follows
+                  up with F7 to migrate scratch_e to {A,B}.
+
+frame: 8
+op: InputOp
+  event:          KeyDown { key = F7, modifiers = {} }
   semantics:      debug-overlay → World::set_component(scratch_entity,
-                  TypeIdOf<B>, B{value=43}). The scratch row migrates
+                  TypeIdOf<B>, B{value=43}). F7 targets the scratch_ring
+                  head (scratch_e from frame 7). The scratch row migrates
                   to archetype {A,B}; world.A.target_entity is
                   unaffected. {A,B} now holds two rows — the
                   precondition for an *observable* swap-remove on F5.
 
-frame: 8
+frame: 9
 op: InputOp
   event:          KeyDown { key = F5, modifiers = {} }
   semantics:      debug-overlay → World::remove_component(
                   world.A.target_entity, TypeIdOf<B>). Triggers the
                   {A,B} → {A} migration; the {A,B} archetype's chunk
-                  swap-removes the scratch row into target_entity's
+                  swap-removes scratch_e into target_entity's
                   vacated slot. Captures post-state into the debug-
                   resource record (overwriting block 1's set
                   observations — see F5 description above).
 
-frame: 9
+frame: 10
 op: AssertState
   id:             10
   world:          A
@@ -483,10 +542,11 @@ op: AssertState
   expected:       u32 { value = 1 }
   evidence:       the {A} archetype holds exactly one chunk — the
                   reborn row landed in {A}'s chunk 0 alongside any
-                  other {A}-only rows. (After F2 spawned the scratch
-                  entity into {A} and F3 then migrated it to {A,B},
-                  {A} held zero rows immediately before F5; F5
-                  re-introduces target_entity to {A}, giving 1 row
+                  other {A}-only rows. (After frame 7's F2 spawned
+                  scratch_e into {A} and frame 8's F7 migrated it
+                  to {A,B}, archetype {A} held one row (the bystander
+                  from frame 3) immediately before F5; F5
+                  re-introduces target_entity to {A}, giving 2 rows
                   → 1 chunk.) Sanity gate that distinguishes the
                   reverse-migration path from a buggy no-op that
                   leaves the row in {A,B}.
@@ -499,8 +559,8 @@ op: AssertState
   evidence:       encodes the Gherkin `the freed slot's column is
                   overwritten by swap-remove` (visible state half).
                   Per §4.2 inv 4 the {A,B} archetype's chunk must
-                  contain zero holes after the removal: the scratch
-                  row swaps into target_entity's vacated slot, leaving
+                  contain zero holes after the removal: scratch_e
+                  swaps into target_entity's vacated slot, leaving
                   one occupied row at index 0 and an unallocated
                   trailing region — but no *hole* (no occupied-then-
                   unoccupied-then-occupied pattern within the chunk).
@@ -547,7 +607,7 @@ op: AssertLogContains
 # tag and as the post-call archetype set being byte-equal to the
 # pre-call archetype set.
 
-frame: 10
+frame: 11
 op: InputOp
   event:          KeyDown { key = F4, modifiers = {} }
   semantics:      debug-overlay → World::set_component(
@@ -560,13 +620,20 @@ op: InputOp
                   and the post-call archetype set into
                   world.A.target_archetype_set_after_refusal.
 
-frame: 11
+frame: 12
 op: InputOp
   event:          KeyDown { key = F6, modifiers = {} }
-  semantics:      debug-overlay → republish full debug-resource table
-                  for the final assertion frame.
+  semantics:      debug-overlay → republish full accumulated debug-
+                  resource table for the final assertion frame. F6
+                  fires here (frame 12) after F4's block-3 refusal
+                  (frame 11); F5 ran earlier at frame 9 and its
+                  captured fields (world.A.last_remove_outcome, etc.)
+                  remain stable since F4 does not overwrite them. F6
+                  refreshes ALL fields in one snapshot so the
+                  frame-13 assertions see a coherent, atomic view of
+                  the accumulated debug state.
 
-frame: 12
+frame: 13
 op: AssertState
   id:             17
   world:          A
@@ -623,7 +690,7 @@ op: AssertLogContains
 # Termination
 # ============================================================================
 
-frame: 13
+frame: 14
 op: End
   evidence:       specs/e2e/SPEC.md §4.1.1 inv 5 — exactly one End
                   op, emitted last; specs/e2e/SPEC.md §7.1.5
@@ -637,7 +704,8 @@ op: End
 #       ↦ AssertState id=5  (target_archetype_set == {A,B})
 #       ↦ AssertState id=6  (forward/reverse maps consistent post-mig)
 #       ↦ AssertState id=7  (source-archetype {A} chunk_holes == 0)
-#       ↦ AssertState id=8  (source swap-remove path executed)
+#       ↦ AssertState id=8  (source swap-remove path executed;
+#                            load-bearing: {A} held 2 rows before F3)
 #       ↦ AssertLogContains id=9 ("archetype.migrate" — proves the
 #                                  migration handler ran)
 #   "the public boundary observers see the mutation only after the
@@ -645,8 +713,8 @@ op: End
 #       ↦ AssertState id=4  (set_component_observed_atomicity == true;
 #                            the §4.1 inv 7 observer never saw an
 #                            intermediate archetype membership)
-#   (id=2 is the precondition gate that e starts in {A}; id=3 is the
-#    success gate that the call did not refuse.)
+#   (id=2 is the precondition gate that target_entity starts in {A};
+#    id=3 is the success gate that the call did not refuse.)
 #
 # Block 2 — remove_component
 #   "e moves to the Archetype for {A}"
@@ -686,6 +754,25 @@ op: End
 # half-mutation cannot pass as a refusal.
 #
 # ─────────────────────────────────────────────────────────────────────────────
+# Frame-timeline summary (all bindings and their targets)
+# ─────────────────────────────────────────────────────────────────────────────
+#  frame 0  — F1   : register {A,B}
+#  frame 1  — assert entity_count=0
+#  frame 2  — F2   : spawn target_entity → {A}
+#  frame 3  — F2   : spawn bystander_e   → {A}  (makes block-1 swap-remove load-bearing)
+#  frame 4  — assert target_archetype_set == {A}
+#  frame 5  — F3   : migrate target_entity {A}→{A,B}  (2 rows in {A} at this point)
+#  frame 6  — asserts id=3..9
+#  frame 7  — F2   : spawn scratch_e → {A}
+#  frame 8  — F7   : migrate scratch_e {A}→{A,B}     (makes block-2 swap-remove load-bearing)
+#  frame 9  — F5   : remove B from target_entity {A,B}→{A}
+#  frame 10 — asserts id=10..16
+#  frame 11 — F4   : refusal call (PhantomTypeId)
+#  frame 12 — F6   : snapshot full debug-resource table
+#  frame 13 — asserts id=17..20
+#  frame 14 — End
+#
+# ─────────────────────────────────────────────────────────────────────────────
 # CI status (until implementation lands)
 # ─────────────────────────────────────────────────────────────────────────────
 # Per specs/e2e/SPEC.md §5 / §6.5, replay requires:
@@ -701,7 +788,7 @@ op: End
 #     debug-overlay subscriber that records archetype-membership
 #     transitions across the call's critical section (the atomicity
 #     probe).
-#   * The debug-overlay key bindings F1…F6 plus the swap-remove
+#   * The debug-overlay key bindings F1…F7 plus the swap-remove
 #     observation hook in the archetype storage layer
 #     (cfg(debug_overlay) only).
 #   * `tools::TraceWriter` to lower this author-spec to canonical Fory
