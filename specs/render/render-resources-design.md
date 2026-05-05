@@ -801,12 +801,18 @@ using ClusterCullStateHandle = Handle<tags::cluster_cull_state>;
 }  // namespace glibre::render
 ```
 
-`SamplerHandle` is a private sub-tag of `tags::argument_buffer` per
-§3.3; it is **not** exported as a separate top-level alias because
-the sampler cache is plugin-internal (no caller outside render
-needs to construct a `SamplerHandle`). The header retains
-`ArgumentBufferHandle` as the public name; samplers are vended
-through the same pathway by the binder (§3.9).
+`SamplerHandle` is `Handle<tags::sampler>` — a distinct phantom type
+separate from `ArgumentBufferHandle` (`Handle<tags::argument_buffer>`).
+`tags::sampler` gives the `SlotTable<MTL::SamplerState*, tags::sampler>`
+table the full 24-bit generation field with no sub-tag bits consumed
+(§3.4). Cross-assignment between `SamplerHandle` and
+`ArgumentBufferHandle` is a compile error enforced by the phantom-tag
+mechanism. `SamplerHandle` is plugin-internal because
+`ResourceCatalog::sampler(SamplerDesc)` is the sole vend point; no
+caller outside the render plugin needs to construct one. Samplers are
+**not** vended through the argument-buffer binder (§3.9); the binder
+receives a `SamplerHandle` produced by the sampler cache and encodes it
+into the argument buffer at bind time.
 
 ### 4.2 Methods on `GraphBuilder` (re-stated from SPEC §5)
 
@@ -1253,7 +1259,7 @@ dylib:
 
 - `HeapOutOfMemory` — `resources/persistent.cpp::PersistentAllocator::allocate`.
 - `TransientPoolExhausted` — `resources/alias_planner.cpp::AliasPlanner::compute` (the planner constructs the error; the catalog forwards it through `RenderGraph::compile`).
-- `ResourceResidencyExceeded` — (a) `resources/transient_pool.cpp::TransientPool::peak_residency_check`; (b) `resources/sampler_cache.cpp::SamplerCache::get_or_create` (over-cap arm). Two construction sites for one variant is an SRP violation that must be resolved in the implementation plan: either split into separate variants (preferred; requires SPEC.md §5 ABI bump) or consolidate via a shared helper. Tracked as part of the §5 amendment for `StaleResourceHandle` / `ResourceRoleMismatch`.
+- `ResourceResidencyExceeded` — (a) `resources/transient_pool.cpp::TransientPool::peak_residency_check`; (b) `resources/sampler_cache.cpp::SamplerCache::get_or_create` (over-cap arm). Two construction sites for one variant is an SRP violation that must be resolved in the implementation plan: either split into separate variants (preferred; requires SPEC.md §5 ABI bump) or consolidate via a shared helper. Tracked in [SPIKE] iterate-render-resourceresidencyexceeded-srp (#874).
 - `StaleResourceHandle` — `resources/handle_table.cpp::SlotTable::lookup` (generation mismatch).
 - `ResourceRoleMismatch` — `resources/imported.cpp::ImportRegistry::release` (wrong release API for handle's lifetime kind).
 - `ResourceImportRefused` — `resources/imported.cpp::ImportRegistry::declare_write` (write-on-read-borrow).
@@ -1265,9 +1271,9 @@ SRP boundary is being violated and a refactor is required.
 
 ### 10.2 Cross-references
 
-- `SPEC.md` §10.1 — closed sum (eighteen variants; this design adds
-  `StaleResourceHandle` and `ResourceRoleMismatch` as ABI additions,
-  plus adds `tags::sampler` to the §5 handle catalog).
+- `SPEC.md` §10.1 — closed sum (twenty design-name rows / 24 §5 enumerators;
+  this design adds `StaleResourceHandle` and `ResourceRoleMismatch` as ABI
+  additions, plus adds `tags::sampler` to the §5 handle catalog).
 - `SPEC.md` §10.2 — recovery ladder.
 - `SPEC.md` §10.3 — per-variant rows. This design's contributions map
   to §10 design-name rows as follows:

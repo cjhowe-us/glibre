@@ -2709,7 +2709,7 @@ strategy, severity, and capability-fallback path. Adding or removing a
 variant is a render-plugin ABI bump (per `reviews/decisions/error-model.md`
 §"Composition Rules" item 5 and §3.2 collapse #5 of this spec).
 
-### 10.1 The closed sum (eighteen variants)
+### 10.1 The closed sum (twenty design-name rows; 24 §5 enumerators)
 
 The §5 stub publishes the canonical enumerator names; §10 names them in
 the documentation form below and notes the §5 spelling in parentheses
