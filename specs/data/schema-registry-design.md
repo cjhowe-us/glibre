@@ -179,11 +179,17 @@ Container choice rationale (per PHILOSOPHY §11 / EASTL replaces
   `RegistryEntry` is the trivially-copyable POD declared in
   `specs/data/SPEC.md` §5 (registry.hpp stub) — see §3.2 below.
 - **`eastl::hash_map<eastl::string_view, std::uint32_t>` `by_fqn_index_`** —
-  optional accelerator the cold-path admission paths (§3.5 path C)
-  use to detect FQN collisions in `O(1)`. Hot-path serdes never
-  touches it; the codegen-emitted descriptor pointer (§5) bypasses
-  the map entirely. Built lazily on first cold-path miss; sized
-  against the descriptor reserve so it never rehashes mid-session.
+  accelerator the cold-path admission paths (§3.5 path C) use to
+  detect FQN collisions in `O(1)`. Hot-path serdes never touches it;
+  the codegen-emitted descriptor pointer (§5) bypasses the map
+  entirely. Built **eagerly** during static-init: `register_one`
+  (§3.7 step 4) inserts one entry per registered FQN, so the map is
+  fully populated before `commit_static_init` publishes `size_`.
+  Pre-sized against the descriptor reserve so it never rehashes
+  mid-session. Eager population is required for correct duplicate-FQN
+  detection in step 2 of `register_one` — a lazy map would yield
+  false-negative collision checks for entries added before the first
+  cold-path miss.
 - **`eastl::vector<MigrationEntry>` `chain_pool_`** — every per-FQN
   `MigrationChain` is a contiguous slice of this pool. The
   `RegistryEntry::migrations` span borrows into the pool. Single
@@ -410,9 +416,10 @@ cost class:
 path. Implemented as a binary search over the FQN-sorted `entries_`
 vector (`specs/data/SPEC.md` §4.5 inv. 3); allocation-free,
 branch-predictable, never touches the hash map. Returns
-`const RegistryEntry*` (nullptr on miss — translated into
-`data::Error::SchemaUnknown` by the calling envelope serdes per
-`specs/data/SPEC.md` §10.2). **Per the hot/cold split (§5 below),
+`std::expected<const RegistryEntry*, data::Error>` — on a miss the
+unexpected value carries `data::Error{ .tag = ErrorTag::SchemaUnknown }`;
+the calling envelope serdes propagates this error to its own caller per
+`specs/data/SPEC.md` §10.2. **Per the hot/cold split (§5 below),
 envelope serdes calls this path *exactly once per FQN per session*:
 at codegen-emitted thunk static-init or at the hot-reload barrier's
 `SchemaRegistryChange` notification handler. The resolved
@@ -661,8 +668,11 @@ namespace glibre::types {
 
 class SchemaRegistry {
 public:
+    // Returns the entry for `schema`, or unexpected(data::Error{
+    //   .tag = ErrorTag::SchemaUnknown}) on miss.
+    // noexcept — error is returned as a value, never thrown.
     [[nodiscard]] auto lookup(SchemaId schema) const noexcept
-        -> const RegistryEntry*;
+        -> std::expected<const RegistryEntry*, data::Error>;
 
     [[nodiscard]] auto entries() const noexcept
         -> std::span<const RegistryEntry>;
@@ -680,33 +690,37 @@ private:
 The class declaration is exactly what `specs/data/SPEC.md` §5
 registry.hpp publishes; this design specifies its semantics, its
 storage, and its concurrency model without widening the surface.
+The `std::expected` return type satisfies `reviews/decisions/error-model.md`
+§"Decision" #1 ("Every public boundary in the engine returns
+`std::expected<T, glibre::Error>`"). `lookup` is reachable from
+cross-context sites (core::HotReloadBarrier §6.3 step 2,
+core::TypeRegistry admission §5 path A, Envelope<T> serdes) and
+therefore qualifies as a public boundary.
 
 ### 4.2 `SchemaRegistry` operations
 
-| Operation               | Signature                                              | Cost            | Discipline                                |
-|-------------------------|--------------------------------------------------------|-----------------|-------------------------------------------|
-| `lookup`                | `(SchemaId) -> const RegistryEntry*`                   | `O(log N)`      | Lock-free; acquire-load on `size_`.       |
-| `entries`               | `() -> std::span<const RegistryEntry>`                 | `O(1)`          | Returned span lives until the next Mode-B swap. |
-| `instance`              | `() -> const SchemaRegistry&`                          | `O(1)` static   | The single live registry; pointer is stable for the live middleman build. |
+| Operation               | Signature                                                                   | Cost            | Discipline                                |
+|-------------------------|-----------------------------------------------------------------------------|-----------------|-------------------------------------------|
+| `lookup`                | `(SchemaId) -> std::expected<const RegistryEntry*, data::Error>`            | `O(log N)`      | Lock-free; acquire-load on `size_`. Returns `unexpected(data::Error{ .tag = ErrorTag::SchemaUnknown })` on miss. |
+| `entries`               | `() -> std::span<const RegistryEntry>`                                      | `O(1)`          | Returned span lives until the next Mode-B swap. |
+| `instance`              | `() -> const SchemaRegistry&`                                               | `O(1)` static   | The single live registry; pointer is stable for the live middleman build. |
 
-`std::expected` is *not* applied to these calls. `lookup` returns
-`nullptr` on miss (the call is structurally `Result<-shaped` only at
-the envelope-serdes layer above; the registry itself is a borrowed
-pointer source). `entries` and `instance` cannot fail — they expose
-existing storage.
+`lookup` returns `std::expected<const RegistryEntry*, data::Error>`
+per `reviews/decisions/error-model.md` §"Decision" #1: every public
+boundary in the engine (including symbols reachable from outside the
+owning context) returns `std::expected<T, glibre::Error>`. Because
+`data::Error` is the context-local arm that composes into
+`glibre::Error`, the per-context form is acceptable at the
+context-internal surface; the ABI boundary still sees the engine-wide
+wrapper. On a miss the return is
+`std::unexpected(data::Error{ .tag = ErrorTag::SchemaUnknown })`.
+`entries` and `instance` cannot fail and return plain types unchanged.
 
-The codegen-emitted serdes layer wraps `lookup`'s `nullptr` into
-`std::unexpected(data::Error{ .tag = ErrorTag::SchemaUnknown,
-.at = WireSite{...} })` (`specs/data/SPEC.md` §10.2 row
-`SchemaUnknown`); the registry surface itself stays
-allocation-free and exception-free.
-
-Per `reviews/decisions/error-model.md` §"Decision" #3 every public
-boundary in the data context is `noexcept`. Per §"Decision" #2 no
-exceptions cross the ABI boundary: `lookup` returns a pointer,
-`entries` / `instance` return references — none can throw. The
-schema-registry public surface inherits the engine-wide rule by
-construction.
+All three operations are `noexcept` per `reviews/decisions/error-model.md`
+§"Decision" #3 (every public boundary in the data context is
+`noexcept`). `std::expected` propagates the miss as a value without
+allocation or exception machinery, satisfying both the `noexcept`
+requirement and the error-model rule simultaneously.
 
 ### 4.3 Loader-internal seam
 
@@ -730,6 +744,87 @@ plugin-abi seam is composed of `glibre_types_abi_hash`,
 trampolines (`reviews/decisions/fory-codegen.md` §"middleman dylib
 exposes"; `specs/data/SPEC.md` §4.3 inv. 4). The registry's
 mutators are not on that list.
+
+#### 4.3-bis Batch-mutation API (Mode-A hot-reload seam)
+
+The hot-reload barrier (§6.3) uses a narrow batch-mutation seam on
+top of the static-init helpers above. This seam is also internal-linkage
+only and never exported as `extern "C"`:
+
+```cpp
+namespace glibre::types::detail {
+
+// Opaque token identifying one in-flight Mode-A append batch.
+// Allocated by begin_batch; consumed by commit_batch or rollback_batch.
+// Non-copyable; move-only. Lives on the loader thread's stack.
+struct BatchToken {
+    std::uint32_t id{};         // monotonically-increasing batch serial
+    std::uint32_t start_size{}; // entries_.size() at begin_batch
+
+    BatchToken(const BatchToken&)            = delete;
+    BatchToken& operator=(const BatchToken&) = delete;
+    BatchToken(BatchToken&&)                 = default;
+    BatchToken& operator=(BatchToken&&)      = default;
+};
+
+// Begin a new Mode-A append batch. Must be called from the barrier's
+// loader-thread, at phase-8 entry only (§6.1 inv. 1). Returns the
+// token the caller must pass to commit_batch or rollback_batch.
+// Pre-condition: no batch currently open on this registry instance.
+[[nodiscard]]
+BatchToken begin_batch(SchemaRegistry&) noexcept;
+
+// Commit an in-flight batch: atomically publishes all entries appended
+// since begin_batch (i.e. entries_[token.start_size..size_)) by
+// advancing the registry's published-size atomic with release semantics
+// (§6.2 inv. 2).
+// Success post-condition: the token is invalidated; the published
+// entry set is extended to include all entries appended since begin_batch.
+// OutOfBudget post-condition: entries_ is truncated back to
+// token.start_size (entries past the reserve ceiling are rolled back);
+// the BatchToken and any chain-pool slices appended during the batch
+// remain valid — the caller MUST call rollback_batch to complete
+// cleanup. The token is NOT invalidated by an OutOfBudget return.
+// Returns: unexpected(glibre::Error{ core::Error::OutOfBudget }) if
+// the reserve was exhausted during the batch. On success returns void.
+// noexcept: yes — the append path is pre-checked at begin_batch.
+[[nodiscard]]
+std::expected<void, glibre::Error> commit_batch(SchemaRegistry&, BatchToken&) noexcept;
+
+// Roll back an in-flight batch: truncates entries_ back to
+// token.start_size and tombstones any chain-pool slices added during
+// the batch. Leaves the registry byte-identical to its state at
+// begin_batch. Invalidates the token. Always noexcept; the rollback
+// path must not fail.
+void rollback_batch(SchemaRegistry&, BatchToken&) noexcept;
+
+}  // namespace glibre::types::detail
+```
+
+**Contracts:**
+
+- `begin_batch` / `commit_batch` / `rollback_batch` must be called on
+  the same loader thread that holds the barrier's exclusive lock (§6.1
+  inv. 1). No inter-thread transfer of `BatchToken` is permitted.
+- `size_` (the publicly-visible entry count, acquired by readers via
+  acquire semantics, §6.2) is **not advanced** until `commit_batch`
+  returns successfully. Readers racing the append see the pre-batch
+  snapshot; the release fence in `commit_batch` ensures they see the
+  full committed set after the fence.
+- If `rollback_batch` is called without a preceding `begin_batch`, the
+  behaviour is undefined (debug builds assert).
+- After a **successful** `commit_batch`, or after any `rollback_batch`,
+  the `BatchToken` is invalidated; reuse is undefined.
+- `glibre::Error{ core::Error::OutOfBudget }` from `commit_batch`
+  is a **failure return**: `entries_` has been truncated back to
+  `token.start_size` (no new entries are visible to readers), but
+  chain-pool slices allocated during the batch are not yet cleaned up,
+  and the `BatchToken` remains valid. The caller **must** call
+  `rollback_batch` after an `OutOfBudget` return to complete chain-pool
+  cleanup; `rollback_batch` then invalidates the token. The engine-wide
+  `glibre::Error` wrapper is used (not the bare `core::Error`) per
+  `reviews/decisions/error-model.md` §"Decision" #1 (public
+  boundaries return `std::expected<T, glibre::Error>`).
 
 ### 4.4 No reflective surface
 
@@ -787,8 +882,14 @@ namespace glibre::types::detail {
 
 template <class T>
 auto resolve_entry_for() noexcept -> const RegistryEntry* {
-    static const RegistryEntry* cached =
-        SchemaRegistry::instance().lookup(SchemaId{fqn_for<T>()});
+    static const RegistryEntry* cached = []() -> const RegistryEntry* {
+        auto result = SchemaRegistry::instance().lookup(SchemaId{fqn_for<T>()});
+        // Schema must be present at codegen-emitted static-init time; absence is
+        // a fatal misconfiguration (the codegen tool guarantees registration
+        // occurs before any thunk is reachable).
+        GLIBRE_ASSERT(result.has_value(), "SchemaRegistry: missing entry for T at thunk init");
+        return result.value();
+    }();
     return cached;
 }
 
@@ -801,9 +902,13 @@ auto resolve_entry_for() noexcept -> const RegistryEntry* {
    registry reserves capacity for the codegen-emitted descriptor
    count plus the §3.7 reserve at `_registry.cpp` static-init;
    subsequent appends in Mode-A reload (§8 below) consume from the
-   reserve without reallocation. Exhausting the reserve refuses
-   with `data::Error::OutOfBudget` (registered through `core` per
-   `reviews/decisions/error-model.md`).
+   reserve without reallocation. Exhausting the reserve refuses with
+   `glibre::Error{ core::Error::OutOfBudget }` (a resource-allocation
+   failure in the core error enum, not a schema-semantic failure and
+   therefore not a `data::ErrorTag` arm — per
+   `reviews/decisions/error-model.md` §"Type Sketch" and
+   §"Composition Rules" #2; surfaced through the engine-wide
+   `glibre::Error` wrapper per §"Decision" #1).
 2. **`RegistryEntry*` handed out by `lookup` remains valid for the
    live registry instance's lifetime.** Cached pointers in
    compiled serdes thunks survive across frame boundaries and
@@ -871,7 +976,8 @@ size_.store(next_idx + 1, std::memory_order_release);   // 2. Publish.
 
 // Read side (any thread):
 const auto sz = size_.load(std::memory_order_acquire);  // 3. Sync.
-if (idx >= sz) return nullptr;                          // miss → SchemaUnknown.
+if (idx >= sz) return std::unexpected(                  // miss → SchemaUnknown.
+    data::Error{ .tag = data::ErrorTag::SchemaUnknown });
 return &entries_[idx];                                  // 4. Plain load, fenced.
 ```
 
@@ -909,9 +1015,10 @@ Per `specs/data/SPEC.md` §8.2 and `reviews/decisions/hot-reload-protocol.md`
    that gates `core::TypeRegistry` per §6 of its design).
 2. **Schema-set continuity check (`migrate(...)` step 1).**
    For every FQN registered in the outgoing snapshot, the
-   barrier calls `incoming.lookup(fqn)`. A nullptr return →
-   `data::Error::SchemaMigrationFailure` (`specs/data/SPEC.md`
-   §8.2 step 1) — refuse the swap.
+   barrier calls `incoming.lookup(fqn)`. A miss — indicated by
+   the returned `std::expected` holding an unexpected value —
+   causes the barrier to return `data::Error{ .tag = ErrorTag::SchemaMigrationFailure }`
+   (`specs/data/SPEC.md` §8.2 step 1) — refuse the swap.
 3. **Per-FQN version-chain query.** For every FQN whose stored
    version differs from `incoming.lookup(fqn)->version`, the
    barrier dispatches the migration chain via
@@ -1090,11 +1197,12 @@ through `lookup(fqn)->migrations`.
 
 ```cpp
 // Inside MigrationDispatcher (#738), at HotReloadBarrier step 3.
-const auto* entry = SchemaRegistry::instance().lookup(SchemaId{fqn});
-if (entry == nullptr) {
+auto entry_result = SchemaRegistry::instance().lookup(SchemaId{fqn});
+if (!entry_result.has_value()) {
     return std::unexpected(data::Error{ .tag = ErrorTag::SchemaMigrationFailure,
                                         .step_schema = SchemaId{fqn} });
 }
+const auto* entry = entry_result.value();
 for (auto v = stored_version; v < entry->version; ++v) {
     auto step = find_step(entry->migrations, v, v + 1);
     if (step == nullptr) {
@@ -1155,8 +1263,9 @@ The §10 table below transcribes the registry-relevant refusals;
 the authoritative table is `specs/data/SPEC.md` §10.2. The
 registry-specific refusals:
 
-- `SchemaUnknown` — `lookup` miss at the consumer's call site
-  (translated by envelope serdes; the registry returns nullptr).
+- `SchemaUnknown` — `lookup` miss at the consumer's call site;
+  `lookup` returns `std::unexpected(data::Error{ .tag = ErrorTag::SchemaUnknown })`
+  and the caller (envelope serdes or barrier) propagates that error.
 - `SchemaRegistryConflict` — duplicate FQN at static-init.
 - `SchemaMigrationFailure` — schema-set continuity refusal at
   the barrier.
@@ -1304,7 +1413,7 @@ sum (with §3.8 amendment):
 
 | Arm                          | Trigger                                                                                                                  | Detection point                                                | Payload                                  | Recovery                            | Severity              | core::Error mapping                  |
 |------------------------------|--------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------|------------------------------------------|-------------------------------------|-----------------------|---------------------------------------|
-| `SchemaUnknown`              | `lookup(fqn)` returns nullptr at envelope serdes; FQN not in live registry.                                              | Cached resolution at thunk static-init; barrier diff path.     | `at.schema = fqn`, `at.offset = 0`       | refuse decode (envelope path); refuse load (barrier). | error / warn          | None — passed through `glibre::Error::Variant` (deserialize); wraps `core::Error::SchemaMigrationFailed` (barrier removed-FQN). |
+| `SchemaUnknown`              | `lookup(fqn)` returns `unexpected(data::Error{ .tag = SchemaUnknown })` at envelope serdes; FQN not in live registry. | Cached resolution at thunk static-init; barrier diff path.     | `at.schema = fqn`, `at.offset = 0`       | refuse decode (envelope path); refuse load (barrier). | error / warn          | None — passed through `glibre::Error::Variant` (deserialize); wraps `core::Error::SchemaMigrationFailed` (barrier removed-FQN). |
 | `SchemaRegistryConflict`     | Duplicate FQN at static-init insertion sequence step 2 (§3.7).                                                           | `register_one` collision check.                                | `step_schema = duplicated_fqn`           | process abort — `std::abort()`.     | fatal                 | None — fatal at static-init never reaches the loader. |
 | `SchemaMigrationFailure`     | Schema-set continuity check refuses (§8.1 row "removed FQN" / "version regression").                                     | `migrate(...)` step 1 (§8.2 of SPEC).                          | `step_schema = removed_or_regressed_fqn` | refuse load — Mode A: rollback batch; Mode B: drop new instance. | warn                  | `core::Error::SchemaMigrationFailed`. |
 | `MigrationStepMissing`       | A `MigrationChain` for a known FQN lacks an entry whose `from_version` matches the inbound version.                       | `MigrationDispatcher::dispatch` (§8.2 above).                  | `step_schema`, `step_from`, `step_to`    | refuse decode / refuse load.        | error / warn          | `core::Error::SchemaMigrationFailed` (collapses with `SchemaMigrationFailure`). |
@@ -1342,21 +1451,24 @@ detect:
 These arms surface elsewhere in the data context; the registry's
 public surface stays narrow.
 
-### 10.3 SPEC §10.1 amendment required
+### 10.3 SPEC §10.1 amendment (addressed in follow-up)
 
-Adopting `SourceHashMismatch = 10` requires an in-place amendment
+Adopting `SourceHashMismatch = 10` required an in-place amendment
 to `specs/data/SPEC.md` §10.1's `ErrorTag` enumerator and §10.2's
-per-arm table. The amendment ships in **the same PR that lands
-this design** — SPEC §10's closed-enumeration discipline mandates
-co-shipping. The amendment is one new row in the table, four new
-lines in the enumerator, and one bullet under §10.4 logging
-discipline (the new arm is `warn`-severity, identical to existing
-hot-reload-refusal arms; no new spdlog level mapping).
+per-arm table. The amendment was not included in the PR that
+originally landed this design (PR #833) — SPEC §10's
+closed-enumeration discipline mandates co-shipping, and the split
+created a 9-arm SPEC enum vs. a 10-arm design. This was identified
+in the round-1 review (finding HIGH-1) and addressed by adding:
 
-(Implementation note: this design's PR carries the amendment
-inline, alongside the new `specs/data/schema-registry-design.md`
-file. The §3.8 sketch above is the authoritative per-arm
-specification; SPEC §10 is updated to reference it.)
+- `SourceHashMismatch = 10` to the `ErrorTag` enum (§10.1).
+- The full trigger/recovery/severity/mapping row to §10.2.
+- The `core::Error::PluginAbiHashMismatch` wrapping row to §10.3.
+- Arm 10 to the loader-handler bullet in §10.4.
+- The `SourceHashMismatch` fixture row to §10.5.
+
+The §3.8 sketch above remains the authoritative per-arm specification.
+SPEC §10.1–§10.5 now reflects it in full.
 
 ## 11. Test plan
 
@@ -1371,8 +1483,8 @@ Location: `tests/data/registry/schema_registry_test.cpp`.
 
 | Case                                       | Asserts                                                                       |
 |--------------------------------------------|-------------------------------------------------------------------------------|
-| `lookup_hit`                               | `lookup(fqn)` for a registered FQN returns non-null; pointer dereferences to expected `(version, source_hash)`. |
-| `lookup_miss`                              | `lookup(fqn)` for an unregistered FQN returns nullptr.                        |
+| `lookup_hit`                               | `lookup(fqn)` for a registered FQN returns a `std::expected` holding a non-null pointer; `*result` dereferences to expected `(version, source_hash)`. |
+| `lookup_miss`                              | `lookup(fqn)` for an unregistered FQN returns an `std::expected` holding `data::Error{ .tag = ErrorTag::SchemaUnknown }`. |
 | `lookup_log_n`                             | `BENCHMARK` over 1k entries asserts ≤ 10 ns per call (§9.2).                 |
 | `entries_canonical_order`                  | `entries()` returns FQN-sorted-ascending span; `is_sorted` over the FQN field. |
 | `instance_singleton`                       | Two calls to `instance()` return references to the same object.               |
