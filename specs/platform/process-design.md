@@ -437,7 +437,8 @@ Properties:
 
 `install_signal(Signal s, SignalHandlerFn fn)`:
 
-**Pre-condition (caller obligation — applies to `glibre_plugin_register`):**
+**Pre-condition (caller obligation — applies to any `glibre_plugin_register` that calls `install_signal`):**
+<!-- matches platform-error-design.md §6.2's per-plugin ownership rule — any peer plugin (e.g. core/crash) installing signals must satisfy the ordering -->
 Plugin's `glibre_plugin_register` MUST call
 `glibre::platform::detail::error::pre_touch_all()` BEFORE invoking
 `Process::install_signal`. `pre_touch_all()` pre-touches the three
@@ -497,10 +498,9 @@ within 256 KiB sub-arena per §9) and calls `sigaltstack(2)`.
 32 KiB equals MINSIGSTKSZ on macOS 26 Apple Silicon (defined in
 `<sys/signal.h>`); using a smaller value causes `sigaltstack(2)` to
 return `EINVAL`, leaving `SA_ONSTACK` unconfigured — exactly the
-SIGSEGV stack-overflow re-fault described above. The sigaltstack budget is pinned
-at MINSIGSTKSZ; argv was trimmed from 64 KiB to 56 KiB to keep the
-§9 sub-arena at ≤ 256 KiB. The alternate stack is critical for
-SIGSEGV on stack overflow: the default-stack handler would re-fault.
+SIGSEGV stack-overflow re-fault described above. Budget arithmetic:
+argv was trimmed 64→56 KiB to keep the §9 sub-arena at 256 KiB
+exactly; full breakdown in §9 table.
 The alt-stack lives for the program's lifetime and is freed by the
 singleton's destructor.
 
@@ -1222,7 +1222,7 @@ Both run on `macos-26-m1` CI only.
 
 ## 12. Open questions
 
-- **[OPEN] Promotion of `process/` from static library to its own
+- **[OPEN] [NON-BLOCKING] Promotion of `process/` from static library to its own
   reloadable `.dylib`.** The current architecture compiles
   `engine/platform/` as a single static library
   `libglibre_platform.a` linked once into the host binary
@@ -1231,7 +1231,7 @@ Both run on `macos-26-m1` CI only.
   promotion happens, the §8.2 clauses are contingency
   documentation. Resolve when (if) a future spike argues for
   hot-swapping platform itself — currently no plan calls for it.
-- **[OPEN] Out-of-process crash-monitor binary (R-14.4.7).** SPEC
+- **[OPEN] [NON-BLOCKING] Out-of-process crash-monitor binary (R-14.4.7).** SPEC
   §3 refusal list defers it; this design holds the line. Promotion
   trigger: a second consumer of crash-dump capture beyond the
   in-process signal-handler stub (e.g. the editor's
@@ -1243,7 +1243,7 @@ Both run on `macos-26-m1` CI only.
   side (out of `process/` aggregate scope, see §1 refusal of
   subprocess spawn) and the *forwarding* is a new `process/`
   surface gated by a feature flag.
-- **[OPEN] Subprocess-spawn surface for tools.** Tools
+- **[OPEN] [NON-BLOCKING] Subprocess-spawn surface for tools.** Tools
   (`glibre-cook`, `glibre-codegen`, `glibre-foryc`) are launched
   by the editor through the OS shell today. If the editor's
   tool-orchestration spike argues for an in-engine spawn API
@@ -1281,7 +1281,7 @@ Both run on `macos-26-m1` CI only.
   crash-handler plugin (#TBD) is drafted; the trade-off is ABI
   surface growth vs giving the crash-handler enough info to record
   register state.
-- **[OPEN] Env-var change at runtime.** §3.2 rule #2 documents
+- **[OPEN] [NON-BLOCKING] Env-var change at runtime.** §3.2 rule #2 documents
   "out-of-band `setenv` is unsupported and undefined". A future
   consumer (e.g. an editor "edit env var, restart engine"
   workflow) might want a sanctioned mutation API. Routed to a
@@ -1296,7 +1296,7 @@ Both run on `macos-26-m1` CI only.
   buffer), file a SPEC §9.2 amendment to grow the sub-arena
   ceiling. Defer until the in-process crash handler is drafted and
   benchmarked.
-- **[OPEN] Closed signal-enum growth.** §3.4 documents which
+- **[OPEN] [NON-BLOCKING] Closed signal-enum growth.** §3.4 documents which
   signals are exposed today (6) and why others are not. A
   future consumer (e.g. SIGUSR1 used as a reload trigger from a
   CI script) requires a strict expansion. Adding to the enum
