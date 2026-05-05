@@ -501,12 +501,13 @@ Failure shape (per `error-model.md` and `SPEC.md` §10):
 
 `MeshletGroupView` is the only public projection of a DAG node; it
 strips parent/child adjacency and the watertight mask (those are
-internal). The struct is POD and carries exactly five field groups:
-the §3.3 stored fields (`MeshletGroupHandle handle`, `lod_level`,
-`error_bound`, `parent_count`, `child_count`); `meshlet_count`; and
-three view-time-derived fields — `MeshletGroupHandle` (the public
-handle), `BoundingCone cone{}`, and `bool fully_resident` — all three
-sourced from `SPEC.md` §5 lines 1630–1639.
+internal). The struct is POD and carries exactly eight fields
+(authoritative: `SPEC.md` §5 lines 1630–1639): six sourced from §3.3
+stored fields — `MeshletGroupHandle handle`, `LODBand band`,
+`BoundingSphere bounds`, `float screen_space_error`,
+`MaterialHandle material`, `uint32_t meshlet_count` — plus two
+view-time-derived fields populated by `resolve_group` at resolve time:
+`BoundingCone cone` and `bool fully_resident`.
 
 - **`BoundingCone cone{}`** — the aggregate bounding cone over the
   group's constituent meshlet cones, computed at resolve time by
