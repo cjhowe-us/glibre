@@ -80,7 +80,7 @@ Terms used unchanged in code (identifiers, file names, comments).
 | `EcsSnapshot` | A Fory-encoded serialisation of a `World` (or sub-aggregate) used both as input baseline and as `AssertEcsSnapshot` reference. |
 | `TraceReport` | Structured per-run output: pass/fail, failing assert id, captured artefacts (diff image, snapshot diff), wall-clock duration, frame count, `EnvHash`. |
 | `DivergenceReport` | Specialised `TraceReport` produced when two replays of the same trace diverge — names the first differing `FrameIndex` and op. |
-| `E2eError` | Closed sum of typed failures (`TraceParse`, `EnvDrift`, `AssertFailed`, `DriverInstall`, `InjectionRefused`, `GoldenMissing`, `Timeout`, `BinaryCrash`). No exceptions cross the boundary. |
+| `E2eError` | Closed sum of typed failures (`TraceParse`, `EnvDrift`, `AssertFailed`, `DriverInstall`, `InjectionRefused`, `InjectionUntrusted`, `GoldenMissing`, `Timeout`, `BinaryCrash`). No exceptions cross the boundary. |
 | `ClosureGate` | The CI step that flips a user-story from "in progress" to "QA-ready" once its referenced traces report green. Required before any manual PASS comment. |
 
 ## 3. Derived From
@@ -693,6 +693,12 @@ each by `RunnerHost`.
 - `OsAutomation` — full-desktop control via synthesised
   global mouse/keyboard. Restricted to isolated CI runners
   by policy; explicitly refused on developer hosts.
+  Backing APIs are *fire-and-forget*: macOS `CGEventPost`
+  is `void` and silently drops events when the binary
+  lacks the OS-level capability (Accessibility /
+  `kTCCServiceAccessibility`). Policy permission alone is
+  therefore insufficient — invariant 5 below adds the
+  capability gate.
 
 **Identity & lifetime.** A value object selected once at
 runner construction and held by the `TraceRunner` for the
@@ -720,6 +726,35 @@ live `RunnerHost` (§4.1.9) and the trace's
 4. **One layer per run.** A run does not switch layers
    mid-trace. Switching would mean two `EnvHash` worlds in
    one report, defeating the gating invariant.
+5. **OS-level capability gate (orthogonal to policy).**
+   Each `OsAutomation` backend MUST verify its host's
+   capability to deliver synthesised input *before* the
+   layer reports `Ok` to the runner; failure returns
+   `E2eError::InjectionUntrusted` (distinct from
+   `InjectionRefused`, which is a *policy* denial — see
+   §4.1.9 inv 2). Per platform: macOS calls
+   `AXIsProcessTrustedWithOptions(NULL)` from
+   `<ApplicationServices/ApplicationServices.h>` (pure-C;
+   preserves the §6.1 no-AppKit / no-second-`.mm`
+   constraint); Windows verifies the process token's
+   UI-access / integrity level required for `SendInput`
+   into elevated targets; Linux verifies write access to
+   `/dev/uinput` (or, on Wayland, the security-context
+   handshake required by the compositor). Rationale:
+   `CGEventPost` is `void` and `SendInput`/`uinput`
+   failures surface only via best-effort `GetLastError`
+   / `errno` channels that a misconfigured CI image will
+   not expose to the test harness — without an explicit
+   capability check, a permit claim is a lie and
+   downstream frame-boundary assertions become silent
+   flakes (image-mint regressions on `ci-isolated` after
+   a TCC.db reset are the canonical failure mode).
+6. **Capability check is mockable.** The capability check
+   is reached through an injectable oracle (`IAxTrustOracle`
+   on macOS and the analogous interfaces on Windows /
+   Linux) so unit tests determine `Trusted` /
+   `Untrusted` deterministically without touching the
+   live host's TCC.db / token / device permissions.
 
 #### 4.1.9 `RunnerHost` — host-environment tag gating injection (value object)
 
@@ -761,7 +796,13 @@ construction and held for the duration of the run.
    Selecting a layer outside its host's set returns
    `E2eError::InjectionRefused`. The §3.2 #2 collapse
    demands that this table be the only place such permissions
-   live.
+   live. Policy permission and OS-level capability are
+   orthogonal: this table answers *"may this host run
+   this layer?"*; §4.1.8 inv 5 answers *"is this binary
+   actually capable on this host?"*. Both must hold —
+   failures map to `InjectionRefused` (policy) and
+   `InjectionUntrusted` (capability) respectively, and
+   the runner never collapses the two.
 3. **Detection is conservative.** Ambiguous environments
    (e.g. a CI runner that exposes a display server but is
    not declared isolated) downgrade to `ci-headless`, never
@@ -937,7 +978,18 @@ as one arm and is the only e2e-internal error surface.
   `platform::InputDriver` seam failed (e.g. the binary
   under test does not expose the seam).
 - `InjectionRefused` — the requested `InjectionLayer` is
-  not permitted on the live `RunnerHost`.
+  not permitted on the live `RunnerHost` (policy denial
+  per §4.1.9 inv 2).
+- `InjectionUntrusted` — the requested `InjectionLayer`
+  is policy-permitted on the live `RunnerHost`, but the
+  binary lacks the OS-level capability required to
+  deliver events (macOS: Accessibility /
+  `kTCCServiceAccessibility`; Windows: UI-access /
+  integrity level for `SendInput`; Linux: `/dev/uinput`
+  permission or Wayland security context). A
+  host-provisioning defect, not a policy denial — kept
+  distinct from `InjectionRefused` per §4.1.8 inv 5 so
+  on-call diagnostics aren't ambiguous.
 - `GoldenMissing` — a `GoldenStore`-relative path the
   manifest cited does not exist at gate time.
 - `Timeout` — the run exceeded its declared frame budget
@@ -1257,6 +1309,7 @@ struct TraceParse        { constexpr bool operator==(const TraceParse&)        c
 struct EnvDrift          { constexpr bool operator==(const EnvDrift&)          const noexcept = default; };
 struct DriverInstall     { constexpr bool operator==(const DriverInstall&)     const noexcept = default; };
 struct InjectionRefused  { constexpr bool operator==(const InjectionRefused&)  const noexcept = default; };
+struct InjectionUntrusted{ constexpr bool operator==(const InjectionUntrusted&)const noexcept = default; };
 struct GoldenMissing     { constexpr bool operator==(const GoldenMissing&)     const noexcept = default; };
 struct Timeout           { constexpr bool operator==(const Timeout&)           const noexcept = default; };
 
@@ -1280,6 +1333,7 @@ using Error = eastl::variant<
     AssertFailed,
     DriverInstall,
     InjectionRefused,
+    InjectionUntrusted,
     GoldenMissing,
     Timeout,
     BinaryCrash>;
@@ -1845,7 +1899,7 @@ public:
 
     // Drive `trace` to completion. Always emits a TraceReport
     // (§4.1.7 inv 5) — pass, fail, parse, drift, golden-missing,
-    // driver-install, injection-refused, timeout, binary-crash.
+    // driver-install, injection-refused, injection-untrusted, timeout, binary-crash.
     [[nodiscard]] auto run(const Trace& trace) noexcept -> Result<TraceReport>;
 
     // Divergence-mode run: compares against `config.compare_to` and
@@ -1865,6 +1919,7 @@ public:
                 else if constexpr (std::is_same_v<T, AssertFailed>) return 12;
                 else if constexpr (std::is_same_v<T, DriverInstall>)return 13;
                 else if constexpr (std::is_same_v<T, InjectionRefused>) return 14;
+                else if constexpr (std::is_same_v<T, InjectionUntrusted>) return 18;
                 else if constexpr (std::is_same_v<T, GoldenMissing>) return 15;
                 else if constexpr (std::is_same_v<T, Timeout>)      return 16;
                 else if constexpr (std::is_same_v<T, BinaryCrash>)  return 17;
@@ -1991,9 +2046,12 @@ engine/e2e/
       per_process_macos.{hpp,cpp}    # CGEventPostToPid (PerProcess on macOS).
       per_process_windows.{hpp,cpp}  # PostMessage + PostThreadMessage (PerProcess on Windows).
       per_process_linux.{hpp,cpp}    # xdotool --window IPC (PerProcess on Linux).
-      os_automation_macos.{hpp,cpp}    # CGEventPost (OsAutomation; ci-isolated only).
-      os_automation_windows.{hpp,cpp}  # SendInput (OsAutomation; ci-isolated only).
-      os_automation_linux.{hpp,cpp}    # XTest / uinput (OsAutomation; ci-isolated only).
+      os_automation_macos.{hpp,cpp}    # CGEventPost (OsAutomation; ci-isolated only; AX-trust gated, §4.1.8 inv 5).
+      os_automation_windows.{hpp,cpp}  # SendInput (OsAutomation; ci-isolated only; UI-access gated, §4.1.8 inv 5).
+      os_automation_linux.{hpp,cpp}    # XTest / uinput (OsAutomation; ci-isolated only; uinput-permission gated, §4.1.8 inv 5).
+      ax_trust_oracle_macos.{hpp,cpp}  # `IAxTrustOracle` impl: `AXIsProcessTrustedWithOptions(NULL)` (§4.1.8 inv 6).
+      ui_access_oracle_windows.{hpp,cpp} # Capability oracle for SendInput (§4.1.8 inv 6).
+      uinput_oracle_linux.{hpp,cpp}    # Capability oracle for /dev/uinput + Wayland security context (§4.1.8 inv 6).
     runner/                      # Aggregate §4.1.7 + §4.1.12 + §4.1.14.
       runner.{hpp,cpp}           # `TraceRunner::create` / `run` / `run_with_compare`.
       gate.{hpp,cpp}             # EnvHash gate + golden-presence probe (one site).
@@ -2043,9 +2101,14 @@ require Cocoa / Foundation; per `platform` §6.2 the engine's lone
 Objective-C++ TU is `engine/platform/src/surface/bridge.mm`. The e2e
 plugin therefore does **not** introduce a second `.mm` — the macOS
 `OsAutomation` body links against `CoreGraphics` (which exposes
-`CGEventPost` as a pure-C API) and never includes `<AppKit/AppKit.h>`.
-If a future need pulls in AppKit, that surface routes through a new
-`platform`-side bridge function rather than a second e2e-side `.mm`.
+`CGEventPost` as a pure-C API) and against `ApplicationServices`
+(which exposes `AXIsProcessTrustedWithOptions` — the §4.1.8 inv 5
+capability gate — as a pure-C API). Both headers are pure-C C
+interfaces; neither include nor transitively pull in
+`<AppKit/AppKit.h>` or any Objective-C runtime headers, so the
+no-second-`.mm` constraint is preserved. If a future need pulls in
+AppKit, that surface routes through a new `platform`-side bridge
+function rather than a second e2e-side `.mm`.
 
 ### 6.2 Replay loop — the frame-locked driver
 
