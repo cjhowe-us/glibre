@@ -20,7 +20,7 @@
 > `reviews/decisions/plugin-abi.md`,
 > `reviews/decisions/hot-reload-protocol.md`,
 > `reviews/decisions/fory-codegen.md`, and
-> `reviews/decisions/frame-phases.md`. Sibling siblings on `main`:
+> `reviews/decisions/frame-phases.md`. Siblings on `main`:
 > `specs/data/reflection-blob-design.md` (a different subject — the
 > editor descriptor table for Fory schemas; SRP fence in §1 below),
 > `specs/data/schema-registry-design.md`. All conclusions independently
@@ -183,7 +183,7 @@ lands in this design or is refused with a one-line rationale.
 | SPEC §7.1 `ReflectionRecord` schema                                                                | **Covered**                         | §7.2 — the Fory schema embeds-by-value into `ShaderArtifactRecord`; tag layout pinned in `data/schemas/shader/ReflectionRecord.fory` per SPEC §7.2.                                                                                                                       |
 | SPEC §7.4 rules 2 + 6 — additive evolution of `ReflectionRecord`; schema migrations at hot-reload  | **Covered**                         | §7.3 — additive-only fields land at fresh tags `since N+1` with deterministic synth defaults; migration providers live in `glibre::shader::migrate::ReflectionRecord_vN_to_vNplus1` per `fory-codegen.md` §"Migration Mechanic".                                          |
 | SPEC §8.2 rule 1 — unaffected `ReflectionBlob`s survive bit-equal across source-change reload      | **Covered**                         | §8.1 — survival is by content-addressed CAS; the ingester is invoked only on the *affected* `(PermutationKey, target)` set.                                                                                                                                              |
-| SPEC §8.4 refusal case 3 — reflection / descriptor-layout failure leaves prior artifact bound      | **Covered**                         | §10 — every reflection refusal arm (`ReflectionExtractionFailed`, `DescriptorFrequencyAmbiguous`, `DescriptorFrequencyMissing`) refuses publish; `ShaderCache::insert` is not called; prior CAS entry remains live.                                                       |
+| SPEC §8.4 refusal case 3 — reflection / descriptor-layout failure leaves prior artifact bound      | **Covered**                         | §10 — every reflection refusal arm (`ReflectionExtractionFailed`, `EntryPointMissing`, `DescriptorFrequencyAmbiguous`, `DescriptorFrequencyMissing`) refuses publish; `ShaderCache::insert` is not called; prior CAS entry remains live.                                 |
 | SPEC §9.3 row "ReflectionBlob"                                                                     | **Covered**                         | §9 — runtime hot-path cost is **0 ms / frame**; cold-start cost is bounded as the ingester does not run in shipping; build-time wall-clock budget per program is in §9.2.                                                                                                |
 | SPEC §10.2 four reflection-relevant arms                                                           | **Covered**                         | §10 — full per-arm contract (trigger, recovery, severity, ingester-internal detection point).                                                                                                                                                                            |
 | `reviews/decisions/error-model.md` `std::expected<T, glibre::Error>` boundary                      | **Covered**                         | §4 surface; the `shader::Error` enum surface rolls into `glibre::Error` via the variant alias; ingester is `noexcept` and returns `std::expected<ReflectionBlob, shader::Error>` directly.                                                                                |
@@ -628,7 +628,7 @@ public:
     // (other operations elided; see SPEC §5 for the full trait)
 
     [[nodiscard]] virtual std::expected<ReflectionBlob, Error>
-    reflect(const ShaderArtifact&) = 0;
+    reflect(const ShaderArtifact&) noexcept = 0;
 };
 
 }  // namespace glibre::shader
