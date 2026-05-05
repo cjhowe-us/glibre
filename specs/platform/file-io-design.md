@@ -58,6 +58,16 @@ atomic-write protocol, the path-root admission rule, the per-token slot
 discipline, or the queue-saturation refusal contract changes, this
 design changes. Anything else is out of scope.
 
+**`OpenMode` encoding.** `OpenMode` is declared in SPEC §5.11 and
+named in the preamble above, but no method in this design's API takes
+an `OpenMode` argument. The operation-named API encodes mode
+implicitly: `read_all` / `read_async` imply read + sequential-access;
+`write_atomic` / `write_atomic_async` imply create-or-replace + write.
+The `OpenMode` enum is retained in SPEC §5.11 for future API
+extensions (e.g. an `open_with_mode` surface allowing append or
+exclusive-create). Its introduction before a second consumer requires
+it is tagged in §12 [OPEN] #9.
+
 ## 2. Requirements Coverage
 
 Mapping of harmonius requirements
@@ -113,13 +123,18 @@ Glibre-native requirements added beyond harmonius:
 
 ```text
 FileIo (root, owned by platform)
-├── PathRoots                  roots_       (sandbox-root registry; §3.2)
-├── eastl::array<Worker, N>    workers_     (N = FileIoConfig.io_thread_budget; §3.4)
-├── SpscRing<Request>          requests_    (engine → workers; bounded; §3.5)
-├── eastl::array<Slot, M>      slots_       (M = N * queue_depth; §3.6)
-├── SlotFreeList               free_slots_  (lock-free LIFO; §3.6)
-├── ReadAllArena               read_arena_  (per-call buffer for sync read_all; §6.9)
-└── PlatformAllocator&         alloc_       (sub-arena handle, ContextTag::platform)
+├── PathRoots                  roots_              (sandbox-root registry; §3.2)
+├── PathInterner               interner_           (uint32_t ↔ CanonicalPath map; §3.5a)
+├── eastl::array<Worker, N>    workers_            (N = FileIoConfig.io_thread_budget; §3.4)
+├── RequestRing<Request>       requests_           (SPSC for N==1 MVP, MPSC for N>1 post-MVP — see §3.5; bounded)
+├── SpscRing<Request>          worker_dispatch_ring_  (worker-0→worker-1 forwarding; owned by FileIo root;
+│                                                  populated by worker 0, consumed by worker 1;
+│                                                  only present when worker_count > 1; null/unused for N==1)
+├── eastl::array<Slot, M>      slots_              (M = N * queue_depth; §3.6)
+├── eastl::array<const char*, M> prefixes_         (parallel prefix array for async error transport; §3.6 / §3.9)
+├── SlotFreeList               free_slots_         (lock-free LIFO; §3.6)
+├── ReadAllArena               read_arena_         (per-call buffer for sync read_all; §6.9)
+└── PlatformAllocator&         alloc_              (sub-arena handle, ContextTag::platform)
 ```
 
 The aggregate owns no OS file handles across calls — each operation
@@ -201,16 +216,29 @@ paths; it consumes whatever absolute paths the composer provides.
 ```cpp
 // platform/src/fileio/token.hpp — internal projection of §5.11 IoToken.
 struct Slot {
-    std::atomic<IoToken::State>          state;        // InFlight | Ready | Cancelled
-    std::atomic<bool>                    abandoned;    // ~IoToken set this
+    std::atomic<IoToken::State>          state;        // InFlight | Ready | Cancelled; enum class : uint8_t
+    std::atomic<bool>                    abandoned;    // ~IoToken sets this; enum class : uint8_t equivalent
+    std::uint16_t                        next_free;    // intrusive free-list link (max 65535 > max M=128)
+    // 4 bytes implicit padding to align result_bytes to 8B boundary
     eastl::span<const std::byte>         result_bytes; // filled before state=Ready (release)
     Result<void>                         err;          // failure code if state=Ready and err is unexpected
     Request                              req;          // bound at enqueue, read by worker
-    std::uint32_t                        next_free;    // intrusive free-list link
 };
+static_assert(sizeof(Slot) <= 64, "Slot must fit one cache line (§3.6 layout table; SPEC §6.5 / §9.2)");
 
 // IoToken::Impl is just &Slot; the public IoToken from §5.11 is a
 // move-only handle that holds slot index + free-list backref.
+//
+// Async-path prefix transport: `prefix` is NOT stored in Slot (adding
+// an 8B pointer would push Slot past 64B — see §3.6 layout table).
+// Instead, FileIo maintains a parallel array:
+//   eastl::array<const char*, M>  prefixes_;
+// indexed by slot id. The worker writes `prefixes_[i]` AFTER the
+// translator runs and BEFORE setting `state = Ready` (release-store).
+// The consumer reads `prefixes_[i]` AFTER observing `state == Ready`
+// (acquire-load). The release/acquire on `state` provides the ordering
+// guarantee for the parallel-array read; no separate synchronization
+// on `prefixes_[i]` is needed. See §3.9 for the full transport contract.
 ```
 
 Token lifetime invariants (extending §4.6 inv #3):
@@ -244,9 +272,30 @@ ceiling 8) at `FileIo::create`. Each worker is a `std::thread` named
 `"glibre-fileio-N"` whose body is:
 
 ```text
-worker_loop:
+# Worker 0 (dispatcher + executor; N==1 and N==2 MVP)
+worker_0_loop:
     while (!stopping):
-        slot = requests_.pop_blocking()        # SPSC dequeue (§3.5)
+        slot = requests_.pop_blocking()        # SPSC dequeue from main ring (§3.5)
+        if slot.state == Cancelled:
+            release(slot)
+            continue
+        if N > 1 AND worker_0_sub_pool_saturated(slot):
+            # Forward to worker 1 via dispatch ring (§3.5 worker-dispatch-ring)
+            if worker_dispatch_ring_.push(slot) fails:
+                # Dispatch ring full — worker 1 not draining
+                slots_[slot].err = IoFailure { OsCode { ENOBUFS } }
+                set_prefix(prefix::out_of_budget)       # TLS prefix (§3.9)
+                slots_[slot].state = Ready (release)    # §10.1 AsyncQueueFull arm
+            continue
+        do_work(slot)                          # POSIX call; §3.7
+        slot.state = Ready (release)
+        if slot.abandoned:
+            release(slot)                      # §3.3 two-phase abandon
+
+# Worker 1 (secondary executor; N==2 MVP only; dequeues from dispatch ring, not requests_)
+worker_1_loop:
+    while (!stopping):
+        slot = worker_dispatch_ring_.pop_blocking()    # dequeue from dispatch ring (§3.5)
         if slot.state == Cancelled:
             release(slot)
             continue
@@ -254,6 +303,9 @@ worker_loop:
         slot.state = Ready (release)
         if slot.abandoned:
             release(slot)                      # §3.3 two-phase abandon
+
+# N==1: worker_dispatch_ring_ is null/unused; worker 0 runs the first loop only
+#       (the N>1 branch is compiled out or guarded by runtime check).
 ```
 
 The pool is **plain `std::thread`**, not libdispatch / GCD. Reasoning:
@@ -280,32 +332,78 @@ configurations refuse at `create` with `Unsupported`.
 
 ### 3.5 Request queue
 
-A bounded SPSC ring (`detail/spsc_ring.hpp` shared with `event/`) sized
-to `M` entries (one per slot). The producer is the engine driver
-thread (calling `read_async` / `write_atomic_async`); the consumer is
-the worker pool's dispatcher thread (worker 0 is also the dispatcher
-when `N=1`; for `N>1` the workers themselves act as competing consumers
-via a stronger primitive — see below).
+The ring type depends on the worker count `N`.
 
-For `N=1` (no plausible MVP saturation case), the ring is plain SPSC.
-For `N>1`, the ring is **MPSC-from-the-engine + N-way work-stealing
-from workers**. Topology:
+**N == 1 (MVP default).** A bounded SPSC ring (`detail/spsc_ring.hpp`)
+sized to `M = N * queue_depth` entries. One producer (engine driver
+thread) and one consumer (worker 0). This is the same primitive used
+by `event/` and `watcher/`. Worker 0 is both dispatcher and executor.
+Saturation (`head == tail + capacity`) returns `IoFailure` with
+diagnostic prefix `"out-of-budget"` (§10.3.6 / SPEC §4.6 inv #6) —
+never grows.
 
 ```text
 engine driver thread
-        │ push(Request)        (one producer)
+        │ push(Request)          (one producer)
         ▼
-   request_ring (N * queue_depth slots, lock-free MPSC ring)
-        │ pop(Request)
+   spsc_ring (M slots, detail/spsc_ring.hpp)
+        │ pop(Request)           (one consumer)
         ▼
-worker[0] worker[1] ... worker[N-1]   (N consumers; each owns its own ring slice)
+   worker[0]
 ```
 
-The MPSC primitive is the same lock-free ring used by `event/` /
-`watcher/`, with the consumer side widened to N readers via a
-per-worker head index plus a single shared tail. Saturation
-(`tail - any_head >= capacity`) returns `IoFailure` with diagnostic
-prefix `"out-of-budget"` (§10.3.6 / SPEC §4.6 inv #6) — never grows.
+**N > 1 (post-MVP, disabled for MVP).** The SPSC ring cannot serve
+multiple consumers safely — N workers CAS'ing the same head pointer
+would be a data race. For N > 1 the ring is replaced by a separate
+MPSC ring (`detail/mpsc_ring.hpp`) with a per-consumer head index
+and a single shared tail, allowing N consumers to pop without
+contention on a single head. The `event/` / `watcher/` SPSC ring is
+**not** shared on this path; `file-io`'s N > 1 ring is a distinct
+instance with the wider consumer contract. The exact ring contract,
+work-stealing protocol, and fairness guarantees for the N > 1 path
+are captured in §12 [OPEN] #11.
+
+```text
+engine driver thread
+        │ push(Request)          (one producer)
+        ▼
+   mpsc_ring (M slots, detail/mpsc_ring.hpp)
+        │ pop(Request)           (N consumers, each with own head index)
+        ▼
+worker[0] worker[1] ... worker[N-1]
+```
+
+For MVP (`N = 2` default), only the SPSC ring is used; the full
+MPSC promotion is post-MVP — at N=2, the SPSC ring with the
+Worker-0→Worker-1 forwarding ring (described below) handles the N=2
+case without MPSC. Saturation is computed the same way regardless of
+ring type.
+
+**Worker-0 → Worker-1 dispatch primitive (MVP N=2).** When worker 0
+dequeues a `Request` from the main SPSC `requests_` ring, it first
+checks whether its own sub-pool has a free slot for that request type.
+If worker 0's sub-pool is saturated, it forwards the request to worker 1
+via a dedicated **per-pool SPSC ring** (`detail/worker_dispatch_ring.hpp`,
+capacity = `queue_depth / 2`). Worker 1 dequeues exclusively from this
+secondary ring; it does not touch `requests_` directly. The secondary
+ring's capacity of `queue_depth / 2` gives worker 0's wake-up budget
+room to cover half the inflight requests it can service-and-forward before
+blocking.
+
+Saturation contract: if the `worker_dispatch_ring` is full (worker 1 is
+not draining), worker 0 writes `IoFailure { OsCode { ENOBUFS } }` with
+prefix `prefix::out_of_budget` into `slots_[i].err` and sets
+`state = Ready` (release) — identical to the slot-pool exhaustion arm in
+§3.8 step 3 and §10.1 (`AsyncQueueFull` row). Worker 0 does NOT block
+waiting for worker 1 to drain; it refuses immediately via the slot's
+completion path. This preserves the §10.2 invariant that `fileio/` never
+constructs `core::Error` — the platform arm `IoFailure { OsCode { ENOBUFS } }`
+is the correct surface here.
+
+This topology is specific to `N = 2` MVP and the SPSC ring. For N > 1
+post-MVP, the separate MPSC ring (§3.5, N > 1 block) replaces both the
+main SPSC ring and the `worker_dispatch_ring`; the dispatch logic moves
+into the MPSC ring's N-consumer head protocol.
 
 A request is a fixed-size POD:
 
@@ -316,11 +414,82 @@ struct Request {
         WriteAtomic,
     };
     Op                            op;
-    std::uint32_t                 slot_index;     // back-ref into slots_
-    CanonicalPath                 path;           // string_view backed by interner arena
+    // 3 bytes implicit padding to align path_index to 4 B
+    std::uint32_t                 path_index;     // interner slot id — see §3.5a
     eastl::span<const std::byte>  bytes_in;       // Write only; nullptr for Read
+    // Note: slot_index is NOT stored here — worker receives it as a
+    // parameter; storing it in Request wastes 4 B + 3 B alignment pad.
+    // See §3.6 layout table rationale.
+};
+// Request layout: Op(1) + 3 pad + path_index(4) + bytes_in(16) = 24 B
+static_assert(sizeof(Request) == 24, "Request must be 24 B (§3.6 layout table)");
+```
+
+The public `read_async(CanonicalPath p)` / `write_atomic_async(CanonicalPath p, ...)` API
+continues to accept `CanonicalPath` — the path-interner mapping (§3.5a) is performed by
+`FileIo` internally before the `Request` is pushed onto the ring. Workers receive the
+`path_index` and look up the canonical string via the interner's reader-snapshot; they
+never store or copy the `CanonicalPath` string in the `Request` struct itself.
+
+### 3.5a Path interner
+
+`FileIo` maintains a per-instance **path interner** that maps stable `uint32_t` ids to
+`CanonicalPath` values. Its sole purpose is to allow `Request` (a fixed-size POD carried
+through the ring) to reference a path by a 4-byte id rather than by an inline
+`eastl::string_view` (16 B — which would inflate `Request` past the size budget and push
+`Slot` above one cache line).
+
+```cpp
+// platform/src/fileio/path_interner.hpp — internal.
+struct PathInterner {
+    // Bimap: id → CanonicalPath (for worker lookup) and
+    //        CanonicalPath → id (for caller-side intern lookup).
+    // eastl::flat_map provides sorted-vector layout; O(log N) lookup.
+    // N ≤ alive open paths across all in-flight requests; at MVP N ≤ 32
+    // (= M, the slot count), so the map is tiny and cache-resident.
+    eastl::flat_map<std::uint32_t, CanonicalPath> by_id;
+    eastl::flat_map<CanonicalPath, std::uint32_t> by_path;
+    std::uint32_t                                 next_id{0};
 };
 ```
+
+Design rules:
+
+- **Single-writer, lock-free reader.** The interner is written exclusively on the
+  caller thread (the engine driver thread that calls `read_async` / `write_atomic_async`).
+  Synchronisation: lock-free single-writer-multi-reader. The caller thread is the sole
+  writer (inserts new entries before pushing the `Request` to `requests_`). Workers read
+  `by_id[path_index]` after dequeuing the `Request`. Memory ordering is provided by the
+  SPSC ring's release-store-on-push / acquire-load-on-pop contract — no mutex required,
+  consistent with §6.1 rule 6. The interner's storage uses `eastl::flat_map` with stable
+  indices; the worker sees a consistent snapshot of all entries pushed before the `Request`
+  whose `path_index` it now resolves.
+- **Intern on enqueue, release on slot reclaim.** A new `CanonicalPath` is interned at
+  `read_async` / `write_atomic_async` time (before the `Request` is written). The
+  interner entry is retained until the slot is returned to `free_slots_` — at that point
+  the caller thread removes the entry. No lock is required at removal either: the caller
+  thread is the sole writer and removal happens on the caller thread after the worker has
+  already finished reading the entry (the slot's `state = Ready` release-store from the
+  worker provides the happens-before ordering for the subsequent caller-side removal).
+  This keeps the interner size ≤ M (slot count) at all times.
+- **Reverse hash-index for O(1) intern.** The `by_path` flat_map provides the
+  `CanonicalPath → id` reverse lookup needed to intern without inserting a duplicate.
+  At MVP the map is tiny; if a profile shows the O(log N) lookup is a bottleneck,
+  `by_path` can be replaced with an open-addressing hash table — the implementation PR
+  may pick the alternate without a spec change, since the observable contract (4-byte id
+  in `Request`) is unchanged.
+- **No allocation in the request ring.** The interner holds the `CanonicalPath` strings
+  in the platform sub-arena (§9); the `Request` POD contains only the 4-byte id.
+  Enqueue is allocation-free after the interner insert (which may allocate into the
+  arena, but only once per distinct path per flight — the common case is re-use of an
+  already-interned path with zero allocation).
+
+Two concrete consumers that drive the interner:
+
+1. `data::deserialize<T>` path resolver calls `FileIo::read_async` with the asset's
+   canonical path; the interner maps it to an id for the duration of the read.
+2. Shader cache lookup path in `shader` calls `FileIo::read_async` / `write_atomic_async`
+   with the blake3-keyed cache file path; same interner flow.
 
 `Request::bytes_in` is **caller-owned** for the duration of the
 operation. The caller MUST keep the buffer live until
@@ -348,10 +517,51 @@ LIFO populated at construction with every slot index `0..M`.
 
 Slot count `M = N * queue_depth` with default `queue_depth = 16` →
 `M = 32` slots at `N = 2`. `Slot` size is one cache line (64 B on M1):
-`atomic<State>` (1 B) + `atomic<bool>` (1 B) + 6 B pad +
-`span` (16 B) + `Result<void>` (~16 B) + `Request` (~24 B). Pool
-footprint is `64 * 32 = 2 KiB` resident at default config; bounded by
-the §9 8 MiB sub-arena.
+
+| Field          | Type                        | Size | Notes                                      |
+|----------------|-----------------------------|------|--------------------------------------------|
+| `state`        | `atomic<State>` (uint8_t)   | 1 B  | InFlight / Ready / Cancelled               |
+| `abandoned`    | `atomic<bool>` (uint8_t)    | 1 B  | one-shot; ~IoToken sets this               |
+| `next_free`    | `uint16_t`                  | 2 B  | intrusive free-list link; max 65535 > M    |
+| (padding)      | —                           | 4 B  | implicit; aligns `result_bytes` to 8 B    |
+| `result_bytes` | `span<const byte>` (16 B)   | 16 B | ptr + size; filled before state=Ready      |
+| `err`          | `Result<void>` (~16 B)      | 16 B | failure arm if state=Ready and err set     |
+| `req`          | `Request` (24 B)            | 24 B | Op(1)+3pad+path_index(4)+bytes_in(16)      |
+| **Total**      |                             | **64 B** | fits one M1 cache line (§3.6 layout table; SPEC §6.5 / §9.2)  |
+
+`Request` layout detail: `Op` (uint8_t, 1 B) + 3 B implicit padding + `path_index`
+(uint32_t, 4 B) + `bytes_in` (eastl::span = 16 B) = **24 B**. The path interner (§3.5a)
+is what enables `path` to be a 4-byte id rather than a 16-byte `CanonicalPath` (eastl::string_view).
+`static_assert(sizeof(Request) == 24)` in `request.hpp` is the compile-time gate.
+
+The `prefix` (8 B pointer for async error transport) is **not** stored in
+`Slot` — adding it inline would push the struct to 72 B, violating the
+one-cache-line invariant. Instead, `FileIo` maintains a parallel array
+`prefixes_[M]` (option c); see §3.9 for the transport contract and §3.3 for
+the ordering guarantee. The trade-off: `prefixes_[i]` is on a cold path
+(read only after observing `state == Ready`, which is already an error branch
+on a background thread); the extra cache line is acceptable.
+
+`next_free` as `uint16_t` (2 B instead of `uint32_t` 4 B) reclaims 2 B
+within the Slot and limits the free-list to 65 535 entries. The maximum
+plausible slot count is `io_thread_budget_max (8) × queue_depth_max (128)
+= 1 024`; `uint16_t` is far above this ceiling.
+
+`Request::slot_index` (`uint32_t`, 4 B) is dropped from the `Request`
+struct — the worker receives the slot index as a separate parameter and
+the Slot is addressed via `slots_[i]` directly; storing it redundantly
+inside `Request` wastes 4 B + 3 B alignment padding.
+
+`Request::path` was previously a `CanonicalPath` (eastl::string_view = 16 B), which
+inflated `Request` to 40 B and pushed `Slot` to 80 B — violating the one-cache-line
+invariant. The path interner (§3.5a) replaces the inline string_view with a stable
+`uint32_t path_index` (4 B), restoring `Request` to 24 B and `Slot` to 64 B. The
+`static_assert(sizeof(Request) == 24)` in `request.hpp` and `static_assert(sizeof(Slot) <= 64)`
+in `token.hpp` are the compile-time gates.
+
+Pool footprint: `64 × 32 + 8 × 32 + (24 × 8 + ~8B ring metadata) = 2 KiB + 256 B + 200 B ≈ 2.45 KiB` resident
+at default config (`queue_depth=16`, N==2); `worker_dispatch_ring_` contributes only when N>1 (at N==1 the ring
+is unused per §3.5). Bounded by the §9 8 MiB sub-arena.
 
 ### 3.7 Synchronous primitives — POSIX direct
 
@@ -447,8 +657,10 @@ share one body:
 3. Pop a slot from `free_slots_`. Empty →
    `IoFailure { OsCode { ENOBUFS } }` with diagnostic prefix
    `"out-of-budget"` (§10.3.6).
-4. Build the `Request` directly into `slots_[i].req`; set
-   `state = InFlight`, `abandoned = false`.
+4. Intern `p` via the path interner (§3.5a): look up `path_index = interner.intern(p)`
+   (insert if absent; single-writer caller-thread access — see §3.5a; returns a stable `uint32_t`). Build the
+   `Request` directly into `slots_[i].req` using `path_index` (not the raw
+   `CanonicalPath`); set `state = InFlight`, `abandoned = false`.
 5. Push slot index onto `requests_` ring. The push is non-blocking
    and infallible because the ring has the same capacity as
    `free_slots_` — if we got a slot, the ring has room.
@@ -484,11 +696,50 @@ writability refusal: `PermissionDenied` with prefix
 `"read-too-large"`.
 
 The diagnostic prefix is the §10.6 SPEC mechanism for telling adjacent
-arms apart without growing the closed sum. Each prefix lives as a
-`constinit const char*` literal in `fileio/error_prefixes.hpp` and is
-checked via byte-equal comparison at the consumer (no allocation,
-exactly the discipline §10.6 imposes for `"surface-lost"` /
-`"watcher-unavailable"` / `"queue-full"`).
+arms apart without growing the closed sum. There is **no**
+`fileio/error_prefixes.hpp`; FileIo's error translator imports the
+prefix literals directly from `glibre::platform::detail::error::prefix::`
+(defined in `platform-error-design.md §3.3`, compiled into
+`platform/src/detail/error/diagnostic.hpp`). This is the single source of
+truth for all prefix constants. The file-io-specific prefixes registered in
+that namespace are:
+
+| Prefix constant                 | String value            | Source                          |
+|---------------------------------|-------------------------|---------------------------------|
+| `prefix::out_of_budget`         | `"out-of-budget"`       | §3.3 registry (pre-existing)    |
+| `prefix::path_outside_root`     | `"path-outside-root"`   | §3.3 registry (added by §3.9)   |
+| `prefix::project_readonly`      | `"project-readonly"`    | §3.3 registry (added by §3.9)   |
+| `prefix::read_too_large`        | `"read-too-large"`      | §3.3 registry (added by §3.9)   |
+
+Pointer-equality checks at the consumer are valid because all prefix
+pointers originate from the same `constinit const char*` literals in
+`diagnostic.hpp` — single source of truth, program lifetime. Duplication
+in a separate header would break pointer identity (two independent literals
+with identical bytes are not pointer-equal under the C++ standard).
+
+**Prefix transport by path:**
+
+- **Sync path.** The translator runs on the caller thread immediately
+  after the POSIX call returns. The TLS prefix (SPEC §3.3 of
+  `platform-error-design.md`: `set_prefix` / `current_prefix` /
+  `reset_prefix`) is written and read on the same thread before the
+  `unexpected` is returned to the caller — no cross-thread transport
+  needed.
+- **Async path.** The worker thread runs the translator after
+  `do_work(slot)` completes. Because the worker runs on its own
+  thread, its TLS prefix is invisible to the consumer thread that
+  reads `take_result()`. To bridge this, `FileIo` maintains the
+  parallel `prefixes_[M]` array (§3.6). After the translator runs and
+  BEFORE the worker sets `state = Ready` (release-store), the worker
+  captures `current_prefix()` into `prefixes_[slot_index]`. The
+  consumer reads `prefixes_[slot_index]` AFTER observing
+  `state == Ready` (acquire-load) and compares pointer-equal against
+  the `glibre::platform::detail::error::prefix::*` literals from
+  `platform-error-design.md §3.3`. This is safe because all prefix
+  pointers share the same literal address — pointer equality is valid
+  across threads and across TLS boundaries.
+
+  See §12 [OPEN] #10 for the implementation gate on this transport.
 
 ## 4. Public Surface
 
@@ -546,13 +797,21 @@ Per-method contract:
   allowed to be absent (engine-only builds without a cache dir).
   **Refusal arms.** `Unsupported` (config invalid:
   `io_thread_budget == 0` or `> 8`, or all three roots are empty);
-  `IoFailure` (worker thread spawn failed); `OutOfBudget` (cell
-  exhausted; `core::Error::OutOfBudget` per perf-budget.md).
+  `IoFailure` (worker thread spawn failed). Saturation surfaces as
+  `core::Error::OutOfBudget` at the core seam, not as a
+  `platform::Error` arm — see §10.2 for the routing.
 
 - **`read_all(p)`** — synchronous read; off-main-thread asserted in
   debug (§4.6 inv #2). Flow per §3.7.1. Returns a borrowed span;
-  lifetime is until the next `read_all` from the same `FileIo`
-  instance (per §6.9 SPEC). Callers that need persistence copy out.
+  lifetime is valid until the NEXT call to `read_all` ON THE SAME
+  THREAD (§6.9 SPEC: the `read_arena_` is per-`FileIo` instance but
+  recycled per call; concurrent `read_all` calls on different threads
+  are not supported — the synchronous surface is off-main-thread-only
+  and the arena is not designed for concurrent recycling). Callers
+  that need persistence copy out. Async path workers allocate from
+  per-worker arenas (`workerN_arena_`), not from the caller's
+  `read_arena_`; async-completion buffers have lifetime governed by
+  the consumer's `take_result()` reclaim per Slot, see §3.6.
 
 - **`write_atomic(p, bytes)`** — synchronous atomic write per
   §3.7.2. Flow goes through the temp + rename + parent-fsync
@@ -657,8 +916,10 @@ budget, lining up with §9.1 of SPEC):
   the slot's `state`. No memory traffic on idle frames (the caller's
   poll-call site is gated by a `token.has_value()` check that is
   itself a register read).
-- The MPSC request ring's producer side (engine) is touched only at
-  `read_async` / `write_atomic_async` — never on idle frames.
+- The SPSC request ring's producer side (engine, MVP N==1/2 dispatcher
+  mode) is touched only at `read_async` / `write_atomic_async` — never
+  on idle frames. The post-MVP MPSC variant cost analysis is out of scope
+  here; see §12 [OPEN] #11.
 
 Cold-path invariants:
 
@@ -726,9 +987,10 @@ The aggregate runs across **three thread classes**:
    only one transition direction (false → true), no ABA.
 
 6. **No mutexes inside `fileio/`.** The free-list (§3.6) is a
-   treiber-stack; the MPSC ring is the lock-free primitive shared
-   with `event/` / `watcher/`; the worker dispatch is per-worker
-   atomic head indices.
+   treiber-stack; for N == 1 the request ring is `detail/spsc_ring.hpp`
+   (same primitive as `event/` / `watcher/`); for N > 1 the ring is
+   a separate `detail/mpsc_ring.hpp` instance (§3.5); the worker
+   dispatch is per-worker atomic head indices.
 
 ### 6.2 Hot-reload barrier interaction
 
@@ -1302,12 +1564,15 @@ gate's tolerance band.
 - **[OPEN] `read_arena` ownership for async path**: `read_async`
   workers need their own buffers (the synchronous `read_arena_` is
   driver-thread-only-recycled, so worker reads must not share it).
-  This design says "the worker has its own buffer" without pinning
-  the allocation site — the natural choice is one buffer per
-  `Slot` of size `read_arena_bytes / N`, but this couples slot size
-  to read size in a way the synchronous arena does not. The first
-  plan that lands the loader picks an explicit policy; this design
-  permits any policy that respects the §9 8 MiB sub-arena ceiling.
+  Workers allocate from per-worker arenas (`workerN_arena_`) as
+  described in §4.1 (`read_all`) and §3.6 (Slot reclaim). The
+  natural choice is one arena per worker of size
+  `read_arena_bytes / N`, but this couples slot size to read size
+  in a way the synchronous arena does not. The first implementation
+  PR picks the explicit policy; this design permits any policy that
+  respects the §9 8 MiB sub-arena ceiling. Per-worker arena
+  ownership stays strictly within the worker — the consumer's
+  `take_result()` reclaim (Slot → free-list) is the hand-off point.
 
 - **[OPEN] `list_dir` glob / recursion**: the MVP surface accepts a
   flat single-directory enumeration. The editor's content-tree
@@ -1323,3 +1588,92 @@ gate's tolerance band.
   differs. Out of MVP per PHILOSOPHY §1; the §3 surface is
   host-agnostic, only the §3.7 bodies change. Track at the first
   Windows-port spike.
+
+- **[OPEN] `OpenMode` API extension** [NON-BLOCKING]: `OpenMode`
+  (SPEC §5.11) is reserved for future API surfaces such as
+  `open_with_mode(path, OpenMode)`. No existing consumer requires
+  it; the enum is retained so the API slot is named. Promote to a
+  concrete method once a second consumer demonstrates the need (same
+  Occam's-razor gate as `PathOutsideRoot` arm, §12 [OPEN] #4).
+
+- **[OPEN] Async-path prefix transport — parallel `prefixes_` array**
+  [BLOCKING IMPLEMENTATION]: `FileIo` maintains a parallel
+  `eastl::array<const char*, M> prefixes_` alongside `slots_` (§3.6).
+  `prefix` is NOT in `Slot` (would violate the 64 B cache-line invariant).
+  The implementation PR must: (a) import
+  `glibre::platform::detail::error::prefix::*` from
+  `platform/src/detail/error/diagnostic.hpp` (single source of truth —
+  no `fileio/error_prefixes.hpp`); (b) have the worker write
+  `prefixes_[slot_index] = current_prefix()` AFTER the translator runs
+  and BEFORE the `state = Ready` release-store; (c) have the consumer
+  read `prefixes_[slot_index]` AFTER observing `state == Ready`
+  (acquire-load). The file-io-specific prefix constants
+  (`path_outside_root`, `project_readonly`, `read_too_large`) are
+  registered in `platform-error-design.md §3.3` (already added in §3.9).
+  Gate the implementation PR on confirming the §3.3 registry additions.
+
+- **[OPEN] N > 1 MPSC ring for multi-worker file-IO** [NON-BLOCKING]:
+  The N > 1 worker path (§3.5) requires a separate MPSC ring
+  (`detail/mpsc_ring.hpp`) because SPSC cannot safely serve multiple
+  consumer threads. The exact ring contract (per-consumer head index,
+  shared tail, ABA hazards), work-stealing protocol, and fairness
+  guarantees are deferred to a dedicated spike. File-IO N > 1
+  enablement is post-MVP per PHILOSOPHY §5 / plans/mvp.md; the MVP
+  `N = 2` path uses a SPSC ring with dispatcher semantics (§3.5).
+  Track at `[SPIKE] iterate-platform-mpsc-ring`.
+
+- **[OPEN] `FileIoConfig` SPEC §5.11 widening — `project_root` /
+  `user_root` / `cache_root` / `read_arena_bytes` / `queue_depth`**
+  [BLOCKING IMPLEMENTATION]: SPEC §5.11 declares `FileIoConfig` with
+  a single field (`io_thread_budget`). This design adds five additional
+  fields without amending the SPEC: `project_root (CanonicalPath)`,
+  `user_root (CanonicalPath)`, `cache_root (CanonicalPath)`,
+  `read_arena_bytes (std::size_t)`, and `queue_depth (uint32_t)` — see
+  §4.1 `FileIoConfig` block. An implementer reading SPEC §5.11 alone
+  gets the wrong API shape. Two concrete consumers drive the widening:
+  (a) editor sandbox bootstrap, which uses `project_root` to scope its
+  writable path set; (b) shipping runtime, which uses `cache_root` as
+  the shader-cache directory. A SPEC §5.11 amendment spike must land
+  (updating §5.11 with the full `FileIoConfig` struct) **before** the
+  first `envelope.cpp` implementation PR so implementers and the SPEC
+  are in sync.
+
+- **[OPEN] SPEC §6.5 `internal-architecture` SPSC-only language is
+  stale** [NON-BLOCKING]: SPEC §6.5 says "single bounded SPSC ring
+  for all N" — that language pre-dates the §3.5 N == 1 SPSC / N > 1
+  MPSC topology split defined in this design. §3.5 is the canonical
+  authority; SPEC §6.5 is an informative sketch and is now inaccurate.
+  The SPEC §6.5 amendment (updating "single bounded SPSC ring" to
+  reflect the SPSC / MPSC topology) can land alongside the
+  `FileIoConfig` amendment from the BLOCKING entry above, or as a
+  separate doc-only patch. Not blocking the implementation PR since
+  §3.5 governs all implementation decisions.
+
+- **[BLOCKING IMPLEMENTATION] Path interner data structure choice**:
+  `FileIo` owns a per-instance path interner (§3.5a) that maps stable
+  `uint32_t` ids to `CanonicalPath` values. The interner is what enables
+  `Request` to carry a 4-byte `path_index` instead of a 16-byte
+  `CanonicalPath` (eastl::string_view), keeping `Slot` at 64 B. Two
+  concrete consumers drive the interner:
+  (1) `data::deserialize<T>` path resolver — calls `read_async` with
+  asset canonical paths; (2) shader cache lookup path — calls
+  `read_async` / `write_atomic_async` with blake3-keyed cache file paths.
+  Default data structure: `eastl::flat_map<uint32_t, CanonicalPath>`
+  (by_id) + `eastl::flat_map<CanonicalPath, uint32_t>` (by_path, reverse
+  index for O(1) intern lookup at insert time). The implementation PR
+  may substitute an open-addressing hash table for `by_path` if benchmarks
+  show O(log N) lookup is a hot path — the observable contract (4-byte
+  `path_index` in `Request`, ≤ M entries at any time) is unchanged by
+  the substitution. Gate: `static_assert(sizeof(Request) == 24)` in
+  `request.hpp` must pass before the first async enqueue test is written.
+
+- **[OPEN] SPEC §9.2 stale ring sizing** [NON-BLOCKING]: SPEC §9.2 describes
+  sub-arena contents with "SPSC request/response rings (1 MiB each)" — that
+  language pre-dates the ring topology redesign. The actual layout is a 32-slot
+  SPSC `requests_` ring + 8-slot `worker_dispatch_ring_` with no response ring
+  (per §3.5 + §3.6); total 8 MiB budget is unchanged, only the descriptive text
+  drifts. §3.5 and §3.6 are the canonical authority for sizing; §9.2 is
+  informative. The §9.2 amendment (striking "SPSC request/response rings (1 MiB
+  each)" and replacing with a summary matching §3.5/§3.6) can land alongside the
+  §5.11 and §6.5 amendments per the existing §12 entries — NOT blocking
+  implementation.

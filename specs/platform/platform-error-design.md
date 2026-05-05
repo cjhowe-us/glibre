@@ -314,6 +314,10 @@ inline constexpr const char* out_of_budget       = "out-of-budget";
 inline constexpr const char* sdl_empty           = "sdl-empty";
 inline constexpr const char* mach_unmapped       = "mach-unmapped";
 inline constexpr const char* ns_unmapped         = "ns-unmapped";
+// file-io translator prefixes (see file-io-design.md §3.9)
+inline constexpr const char* path_outside_root   = "path-outside-root";  // Reader: take_result() caller distinguishing admission-gate PermissionDenied from OS-level PermissionDenied
+inline constexpr const char* project_readonly    = "project-readonly";   // Reader: write-path take_result() caller distinguishing sandbox writable-scope PermissionDenied from OS-level PermissionDenied
+inline constexpr const char* read_too_large      = "read-too-large";     // Reader: read_all caller distinguishing arena-overflow Unsupported from OS-level Unsupported
 }  // namespace prefix
 
 // Every translator stamps the slot before returning; callers that
