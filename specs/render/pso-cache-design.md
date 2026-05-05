@@ -3,8 +3,10 @@
 > Detailed design for the `render` context's `PSOCache` aggregate
 > (`specs/render/SPEC.md` §4.1.7, §5 `PSOCache` / `PSOKey` /
 > `PSOHandle`, §7.1.2 `PSOCacheRecord`, §8.3.2 hot-reload handoff,
-> §9.5 heap row, the PSO-cache arms of §10 — `PsoCompileFailed`,
-> `ShaderModuleLoadFailed`, `BarrierViolation` aliasing).
+> §9.5 heap row, the PSO-cache arms of §10 — `PipelineCompileFailed`
+> (§10 design-name alias `PsoCompileFailed`) and `ShaderModuleLoadFailed`).
+> `BarrierViolation` (`BarrierConflict`) is a graph-aggregate arm
+> (§10.3) and is NOT a PSO-cache §10 arm.
 >
 > All conclusions re-derived; harmonius prior art
 > (`/Users/cjhowe/Code/harmonius/docs/design/rendering/pipeline-state-cache.md`,
@@ -101,7 +103,7 @@ only (PHILOSOPHY §"How harmonius is used").
 | `pipeline-state-cache.md` R-2.3.9.7 — hot-reload sends `Invalidate(PsoKey)` to the render thread                       | **Covered (re-cast on shader_hash)**   | §8 below: invalidation is keyed on `shader_hash`, not `PSOKey` — one shader edit invalidates the entire `(shader_hash, *)` slice in one call.|
 | `pipeline-state-cache.md` R-2.3.9.8 — descriptor layout inferred from DXIL / SPIR-V reflection once, cached            | **Refused (shader's job)**             | `shader::DescriptorLayout` (spike #753) owns this. The cache embeds nothing layout-shaped; it pins `MTL::ArgumentEncoder` handles by reference. SPEC §3 refusal restated. |
 | `pipeline-state-cache-test-cases.md` — corruption recovery, GC, cold-start latency, hot-reload latency                 | **Covered**                            | §11 test plan below maps each scenario to a Catch2 test under `tests/render/pso_cache/`.                                                       |
-| `pipeline-state-cache.md` "Per-backend serialization API" — D3D12 / Metal / Vulkan branches                            | **Refused (Metal-only)**                | MVP is Metal 4 only (PHILOSOPHY tech stack). The §6 `IBackendArchive` seam is named so post-MVP `D3D12PipelineLibrary` / `VkPipelineCache` slot in without churning the public surface; the implementation has one body. |
+| `pipeline-state-cache.md` "Per-backend serialization API" — D3D12 / Metal / Vulkan branches                            | **Refused (Metal-only)**                | MVP is Metal 4 only (PHILOSOPHY tech stack). The §7.5 `IBackendArchive` seam is a Metal-internal archive-multiplexing abstraction (read-set vs. write-scratch), not a cross-backend seam — its `borrow_for` return type is `NS::SharedPtr<MTL::BinaryArchive>`, a concrete metal-cpp type. No non-Metal backend is in scope for MVP or post-MVP planning under this design. |
 | `pipeline-state-cache.md` mermaid sequence — Editor → HotReloadManager → RenderThread → PsoCache                       | **Refused (no editor in MVP)**         | §8 below: invalidation source is `shader::ShaderCache::invalidate_by_source_hash` plus `core::HotReloadCompleted` event — no editor-specific path. The cache never observes a "manager" intermediate. |
 
 Glibre-native requirements added beyond harmonius:
@@ -146,8 +148,8 @@ Glibre-native requirements added beyond harmonius:
 - **Lookup-miss is success-in-disguise on the warm path, error on
   the unknown-shader path.** §4 splits the public surface so
   `get(PSOKey)` returns `Result<PSOHandle>` whose
-  `unexpected{PsoCompileFailed}` arm is reserved for a build-time
-  failure. A miss whose `shader_hash` is not resident returns
+  `unexpected{render::Error::PipelineCompileFailed}` arm is reserved
+  for a build-time failure. A miss whose `shader_hash` is not resident returns
   `unexpected{ShaderModuleLoadFailed}` — there is no "soft miss"
   category in render (unlike `shader::ShaderCache`'s `nullptr`
   return). This matches SPEC §10's per-variant semantics.
@@ -182,6 +184,9 @@ PSOCache (entity, MetalDevice-owned, §4.1.7)
 ├── std::mutex                                build_mutex_      // guards in_flight_ map
 ├── BinaryArchiveSet                          archives_         // §3.5; MTL::BinaryArchive borrows
 ├── ShaderModuleResolver                      shaders_          // §3.5; borrows from shader::ShaderCache
+├── eastl::hash_map<std::uint64_t,            state_descriptor_table_  // §3.5 step 5; keyed by state_hash
+│                   StateDescriptor>                            // populated by register_state_descriptor
+├── std::shared_mutex                         descriptor_mutex_ // guards state_descriptor_table_
 ├── std::atomic<std::size_t>                  live_bytes_       // residency accounting
 ├── const std::size_t                         budget_bytes_     // 64 MiB (SPEC §9.5 row)
 └── DiagnosticOverlay*                        overlay_          // §4.1 SPEC; eviction reporting
@@ -228,7 +233,7 @@ collision floor at 2^16 entries — comfortably above the §9 working
 set ceiling (~512 resident pipelines at MVP). Collision check is
 performed at insert: when two distinct `shader::ShaderHash` values
 truncate to the same `u64`, the insert is rejected with
-`PsoCompileFailed` (with `detail="shader_hash_collision"` for the
+`render::Error::PipelineCompileFailed` (with `detail="shader_hash_collision"` for the
 log) and the cooker is required to re-permute one of the offending
 artifacts. Probability under MVP scale is ~1 in 2^32; the failure is
 a build-time bug, not a runtime category.
@@ -356,7 +361,7 @@ Metal pipeline descriptor fields.
 The 64-bit truncation's collision floor is 2^16 simultaneous resident
 pipelines; the §9.5 64 MiB cap admits ~512 entries at MVP scale, well
 under the floor. A collision is detected at insert (§3.5 step 6
-below) and refused with `PsoCompileFailed` /
+below) and refused with `render::Error::PipelineCompileFailed` /
 `detail="state_hash_collision"`; resolution path is to bump the
 `state_hash` function (this design's amendment surface).
 
@@ -442,13 +447,18 @@ get(key) :
            return std::unexpected{render::Error::ShaderModuleLoadFailed}
 
     5. // Construct the descriptor matching `state_hash`.
-       desc := state_descriptor_table_.find(key.state_hash)
+       // Acquire descriptor_mutex_ in shared mode (see §6.1 lock ordering).
+       // Released before step 6 so it is never held across the build.
+       {
+         shared_lock(descriptor_mutex_);
+         desc := state_descriptor_table_.find(key.state_hash)
+       } // release shared descriptor_mutex_
        if desc is empty:
            // The caller pinned a state_hash render itself does not
            // know how to descriptor-build. This is a contract breach
            // by the upstream pass-registry; surfaces as a fatal arm.
            in_flight_.erase(key); barrier.notify_all()
-           return std::unexpected{render::Error::PsoCompileFailed}
+           return std::unexpected{render::Error::PipelineCompileFailed}
                   // detail="unknown_state_hash"
 
     6. // Build the PSO. Try the binary archive first.
@@ -471,7 +481,7 @@ get(key) :
     7. if pso == nullptr or err != nullptr:
            record err->localizedDescription() into ErrorContext::detail
            in_flight_.erase(key); barrier.notify_all()
-           return std::unexpected{render::Error::PsoCompileFailed}
+           return std::unexpected{render::Error::PipelineCompileFailed}
 
     8. // Insert into live_ + LRU under exclusive lock.
        size := estimate_size(pso, desc)              // §3.4
@@ -530,8 +540,10 @@ evict_if_needed(incoming_bytes) :
         victim := lru_.front()                      // least-recent
         if victim.pin_count.load() != 0:
             // Pinned — current frame still using it. Walk forward.
-            // In practice the working set is much smaller than the
-            // budget; this loop terminates after at most ~10 hops.
+            // Under typical workloads the hot working set is well below
+            // budget, so this inner walk is short; the formal invariant
+            // is: if every entry is pinned, return without eviction
+            // (§6.2 documents the overshoot path).
             move victim to tail (re-link); restart loop.
             // If every entry is pinned, return without eviction —
             // the caller proceeds and live_bytes_ overshoots until
@@ -616,10 +628,12 @@ Re-stating §1's refusals against the §3 layout to make the boundaries
 mechanically inspectable in code review:
 
 - **No descriptor-builder.** The `state_descriptor_table_` map at §3.5
-  step 5 is populated by upstream pass-registry code — each `Pass`
-  registers its descriptor under a `state_hash` at register-time.
-  The cache stores the inverse mapping for cold-path lookup; it never
-  authors a descriptor.
+  step 5 is populated via `PSOCache::register_state_descriptor` (§4.1 /
+  §4.3). The caller is the pass-registry — concretely `GraphBuilder`'s
+  plugin-register walk, which calls this method once per static
+  `(pass_class, PSOKey)` table entry during `glibre_plugin_register`.
+  The cache stores the resulting `state_hash → StateDescriptor` mapping
+  for cold-path descriptor lookup; it never authors a descriptor.
 - **No shader resolver.** `shaders_.resolve(shader_hash)` walks
   `shader::ShaderCache::get(ShaderHash)` (#755) under a borrowed
   reference; the cache neither owns nor decodes the result.
@@ -671,20 +685,30 @@ public:
     void                            unpin(PSOHandle) noexcept;
 
     // Bulk warm. Builds every key in `keys`; stops at the first
-    // ShaderModuleLoadFailed / PsoCompileFailed and returns. The
+    // ShaderModuleLoadFailed / PipelineCompileFailed and returns. The
     // partial set of warmed keys remains live.
     [[nodiscard]] Result<void>
         warm(eastl::span<const PSOKey> keys) noexcept;
 
     // Drop every entry whose key.shader_hash matches.
     // Returns the count dropped. Called by `shader`'s reload hook.
-    std::size_t
+    [[nodiscard]] std::size_t
         invalidate_by_shader_hash(std::uint64_t shader_hash) noexcept;
 
     // Force LRU drain to `target_size` bytes. Honours pin_count;
     // overshoot logged but never refused.
     void
         evict_lru(std::size_t target_size) noexcept;
+
+    // Descriptor-table registration — called by the pass-registry
+    // (GraphBuilder internals) at glibre_plugin_register time for every
+    // static (pass_class → PSOKey) table entry. The cache's §3.5 step 5
+    // cold path requires a descriptor for every state_hash it encounters;
+    // `get` / `pin` / `warm` return unexpected{PipelineCompileFailed}
+    // (detail="unknown_state_hash") if this seam has not been called first.
+    [[nodiscard]] Result<void>
+        register_state_descriptor(std::uint64_t           state_hash,
+                                  StateDescriptor         desc) noexcept;
 
     // Diagnostic accessors — read-only, lock-free.
     [[nodiscard]] std::size_t live_bytes()  const noexcept;
@@ -701,10 +725,11 @@ protected:
 ```
 
 `pin` / `unpin` / `invalidate_by_shader_hash` / `entry_count` /
-`live_bytes` are §5 amendments this design declares; they land in the
-follow-up plan that lifts spike findings into SPEC text. The spike
-issue brief expressly names `MTLBinaryArchive` persistence (§7) and
-`invalidate_by_shader_hash` (§8) as in-scope deliverables.
+`live_bytes` / `register_state_descriptor` are §5 amendments this design
+declares; they land in the follow-up plan that lifts spike findings into
+SPEC text. The spike issue brief expressly names `MTLBinaryArchive`
+persistence (§7) and `invalidate_by_shader_hash` (§8) as in-scope
+deliverables.
 
 ### 4.2 Surface rules
 
@@ -725,8 +750,8 @@ issue brief expressly names `MTLBinaryArchive` persistence (§7) and
   the holder's pin is live (RAII `PinnedPSO` wrapper or explicit
   `unpin`). A `PSOHandle` whose entry has been evicted is detected
   on dereference (the entry's `shared_ptr` count is checked); a
-  stale handle returns `unexpected{PsoCompileFailed}` from any
-  encoder bind path. In practice no holder sees an evicted handle
+  stale handle returns `unexpected{render::Error::PipelineCompileFailed}`
+  from any encoder bind path. In practice no holder sees an evicted handle
   because every holder holds a pin.
 - **Lookup-miss is not silent.** Unlike `shader::ShaderCache::get`,
   `PSOCache::get` does not have a "soft miss" return shape — every
@@ -742,7 +767,7 @@ issue brief expressly names `MTLBinaryArchive` persistence (§7) and
   `shader_hash` is registered with `shaders_` (i.e. the shader is
   resident); `key`'s `state_hash` was previously registered by an
   upstream pass against the descriptor table. Failure modes:
-  `ShaderModuleLoadFailed`, `PsoCompileFailed`. Wall-time bound:
+  `ShaderModuleLoadFailed`, `PipelineCompileFailed`. Wall-time bound:
   §9.
 
 - **`pin(key) noexcept -> Result<PSOHandle>`** — same as `get` but
@@ -753,7 +778,7 @@ issue brief expressly names `MTLBinaryArchive` persistence (§7) and
   `(pass_class, PSOKey)`; misses run the same §3.5 build path. The
   warmer's per-tick budget (`RenderSettings.warm_per_tick`) caps the
   number of cold builds the register call issues; excess misses
-  return `unexpected{PsoCompileFailed}` /
+  return `unexpected{render::Error::PipelineCompileFailed}` /
   `detail="warm_budget_exhausted"` and the loader logs but proceeds —
   the next tick re-attempts the pin (the new plugin's
   binding-table prebuild is incremental).
@@ -793,6 +818,34 @@ issue brief expressly names `MTLBinaryArchive` persistence (§7) and
 - **`live_bytes() const noexcept`** / **`entry_count() const
   noexcept`** — relaxed atomic loads; no lock acquired. Used by
   §9.6 budget gate and `DiagnosticOverlay`.
+
+- **`register_state_descriptor(state_hash, desc) noexcept ->
+  Result<void>`** — the registration seam that populates
+  `state_descriptor_table_` (§3.1 aggregate member). Called by the
+  pass-registry (concretely `GraphBuilder`'s plugin-register path) for
+  every static `(pass_class → PSOKey)` table entry during
+  `glibre_plugin_register`. Pre-conditions: `state_hash` is the render-
+  context BLAKE3 fingerprint (§3.2.2) for `desc`'s non-shader field set;
+  `desc` is the canonical `MTL::RenderPipelineDescriptor` /
+  `MTL::ComputePipelineDescriptor` configuration produced by the pass
+  class's `describe_pso` factory, with shader functions left null (the
+  cache attaches the `MTL::Library` at build time in §3.5 step 5).
+  Behaviour: idempotent — a second call with the same `state_hash` and
+  byte-equal `desc` is a no-op returning `Result<void>{}`. A collision
+  (same `state_hash`, non-equal `desc`) is a contract violation; returns
+  `unexpected{render::Error::PipelineCompileFailed}` with
+  `detail="state_descriptor_collision"` (this indicates either a
+  `state_hash` function bug or a pass authoring error — it is treated as
+  a fatal configuration error, not a fallback path). Thread-safety: the
+  method acquires `descriptor_mutex_` exclusively. Concurrent `get`,
+  `pin`, and `warm` calls acquire `descriptor_mutex_` in **shared** mode
+  at §3.5 step 5 (descriptor resolution) and release it before entering
+  the Metal build at step 6. This is the complete descriptor-table lock
+  contract; `table_mutex_` is a separate lock governing `live_` / `lru_`
+  and is unrelated to descriptor reads. See §6.1 for the full
+  lock-ordering invariant (`build_mutex_` → `descriptor_mutex_` →
+  `table_mutex_`). The method is not callable after the first `get`/`pin`
+  call on a given `state_hash` — callers must register before warming.
 
 ## 5. Hot / Cold Path Split
 
@@ -835,14 +888,22 @@ phase 8 ownership.
 
 ### 6.1 Locking strategy
 
+- **`std::mutex build_mutex_`** guards the `in_flight_` map. Held
+  only across the per-key barrier insert / wait-handoff; never held
+  across the build itself.
+- **`std::shared_mutex descriptor_mutex_`** guards
+  `state_descriptor_table_`. Acquired in **shared** mode by `get`,
+  `pin`, and `warm` at §3.5 step 5 (descriptor resolution); acquired
+  in **exclusive** mode by `register_state_descriptor` (§4.3).
+  Registration is expected only during `glibre_plugin_register`
+  (single-threaded phase) so the exclusive acquisition does not
+  contend with hot-path shared readers in practice, but the lock is
+  present for correctness in post-MVP editor-hot-reload paths (§8.6).
 - **`std::shared_mutex table_mutex_`** guards the `live_` table and
   `lru_` list. Acquired in shared mode for hot lookups; in exclusive
   mode for inserts, evictions, and `invalidate_by_shader_hash`. The
   exclusive critical section is bounded to a few hashmap operations
   and an LRU re-link; it never spans a Metal pipeline build.
-- **`std::mutex build_mutex_`** guards the `in_flight_` map. Held
-  only across the per-key barrier insert / wait-handoff; never held
-  across the build itself.
 - **Per-key one-shot.** `in_flight_[key]` is a `BuildBarrier` (a
   `std::atomic_flag` plus a `std::condition_variable_any` to wake
   waiters). The first thread to miss `live_` for `key` inserts the
@@ -855,6 +916,15 @@ phase 8 ownership.
   tick_counter_.** All relaxed except where ordering is required:
   `pin_count` increments use `acquire` on read-side, `release` on
   decrement.
+
+**Lock-ordering invariant:** when two or more of these mutexes must be
+held simultaneously, they must be acquired in the order
+`build_mutex_` → `descriptor_mutex_` → `table_mutex_`. The cold build
+path (§3.5) never holds `descriptor_mutex_` and `table_mutex_` at the
+same time — the shared `descriptor_mutex_` is acquired and released at
+step 5, and the exclusive `table_mutex_` is acquired only at step 8 —
+so the ordering is naturally respected by the existing pseudocode.
+Implementations that deviate from this order will deadlock.
 
 ### 6.2 Pin lifetime & eviction safety
 
@@ -987,8 +1057,19 @@ SPEC §7.2.2 names.
 
 ### 7.5 ABI seam (`IBackendArchive`)
 
-The cache talks to the archive via a one-method interface so the
-post-MVP D3D12 / Vulkan ports plug in without churning the cache:
+The cache talks to the archive via a one-method interface whose purpose
+is **Metal-internal archive multiplexing**: the MVP `BinaryArchiveSet`
+manages a read-side set (the on-disk archives loaded at startup) and a
+write-side scratch archive (the per-process `MTL::BinaryArchive` that
+accumulates newly-built PSOs for `flush_to_disk`). The interface lets
+these two faces be swapped in tests and in debug tooling without the
+`PSOCache` cold path caring which face it is talking to.
+
+The interface is **not** a cross-backend seam. `borrow_for` returns
+`NS::SharedPtr<MTL::BinaryArchive>` — a concrete metal-cpp type — which
+no non-Metal implementation could return. Glibre is Metal-only for MVP
+(PHILOSOPHY tech stack); the interface encapsulates archive-set
+multiplexing, not backend portability.
 
 ```cpp
 namespace glibre::render {
@@ -997,15 +1078,16 @@ class IBackendArchive {
 public:
     virtual ~IBackendArchive() = default;
 
-    // Add this archive's contents as a candidate during pipeline build.
-    // Returns the metal-cpp-side MTL::BinaryArchive* for descriptor-
-    // attachment (Render: setBinaryArchives:; Compute: setBinaryArchives:).
+    // Return the Metal binary archive that should be attached during
+    // this key's pipeline build (§3.5 step 6, setBinaryArchives:).
+    // Returns nullptr when no on-disk archive covers this key (cache
+    // miss forces a full driver compile).
     [[nodiscard]] virtual NS::SharedPtr<MTL::BinaryArchive>
         borrow_for(PSOKey) const noexcept = 0;
 
-    // Add a freshly-built PSO to the writable set; the writer is
-    // backed by a per-process scratch MTL::BinaryArchive that is
-    // serialised at PSOCache::flush_to_disk() time.
+    // Record a freshly-built PSO into the write-side scratch archive.
+    // The archive accumulates entries across the process lifetime and
+    // is serialised at PSOCache::flush_to_disk() time.
     [[nodiscard]] virtual Result<void>
         add_to_writable(NS::SharedPtr<MTL::PipelineState>, PSOKey) noexcept = 0;
 };
@@ -1014,8 +1096,8 @@ public:
 ```
 
 MVP implementation: `MetalBinaryArchiveSet` under
-`pso_cache/binary_archive.cpp`. Post-MVP `D3D12PipelineLibrarySet`
-slots into the same trait without any change to `PSOCache`.
+`pso_cache/binary_archive.cpp` — manages the read set (opened from the
+on-disk directory per §7.4) and the per-process write scratch archive.
 
 ### 7.6 What is NOT persisted
 
@@ -1076,6 +1158,16 @@ the plugin image), so the live entries are preserved verbatim across
 the swap. The new plugin's binding tables fix up against the same
 resident pipelines.
 
+For any pass that is newly introduced by the reloaded plugin (not
+present in the old plugin's static table), `register_state_descriptor`
+(§4.3) **must be called before** the pin walk reaches that pass's
+PSOKey; the cold-path descriptor lookup at §3.5 step 5 requires a
+registered `StateDescriptor` and returns
+`unexpected{PipelineCompileFailed}` (detail="unknown_state_hash") if
+it has not been set. The idempotency guarantee in §4.3 means calling
+`register_state_descriptor` for passes that were already registered by
+the old plugin is safe — repeated identical descriptors are no-ops.
+
 The bounded-compile rate (§4.3 `pin` contract) caps misses per tick.
 The post-reload register call is therefore O(passes) atomic-store
 fix-ups + O(distinct PSOKeys) cache-pin calls, identical to the SPEC
@@ -1109,7 +1201,7 @@ the PSO cache participates in two:
    stored `shader_hash` that does not match the requested key — the
    §3.5 step 6 path's `add_to_writable` invariant ("`(shader_hash,
    state_hash)` map injectively to bytecode") breaks. The cache
-   returns `unexpected{render::Error::PsoCompileFailed}` /
+   returns `unexpected{render::Error::PipelineCompileFailed}` /
    `detail="shader_hash_mismatch_at_pin"`; the loader rolls up to
    `core::Error::PluginInitFailed` per §8.4 row 3.
 2. **Capability-set narrowing** (SPEC §8.4 row 2) is detected
@@ -1169,8 +1261,9 @@ the aggregate phase-7 ceiling; per-draw asserts are debug-build only.
 | `invalidate_by_shader_hash` — drop N entries                       | 10 µs / entry  | 50 µs / entry  | Editor / dev-loop only; runs in phase 1, well outside any frame-time budget.        |
 
 Cold paths never fire on a frame's critical path under steady-state
-S1. The §10 `PsoCompileFailed` arm is the only category that can
-trigger a Cold B mid-frame, and it surfaces as `lower-tier` recovery
+S1. The §10 `PipelineCompileFailed` arm (design-name `PsoCompileFailed`)
+is the only category that can trigger a Cold B mid-frame, and it surfaces
+as `lower-tier` recovery
 (§10.3) — the failing draw is dropped, the previous frame is
 re-presented, and the next frame's lower-tier descriptor either hits
 the cache or rebuilds against a smaller pipeline.
@@ -1225,9 +1318,9 @@ item 5.
 | §10 arm                          | Cache trigger site                                                                                                                                                                                                                            | Recovery (§10.2)        | Severity | Notes                                                                                                                                                                |
 |----------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------|----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `ShaderModuleLoadFailed`         | §3.5 step 4 — `shaders_.resolve(shader_hash)` returns empty (the requested shader is not resident in `shader::ShaderCache`).                                                                                                                  | `abort-engine` (init) / `lower-tier` (post-init) | `error`  | A miss against the resident shader set is a contract bug at init (the warmer pre-faults the MVP material set). Post-init, lower-tier demotes the offending pass.    |
-| `PsoCompileFailed`               | §3.5 step 7 — `newRenderPipelineState` / `newComputePipelineState` returns null / non-null `NS::Error`. Also: §3.2 `shader_hash` collision (rare; build-time bug); §3.2 `state_hash` collision (rare; design-time bug). Also: SPEC §8.4 row 3 hot-reload mismatch. | `lower-tier`            | `warn`   | The `NS::Error.localizedDescription()` is captured into `ErrorContext::detail` for log forensics. The lower tier's pass predicate selects a different PSO (e.g. drops TAA → FXAA → Off). |
+| `PipelineCompileFailed` *(§10 design-name: `PsoCompileFailed`)* | §3.5 step 7 — `newRenderPipelineState` / `newComputePipelineState` returns null / non-null `NS::Error`. Also: §3.2 `shader_hash` collision (rare; build-time bug); §3.2 `state_hash` collision (rare; design-time bug). Also: SPEC §8.4 row 3 hot-reload mismatch. | `lower-tier`            | `warn`   | The `NS::Error.localizedDescription()` is captured into `ErrorContext::detail` for log forensics. The lower tier's pass predicate selects a different PSO (e.g. drops TAA → FXAA → Off). |
 | `ResourceResidencyExceeded`      | §6.2 — every entry pinned, working set ≥ budget, cumulative overshoot > 25% of `budget_bytes_`.                                                                                                                                                | `lower-tier`            | `warn`   | The per-tier descriptor table is smaller; lower tier thins the resident set under the cap.                                                                          |
-| `BinaryArchiveLoadFailed` *(implied; folds under `PsoCompileFailed`)* | §7.4 — `MTL::BinaryArchive::deserializeFromURL` fails on a bytewise-valid archive (bad signature, version mismatch the manifest didn't catch).                                                                                                | `lower-tier` (degrade)   | `warn`   | The archive is dropped from `archives_`; subsequent builds fall through to Cold B. Not a separate §10 arm — folded under `PsoCompileFailed` per §10.1's eighteen-variant cap. The detail string `"binary_archive_load_failed"` distinguishes in logs. |
+| `BinaryArchiveLoadFailed` *(implied; folds under `PipelineCompileFailed`)* | §7.4 — `MTL::BinaryArchive::deserializeFromURL` fails on a bytewise-valid archive (bad signature, version mismatch the manifest didn't catch).                                                                                                | `lower-tier` (degrade)   | `warn`   | The archive is dropped from `archives_`; subsequent builds fall through to Cold B. Not a separate §10 arm — folded under `PipelineCompileFailed` per §10.1's twenty design-name rows. The detail string `"binary_archive_load_failed"` distinguishes in logs. |
 
 The cache does **not** contribute to `MetalDeviceUnavailable`,
 `SwapchainAcquireFailed`, `BarrierViolation`, `GraphCycle`,
@@ -1242,17 +1335,17 @@ and re-binds against the re-registered plugin.
 The `ErrorContext::detail` field carries a stable string for each
 distinct failure site so the structured log is grep-able:
 
-| Detail string                          | Site                                                | Arm                          |
-|----------------------------------------|-----------------------------------------------------|------------------------------|
-| `"shader_unresolved"`                  | §3.5 step 4                                         | `ShaderModuleLoadFailed`     |
-| `"unknown_state_hash"`                 | §3.5 step 5                                         | `PsoCompileFailed`           |
-| `"metal_compile_failed"`               | §3.5 step 7 (Metal NS::Error returned)              | `PsoCompileFailed`           |
-| `"shader_hash_collision"`              | §3.2.1 collision detection at insert                | `PsoCompileFailed`           |
-| `"state_hash_collision"`               | §3.2.2 collision detection at insert                | `PsoCompileFailed`           |
-| `"shader_hash_mismatch_at_pin"`        | §3.5 step 6 (§8.4 row 3 reload refusal)             | `PsoCompileFailed`           |
-| `"warm_budget_exhausted"`              | §4.3 `pin` rate limit                               | `PsoCompileFailed`           |
-| `"binary_archive_load_failed"`         | §7.4 step 3e degraded-archive case                  | `PsoCompileFailed`           |
-| `"residency_overshoot"`                | §6.2 over-25% overshoot                             | `ResourceResidencyExceeded`  |
+| Detail string                          | Site                                                | §5 enumerator (`render::Error::`)  |
+|----------------------------------------|-----------------------------------------------------|------------------------------------|
+| `"shader_unresolved"`                  | §3.5 step 4                                         | `ShaderModuleLoadFailed`           |
+| `"unknown_state_hash"`                 | §3.5 step 5                                         | `PipelineCompileFailed`            |
+| `"metal_compile_failed"`               | §3.5 step 7 (Metal NS::Error returned)              | `PipelineCompileFailed`            |
+| `"shader_hash_collision"`              | §3.2.1 collision detection at insert                | `PipelineCompileFailed`            |
+| `"state_hash_collision"`               | §3.2.2 collision detection at insert                | `PipelineCompileFailed`            |
+| `"shader_hash_mismatch_at_pin"`        | §3.5 step 6 (§8.4 row 3 reload refusal)             | `PipelineCompileFailed`            |
+| `"warm_budget_exhausted"`              | §4.3 `pin` rate limit                               | `PipelineCompileFailed`            |
+| `"binary_archive_load_failed"`         | §7.4 step 3e degraded-archive case                  | `PipelineCompileFailed`            |
+| `"residency_overshoot"`                | §6.2 over-25% overshoot                             | `ResourceResidencyExceeded`        |
 
 The registry is exhaustive against §3 / §4 / §6 / §7; adding a new
 detail string requires an amendment here.
@@ -1278,8 +1371,8 @@ or a controlled error.
 | `get_miss_then_hit`                           | First `get(key)` triggers `MockBuilder::compile`; second `get(key)` returns the cached entry with `pin_count==2`. Assert build was invoked exactly once.                                              | §3.5 + §3.7.                                                                                                                       |
 | `get_concurrent_miss_one_shot`                | Two threads call `get(key)` simultaneously; assert `MockBuilder::compile` invoked exactly once and both threads receive the same `PSOHandle`.                                                          | §6.1 + §6.3.                                                                                                                        |
 | `get_unknown_shader_hash`                     | `shaders_.resolve` returns empty for the requested key; assert `unexpected{ShaderModuleLoadFailed}` and that no `live_` entry was created.                                                             | §10 row `ShaderModuleLoadFailed`.                                                                                                  |
-| `get_unknown_state_hash`                      | `state_descriptor_table_` has no entry for `key.state_hash`; assert `unexpected{PsoCompileFailed}`, detail `"unknown_state_hash"`.                                                                       | §10 detail registry.                                                                                                                |
-| `get_metal_compile_error`                     | `MockBuilder::compile` returns an `NS::Error*` non-null; assert `unexpected{PsoCompileFailed}` with detail `"metal_compile_failed"` and that the localised description is captured into `detail`.       | §3.5 step 7 + logging contract.                                                                                                    |
+| `get_unknown_state_hash`                      | `state_descriptor_table_` has no entry for `key.state_hash`; assert `unexpected{render::Error::PipelineCompileFailed}`, detail `"unknown_state_hash"`.                                                  | §10 detail registry.                                                                                                                |
+| `get_metal_compile_error`                     | `MockBuilder::compile` returns an `NS::Error*` non-null; assert `unexpected{render::Error::PipelineCompileFailed}` with detail `"metal_compile_failed"` and that the localised description is captured into `detail`. | §3.5 step 7 + logging contract.                                                                                                    |
 | `eviction_lru_unpinned_drops`                 | Insert N entries up to `budget_bytes_`; insert one more; assert the least-recent unpinned entry was dropped and `live_bytes_` is below the budget.                                                     | §3.6.                                                                                                                                |
 | `eviction_skips_pinned`                       | Pin every entry; insert one more; assert no eviction (overshoot allowed) and a `warn` log fires once.                                                                                                  | §6.2.                                                                                                                                |
 | `eviction_residency_exceeded_at_25pct`        | Pin every entry; cumulative overshoot crosses 25% of `budget_bytes_`; assert `unexpected{ResourceResidencyExceeded}` from the next `get` that triggers `evict_if_needed`.                              | §10 row `ResourceResidencyExceeded`.                                                                                              |
@@ -1287,7 +1380,7 @@ or a controlled error.
 | `invalidate_with_pinned_keeps_alive`          | Pin a `(h_a, s_x)` entry, call `invalidate_by_shader_hash(h_a)`, assert the entry is removed from `live_` but the pinned `PSOHandle` still dereferences a live `MTL::PipelineState`.                   | §4.3 contract on pinned drop.                                                                                                      |
 | `pin_unpin_lifecycle`                         | `pin(key)`; `unpin(handle)`; assert `pin_count` returns to 0 and the entry becomes eviction-eligible.                                                                                                  | §3.7 + §3.8.                                                                                                                        |
 | `warm_partial_failure`                        | `warm({k1, k2_bad, k3})` — `k2_bad` has unknown `shader_hash`; assert `unexpected` and that `k1` is live, `k2`/`k3` are not.                                                                            | §4.3 `warm` contract.                                                                                                              |
-| `state_hash_collision_at_insert`              | Force two distinct descriptors to collide in `state_hash` (debug-only mock); assert second insert is rejected with `PsoCompileFailed` / detail `"state_hash_collision"`.                               | §3.2.2 + §10.1.                                                                                                                    |
+| `state_hash_collision_at_insert`              | Force two distinct descriptors to collide in `state_hash` (debug-only mock); assert second insert is rejected with `render::Error::PipelineCompileFailed` / detail `"state_hash_collision"`.           | §3.2.2 + §10.1.                                                                                                                    |
 | `shader_hash_collision_at_insert`             | Force two distinct `shader::ShaderHash`es to truncate to the same `u64`; assert second insert is rejected with detail `"shader_hash_collision"`.                                                       | §3.2.1 + §10.1.                                                                                                                    |
 | `live_bytes_accounting`                       | Insert and drop entries; assert `live_bytes()` is monotonically consistent (insert raises, drop lowers, sum-zero on full drain).                                                                       | §3.4.                                                                                                                                |
 | `concurrent_get_and_invalidate`               | One thread loops `get(k_a)`; second thread calls `invalidate_by_shader_hash(h_a)` mid-loop; assert no use-after-free, no torn `PSOHandle`, and that the post-invalidate `get` rebuilds via cold path.   | §6.1 + §6.4.                                                                                                                        |
@@ -1306,7 +1399,7 @@ device (CI matrix includes one M1 / M2 macOS runner).
 | `metal_archive_warm_then_hit`                 | Run a build, flush archive to a tmp path, drop the cache, re-open against that path, assert second `get` hits Cold A (timed `< 1 ms p99`).                                                                                                                  | §7 warmer + Cold A budget.                                                                                                        |
 | `metal_archive_corrupt_record_silently_skipped` | Pre-write a manifest entry with an `archive_blob` whose blake3 mismatches the stored `archive_blob_blake3`; assert warmer skips that record (no error surfaced) and the cache rebuilds via Cold B.                                                          | SPEC §7.1.2 invariant 1 + §7.3.                                                                                                   |
 | `metal_archive_provenance_mismatch_wipes_dir` | Pre-write a manifest with `glibre_types_abi_hash` differing from the host; assert the warmer `rmtree`s the directory and an empty cache results.                                                                                                              | SPEC §7.1.2 invariant 2 + §7.4 step 2.                                                                                            |
-| `metal_compile_failed_lower_tier`             | Force a malformed descriptor (e.g. invalid combination of MRT formats); assert `PsoCompileFailed` and that the §10 `lower-tier` recovery is observable (the test fixture sets a callback that asserts the recovery action).                                  | §10 row `PsoCompileFailed` + §10.2 ladder.                                                                                        |
+| `metal_compile_failed_lower_tier`             | Force a malformed descriptor (e.g. invalid combination of MRT formats); assert `render::Error::PipelineCompileFailed` and that the §10 `lower-tier` recovery is observable (the test fixture sets a callback that asserts the recovery action).             | §10 row `PipelineCompileFailed` + §10.2 ladder.                                                                                   |
 | `metal_warm_under_budget`                     | `warm` 256 keys; assert no entry is dropped during warm (all fit the 64 MiB budget) and total wall-time is dominated by archive-deserialise rather than driver-compile when the archive is warm.                                                              | §9.3 row "PSO cache" + §9.2 Cold A.                                                                                              |
 | `metal_warm_over_budget_evicts`               | `warm` 1024 keys against a budget shrunk to 16 MiB; assert eviction runs during warm, oldest entries are dropped, and the final `live_bytes()` is at the budget.                                                                                              | §3.6 under stress.                                                                                                                |
 | `metal_invalidate_round_trip`                 | Build a PSO; invalidate by `shader_hash`; rebuild via the same key against a freshly-resident shader (simulating a hot-reload); assert handle differs from the first build (new `MTL::PipelineState*`) and an offscreen draw produces the expected pixel.   | §8.1 round-trip.                                                                                                                  |
