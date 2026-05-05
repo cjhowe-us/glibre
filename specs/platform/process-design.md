@@ -270,17 +270,19 @@ shim; subsequent threads see the post-init state through the
 acquire-semantics of normal C++ static-initialization rules
 combined with the Meyer's-singleton accessor).
 
-The 256 KiB sub-arena (SPEC §9.2) is sized for: argv ≤ 64 KiB
+The 256 KiB sub-arena (SPEC §9.2) is sized for: argv ≤ 56 KiB
 (typical engine invocations are dozens of args, but the editor may
-pass long content paths), env ≤ 128 KiB (macOS caps `getconf
-ARG_MAX = 256 KiB` for argv+env *combined*; we reserve half for
-each), cwd + executable_path ≤ 8 KiB (PATH_MAX ≈ 1024 each, with
-slack for canonicalization), key→value flat-vector index ≤ 56 KiB
-(≈ 1500 env entries × 2 spans × 16 B + slack). If any individual
-component overflows its slice the aggregate aborts at boot — argv /
-env that exceeds 256 KiB is a sandbox configuration the engine
-cannot represent without reshaping its discipline; failing fast is
-correct.
+pass long content paths; ARG_MAX is 256 KiB combined argv+env, and
+56+(128+8+32) = 224 KiB env+argv envelope leaves 32 KiB headroom
+under ARG_MAX), env ≤ 128 KiB (macOS caps `getconf ARG_MAX = 256
+KiB` for argv+env *combined*; we reserve roughly half for each),
+cwd + executable_path ≤ 8 KiB (PATH_MAX ≈ 1024 each, with slack
+for canonicalization), key→value flat-vector index ≤ 32 KiB
+(~1024 env entries × 2 spans × 16 B; sized against measured macOS
+environment populations). If any individual component overflows its
+slice the aggregate aborts at boot — argv / env that exceeds 256
+KiB is a sandbox configuration the engine cannot represent without
+reshaping its discipline; failing fast is correct.
 
 ### 3.3 Singleton accessor + init / shutdown lifecycle
 
@@ -485,11 +487,15 @@ install is main-thread-only by convention) produce a deterministic
 orphans one handler.
 
 `SA_ONSTACK` requires an alternate signal stack; the aggregate
-allocates a **24 KiB** `sigaltstack` once during `init` (in the same
-sub-arena, so it counts against the 256 KiB ceiling — fits with
-margin within 256 KiB sub-arena per §9) and calls `sigaltstack(2)`.
-24 KiB gives 8 KiB headroom above the POSIX `SIGSTKSZ` minimum
-(typically 16–32 KiB on macOS). The alternate stack is critical for
+allocates a **32 KiB** `sigaltstack` once during `init` (in the same
+sub-arena, so it counts against the 256 KiB ceiling — fits exactly
+within 256 KiB sub-arena per §9) and calls `sigaltstack(2)`.
+32 KiB equals MINSIGSTKSZ on macOS 26 Apple Silicon (defined in
+`<sys/signal.h>`); using a smaller value causes `sigaltstack(2)` to
+return `EINVAL`, leaving `SA_ONSTACK` unconfigured — exactly the
+re-fault failure §3.5 warns about. The sigaltstack budget is pinned
+at MINSIGSTKSZ; argv was trimmed from 64 KiB to 56 KiB to keep the
+§9 sub-arena at ≤ 256 KiB. The alternate stack is critical for
 SIGSEGV on stack overflow: the default-stack handler would re-fault.
 The alt-stack lives for the program's lifetime and is freed by the
 singleton's destructor.
@@ -711,7 +717,7 @@ rules apply — no special-casing.
 
 - **Hot reads (per-frame, possibly many times):** `argv()`,
   `env(name)`, `cwd()`, `executable_path()`, `pid()`. All are
-  O(1) (`env` is O(log N) over ≤ ~1500 entries — effectively
+  O(1) (`env` is O(log N) over ≤ ~1024 entries — effectively
   constant given the small-N), allocate nothing, and run on any
   thread. Per-frame budget: 0.000 ms (SPEC §9.1).
 - **Cold writes (boot / shutdown / rare events):** `init`,
@@ -876,18 +882,30 @@ This design refines the protocol mechanics:
    `eastl::vector<Signal>` is included in
    `host_glibre_types_abi_hash`.
 3. **Migrate step.** Empty. No `.fory` schema (§7).
-4. **Resume step.** `Q::glibre_plugin_register` re-creates the
-   `Process` singleton's bookkeeping (the singleton's storage
-   lives in the static library, which is *not* reloaded — the
-   reload is for the platform plugin's `.dylib` if and only if
-   `platform/` is built as a separate plugin; under the current
-   architecture `platform/` is a static library inside the host
-   binary, so platform self-reload is moot. The clauses above
-   apply if a future spike promotes `platform/` to its own
-   reloadable `.dylib`. Until then, this is dead-code documented
-   for future-proofing.) Q then iterates the middleman `Signal`
-   vector and calls `install_signal(s, resolve_symbol_for(s))`
-   for each.
+4. **Resume step.** Before iterating captured `Signal` values to
+   call `install_signal()`, the resumed plugin's
+   `glibre_plugin_register` MUST have already invoked
+   `glibre::platform::detail::error::pre_touch_all()`. The same
+   ordering contract from §3.5 applies on Resume because the lazy
+   linker resolver is bound to the freshly-`dlopen`'d plugin's TLS,
+   which was reset by Pause. Resume == fresh `dlopen` for ordering
+   purposes per `platform-error-design.md` §6.2 rebind clause. The
+   Resume orchestrator therefore calls `glibre_plugin_register`
+   first (which itself must call `pre_touch_all()` then
+   `install_signal()`). See §3.5 install_signal pre-condition; the
+   same ordering applies on Resume.
+
+   `Q::glibre_plugin_register` then re-creates the `Process`
+   singleton's bookkeeping (the singleton's storage lives in the
+   static library, which is *not* reloaded — the reload is for the
+   platform plugin's `.dylib` if and only if `platform/` is built
+   as a separate plugin; under the current architecture `platform/`
+   is a static library inside the host binary, so platform
+   self-reload is moot. The clauses above apply if a future spike
+   promotes `platform/` to its own reloadable `.dylib`. Until then,
+   this is dead-code documented for future-proofing.) Q then
+   iterates the middleman `Signal` vector and calls
+   `install_signal(s, resolve_symbol_for(s))` for each.
 5. **Refusal.** If `install_signal` fails on resume (e.g. a peer
    plugin re-installed the same signal between drain and resume),
    the loader marks the swap as `HotReloadRefused` and rolls
@@ -939,24 +957,22 @@ This design partitions it as (§3.2):
 
 | Slice                         | Size       | Filled at | Frees at      |
 |-------------------------------|------------|-----------|---------------|
-| Argv copy                     | ≤ 64 KiB   | `init`    | shutdown      |
+| Argv copy                     | ≤ 56 KiB   | `init`    | shutdown      |
 | Env copy                      | ≤ 128 KiB  | `init`    | shutdown      |
 | Cwd + executable_path copies  | ≤ 8 KiB    | `init`    | shutdown      |
 | Env (key, value) flat-vec idx | ≤ 32 KiB   | `init`    | shutdown      |
-| Sigaltstack                   | 24 KiB     | `init`    | shutdown      |
+| Sigaltstack                   | 32 KiB     | `init`    | shutdown      |
 | Handler table                 | trivial    | static    | static        |
 | **Total**                     | **≤ 256 KiB** | —      | —             |
 
-Slice arithmetic: 64 + 128 + 8 + 32 + 24 = 256 KiB exactly,
-meeting the SPEC §9.2 ceiling. The env flat-vec index slice was
-reduced from 56 KiB to 32 KiB (sufficient for up to ~1024
-`(view-key, view-value)` pairs at 32 bytes each — well above
-typical macOS `environ` cardinality) and sigaltstack was trimmed
-from 32 KiB to 24 KiB (8 KiB above the POSIX `SIGSTKSZ` floor;
-see §3.5 and §12 [NON-BLOCKING] open item). If the total snapshot
-exceeds 256 KiB at boot, `init` aborts with a clear diagnostic —
-strictly preferable to silent truncation that would orphan
-environment variables a tool relies on.
+Slice arithmetic: 56 + 128 + 8 + 32 + 32 = 256 KiB exactly,
+meeting the SPEC §9.2 ceiling. Sigaltstack is pinned at
+MINSIGSTKSZ (macOS 26 = 32 KiB); argv was trimmed from 64 KiB to
+56 KiB to keep the sub-arena ≤ 256 KiB (see §3.5 and §12
+[NON-BLOCKING] open item). If the total snapshot exceeds 256 KiB
+at boot, `init` aborts with a clear diagnostic — strictly
+preferable to silent truncation that would orphan environment
+variables a tool relies on.
 
 Steady-state allocation rate (post-`init`): **0 bytes per frame**.
 Every aggregate function on the public surface is annotated with
@@ -1063,9 +1079,10 @@ Bound to SPEC §4.5 invariants and §10.3.5 failure rows.
   `env("FOO")` returns `Some("bar")`.
 - **`process.env_lookup_miss`** — assert `env("DOES_NOT_EXIST")`
   returns `None` (`eastl::optional<...>{}`).
-- **`process.env_lookup_last_wins_on_duplicate_key`** —
-  preload `["X=1", "X=2"]`; assert `env("X") == "2"`. Matches
-  `getenv` POSIX semantics; documented in §3.2.
+- **`process.env_lookup_first_wins_on_duplicate_key`** —
+  preload `["X=1", "X=2"]`; assert `env("X") == "1"`. Matches
+  POSIX `getenv` first-wins semantics on macOS / glibc / musl per
+  §3.2.
 - **`process.cwd_canonicalizes`** — set cwd to a path with a
   trailing slash / `.` segment; assert `cwd()` returns the
   canonicalized form.
@@ -1265,16 +1282,14 @@ Both run on `macos-26-m1` CI only.
   separate spike; expected resolution is "we don't mutate; we
   restart the engine binary with new argv/env" — preserving
   the snapshot-once invariant. Open until a consumer exists.
-- **[OPEN] [NON-BLOCKING] Sigaltstack size.** The current 24 KiB
-  allocation (§3.5, §9 table) is 8 KiB above the POSIX
-  `SIGSTKSZ` floor and fits the 256 KiB sub-arena ceiling
-  exactly (see §9). If runtime stack-overflow signals are
-  observed in benchmarks (e.g. a crash-handler that walks the
-  stack into a 16 KiB scratch buffer), consider growing
-  sigaltstack to 32 KiB and trimming a different slice (e.g.
-  Argv from 64 KiB to 56 KiB) or filing a SPEC §9.2 amendment
-  to widen the sub-arena ceiling. Defer until the in-process
-  crash handler is drafted and benchmarked.
+- **[OPEN] [NON-BLOCKING] Sigaltstack growth.** The current 32 KiB
+  allocation (§3.5, §9 table) equals MINSIGSTKSZ (macOS 26 = 32
+  KiB) and fits the 256 KiB sub-arena ceiling exactly (see §9).
+  If runtime stack-overflow signals exhaust the 32 KiB sigaltstack
+  (e.g. a crash-handler that walks the stack into a large scratch
+  buffer), file a SPEC §9.2 amendment to grow the sub-arena
+  ceiling. Defer until the in-process crash handler is drafted and
+  benchmarked.
 - **[OPEN] Closed signal-enum growth.** §3.4 documents which
   signals are exposed today (6) and why others are not. A
   future consumer (e.g. SIGUSR1 used as a reload trigger from a
