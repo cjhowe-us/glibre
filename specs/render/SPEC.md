@@ -1338,7 +1338,14 @@ struct HZBDesc {
 class HZB {
 public:
     [[nodiscard]] Result<HZBHandle> ensure(ViewHandle, HZBDesc) noexcept;
-    void invalidate(ViewHandle) noexcept;
+    void                            invalidate(ViewHandle) noexcept;
+
+    // ABI add (hzb-cull-design.md) — read-only handle accessor for
+    // DiagnosticOverlay (#774) and other render-internal readers.
+    // Returns an empty optional when the view has no live pyramid
+    // (not yet ensure'd, or after invalidate before next ensure).
+    [[nodiscard]] eastl::optional<HZBHandle>
+                                    handle(ViewHandle) const noexcept;
 
 protected:
     HZB()  noexcept = default;

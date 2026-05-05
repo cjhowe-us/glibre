@@ -284,8 +284,8 @@ cook supplies both shapes).
 
 Read `meshlet.normal_cone = {apex.xyz, axis.xyz, cos_half_angle}`
 (16 B). `axis` is **outward-facing** (points away from the meshlet's
-surface toward the outside of the cone, matching the geometry
-`geometry`'s cook convention for the meshlet header layout). The
+surface toward the outside of the cone, matching `geometry`'s cook
+convention for the meshlet header layout). The
 cone is back-facing from camera position `cam.xyz` when
 `dot(axis, normalize(cam - apex)) < -cos_half_angle`. If fully
 back-facing (the strict `<` inequality), cull.
