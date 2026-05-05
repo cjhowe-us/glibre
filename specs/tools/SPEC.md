@@ -98,6 +98,9 @@ Terms used unchanged in code (identifiers, file names, comments).
 | `TraceOp` | One entry in a `.glibre-trace`: typed input event, scheduler tick, or assertion (`expect:component:value`). |
 | `TraceRecorder` | The MVP service that, in `Recording` mode, captures all input + selected assertions into a `.glibre-trace` file under `tests/e2e/`. |
 | `TraceFile` | The on-disk artifact (`.glibre-trace`) — Fory-archived sequence of `TraceOp`s, mmap-replayable by the E2E runner. |
+| `DebugOverlay` | Non-shipping editor surface (debug + E2E builds only, behind `cfg(debug_overlay)`) that maps a fixed set of F-key bindings to debug-only `GameWorld` actions, captures each action's pre/post state into typed records, and atomically publishes those records into the per-world `DebugResourceTable` before the action handler returns — so subsequent inspector reads, AssertState evaluations, and `TraceRecorder` snapshots observe a coherent post-action state. |
+| `DebugResource` | One typed record published by a `DebugOverlay` binding (e.g. `world.A.target_archetype_set`, `world.A.last_unregistered_set_error`). Identified by a dotted, world-scoped path; resolves through the codegen-emitted reflection table (debug-only), never through runtime reflection. |
+| `DebugResourceTable` | The per-`World` table holding the live set of `DebugResource` records. Lives in `EditorWorld` (one logical sub-table per inspected world); reads are O(1) by path; writes are exclusively performed by `DebugOverlay` action handlers under the auto-publish invariant. |
 | `Console` | The log/error panel rendering messages from the engine's diagnostics sink; read-only in MVP. |
 | `Profiler` | The panel rendering the engine's GPU timestamp + per-system CPU timing readback; consumes data only, owns no measurement. |
 | `Shortcuts` | The keymap binding actions to chords (`Ctrl+Z`, `G`, `R`, `S`, `Space`, …); per-user override layers over a default ring. |
@@ -381,6 +384,12 @@ reflection-driven inspector (§4.4), the on-viewport gizmo (§4.5), the
 asset browser (§4.6), the undo/redo command stack (§4.7), the toolbar
 play/pause/step controls (§4.8), and the trace recorder (§4.9). The
 cross-aggregate invariants that span those seams are collected in §4.10.
+A non-shipping debug-only postscript — `DebugOverlay` (§4.11) — closes
+the section: it lives behind the `cfg(debug_overlay)` feature gate, ships
+in editor + E2E builds only, and is the named aggregate the
+`.glibre-trace` E2E format cites when a trace presses an F-key debug
+binding (PHILOSOPHY §6 — no runtime reflection in shipping builds; the
+overlay is a development surface, never a runtime surface).
 
 ### 4.1 `EditorHost` — root of the in-process editor shell (aggregate root)
 
@@ -987,6 +996,235 @@ public boundary at the seams between them:
     extract, mode transitions → editor world phase 9). Tools
     never mutates `GameWorld` outside the moments when its
     `CompiledFrame` permits writes.
+
+### 4.11 `DebugOverlay` + `DebugResourceTable` (aggregate, debug-only)
+
+**Status & build gate.** This aggregate is **non-shipping**. It is
+compiled only when the `cfg(debug_overlay)` feature is set, which is
+true for **editor builds** and the **E2E test runner** and false for
+the runtime / shipping build (PHILOSOPHY §6 — no runtime reflection in
+shipping builds). The codegen column descriptors the overlay reads
+live in the middleman dylib (`glibre-types.dylib`) regardless of
+build flavour, so toggling the feature flag changes only whether the
+overlay's *handlers* link in — not whether the *types* are reachable.
+A shipping runtime that links `glibre-types.dylib` cannot reach
+`DebugOverlay`'s handlers because the symbols are stripped at link
+time when the feature is off.
+
+**Reason to change:** how a debug-mode F-key binding maps a
+`platform::InputEvent::KeyDown` press to a debug-only action against
+the embedded `GameWorld` *and* publishes that action's captured pre /
+post state into the `DebugResourceTable` atomically before the action
+handler returns. If the F-key binding set, the per-binding capture-
+record schema, or the auto-publish discipline evolves, this aggregate
+changes; the recorder's `.glibre-trace` writer (§4.9), the inspector's
+`ReflectionBlob` reader (§4.4), and the toolbar's mode-transition
+controls (§4.8) do not.
+
+This aggregate is the resolution of spike #863 (this section). The
+component-mutation E2E trace at `tests/e2e/core/component-mutation.glibre-trace`
+is the first artefact to cite this anchor; future traces follow the
+same citation pattern (see invariant 6 below).
+
+**Composition.** Three named parts:
+
+- **`DebugOverlay`** — the resource in `EditorWorld` holding the
+  bindings table (`F1..F7` → typed action descriptor) and a
+  monotonically-incrementing per-binding press counter (used as the
+  `DebugResource` "freshness tick" so an inspector reader can tell
+  whether a record was published this frame or in an earlier frame).
+  The bindings table is a fixed-shape `eastl::array<Binding, 7>`
+  populated at `glibre_plugin_register` time and never mutated
+  thereafter (binding identity is compile-time).
+- **`DebugResourceTable`** — a per-`World` typed map keyed by a
+  dotted, world-scoped path (`world.A.target_archetype_set`, …) and
+  carrying a closed-sum `DebugResourceValue` of the same shape the
+  middleman dylib uses for AssertState lowering (`u32`, `u64`,
+  `bool`, `core::TypeId`, `core::Error`, `core::Error?`,
+  `eastl::array<TypeId, N>` — see `specs/e2e/SPEC.md` §7.1.5). The
+  table lives in `EditorWorld` even when the path's prefix names a
+  `GameWorld` (e.g. `world.A.…`); §4.10 inv. 1 (worlds disjoint) is
+  preserved because the table's entries are *snapshots of*
+  `GameWorld` state, not borrowed references into it.
+- **`Binding`** — a value-object pairing a `platform::Key` (always
+  one of `F1..F7` in MVP), a typed action descriptor (a closed-sum
+  enumeration of debug-only `GameWorld` actions, e.g.
+  `RegisterFixtureTypes`, `SpawnAndSetA`, `SetBOnTarget`,
+  `SetUnregisteredOnTarget`, `RemoveBFromTarget`, `SnapshotAll`,
+  `SetBOnScratch`), and the static list of `DebugResource` paths
+  the action publishes when it fires.
+
+**Identity & lifetime.** One `DebugOverlay` resource per
+`EditorHost`, present iff `cfg(debug_overlay)` is on. Constructed at
+`glibre_plugin_register` time after `EditorHost` initialises both
+worlds; destroyed at plugin unload. Hot-reload of any plugin
+*other than* tools itself preserves the `DebugResourceTable`'s
+content per §4.10 inv. 9 (the table is composed of middleman types
+with `.fory` schemas, so it survives by the survival rule of
+`reviews/decisions/hot-reload-protocol.md`). Tools' own dylib swap
+re-runs `glibre_plugin_register` and re-installs the bindings table;
+the `DebugResourceTable` survives the swap and its entries remain
+readable across the boundary.
+
+**Public-boundary invariants.**
+
+1. **Auto-publish before handler return.** Every `DebugOverlay`
+   action handler publishes its full set of declared
+   `DebugResource` records into the `DebugResourceTable` **before
+   the handler returns control to the input pump**. The publish is
+   a single atomic step from any observer's vantage point: an
+   inspector read, an AssertState evaluation, or a
+   `TraceRecorder` snapshot taken between two handler invocations
+   sees either the *complete* pre-press snapshot or the *complete*
+   post-press snapshot, never a partial / torn intermediate. This
+   is the load-bearing invariant the `.glibre-trace` block-3
+   correctness argument depends on (see invariant 6).
+2. **Per-binding atomicity.** The unit of atomicity is **one
+   binding press**. All records a single binding declares are
+   published as one atomic step; records from different bindings
+   are serialised by press order within the input phase. Frame-
+   ordering across bindings is carried by the input phase's
+   in-frame ordering (`specs/platform/SPEC.md` §4.2 / `specs/e2e/SPEC.md`
+   §4.1.5 inv. 3); two bindings pressed in the same frame land in
+   the same press-order both pre-publish and post-publish.
+3. **Frame-boundary completeness.** No `DebugResource` write
+   happens outside an action handler's body. Between handler
+   return at phase 1 (input) and the next phase-9 boundary, the
+   `DebugResourceTable` is read-only. Combined with invariant 1,
+   this gives the trace author the contract: "an AssertState
+   targeting a `DebugResource` path in frame N reads the value
+   the latest binding handler that fired in frame N (or earlier)
+   left in the table; no other writer can mutate that value
+   between handler return and assertion evaluation." The
+   `core::FrameLoop` phase boundaries (`reviews/decisions/frame-phases.md`
+   phases 1–9) are the timing reference; this aggregate registers
+   no phase of its own (§4.10 inv. 10).
+4. **Action handlers run in phase 1 (input), against `GameWorld`
+   under tools' write window.** A binding press becomes a
+   `platform::InputEvent::KeyDown` in phase 1; the
+   `DebugOverlay` action handler is registered as a system inside
+   phase 1 (provisional placement per `frame-phases.md` open
+   question 3 — tools writes happen in phase 1 before any sim
+   consumer reads). The handler is the only path through which
+   the overlay mutates `GameWorld`; it does not bypass `core`'s
+   public `World::set_component` / `World::remove_component` ABI
+   (`specs/core/SPEC.md` §5.5). Game-world mutations issued by
+   debug-overlay actions therefore obey the same archetype-
+   migration / observer / atomicity rules every other writer
+   obeys.
+5. **Non-perturbing capture.** The act of capturing pre / post
+   state into a `DebugResource` record may not mutate any
+   observed system. The handler is permitted to invoke
+   `World::observers().subscribe(...)` on `GameWorld` for the
+   critical section bounded by its own action call, but
+   subscription / unsubscription must be balanced and may not
+   leave residual subscribers after the handler returns. This
+   mirrors §4.9 inv. 1 (the recorder's non-perturbing-capture
+   rule) — debug-overlay observation is the same kind of side
+   channel as trace-recorder capture, just into a different sink.
+6. **Stable spec citation anchor.** This section (§4.11) is the
+   citable anchor for `.glibre-trace` files documenting which
+   debug-overlay binding produced which `DebugResource` field.
+   Trace headers cite `specs/tools/SPEC.md §4.11` (this section)
+   for the auto-publish contract and the binding-table semantics.
+   Future spec edits to this aggregate are append-only on the
+   binding set and the per-binding capture list (existing
+   bindings keep their press semantics + capture paths byte-equal
+   across edits); a non-additive change requires a new spec
+   anchor (`§4.11.v2`) so old traces continue to cite the
+   contract they were authored against.
+7. **No shipping reach.** The `DebugOverlay` resource and its
+   handlers do not link into shipping runtime builds.
+   `cfg(debug_overlay)` is the single feature flag; CI gates
+   refuse a runtime build that links any `DebugOverlay` symbol.
+   Inspector / Trace-recorder code paths conditionally read
+   `DebugResourceTable` entries only when the feature is on;
+   their shipping behaviour does not depend on overlay presence.
+
+**Binding table.** The MVP binding set is fixed at seven F-keys,
+each binding a typed action descriptor and a static list of the
+`DebugResource` paths the action publishes. The press semantics and
+capture lists below are the contract `.glibre-trace` files cite by
+binding name.
+
+| Key | Action | Press semantics | Captures published into `DebugResourceTable` |
+|-----|--------|-----------------|-----------------------------------------------|
+| `F1` | `RegisterFixtureTypes` | Register the fixture's component types via the middleman dylib's codegen-emitted descriptors. Idempotent on repeat presses (re-registration is a no-op per `core` §4.9 inv. 1). The fixture defines which types register — `PhantomTypeId` (or any other deliberately-omitted sentinel) is **not** registered by `F1` per the fixture's contract. | None directly; subsequent bindings observe the post-registration `TypeRegistry` state. (No table writes; this is the one binding that sets up the world for later bindings to capture.) |
+| `F2` | `SpawnAndSetA` | `World::spawn()` into the inspected `GameWorld` then immediately `World::set_component(new_e, TypeIdOf<A>, A{...})` with the fixture's `A` payload. **First press** stores the returned `Entity` into `world.A.target_entity` (the fixed slot). **Subsequent presses** append to `world.A.scratch_ring` (a small ring) and leave `world.A.target_entity` unchanged. Creates the `{A}` archetype on first use per `core` §4.2 inv. 1. | `world.A.target_entity` (`core::Entity`, set on first press only); `world.A.scratch_ring` (`eastl::array<core::Entity, K>` updated on each press). |
+| `F3` | `SetBOnTarget` | `World::set_component(world.A.target_entity, TypeIdOf<B>, B{...})` with the fixture's `B` payload. Always acts on the fixed `target_entity` — never the ring head. Migrates the row from `{A}` to `{A,B}`. Subscribes to the `OnAdd`/`OnRemove`/`OnSet` observer bus (`core` §4.1 inv. 7) for the call's critical section to compute `set_component_observed_atomicity`. | `world.A.last_set_outcome` (`core::Error?`); `world.A.target_archetype_set` (`eastl::array<TypeId, N>`, sorted, post-mutation); `world.A.target_chunk_holes` (`u32`, post-mutation in target archetype); `world.A.target_forward_reverse_consistent` (`bool`, walked across both maps in the target archetype); `world.A.set_component_observed_atomicity` (`bool`); `world.A.target_archetype_chunk_count` (`u32`); `world.A.source_chunk_holes` (`u32`, in the `{A}` source archetype after the row vacated); `world.A.set_component_swap_remove_observed` (`bool`). |
+| `F4` | `SetUnregisteredOnTarget` | `World::set_component(world.A.target_entity, <unregistered TypeId>, {1 byte})`. The TypeId is a fixture-provided sentinel that `F1` deliberately did *not* register, so the call must refuse with `core::Error::TypeUnregistered` per `core` §4.1 inv. 3 *before* any storage mutation. | `world.A.last_unregistered_set_error` (`core::Error`, the u16 discriminant of the refusal); `world.A.target_archetype_set_after_refusal` (`eastl::array<TypeId, N>`, must equal `world.A.target_archetype_set` from F3 — i.e. `{A,B}` — proving no partial mutation). |
+| `F5` | `RemoveBFromTarget` | `World::remove_component(world.A.target_entity, TypeIdOf<B>)`. Migrates the row from `{A,B}` back to `{A}`. | `world.A.last_remove_outcome` (`core::Error?`); `world.A.target_archetype_set` (re-read post-removal, sorted; must equal `{A}`); `world.A.source_chunk_holes` (`u32`, post-removal in the `{A,B}` source archetype the row vacated; must equal 0 via swap-remove on the source side); `world.A.target_forward_reverse_consistent` (`bool`, re-walked post-removal across the destination `{A}` archetype); `world.A.remove_component_swap_remove_observed` (`bool`). |
+| `F6` | `SnapshotAll` | Re-publish the full accumulated `DebugResourceTable` slice for the inspected `GameWorld`. F2/F3/F4/F5 each republish their *own* captured fields per the auto-publish invariant; `F6` is the trailing snapshot binding that refreshes **all** previously-published fields (so a final assertion frame sees fresh values after later bindings — including refusal bindings — have run). | Re-publishes every `DebugResource` path previously written by any binding for the inspected world. No new paths. The freshness tick is bumped on every entry. |
+| `F7` | `SetBOnScratch` | `World::set_component(scratch_e, TypeIdOf<B>, B{...})` where `scratch_e` is the ring head of `world.A.scratch_ring` (the most recently appended entity, distinct from `target_entity`). Used to populate the `{A,B}` archetype with multiple rows so the swap-remove path is load-bearing in F5. | `world.A.scratch_archetype_set` (`eastl::array<TypeId, N>`, post-mutation, sorted); `world.A.scratch_set_outcome` (`core::Error?`). |
+
+The table above is exhaustive for MVP. New bindings are appended in
+key order (`F8` next) and become §4.11 entries; per invariant 6, the
+existing seven entries remain stable so old traces keep citing the
+contract they were authored against.
+
+**SRP justification — single reason to change:** the rules of how a
+debug-mode F-key press maps to a captured `GameWorld` mutation +
+typed `DebugResource` publication that lands atomically in the
+`DebugResourceTable` before the action handler returns. If the
+binding set, the per-binding capture record schema, or the
+auto-publish discipline evolves, this aggregate changes. The
+following adjacent aggregates do *not* change:
+
+- **§4.4 `Inspector`** — `Inspector` reads `DebugResourceTable`
+  entries via `ReflectionBlob` like any other reflectable type;
+  the inspector view rendering rules don't care which writer
+  produced the bytes (§4.4 inv. 1 / §4.10 inv. 4 preserved).
+- **§4.9 `TraceRecorder`** — `TraceRecorder` writes
+  `.glibre-trace` `TraceOp` entries from input + scheduler
+  signals + AssertState calls. The recorder is unaware of
+  `DebugOverlay`'s existence; the only intersection is that
+  AssertState evaluations targeting `DebugResource` paths read
+  the `DebugResourceTable` (per invariants 1 / 3 / 6 above) at
+  the moment the recorder lowers them. The recorder's
+  non-perturbing-capture rule (§4.9 inv. 1) is preserved
+  because reads against the table do not mutate it.
+- **§4.8 `Toolbar`** — the toolbar owns `EditorMode` transitions
+  via `PlayPauseStep`; debug-overlay bindings are independent of
+  `EditorMode` (the overlay fires in `Edit`, `Paused`, `Step`,
+  `Play`, and `Recording` modes alike, since debug actions are
+  manual-debug actions in editor builds and recorded actions in
+  E2E builds). No mode-transition path changes.
+- **§4.10 cross-aggregate invariants 1, 3, 5, 9, 10** — preserved:
+  worlds remain disjoint (the `DebugResourceTable` lives in
+  `EditorWorld`); the single edit pipeline rule (`CommandStack`
+  is the only `GameWorld` writer for *user* edits) is honoured
+  because debug-overlay actions are explicitly **not user
+  edits** — they are debug-only `GameWorld` mutations gated
+  behind a non-shipping feature flag, and they go through
+  `core::World`'s public `set_component` / `remove_component`
+  ABI rather than constructing `EditCommand` envelopes (the
+  envelope shape is reserved for user-authored, undoable
+  edits per §4.7); non-perturbing capture is preserved per
+  invariant 5; hot-reload survival rides the standard middleman
+  schema rule; tools registers no new phase, the action handler
+  runs inside phase 1.
+
+**Failure modes.** Debug-overlay handlers return
+`std::expected<void, glibre::Error>` per `reviews/decisions/error-model.md`.
+The expected closed sum of arms a handler may surface:
+
+- `core::Error::TypeUnregistered` (`F4`'s contractual refusal —
+  this is *expected* for that binding and is captured into the
+  `DebugResource` record rather than treated as a handler-level
+  failure).
+- `core::Error::EntityForeignWorld` — only reachable if a
+  fixture mis-configures `target_entity` to belong to
+  `EditorWorld` rather than the inspected `GameWorld`; refused
+  before any storage mutation (defensive).
+- `tools::Error::Refused` with prefix `"debug-overlay-shipping-build"`
+  — emitted if a shipping build somehow invokes an overlay
+  handler (a contract violation the CI gate is supposed to
+  catch at link time; the runtime check is defence-in-depth and
+  always logs at `error` severity).
+
+Successful handler return implies invariants 1–5 held for that
+press. CI exercises happy-path + each refusal arm via the E2E
+trace fixtures under `tests/e2e/`.
 
 ## 5. Public Interface
 
