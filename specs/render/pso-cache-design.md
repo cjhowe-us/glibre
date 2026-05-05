@@ -687,7 +687,7 @@ public:
 
     // Drop every entry whose key.shader_hash matches.
     // Returns the count dropped. Called by `shader`'s reload hook.
-    std::size_t
+    [[nodiscard]] std::size_t
         invalidate_by_shader_hash(std::uint64_t shader_hash) noexcept;
 
     // Force LRU drain to `target_size` bytes. Honours pin_count;
@@ -1131,6 +1131,16 @@ each entry triggers a `PSOCache::pin(PSOKey)` call. The cache itself
 the plugin image), so the live entries are preserved verbatim across
 the swap. The new plugin's binding tables fix up against the same
 resident pipelines.
+
+For any pass that is newly introduced by the reloaded plugin (not
+present in the old plugin's static table), `register_state_descriptor`
+(§4.3) **must be called before** the pin walk reaches that pass's
+PSOKey; the cold-path descriptor lookup at §3.5 step 5 requires a
+registered `StateDescriptor` and returns
+`unexpected{PipelineCompileFailed}` (detail="unknown_state_hash") if
+it has not been set. The idempotency guarantee in §4.3 means calling
+`register_state_descriptor` for passes that were already registered by
+the old plugin is safe — repeated identical descriptors are no-ops.
 
 The bounded-compile rate (§4.3 `pin` contract) caps misses per tick.
 The post-reload register call is therefore O(passes) atomic-store

@@ -1251,11 +1251,13 @@ public:
 
     // Bulk warm. Builds every key in `keys`; stops at the first
     // ShaderModuleLoadFailed / PipelineCompileFailed and returns.
+    // Entries successfully built before the first failure remain live
+    // (partial warm is safe; callers must not retry failed keys).
     [[nodiscard]] Result<void>      warm(eastl::span<const PSOKey>) noexcept;
 
     // Drop every entry whose key.shader_hash matches. Returns the count
     // of entries dropped. Called by `shader`'s reload hook.
-    std::size_t invalidate_by_shader_hash(std::uint64_t shader_hash) noexcept;
+    [[nodiscard]] std::size_t invalidate_by_shader_hash(std::uint64_t shader_hash) noexcept;
 
     // Force LRU drain to `target_size` bytes. Honours pin_count;
     // overshoot is logged but never refused.
