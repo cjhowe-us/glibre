@@ -332,7 +332,7 @@ ShaderHash compose_cache_key(
   h.update(key.to_bytes());                            //  6 B
   h.update(flags.hash.bytes);                          // 32 B
   std::byte t = static_cast<std::byte>(target);
-  h.update(eastl::span(&t, 1));                        //  1 B
+  h.update(eastl::span<const std::byte>(&t, 1));        //  1 B
   return ShaderHash{h.finalize()};
 }
 ```
@@ -844,7 +844,8 @@ when the pipeline calls into that sibling.
 |------------|---------|----------|----------|
 | `EntryPointMissing` | The requested job names a non-existent entry point on the source. | refuse compile; pipeline propagates from `IShaderBackend::compile` argument check before spawn. | refuse |
 | `EntryPointStageAmbiguous` | Source carries an entry point with zero or multiple `[shader(...)]` tags (caught by §4.1, surfaced through pipeline). | refuse compile; defer to source aggregate's resolution. | refuse |
-| `PermutationKeyOutOfRange` | `key.is_well_formed()` is `false` at job construction. | refuse compile; codegen-table drift between caller and pipeline. | fatal |
+| `PermutationKeyMalformed` | `key.is_well_formed()` is `false` at job construction — enumerator bits outside the declared axis range (§4.2). | refuse compile; the key is malformed before any spawn; pipeline returns without touching the driver. | refuse |
+| `PermutationKeyOutOfRange` | A `PermutationIndex` exceeds the §4.2 cardinality product — codegen-table drift between the build that emitted the index and the build that consumes it. | refuse compile; fatal because it indicates a mismatched code-generation table that cannot be resolved without a rebuild. | fatal |
 | `CompilerInvocationFailed` | `posix_spawn` failed; sandbox profile rejected; driver binary missing or not executable; envelope parse failed (driver protocol violation). | refuse compile; no retry; surface to caller for human triage. | refuse |
 | `CompilerExitNonZero` | Driver exited non-zero; `errors[]` non-empty; slang frontend or backend diagnostic. | refuse compile; forward `errors[]` JSON verbatim to editor / cooker logs; prior CAS entry remains live for that key. | refuse |
 | `CompilerTimedOut` | `EVFILT_TIMER` fired before `EVFILT_PROC` (NOTE_EXIT). | refuse compile; **no in-process retry**; the cooker / editor may re-queue at its layer. | refuse |
@@ -891,8 +892,12 @@ The pipeline owns this discipline through RAII helpers:
 class SubprocessHandle {
 public:
     ~SubprocessHandle() {
-        if (pid_ != -1) {
-            kill(pid_, SIGKILL);  // belt-and-suspenders
+        if (pid_ != -1 && !reaped_) {
+            // Only send a signal if the pid has not been waited on yet.
+            // Stage 5 calls waitpid() to capture the exit status, which
+            // marks the process as reaped; the destructor must not
+            // signal a pid that may have been recycled by the OS.
+            kill(pid_, SIGKILL);  // belt-and-suspenders on abnormal paths
             int status;
             ::waitpid(pid_, &status, 0);
         }
@@ -900,27 +905,37 @@ public:
         close_if_open(stdout_fd_);
         close_if_open(stderr_fd_);
     }
+
+    // Called by stage 5 after a successful waitpid(); prevents the
+    // destructor from signalling a now-recycled pid.
+    void mark_reaped() noexcept { reaped_ = true; }
+
 private:
     pid_t pid_{-1};
     int   stdin_fd_{-1};
     int   stdout_fd_{-1};
     int   stderr_fd_{-1};
+    bool  reaped_{false};
 };
 ```
 
 The destructor is the pipeline's last line of defense against zombie
 pids and leaked fds. Every error path that returns out of `compile`
 runs this destructor by stack-unwinding through `std::expected`'s
-construction.
+construction. `mark_reaped()` is called at the end of stage 5 (`await_exit`)
+immediately after `waitpid` captures the exit status, so the destructor
+never sends `SIGKILL` to a pid that the OS may have recycled for a new
+process.
 
 ### 10.4 Logging
 
 Per `error-model.md`:
 
 - `error` severity: `CompilerInvocationFailed`,
-  `CompilerTimedOut`, `MetalLibEmitFailed`, `CacheReadOnlyViolation`
-  (if the pipeline is mistakenly invoked against a read-only cache),
+  `CompilerTimedOut`, `MetalLibEmitFailed`,
   `ShippingCompilationAttempted` (`fatal` — also aborts the thread).
+  (`CacheReadOnlyViolation` is not pipeline-emitted; it belongs to the
+  cache aggregate — see §10.1 "not emit" list.)
 - `warn` severity: `CompilerExitNonZero` (Slang diagnostic — author
   bug, not engine bug), `EntryPointMissing`,
   `EntryPointStageAmbiguous`.
