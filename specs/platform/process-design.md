@@ -234,10 +234,14 @@ Snapshot policy:
    sub-arena and split on the *first* `=` to populate a
    `(view-key, view-value)` pair into a small flat sorted vector
    for `O(log N)` `env(name)` lookups. Duplicate keys (legal in
-   POSIX; the *first* wins in shells but not in `getenv`) are
-   resolved by **last-wins** — the aggregate matches `getenv`
-   semantics so engine code that previously called `getenv`
-   directly can be migrated mechanically.
+   POSIX) are resolved by **first-wins**. The aggregate matches
+   POSIX `getenv` semantics on macOS / glibc / musl, all of which
+   scan `environ` top-to-bottom and return the first matching
+   entry. (Shells such as bash/zsh typically apply last-wins when
+   assigning variables, but `getenv()` reads first-wins — the
+   design aligns with C library behavior, not shell assignment
+   behavior.) Engine code that previously called `getenv` directly
+   can be migrated mechanically.
 3. **CWD.** `getcwd(buf, PATH_MAX)` once; copy the byte sequence
    into the sub-arena; canonicalize via
    `CanonicalPath::from_absolute(view)` (SPEC §5.2). Store the
@@ -266,17 +270,23 @@ shim; subsequent threads see the post-init state through the
 acquire-semantics of normal C++ static-initialization rules
 combined with the Meyer's-singleton accessor).
 
-The 256 KiB sub-arena (SPEC §9.2) is sized for: argv ≤ 64 KiB
+The 256 KiB sub-arena (SPEC §9.2) is sized for: argv ≤ 56 KiB
 (typical engine invocations are dozens of args, but the editor may
-pass long content paths), env ≤ 128 KiB (macOS caps `getconf
-ARG_MAX = 256 KiB` for argv+env *combined*; we reserve half for
-each), cwd + executable_path ≤ 8 KiB (PATH_MAX ≈ 1024 each, with
-slack for canonicalization), key→value flat-vector index ≤ 56 KiB
-(≈ 1500 env entries × 2 spans × 16 B + slack). If any individual
-component overflows its slice the aggregate aborts at boot — argv /
-env that exceeds 256 KiB is a sandbox configuration the engine
-cannot represent without reshaping its discipline; failing fast is
-correct.
+pass long content paths), env ≤ 128 KiB (macOS caps
+`getconf ARG_MAX = 256 KiB` for argv+env *combined*; we reserve
+roughly half for each; 56 KiB argv + 128 KiB env = 184 KiB of raw
+bytes constrained by execve(2)'s ARG_MAX (256 KiB on macOS),
+leaving 72 KiB headroom under ARG_MAX), cwd + executable_path ≤
+8 KiB (PATH_MAX ≈ 1024 each, with slack for canonicalization),
+key→value flat-vector index ≤ 32 KiB (~1024 env entries × 2 spans
+× 16 B; sized against measured macOS environment populations). The
+remaining 8+32+32 = 72 KiB of the §9 sub-arena covers
+engine-internal derived structures (cwd/executable_path copies,
+env flat-vec index, sigaltstack) not constrained by ARG_MAX. If
+any individual component overflows its slice the aggregate aborts
+at boot — argv / env that exceeds 256 KiB is a sandbox
+configuration the engine cannot represent without reshaping its
+discipline; failing fast is correct.
 
 ### 3.3 Singleton accessor + init / shutdown lifecycle
 
@@ -427,6 +437,18 @@ Properties:
 
 `install_signal(Signal s, SignalHandlerFn fn)`:
 
+**Pre-condition (caller obligation — applies to any `glibre_plugin_register` that calls `install_signal`; per `platform-error-design.md` §6.2 per-plugin ownership rule):**
+Plugin's `glibre_plugin_register` MUST call
+`glibre::platform::detail::error::pre_touch_all()` BEFORE invoking
+`Process::install_signal`. `pre_touch_all()` pre-touches the three
+TLS slots (prefix pointer, prose buffer, source_tag pointer — per
+`platform-error-design.md` §9.2) so that the lazy linker stub
+resolver for those `__thread` variables is resolved on the calling
+thread before any signal can fire. If the resolver has not run and
+a signal fires first, the lazy stub itself is not async-signal-safe —
+UB on macOS. See `platform-error-design.md` §6.2 for the mandatory
+ordering contract.
+
 1. Lock `g_install_mutex`.
 2. Find the slot for `s`; if its `fn` is non-null,
    `unlock + return Error::AlreadyExists`.
@@ -469,12 +491,18 @@ install is main-thread-only by convention) produce a deterministic
 orphans one handler.
 
 `SA_ONSTACK` requires an alternate signal stack; the aggregate
-allocates a 32 KiB `sigaltstack` once during `init` (in the same
-sub-arena, so it counts against the 256 KiB ceiling — fits with
-slack to spare) and `sigaltstack(2)` it. The alternate stack is
-critical for SIGSEGV on stack overflow: the default-stack handler
-would re-fault. The alt-stack lives for the program's lifetime and
-is freed by the singleton's destructor.
+allocates a **32 KiB** `sigaltstack` once during `init` (in the same
+sub-arena, so it counts against the 256 KiB ceiling — fits exactly
+within 256 KiB sub-arena per §9) and calls `sigaltstack(2)`.
+32 KiB equals MINSIGSTKSZ on macOS 26 Apple Silicon (defined in
+`<sys/signal.h>`); using a smaller value causes `sigaltstack(2)` to
+return `EINVAL`, leaving `SA_ONSTACK` unconfigured — exactly the
+SIGSEGV stack-overflow re-fault described above. Budget arithmetic:
+argv was trimmed 64→56 KiB to keep the §9 sub-arena at 256 KiB
+exactly; full breakdown in §9 table.
+
+The alt-stack lives for the program's lifetime and is freed by the
+singleton's destructor.
 
 ### 3.6 Exit-code latch
 
@@ -693,7 +721,7 @@ rules apply — no special-casing.
 
 - **Hot reads (per-frame, possibly many times):** `argv()`,
   `env(name)`, `cwd()`, `executable_path()`, `pid()`. All are
-  O(1) (`env` is O(log N) over ≤ ~1500 entries — effectively
+  O(1) (`env` is O(log N) over ≤ ~1024 entries — effectively
   constant given the small-N), allocate nothing, and run on any
   thread. Per-frame budget: 0.000 ms (SPEC §9.1).
 - **Cold writes (boot / shutdown / rare events):** `init`,
@@ -858,18 +886,30 @@ This design refines the protocol mechanics:
    `eastl::vector<Signal>` is included in
    `host_glibre_types_abi_hash`.
 3. **Migrate step.** Empty. No `.fory` schema (§7).
-4. **Resume step.** `Q::glibre_plugin_register` re-creates the
-   `Process` singleton's bookkeeping (the singleton's storage
-   lives in the static library, which is *not* reloaded — the
-   reload is for the platform plugin's `.dylib` if and only if
-   `platform/` is built as a separate plugin; under the current
-   architecture `platform/` is a static library inside the host
-   binary, so platform self-reload is moot. The clauses above
-   apply if a future spike promotes `platform/` to its own
-   reloadable `.dylib`. Until then, this is dead-code documented
-   for future-proofing.) Q then iterates the middleman `Signal`
-   vector and calls `install_signal(s, resolve_symbol_for(s))`
-   for each.
+4. **Resume step.** Before iterating captured `Signal` values to
+   call `install_signal()`, the resumed plugin's
+   `glibre_plugin_register` MUST have already invoked
+   `glibre::platform::detail::error::pre_touch_all()`. The same
+   ordering contract from §3.5 applies on Resume because the lazy
+   linker resolver is bound to the freshly-`dlopen`'d plugin's TLS,
+   which was reset by Pause. Resume == fresh `dlopen` for ordering
+   purposes per `platform-error-design.md` §6.2 rebind clause. The
+   Resume orchestrator therefore calls `glibre_plugin_register`
+   first (which itself must call `pre_touch_all()` then
+   `install_signal()`). See §3.5 install_signal pre-condition; the
+   same ordering applies on Resume.
+
+   `Q::glibre_plugin_register` then re-creates the `Process`
+   singleton's bookkeeping (the singleton's storage lives in the
+   static library, which is *not* reloaded — the reload is for the
+   platform plugin's `.dylib` if and only if `platform/` is built
+   as a separate plugin; under the current architecture `platform/`
+   is a static library inside the host binary, so platform
+   self-reload is moot. The clauses above apply if a future spike
+   promotes `platform/` to its own reloadable `.dylib`. Until then,
+   this is dead-code documented for future-proofing.) Q then
+   iterates the middleman `Signal` vector and calls
+   `install_signal(s, resolve_symbol_for(s))` for each.
 5. **Refusal.** If `install_signal` fails on resume (e.g. a peer
    plugin re-installed the same signal between drain and resume),
    the loader marks the swap as `HotReloadRefused` and rolls
@@ -921,19 +961,22 @@ This design partitions it as (§3.2):
 
 | Slice                         | Size       | Filled at | Frees at      |
 |-------------------------------|------------|-----------|---------------|
-| Argv copy                     | ≤ 64 KiB   | `init`    | shutdown      |
+| Argv copy                     | ≤ 56 KiB   | `init`    | shutdown      |
 | Env copy                      | ≤ 128 KiB  | `init`    | shutdown      |
 | Cwd + executable_path copies  | ≤ 8 KiB    | `init`    | shutdown      |
-| Env (key, value) flat-vec idx | ≤ 56 KiB   | `init`    | shutdown      |
+| Env (key, value) flat-vec idx | ≤ 32 KiB   | `init`    | shutdown      |
 | Sigaltstack                   | 32 KiB     | `init`    | shutdown      |
 | Handler table                 | trivial    | static    | static        |
 | **Total**                     | **≤ 256 KiB** | —      | —             |
 
-Slack (≤ ~32 KiB across slices) absorbs argv/env at the upper
-end of typical macOS limits (`getconf ARG_MAX = 262144`). If the
-total snapshot exceeds 256 KiB at boot, `init` aborts with a
-clear diagnostic — strictly preferable to silent truncation that
-would orphan environment variables a tool relies on.
+Slice arithmetic: 56 + 128 + 8 + 32 + 32 = 256 KiB exactly,
+meeting the SPEC §9.2 ceiling. Sigaltstack is pinned at
+MINSIGSTKSZ (macOS 26 = 32 KiB); argv was trimmed from 64 KiB to
+56 KiB to keep the sub-arena ≤ 256 KiB (see §3.5 and §12
+[NON-BLOCKING] open item). If the total snapshot exceeds 256 KiB
+at boot, `init` aborts with a clear diagnostic — strictly
+preferable to silent truncation that would orphan environment
+variables a tool relies on.
 
 Steady-state allocation rate (post-`init`): **0 bytes per frame**.
 Every aggregate function on the public surface is annotated with
@@ -1040,9 +1083,10 @@ Bound to SPEC §4.5 invariants and §10.3.5 failure rows.
   `env("FOO")` returns `Some("bar")`.
 - **`process.env_lookup_miss`** — assert `env("DOES_NOT_EXIST")`
   returns `None` (`eastl::optional<...>{}`).
-- **`process.env_lookup_last_wins_on_duplicate_key`** —
-  preload `["X=1", "X=2"]`; assert `env("X") == "2"`. Matches
-  `getenv` POSIX semantics; documented in §3.2.
+- **`process.env_lookup_first_wins_on_duplicate_key`** —
+  preload `["X=1", "X=2"]`; assert `env("X") == "1"`. Matches
+  POSIX `getenv` first-wins semantics on macOS / glibc / musl per
+  §3.2.
 - **`process.cwd_canonicalizes`** — set cwd to a path with a
   trailing slash / `.` segment; assert `cwd()` returns the
   canonicalized form.
@@ -1178,7 +1222,7 @@ Both run on `macos-26-m1` CI only.
 
 ## 12. Open questions
 
-- **[OPEN] Promotion of `process/` from static library to its own
+- **[OPEN] [NON-BLOCKING] Promotion of `process/` from static library to its own
   reloadable `.dylib`.** The current architecture compiles
   `engine/platform/` as a single static library
   `libglibre_platform.a` linked once into the host binary
@@ -1187,7 +1231,7 @@ Both run on `macos-26-m1` CI only.
   promotion happens, the §8.2 clauses are contingency
   documentation. Resolve when (if) a future spike argues for
   hot-swapping platform itself — currently no plan calls for it.
-- **[OPEN] Out-of-process crash-monitor binary (R-14.4.7).** SPEC
+- **[OPEN] [NON-BLOCKING] Out-of-process crash-monitor binary (R-14.4.7).** SPEC
   §3 refusal list defers it; this design holds the line. Promotion
   trigger: a second consumer of crash-dump capture beyond the
   in-process signal-handler stub (e.g. the editor's
@@ -1199,7 +1243,7 @@ Both run on `macos-26-m1` CI only.
   side (out of `process/` aggregate scope, see §1 refusal of
   subprocess spawn) and the *forwarding* is a new `process/`
   surface gated by a feature flag.
-- **[OPEN] Subprocess-spawn surface for tools.** Tools
+- **[OPEN] [NON-BLOCKING] Subprocess-spawn surface for tools.** Tools
   (`glibre-cook`, `glibre-codegen`, `glibre-foryc`) are launched
   by the editor through the OS shell today. If the editor's
   tool-orchestration spike argues for an in-engine spawn API
@@ -1213,33 +1257,46 @@ Both run on `macos-26-m1` CI only.
   consumer: `tools/glibre-editor`'s "build" / "cook" / "codegen"
   panel; until that work lands, shell invocation remains
   sufficient.
-- **[OPEN] Signal handlers that need access to per-thread
-  state.** The current `SignalHandlerFn = void (*)(int signal)
-  noexcept` takes only the signum. R-14.4.6 GPU breadcrumbs +
-  R-14.4.1 stack-trace capture want access to the faulting
-  thread's `siginfo_t` and `ucontext_t`. The trampoline already
-  receives them (it uses `SA_SIGINFO`); exposing them would
-  widen `SignalHandlerFn` to e.g. `void (*)(int, const
-  glibre::types::platform::SignalCtx&) noexcept`, where
-  `SignalCtx` is a host-agnostic middleman wrapping the
-  platform-specific bits the dump-writer needs. Defer until the
-  in-process crash-handler plugin (#TBD) lands; the trade-off is
-  ABI surface growth vs giving the crash-handler enough info
-  to record register state.
-- **[OPEN] Env-var change at runtime.** §3.2 rule #2 documents
+- **[OPEN] [BLOCKING IMPLEMENTATION] Signal handlers that need
+  access to per-thread state.** The current
+  `SignalHandlerFn = void (*)(int signal) noexcept` takes only
+  the signum. R-14.4.6 GPU breadcrumbs + R-14.4.1 stack-trace
+  capture want access to the faulting thread's `siginfo_t` and
+  `ucontext_t`. The trampoline already receives them (it uses
+  `SA_SIGINFO`); exposing them would widen `SignalHandlerFn` to
+  e.g. `void (*)(int, const glibre::types::platform::SignalCtx&)
+  noexcept`, where `SignalCtx` is a host-agnostic middleman
+  wrapping the platform-specific bits the dump-writer needs.
+  **BLOCKING IMPLEMENTATION**: per the design preamble (preamble),
+  widening the `SignalHandlerFn` signature changes the §5.10
+  public surface — which requires an amendment spike before any
+  plan PR can adopt the wider signature. Resolution requires:
+  (1) a SPEC §5.10 amendment spike that widens `SignalHandlerFn`
+  signature to add `siginfo_t*` and `ucontext_t*` parameters.
+  (2) The amendment spike's PR creates the SPEC §12 tracking entry
+  as part of its scope (not at this design-PR time — the amendment
+  spike owns the SPEC.md edit).
+  (3) Two concrete callers demonstrating need for the widened
+  parameters before approval. Defer until the in-process
+  crash-handler plugin (#TBD) is drafted; the trade-off is ABI
+  surface growth vs giving the crash-handler enough info to record
+  register state.
+- **[OPEN] [NON-BLOCKING] Env-var change at runtime.** §3.2 rule #2 documents
   "out-of-band `setenv` is unsupported and undefined". A future
   consumer (e.g. an editor "edit env var, restart engine"
   workflow) might want a sanctioned mutation API. Routed to a
   separate spike; expected resolution is "we don't mutate; we
   restart the engine binary with new argv/env" — preserving
   the snapshot-once invariant. Open until a consumer exists.
-- **[OPEN] Sigaltstack size.** 32 KiB is conservative; macOS
-  default `MINSIGSTKSZ` is 32 KiB and the alt-stack handler
-  body is small. If a future crash-handler implementation needs
-  more (e.g. it walks the stack into a 16 KiB scratch buffer),
-  bump to 64 KiB. Defer until the in-process crash handler is
-  drafted and benchmarked.
-- **[OPEN] Closed signal-enum growth.** §3.4 documents which
+- **[OPEN] [NON-BLOCKING] Sigaltstack growth.** The current 32 KiB
+  allocation (§3.5, §9 table) equals MINSIGSTKSZ (macOS 26 = 32
+  KiB) and fits the 256 KiB sub-arena ceiling exactly (see §9).
+  If runtime stack-overflow signals exhaust the 32 KiB sigaltstack
+  (e.g. a crash-handler that walks the stack into a large scratch
+  buffer), file a SPEC §9.2 amendment to grow the sub-arena
+  ceiling. Defer until the in-process crash handler is drafted and
+  benchmarked.
+- **[OPEN] [NON-BLOCKING] Closed signal-enum growth.** §3.4 documents which
   signals are exposed today (6) and why others are not. A
   future consumer (e.g. SIGUSR1 used as a reload trigger from a
   CI script) requires a strict expansion. Adding to the enum
