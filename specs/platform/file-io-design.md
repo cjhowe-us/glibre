@@ -125,8 +125,9 @@ Glibre-native requirements added beyond harmonius:
 FileIo (root, owned by platform)
 ├── PathRoots                  roots_       (sandbox-root registry; §3.2)
 ├── eastl::array<Worker, N>    workers_     (N = FileIoConfig.io_thread_budget; §3.4)
-├── SpscRing<Request>          requests_    (engine → workers; bounded; §3.5)
+├── RequestRing<Request>       requests_    (SPSC for N==1 MVP, MPSC for N>1 post-MVP — see §3.5; bounded)
 ├── eastl::array<Slot, M>      slots_       (M = N * queue_depth; §3.6)
+├── eastl::array<const char*, M> prefixes_  (parallel prefix array for async error transport; §3.6 / §3.9)
 ├── SlotFreeList               free_slots_  (lock-free LIFO; §3.6)
 ├── ReadAllArena               read_arena_  (per-call buffer for sync read_all; §6.9)
 └── PlatformAllocator&         alloc_       (sub-arena handle, ContextTag::platform)
@@ -211,21 +212,29 @@ paths; it consumes whatever absolute paths the composer provides.
 ```cpp
 // platform/src/fileio/token.hpp — internal projection of §5.11 IoToken.
 struct Slot {
-    std::atomic<IoToken::State>          state;        // InFlight | Ready | Cancelled
-    std::atomic<bool>                    abandoned;    // ~IoToken set this
+    std::atomic<IoToken::State>          state;        // InFlight | Ready | Cancelled; enum class : uint8_t
+    std::atomic<bool>                    abandoned;    // ~IoToken sets this; enum class : uint8_t equivalent
+    std::uint16_t                        next_free;    // intrusive free-list link (max 65535 > max M=128)
+    // 4 bytes implicit padding to align result_bytes to 8B boundary
     eastl::span<const std::byte>         result_bytes; // filled before state=Ready (release)
     Result<void>                         err;          // failure code if state=Ready and err is unexpected
     Request                              req;          // bound at enqueue, read by worker
-    const char*                          prefix;       // async-path prefix transport (§3.9); nullptr = no prefix
-    std::uint32_t                        next_free;    // intrusive free-list link
 };
+static_assert(sizeof(Slot) <= 64, "Slot must fit one cache line (§6.3 / §9.2 / §12)");
 
 // IoToken::Impl is just &Slot; the public IoToken from §5.11 is a
 // move-only handle that holds slot index + free-list backref.
-// Note: the `prefix` field is written by the worker (after translator runs,
-// before state=Ready release-store) and read by the consumer (after observing
-// state==Ready acquire-load). The release/acquire on `state` provides the
-// necessary ordering; no separate synchronization on `prefix` is needed.
+//
+// Async-path prefix transport: `prefix` is NOT stored in Slot (adding
+// an 8B pointer would push Slot past 64B — see §3.6 layout table).
+// Instead, FileIo maintains a parallel array:
+//   eastl::array<const char*, M>  prefixes_;
+// indexed by slot id. The worker writes `prefixes_[i]` AFTER the
+// translator runs and BEFORE setting `state = Ready` (release-store).
+// The consumer reads `prefixes_[i]` AFTER observing `state == Ready`
+// (acquire-load). The release/acquire on `state` provides the ordering
+// guarantee for the parallel-array read; no separate synchronization
+// on `prefixes_[i]` is needed. See §3.9 for the full transport contract.
 ```
 
 Token lifetime invariants (extending §4.6 inv #3):
@@ -351,9 +360,11 @@ struct Request {
         WriteAtomic,
     };
     Op                            op;
-    std::uint32_t                 slot_index;     // back-ref into slots_
     CanonicalPath                 path;           // string_view backed by interner arena
     eastl::span<const std::byte>  bytes_in;       // Write only; nullptr for Read
+    // Note: slot_index is NOT stored here — worker receives it as a
+    // parameter; storing it in Request wastes 4 B + 3 B alignment pad.
+    // See §3.6 layout table rationale.
 };
 ```
 
@@ -383,10 +394,53 @@ LIFO populated at construction with every slot index `0..M`.
 
 Slot count `M = N * queue_depth` with default `queue_depth = 16` →
 `M = 32` slots at `N = 2`. `Slot` size is one cache line (64 B on M1):
-`atomic<State>` (1 B) + `atomic<bool>` (1 B) + 6 B pad +
-`span` (16 B) + `Result<void>` (~16 B) + `Request` (~24 B). Pool
-footprint is `64 * 32 = 2 KiB` resident at default config; bounded by
-the §9 8 MiB sub-arena.
+
+| Field          | Type                        | Size | Notes                                      |
+|----------------|-----------------------------|------|--------------------------------------------|
+| `state`        | `atomic<State>` (uint8_t)   | 1 B  | InFlight / Ready / Cancelled               |
+| `abandoned`    | `atomic<bool>` (uint8_t)    | 1 B  | one-shot; ~IoToken sets this               |
+| `next_free`    | `uint16_t`                  | 2 B  | intrusive free-list link; max 65535 > M    |
+| (padding)      | —                           | 4 B  | implicit; aligns `result_bytes` to 8 B    |
+| `result_bytes` | `span<const byte>` (16 B)   | 16 B | ptr + size; filled before state=Ready      |
+| `err`          | `Result<void>` (~16 B)      | 16 B | failure arm if state=Ready and err set     |
+| `req`          | `Request` (~24 B)           | 24 B | op + path + bytes_in (slot_index dropped)  |
+| **Total**      |                             | **64 B** | fits one M1 cache line (§6.3 / §9.2)  |
+
+The `prefix` (8 B pointer for async error transport) is **not** stored in
+`Slot` — adding it inline would push the struct to 72 B, violating the
+one-cache-line invariant. Instead, `FileIo` maintains a parallel array
+`prefixes_[M]` (option c); see §3.9 for the transport contract and §3.3 for
+the ordering guarantee. The trade-off: `prefixes_[i]` is on a cold path
+(read only after observing `state == Ready`, which is already an error branch
+on a background thread); the extra cache line is acceptable.
+
+`next_free` as `uint16_t` (2 B instead of `uint32_t` 4 B) reclaims 2 B
+within the Slot and limits the free-list to 65 535 entries. The maximum
+plausible slot count is `io_thread_budget_max (8) × queue_depth_max (128)
+= 1 024`; `uint16_t` is far above this ceiling.
+
+`Request::slot_index` (`uint32_t`, 4 B) is dropped from §3.5's `Request`
+struct — the worker receives the slot index as a separate parameter and
+the Slot is addressed via `slots_[i]` directly; storing it redundantly
+inside `Request` wastes 4 B + 3 B alignment padding. The `static_assert`
+in `token.hpp` is the implementation gate.
+
+Pool footprint: `64 × 32 + 8 × 32 = 2 KiB + 256 B = 2.25 KiB` resident
+at default config; bounded by the §9 8 MiB sub-arena.
+
+`prefix` for async-path error transport is kept in a **parallel array**
+`prefixes_[M]` (one `const char*` per slot, 8 B × 32 = 256 B; cold path
+only) to preserve the Slot 64 B invariant. See §3.9 for the transport
+contract. The parallel-array access is release/acquire-ordered via the
+`state` field transition — no separate synchronization needed.
+
+Pool footprint: `64 × 32 + 256 = 2.25 KiB` resident at default config;
+bounded by the §9 8 MiB sub-arena.
+
+`next_free` as `uint16_t` limits the free-list to 65 535 entries. The
+maximum plausible slot count is `io_thread_budget_max (8) × queue_depth_max
+(128) = 1 024`; `uint16_t` is far above this ceiling and documents the
+constraint at the type level.
 
 ### 3.7 Synchronous primitives — POSIX direct
 
@@ -519,11 +573,26 @@ writability refusal: `PermissionDenied` with prefix
 `"read-too-large"`.
 
 The diagnostic prefix is the §10.6 SPEC mechanism for telling adjacent
-arms apart without growing the closed sum. Each prefix lives as a
-`constinit const char*` literal in `fileio/error_prefixes.hpp` and is
-checked via byte-equal comparison at the consumer (no allocation,
-exactly the discipline §10.6 imposes for `"surface-lost"` /
-`"watcher-unavailable"` / `"queue-full"`).
+arms apart without growing the closed sum. There is **no**
+`fileio/error_prefixes.hpp`; FileIo's error translator imports the
+prefix literals directly from `glibre::platform::detail::error::prefix::`
+(defined in `platform-error-design.md §3.3`, compiled into
+`platform/src/detail/error/diagnostic.hpp`). This is the single source of
+truth for all prefix constants. The file-io-specific prefixes registered in
+that namespace are:
+
+| Prefix constant                 | String value            | Source                          |
+|---------------------------------|-------------------------|---------------------------------|
+| `prefix::out_of_budget`         | `"out-of-budget"`       | §3.3 registry (pre-existing)    |
+| `prefix::path_outside_root`     | `"path-outside-root"`   | §3.3 registry (added by §3.9)   |
+| `prefix::project_readonly`      | `"project-readonly"`    | §3.3 registry (added by §3.9)   |
+| `prefix::read_too_large`        | `"read-too-large"`      | §3.3 registry (added by §3.9)   |
+
+Pointer-equality checks at the consumer are valid because all prefix
+pointers originate from the same `constinit const char*` literals in
+`diagnostic.hpp` — single source of truth, program lifetime. Duplication
+in a separate header would break pointer identity (two independent literals
+with identical bytes are not pointer-equal under the C++ standard).
 
 **Prefix transport by path:**
 
@@ -536,15 +605,16 @@ exactly the discipline §10.6 imposes for `"surface-lost"` /
 - **Async path.** The worker thread runs the translator after
   `do_work(slot)` completes. Because the worker runs on its own
   thread, its TLS prefix is invisible to the consumer thread that
-  reads `take_result()`. To bridge this: the `Slot` struct (§3.6)
-  gains a `const char* prefix` field. After the translator runs and
-  BEFORE the worker sets `state = Ready` (release), the worker
-  captures `current_prefix()` into `slot.prefix`. The consumer reads
-  `slot.prefix` (acquire-ordered by the `state` transition) and
-  compares pointer-equal against the `prefix::file_io_*` literals
-  from `fileio/error_prefixes.hpp`. This is safe because all prefixes
-  are `constinit const char*` literals with program lifetime — pointer
-  equality is valid across threads.
+  reads `take_result()`. To bridge this, `FileIo` maintains the
+  parallel `prefixes_[M]` array (§3.6). After the translator runs and
+  BEFORE the worker sets `state = Ready` (release-store), the worker
+  captures `current_prefix()` into `prefixes_[slot_index]`. The
+  consumer reads `prefixes_[slot_index]` AFTER observing
+  `state == Ready` (acquire-load) and compares pointer-equal against
+  the `glibre::platform::detail::error::prefix::*` literals from
+  `platform-error-design.md §3.3`. This is safe because all prefix
+  pointers share the same literal address — pointer equality is valid
+  across threads and across TLS boundaries.
 
   See §12 [OPEN] #10 for the implementation gate on this transport.
 
@@ -723,8 +793,10 @@ budget, lining up with §9.1 of SPEC):
   the slot's `state`. No memory traffic on idle frames (the caller's
   poll-call site is gated by a `token.has_value()` check that is
   itself a register read).
-- The MPSC request ring's producer side (engine) is touched only at
-  `read_async` / `write_atomic_async` — never on idle frames.
+- The SPSC request ring's producer side (engine, MVP N==1/2 dispatcher
+  mode) is touched only at `read_async` / `write_atomic_async` — never
+  on idle frames. The post-MVP MPSC variant cost analysis is out of scope
+  here; see §12 [OPEN] #11.
 
 Cold-path invariants:
 
@@ -1401,16 +1473,21 @@ gate's tolerance band.
   concrete method once a second consumer demonstrates the need (same
   Occam's-razor gate as `PathOutsideRoot` arm, §12 [OPEN] #4).
 
-- **[OPEN] Async-path prefix transport — Slot gains `const char* prefix`**
-  [BLOCKING IMPLEMENTATION]: the `Slot` struct (§3.6) gains a
-  `const char* prefix` field (already reflected in §3.6 and §3.9).
-  The implementation PR must: (a) define the canonical set of
-  `prefix::file_io_*` literals in `fileio/error_prefixes.hpp`;
-  (b) have the worker capture `current_prefix()` into `slot.prefix`
-  AFTER the translator runs and BEFORE the `state = Ready`
-  release-store; (c) have the consumer read `slot.prefix` after
-  observing `state == Ready` (acquire-load). Gate the implementation
-  PR on the canonical literal set being established first.
+- **[OPEN] Async-path prefix transport — parallel `prefixes_` array**
+  [BLOCKING IMPLEMENTATION]: `FileIo` maintains a parallel
+  `eastl::array<const char*, M> prefixes_` alongside `slots_` (§3.6).
+  `prefix` is NOT in `Slot` (would violate the 64 B cache-line invariant).
+  The implementation PR must: (a) import
+  `glibre::platform::detail::error::prefix::*` from
+  `platform/src/detail/error/diagnostic.hpp` (single source of truth —
+  no `fileio/error_prefixes.hpp`); (b) have the worker write
+  `prefixes_[slot_index] = current_prefix()` AFTER the translator runs
+  and BEFORE the `state = Ready` release-store; (c) have the consumer
+  read `prefixes_[slot_index]` AFTER observing `state == Ready`
+  (acquire-load). The file-io-specific prefix constants
+  (`path_outside_root`, `project_readonly`, `read_too_large`) are
+  registered in `platform-error-design.md §3.3` (already added in §3.9).
+  Gate the implementation PR on confirming the §3.3 registry additions.
 
 - **[OPEN] N > 1 MPSC ring for multi-worker file-IO** [NON-BLOCKING]:
   The N > 1 worker path (§3.5) requires a separate MPSC ring
