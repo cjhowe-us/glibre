@@ -22,8 +22,8 @@ You will receive an issue-specific dispatch prompt. Treat it as authoritative fo
 ## Required outputs
 
 - New issues opened (numbers cited in the spec PR body).
-- Spec / epic body PR with Conventional Commit subject; `gh pr merge <n> --auto --squash`.
-- Status comment with the AGENTS.md schema, `agent:go-planning`.
+- Spec / epic body PR with Conventional Commit subject. **Do NOT enable auto-merge.** The parent /go skill runs three sequential rounds of review (`go-review` + `go-impl-respond`) against your PR before flipping auto-merge on — never call `gh pr merge --auto --squash` yourself.
+- Status comment with the AGENTS.md schema, `agent:go-planning`. The `notes:` line MUST cite the PR number so the orchestrator can pick it up for review.
 
 ## Reasoning posture
 

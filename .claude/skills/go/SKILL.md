@@ -166,31 +166,94 @@ The stage prompt MUST include:
 5. The closure rule for that issue type (PR merged → close; story
    needs E2E green + manual PASS; spike needs deliverable merged).
 6. The PR-only rule: subagent creates a feature branch, opens a PR
-   with a Conventional Commit subject, sets auto-merge if applicable,
-   never pushes directly to `main`.
+   with a Conventional Commit subject, **stops without enabling
+   auto-merge** (Step 5's review pipeline owns auto-merge), never
+   pushes directly to `main`.
 
 See `references/dispatch-prompts.md` for the full templates.
 
-## Step 4 — Verify and Continue
+## Step 4 — Verify Leaf Output and Hand to Review Loop
 
-When a notification arrives:
+When a leaf-bucket agent's completion notification arrives:
 
 1. Read the agent's summary message.
-2. Check the issue's latest comment matches the required schema. If
-   not, post a follow-up comment that documents the agent's run
-   (using gh CLI) so the audit trail is intact.
-3. Check the PR opened by the agent. If auto-merge is enabled and CI
-   is green for non-critical paths, the merge will happen on its own.
-   If the PR touches critical paths, mention this so the user can
-   approve manually.
-4. Pick the next unblocked leaf to keep ≤ 2 concurrent.
+2. Check the issue's latest comment matches the required schema and
+   cites a PR number. If not, post a follow-up comment that documents
+   the agent's run (using `gh CLI`) so the audit trail is intact.
+3. Confirm the PR exists and is OPEN with auto-merge **NOT** enabled
+   (`gh pr view <N> --json state,autoMergeRequest`). If the leaf agent
+   incorrectly enabled auto-merge, disable it with `gh pr merge <N>
+   --disable-auto`.
+4. Run `git -C /Users/cjhowe/Code/glibre fetch origin main && git -C ...
+   pull --ff-only origin main` to keep local main in sync with any
+   sibling /go agent's already-merged PRs.
+5. Hand the PR to **Step 5** (three-round review pipeline). Review
+   runs sequentially per PR; across PRs you may parallelise up to the
+   ≤ 2 top-level concurrency budget.
+6. Optionally pick the next unblocked leaf if a slot is free.
 
-Stop dispatching when one of:
+Stop dispatching new leaves when one of:
 
 - Total open unblocked leaves becomes 0.
 - The user asks to stop.
 - A completion run reports a structural problem (e.g. agent split a
   leaf — the new leaves need to be triaged before continuing).
+
+## Step 5 — Three-Round Sequential Review (per PR)
+
+Every PR — whether produced by a /go leaf agent in the current session
+or already merged — gets three sequential rounds of review before it
+is allowed to merge (or, for already-merged PRs, before its review
+trail is considered complete). Each round is a pair of dispatches:
+
+```
+for ROUND in 1 2 3:
+    1. Dispatch advance-plan-style review:
+         Agent({ subagent_type: "go-review",        run_in_background: true, prompt: <round-N review prompt> })
+       Wait for completion.
+    2. Dispatch impl-response:
+         Agent({ subagent_type: "go-impl-respond",  run_in_background: true, prompt: <round-N respond prompt> })
+       Wait for completion.
+    3. If the impl-respond opened a follow-up PR (only happens for
+       merged-original PRs), the next round's review targets the
+       follow-up. Otherwise the next round targets the same PR.
+```
+
+After round 3 converges:
+
+- For an OPEN PR (still on its head branch): enable auto-merge with
+  `gh pr merge <N> --auto --squash`. The CI gates + critical-path
+  human-review gates still apply on top of the three-round review.
+- For an already-MERGED PR with no impl-respond changes: nothing more
+  to do. Post a final round-3 summary comment on the PR.
+- For an already-MERGED PR whose impl-respond produced a follow-up
+  PR chain: the LAST follow-up PR is now an open PR — recurse Step 5
+  on it (it gets its own three-round review). Auto-merge fires on the
+  last follow-up after its round 3 converges.
+
+**Round lenses (review agent's body documents these in detail):**
+
+| Round | Lens                                | Concrete focus                                                                            |
+|-------|-------------------------------------|-------------------------------------------------------------------------------------------|
+| 1     | Coverage + correctness              | Diff fulfills declared scope; tests cover Gherkin Thens; CC subject + issue refs sane.     |
+| 2     | Cohesion + SRP + seam quality       | One responsibility per touched module; `std::expected<T, glibre::Error>` at boundaries.   |
+| 3     | Topology + spec alignment + polish  | DAG / dependency story coherent; spec invariants cited; sub-issue parenting + labels right. |
+
+**Per-round dispatch:** see `references/dispatch-prompts.md` §
+"## Review Round — go-review" and § "## Implementation Response —
+go-impl-respond" for the substituted prompt skeletons.
+
+**Concurrency:** within a PR's three rounds the steps are sequential.
+Across distinct PRs the rounds may be parallelised up to the ≤ 2
+top-level concurrency budget. Practical pattern: at most two PRs in
+review pipeline at once, both running their current round's review or
+respond agent in parallel.
+
+**Retroactive review of already-merged PRs:** invoke Step 5 directly
+on the merged PR number, skipping Steps 1–4. Use it when (a) a PR
+was merged before the three-round pipeline existed, (b) the user
+explicitly asks for a retroactive review, (c) a follow-up PR cycle
+needs to start from a merged baseline.
 
 ## Reference Files
 

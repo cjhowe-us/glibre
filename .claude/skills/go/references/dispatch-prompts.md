@@ -9,8 +9,11 @@ Every prompt embeds these invariants:
   `reviews/decisions/*.md`, and the parent issue bodies.
 - One leaf per session. If scope grows, split via comment + new
   issues.
-- Branch from `main`. Conventional Commit subject. Open a PR. Set
-  auto-merge on the PR.
+- Branch from `main`. Conventional Commit subject. Open a PR with
+  `gh pr create` and STOP — do NOT enable auto-merge. The parent /go
+  skill runs three sequential rounds of review (`go-review` +
+  `go-impl-respond`) against your PR and flips auto-merge on after
+  round 3 converges.
 - Status comment per `AGENTS.md` schema:
   `agent / status / issue / branch / worktree / host / cloud /
   commit / pr / notes`.
@@ -37,7 +40,10 @@ INVARIANTS:
   post a status:blocked comment with split proposal and stop.
 - Branch from main: feat/<scope>-<slug> or chore/<scope>-<slug>.
 - Conventional Commit PR title.
-- Open PR with `gh pr create`, then `gh pr merge <n> --auto --squash`.
+- **Open PR with `gh pr create` and STOP.** Do NOT call
+  `gh pr merge --auto --squash`. The parent /go skill runs three
+  sequential rounds of review (`go-review` + `go-impl-respond`) and
+  flips auto-merge on after round 3 converges.
 - Issue stays OPEN. Do not close. Closure happens when PR merges.
 - Status-comment schema (post comments via `gh issue comment <N> --body
   "$(cat <<EOF ... EOF)"` so bash double-quoted heredoc expands $BRANCH
@@ -443,5 +449,122 @@ review checklist sign-off.
 
 GOAL: resolve the regression / chore declared in the plan body.
 
-Same flow as Implementation. PR + auto-merge.
+Same flow as Implementation. Open PR; do NOT enable auto-merge —
+the parent /go skill runs the three-round review pipeline before
+flipping auto-merge on.
+```
+
+---
+
+## Review Round — go-review
+
+Dispatch this prompt to `subagent_type: go-review` once per round
+(rounds 1, 2, 3) per PR. The agent's body documents per-round lenses;
+substitute the placeholders below.
+
+```
+{{COMMON_HEADER_REVIEW}}
+
+ROUND: {{ROUND}}                       # 1, 2, or 3
+TARGET_PR: #{{PR_NUMBER}}
+PR_HEAD_REF: {{PR_HEAD_REF}}            # e.g. test/shader-include-closure-trace
+PR_BASE_REF: main
+PR_STATE: {{PR_STATE}}                  # OPEN | MERGED
+TOUCHED_CONTEXTS: {{TOUCHED_CONTEXTS}}  # comma-list, e.g. shader,e2e
+REFERENCED_ISSUES: {{REFERENCED_ISSUES}} # space-list, e.g. #319 #320
+PRIOR_ROUND_REVIEW_IDS: {{PRIOR_REVIEW_IDS}} # empty for round 1
+
+EXTRA READS:
+- gh pr view {{PR_NUMBER}} --json title,body,headRefName,state,merged,mergedAt,baseRefName,commits
+- gh pr diff {{PR_NUMBER}}
+- For each ctx in TOUCHED_CONTEXTS:
+    /Users/cjhowe/Code/glibre/specs/<ctx>/SPEC.md
+    /Users/cjhowe/Code/glibre/specs/<ctx>/*.md (sibling design docs)
+- /Users/cjhowe/Code/glibre/reviews/decisions/*.md cited in the diff
+- All prior rounds' review comments + impl-respond replies, via
+    gh api repos/cjhowe-us/glibre/pulls/{{PR_NUMBER}}/reviews
+    gh api repos/cjhowe-us/glibre/pulls/{{PR_NUMBER}}/comments
+
+LENS for round {{ROUND}}:
+- Round 1 — Coverage + correctness
+- Round 2 — Cohesion + SRP + seam quality
+- Round 3 — Topology + spec alignment + polish
+(See agent body for the full per-round focus list.)
+
+GOAL: Post inline review comments via `gh api repos/<owner>/<repo>/pulls/{{PR_NUMBER}}/comments`
+and a top-level review verdict via `gh pr review {{PR_NUMBER}} --comment --body "..."`.
+
+OUTPUT:
+- One inline comment per finding with `severity:<HIGH|MED|LOW>
+  location:<file>:<line> problem:<...> fix:<...>`.
+- A top-level review-verdict comment with the schema specified in
+  the agent body (`round:<N> reviewer:go-review verdict:...
+  findings:HIGH:<n> MED:<n> LOW:<n> carryover:<n> notes:<...>`).
+- A status comment on the most-relevant referenced issue per the
+  AGENTS.md schema, agent:go-review.
+
+DO NOT push commits. DO NOT enable or disable auto-merge. DO NOT
+close the PR. Reviewing only.
+```
+
+---
+
+## Implementation Response — go-impl-respond
+
+Dispatch this prompt to `subagent_type: go-impl-respond` once per
+round (rounds 1, 2, 3) per PR, immediately after that round's
+go-review completes. Substitutes:
+
+```
+{{COMMON_HEADER_RESPOND}}
+
+ROUND: {{ROUND}}                       # 1, 2, or 3
+TARGET_PR: #{{PR_NUMBER}}
+PR_HEAD_REF: {{PR_HEAD_REF}}
+PR_BASE_REF: main
+PR_STATE: {{PR_STATE}}                  # OPEN | MERGED
+ROUND_REVIEW_ID: {{REVIEW_ID}}          # the review just posted by go-review
+TOUCHED_CONTEXTS: {{TOUCHED_CONTEXTS}}
+ORIGINAL_BRANCH_SCOPE: {{SCOPE_SLUG}}   # e.g. shader-slang-authoring (for follow-up branch naming)
+ORIGINAL_REFERENCED_ISSUE: #{{ISSUE_NUMBER}}
+
+EXTRA READS:
+- gh api repos/cjhowe-us/glibre/pulls/{{PR_NUMBER}}/reviews/{{REVIEW_ID}}
+- gh api repos/cjhowe-us/glibre/pulls/{{PR_NUMBER}}/comments  (filter to review_id == REVIEW_ID)
+- gh pr diff {{PR_NUMBER}}
+- For each ctx in TOUCHED_CONTEXTS:
+    /Users/cjhowe/Code/glibre/specs/<ctx>/SPEC.md
+- All prior rounds' impl-respond replies (so you don't undo a prior
+  round's PUSHBACK).
+
+GOAL: For each review comment from this round, ADDRESS / PUSHBACK /
+DEFER / NOOP per the rules in the agent body.
+
+PR-state branch protocol:
+- OPEN: check the PR branch into a per-dispatch worktree, push
+  commits to the PR branch, reply on each comment with
+  `decision:ADDRESSED commit:<sha>` etc.
+- MERGED: open ONE follow-up PR branch
+  `fix/{{SCOPE_SLUG}}-followup-r{{ROUND}}` from origin/main, address
+  all "code-change" findings there, open the follow-up PR (no
+  auto-merge — parent /go skill recurses Step 5 on it), and reply
+  on each addressed comment with `decision:ADDRESSED followup:#<NEW_PR>`.
+
+Open `[SPIKE] iterate-...` issues for any DEFER findings, parented
+to the right epic.
+
+OUTPUT:
+- One reply per review comment with the schema specified in the
+  agent body. No silent skips on HIGH.
+- Status comment on the original referenced issue with the
+  AGENTS.md schema, agent:go-impl-respond, notes including counts
+  of ADDRESSED / PUSHBACK / DEFER / NOOP and the follow-up PR
+  number if any.
+- For DEFER: at least one new `[SPIKE] iterate-...` issue per
+  distinct concern.
+
+DO NOT enable or disable auto-merge on the original PR. DO NOT
+close the PR or any referenced issue. DO NOT advance to the next
+round — the parent orchestrator dispatches round R+1's go-review
+after you finish.
 ```
