@@ -140,8 +140,12 @@ ShaderCache (root, repository-shaped)
 
 ShaderCache::Library (cooked, read-only handle, §4)
 ├── std::filesystem::path             library_root_
-├── ShaderCacheManifest               manifest_                // borrowed mmap view
-└── ColdLoader                        cold_                    // shared with parent ShaderCache
+├── ShaderCacheManifest               manifest_                // independently owned; mmap'd at open
+└── ColdLoader                        cold_                    // independently owned; no parent ShaderCache required
+                                                               // Shipping: Library is the sole runtime object.
+                                                               // Tooling: ShaderCache::cook() moves a clone of its
+                                                               //   ColdLoader state into the returned Library (the
+                                                               //   parent ShaderCache's cold_ is unchanged).
 
 ShaderArtifact (value, sealed, §5 SPEC)
 ├── PermutationKey                    key
@@ -330,13 +334,26 @@ cold_lookup(hash) :
     2. if !entry: return nullptr            // miss; not an error (§4)
     3. path := root_ / "artifacts" / hash[0:2] / hash[2:4] / hash
     4. mapping := mmap(path, MAP_PRIVATE)
-       // Read-only mmap; no copy until decode.
+       // Transient MAP_PRIVATE mmap; used only for Fory decode.
+       // The mmap is NOT kept for the artifact's lifetime; it is a
+       // decode scratch window, not a zero-copy residence.
     5. record := fory_decode<ShaderArtifactRecord>(mapping.bytes)
        // data middleman dylib (#732 fory-codegen) handles decode.
+       // Decode copies all variable-length fields (bytecode, reflection,
+       // descriptor layout) into shader-heap allocations tagged
+       // ContextTag::shader. After this step the artifact's bytes live
+       // exclusively in the shader heap, counted against the 24 MiB
+       // HotTable ceiling (§9.2 "Decoded ShaderArtifact bodies ~23 MiB").
     6. if record.artifact_hash != hash:
            return std::unexpected{Error::CacheCorrupt}
     7. artifact := ShaderArtifact::from_record(record)
-    8. munmap(mapping)                      // record is now owned in shader heap
+       // Moves heap-owned fields; record's mmap-backed storage is no
+       // longer referenced after this point.
+    8. munmap(mapping)
+       // Release the transient decode window. The artifact's bytes are
+       // now fully owned in the shader heap; the kernel page-cache
+       // backing the CAS file may or may not remain warm (irrelevant —
+       // subsequent reads go through the HotTable, not disk).
     9. return artifact
 ```
 
@@ -554,6 +571,21 @@ private:
 
 class ShaderCache::Library {
 public:
+    // Shipping-path factory. Opens a cooked ShaderLibrary archive at
+    // `library_root` in read-only mode. Validates `manifest.fory`'s
+    // `schema_abi_hash` against the host's `glibre_types_abi_hash()`
+    // and returns a fully-initialised read-only Library; no parent
+    // ShaderCache is required.
+    //
+    // Pre-conditions: `library_root` exists, contains `manifest.fory`.
+    // Failure modes: CacheCorrupt (manifest decode failure),
+    //                CacheIntegrity (schema_abi_hash mismatch).
+    //
+    // This is the sole factory the shipping runtime calls. cook() is
+    // tooling-only and unavailable in GLIBRE_SHIPPING builds.
+    static std::expected<Library, Error>
+    open(const std::filesystem::path& library_root);
+
     const ShaderArtifact* get(const ShaderHash&) const noexcept;
 
 private:
@@ -598,6 +630,16 @@ follow-up plan that lifts spike findings into SPEC text.
   reserved for `CacheCorrupt` / `CacheIntegrity` /
   `CacheReadOnlyViolation` (the three `fatal` cache arms in SPEC
   §10.2).
+- **`ShaderCache::Library` owns its state independently.** A `Library`
+  obtained via `Library::open(path)` (shipping) or `ShaderCache::cook()`
+  (tooling) is a self-contained, standalone object. It owns its
+  `ColdLoader` and mmap'd manifest by value — it does not borrow from,
+  nor must it outlive, any `ShaderCache` instance. In shipping the
+  `Library` is the *only* runtime object; no parent `ShaderCache` is
+  created or required. In the editor / cooker path, `ShaderCache::cook()`
+  clones the relevant ColdLoader state into the returned `Library`; the
+  parent `ShaderCache`'s `cold_` member is unchanged and the two objects
+  have independent lifetimes thereafter.
 
 ### 4.3 Per-method contracts
 
@@ -633,6 +675,17 @@ follow-up plan that lifts spike findings into SPEC text.
   function is link-included but unreachable; runtime has no
   source-edit trigger).
 - **`compact() const`** — tooling-only on-disk reorder; see §3.8.
+- **`Library::open(library_root) [static]`** — shipping-path factory.
+  Opens a cooked `ShaderLibrary` archive in read-only mode without
+  requiring (or constructing) a parent `ShaderCache`. Validates
+  `manifest.fory`'s `schema_abi_hash` against the host's
+  `glibre_types_abi_hash()` and returns a fully-initialised `Library`.
+  Pre-conditions: `library_root` exists and contains `manifest.fory`.
+  Failure modes: `CacheCorrupt` (manifest decode failure),
+  `CacheIntegrity` (`schema_abi_hash` mismatch). This is the one
+  factory the shipping runtime uses; `ShaderCache::cook()` is
+  unavailable in `GLIBRE_SHIPPING` builds and must not be called from
+  shipping paths.
 
 ### 4.4 Public ABI surface
 
@@ -864,9 +917,25 @@ full `ShaderCache`. SPEC §7.5 layout, recapped:
 
 ```text
 <library_root>/
-    manifest.fory                      # ShaderCacheManifest, mmap'd at open
-    artifacts/<aa>/<bb>/<hash>         # ShaderArtifactRecord blobs, mmap'd lazily
+    manifest.fory                      # ShaderCacheManifest, mmap'd at Library::open and kept resident
+    artifacts/<aa>/<bb>/<hash>         # ShaderArtifactRecord blobs, accessed on first lookup (cold path)
 ```
+
+**Memory model for artifact blobs (copy-to-heap, not zero-copy mmap).**
+When a `ShaderHash` is first requested via `Library::get` (or
+`ShaderCache::get`) and is not yet in the hot table, the cold path
+(§3.5.1) opens a transient `MAP_PRIVATE` mmap on the CAS file,
+Fory-decodes the `ShaderArtifactRecord` into shader-heap allocations
+(tagged `ContextTag::shader`), and immediately unmaps the file. The
+decoded `ShaderArtifact` bytes live in the HotTable's shader-heap
+pool and are counted against the 24 MiB ceiling (§9.2). The CAS
+file's kernel page-cache backing may remain warm for OS-side readahead
+benefit, but the engine does not rely on it and does not count it.
+The manifest (`manifest.fory`), by contrast, is mmap'd once at open
+and kept resident for the lifetime of the `Library` / `ShaderCache`
+(it is a small index structure and is accessed frequently for binary
+search; its pages are kernel-pager-tracked and not counted against the
+24 MiB ceiling per §9.2 Allocator Rule §4).
 
 Read-only at runtime in shipping (SPEC §4.8 invariant 3); the cooker
 is the sole writer; orphan blobs and dangling references both fail
