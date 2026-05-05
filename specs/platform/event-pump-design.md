@@ -403,7 +403,7 @@ the event itself triggers a side effect inside the pump:
 |-------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------|
 | `SDL_EVENT_GAMEPAD_ADDED` / `_REMOVED`                                  | Update SDL3's internal gamepad table by calling `SDL_OpenGamepad` / `SDL_CloseGamepad` so subsequent axis/button events resolve a valid `device` index. No glibre `InputEvent` emitted; consumers query gamepad presence at use time. | None (R-6.1.11 partial).                     |
 | `SDL_EVENT_DISPLAY_ADDED` / `_REMOVED` / `_ORIENTATION_CHANGED`         | Cause the next `Window::display()` call to re-query SDL3's display list (`Display` is a snapshot per SPEC §4.1 inv #5, not cached). Emitted as `WindowEvent::DisplayChanged { window, display }` for the focused window.              | `WindowEvent::DisplayChanged`.                |
-| `SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED`                                | Update the owning `Window::Impl`'s cached `(LogicalSize, PhysicalSize, DpiScale)` snapshot via `surface::detail::query_layer_metrics` *before* the event becomes visible to the engine (§6.3 cross-module note in SPEC).            | `WindowEvent::DpiChanged`.                    |
+| `SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED`                                | Update the owning `Window::Impl`'s cached `(LogicalSize, PhysicalSize, DpiScale)` snapshot via `surface::detail::query_layer_metrics` *before* the event becomes visible to the engine (§6.3 cross-module note in SPEC). Also updates `Pump::Impl`-cached `DpiScale_` from the new `Window::Impl` value; the updated scale is passed to `translate_mouse` on the next `SDL_EVENT_MOUSE_MOTION` in this frame (consumed by the divide-by-scale path per §3.3). | `WindowEvent::DpiChanged`.                    |
 | `SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED` / `_RESIZED`                      | Update the owning `Window::Impl`'s cached `LogicalSize` / `PhysicalSize`.                                                                                                                                                            | `WindowEvent::Resized`.                       |
 | `SDL_EVENT_WINDOW_FOCUS_GAINED` / `_LOST`                               | None at the pump (the window aggregate's focus state is the queue contents themselves).                                                                                                                                              | `WindowEvent::FocusGained` / `FocusLost`.     |
 | `SDL_EVENT_WINDOW_MINIMIZED` / `_RESTORED`                              | None.                                                                                                                                                                                                                                | `WindowEvent::Minimized` / `Restored`.        |
@@ -987,7 +987,7 @@ failure is a `glibre::Error` arm (with the platform-private
 
 | Entry point                     | Returnable arms                                  | Trigger                                         |
 |---------------------------------|--------------------------------------------------|-------------------------------------------------|
-| `EventQueue<T>::with_capacity`  | `Unsupported`                                    | zero capacity / wildly oversized capacity (> 2^24 — SPEC sub-arena cap); non-power-of-two is silently rounded up (not an error) |
+| `EventQueue<T>::with_capacity`  | `Unsupported`                                    | zero capacity / capacity overflow beyond u32::max (the sub-arena ceiling); non-power-of-two is silently rounded up (not an error) |
 | `EventQueue<T>::drain`          | total — never returns `unexpected`               | drain is infallible by design (SPSC pop)        |
 | `Pump::create`                  | `IoFailure { OsCode }`                           | `SDL_InitSubSystem(SDL_INIT_VIDEO \| SDL_INIT_GAMEPAD)` failure |
 | `Pump::drain`                   | `IoFailure { OsCode { 0 } }` with prefix `"queue-full"` (fatal); `Unsupported` (off-main-thread) | Queue full at `try_push` site (§4.2 inv #3 fatal); drain called from non-main thread (§6.4) |
@@ -1123,7 +1123,7 @@ the platform user-story issues).
     whose relative `dx/dy` is 200 physical pixels; assert the emitted
     `MouseMove::dx/dy` is `100.0f` (logical points). Confirms the
     divide-by-dpi_scale invariant documented in §3.3 and that the
-    `DpiScale` parameter is the operative divisor. (§R-6.1.4.)
+    `DpiScale` parameter is the operative divisor. (R-6.1.4)
 4. **`event_pump_drops_unknown_sdl_tag`** — feed an
    `SDL_EVENT_USER` and an out-of-MVP-range tag; assert the
    queues remain empty and a `debug`-level log line was emitted.
