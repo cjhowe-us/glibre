@@ -45,7 +45,7 @@
 #   window_size:        1280x720
 #   dpi_scale:          1.0
 #   rng_seed:           0x0000_0000_0000_0001
-#   frame_budget:       max_frames=64                # 28 authored × 2× safety (14 frames after log-window split)
+#   frame_budget:       max_frames=64                # frames 0–14 (15 slots) × ~4× safety = 64
 #   golden_refs:        []                           # AssertEcsSnapshot/Screenshot not used
 #
 # ─────────────────────────────────────────────────────────────────────────────
