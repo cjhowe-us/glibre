@@ -85,10 +85,17 @@ The aggregate **refuses to own**:
 
 The SRP boundary is sharp: if the **SDL3 event vocabulary**, the
 **SDL3 → typed-variant translation table**, the **per-device
-ordering rule**, the **bounded SPSC ring protocol**, or the
-**per-frame drain trigger** change, this design changes. Anything
-else — input action mapping, window aggregate state, file watching,
-display pacing — is out of scope.
+ordering rule**, the **bounded SPSC ring protocol**, the
+**per-frame drain trigger**, or the **drop-event routing to the
+`FileWatcher` aggregate** change, this design changes. Anything
+else — input action mapping, window aggregate state, display
+pacing — is out of scope.
+
+Drop-event routing is listed as a sixth responsibility for full SRP
+transparency. The §12 one-caller gate (per PHILOSOPHY §Anti-patterns)
+governs whether `ingest_drop` becomes a stable cross-aggregate API;
+the SRP boundary stays unchanged whether routing goes via
+`ingest_drop` or via a future `WindowEvent::FileDropped` variant.
 
 ## 2. Requirements coverage
 
@@ -246,7 +253,7 @@ namespace glibre::platform::event::detail {
 // Returns nullopt for unknown / consumed-internally tags.
 [[nodiscard]] auto translate_keyboard(const SDL_Event&) noexcept
     -> eastl::optional<InputEvent>;
-[[nodiscard]] auto translate_mouse(const SDL_Event&) noexcept
+[[nodiscard]] auto translate_mouse(const SDL_Event&, DpiScale) noexcept
     -> eastl::optional<InputEvent>;
 [[nodiscard]] auto translate_wheel(const SDL_Event&) noexcept
     -> eastl::optional<InputEvent>;
@@ -283,8 +290,11 @@ Key normalisation rules realised in the table:
   is set — window-relative so coordinate (0, 0) is top-left of the
   client area regardless of compositor placement. Relative `dx/dy`
   from `SDL_SetRelativeMouseMode` are physical pixel deltas on macOS
-  and must be divided by `window.dpi_scale()` (from
-  window-surface-design.md) before being placed in `MouseMove::dx/dy`.
+  and must be divided by the current `DpiScale` before being placed
+  in `MouseMove::dx/dy`. `Pump::Impl` caches the current `DpiScale`
+  (initialised `1.0f` at construction; updated in §3.5 on
+  `SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED`). Each `translate_mouse`
+  call passes the cached `DpiScale` by value as its second argument.
   Documented invariant: every `MouseMove` payload reports x, y, dx, dy
   in logical points. A unit test at `DpiScale != 1.0` asserts the
   divide-by-scale path (§11.1 test #3b).
@@ -367,7 +377,10 @@ allocation from the platform sub-arena tagged
 Full-on-`try_push` returns `false`; the pump:
 1. Stamps the TLS prefix slot via
    `detail::error::set_prefix(prefix::queue_full)`.
-2. Constructs `unexpected(IoFailure { OsCode{0} })`.
+2. Emits an `error`-severity log with the prefix `"queue-full"` and
+   the queue family name. The stamp must precede this log call so
+   `log_error` reads the stamped prefix (not `prefix::none`).
+3. Returns `unexpected(IoFailure { OsCode{0} })`.
 
 The TLS prefix stamp is mandatory before any `IoFailure{OsCode{0}}`
 construction where the prefix is the only discriminator; without the
@@ -691,9 +704,8 @@ is a contract violation. Detection in MVP:
   abort in shipping builds because a misbehaving plugin should
   surface as an error, not crash the engine.
 
-This is the canonical detection pattern from `error-model.md`
-§"Logging/Telemetry" (see hot-reload refusal severity discussion
-under that heading) — assert in debug, demote in shipping.
+This is the canonical detection pattern consistent with SPEC §4.1
+inv #2 and §4.2 inv #1 — assert in debug, demote in shipping.
 
 ### 6.5 Hot-reload barrier interaction
 
@@ -1007,10 +1019,12 @@ This is the same recovery contract as SPEC §10.3.2's
 
 When `EventQueue<T>::try_push` returns false during `Pump::drain`:
 
-1. The pump emits a `error`-severity log with the prefix
-   `"queue-full"` and the queue family name.
-2. The pump calls `detail::error::set_prefix(prefix::queue_full)`
-   immediately before constructing the failure value.
+1. The pump calls `detail::error::set_prefix(prefix::queue_full)`.
+   The stamp must precede the log so `log_error` reads the stamped
+   prefix. Reorder is cold-path-only — no impact on hot-path performance.
+2. The pump emits an `error`-severity log with the prefix
+   `"queue-full"` and the queue family name (reads the stamped
+   prefix set in step 1).
 3. The pump returns `unexpected(IoFailure { OsCode { 0 } })`
    from the current `Pump::drain` call. The TLS prefix stamp is the
    load-bearing discriminator: callers that receive `IoFailure` from
@@ -1092,11 +1106,12 @@ the platform user-story issues).
    `(LogicalSize, PhysicalSize, DpiScale)` snapshot on
    `Window::Impl` is updated *before* the typed event is enqueued
    (§3.5 / §6.3 SPEC cross-module note).
-3b. **`event_pump_mouse_relative_motion_divided_by_dpi_scale`** — feed
-    a `SDL_MouseMotionEvent` with relative `dx/dy` of 200 physical
-    pixels at `DpiScale = 2.0`; assert the emitted
+3b. **`event_pump_mouse_relative_motion_divided_by_dpi_scale`** — call
+    `translate_mouse(ev, DpiScale{2.0f})` with a `SDL_MouseMotionEvent`
+    whose relative `dx/dy` is 200 physical pixels; assert the emitted
     `MouseMove::dx/dy` is `100.0f` (logical points). Confirms the
-    divide-by-dpi_scale invariant documented in §3.3. (§R-6.1.4.)
+    divide-by-dpi_scale invariant documented in §3.3 and that the
+    `DpiScale` parameter is the operative divisor. (§R-6.1.4.)
 4. **`event_pump_drops_unknown_sdl_tag`** — feed an
    `SDL_EVENT_USER` and an out-of-MVP-range tag; assert the
    queues remain empty and a `debug`-level log line was emitted.
@@ -1221,7 +1236,7 @@ hot-reload survival path; runs against the same S1 trace with a
 
 | Concern                                    | Test                                                                                  |
 |--------------------------------------------|---------------------------------------------------------------------------------------|
-| SDL3 → typed translation correctness       | unit #1, #2, #3, #6, #7                                                               |
+| SDL3 → typed translation correctness       | unit #1, #2, #3, #3b, #6, #7                                                          |
 | Mouse dx/dy DPI divide (§3.3, R-6.1.4)    | unit #3b                                                                              |
 | Trigger released-state formula (§3.3)      | unit #6b                                                                              |
 | with_capacity round-up (§3.4, §10.1)      | unit #8b                                                                              |
