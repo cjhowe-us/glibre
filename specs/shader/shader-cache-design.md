@@ -115,9 +115,9 @@ Glibre-native requirements added beyond harmonius:
   reserved for `CacheCorrupt` / `CacheIntegrity` /
   `CacheReadOnlyViolation`).
 - **Hot set is bounded; cold disk is unbounded.** §9 in-memory ceiling
-  is the SPEC §9.1 `shader / 32 MiB` row. The cooked `ShaderLibrary`
-  on disk has no engine-imposed size cap (asset-pipe budgets live
-  outside `shader`).
+  is the SPEC §9.4 pool table 24 MiB row for the `shader` context.
+  The cooked `ShaderLibrary` on disk has no engine-imposed size cap
+  (asset-pipe budgets live outside `shader`).
 - **Eviction is a 2Q-LRU.** §9.4 below selects 2Q over straight LRU to
   resist scan-heavy cold-load cooker behaviour washing out the hot
   set in editor / dev-loop builds. Shipping never evicts because
@@ -140,8 +140,12 @@ ShaderCache (root, repository-shaped)
 
 ShaderCache::Library (cooked, read-only handle, §4)
 ├── std::filesystem::path             library_root_
-├── ShaderCacheManifest               manifest_                // borrowed mmap view
-└── ColdLoader                        cold_                    // shared with parent ShaderCache
+├── ShaderCacheManifest               manifest_                // independently owned; mmap'd at open
+└── ColdLoader                        cold_                    // independently owned; no parent ShaderCache required
+                                                               // Shipping: Library is the sole runtime object.
+                                                               // Tooling: ShaderCache::cook() moves a clone of its
+                                                               //   ColdLoader state into the returned Library (the
+                                                               //   parent ShaderCache's cold_ is unchanged).
 
 ShaderArtifact (value, sealed, §5 SPEC)
 ├── PermutationKey                    key
@@ -277,7 +281,7 @@ The runtime read path holds a bounded subset of artifacts memory-
 resident. Architecture:
 
 ```text
-HotTable (SPEC §9.1 'shader / 32 MiB' contract)
+HotTable (SPEC §9.4 pool table 24 MiB ceiling)
 ├── eastl::hash_map<ShaderHash, Entry>      index_           // O(1) lookup, BLAKE3-keyed
 ├── TwoQueueLRU<ShaderHash>                 lru_             // §9.4 eviction policy
 ├── std::atomic<u64>                        live_bytes_      // ContextTag::shader bookkeeping
@@ -304,10 +308,11 @@ Hot-table rules:
 3. **Eviction is 2Q-LRU.** A scanning workload (cooker iterating
    every artifact for a project-pruned cook) does not wash out the
    hot set; recently-promoted entries stay resident. Eviction
-   triggers when `live_bytes_ + incoming_size > 32 MiB`; a victim's
-   `refcount` of 0 is required (live PSOs hold borrows; eviction
-   waits for the borrow to drop in editor / dev-loop, and refuses
-   with `Error::OutOfBudget` only under `GLIBRE_ALLOC_STRICT=1`).
+   triggers when `live_bytes_ + incoming_size > 24 MiB` (SPEC §9.4
+   pool table ceiling; see §9.2); a victim's `refcount` of 0 is
+   required (live PSOs hold borrows; eviction waits for the borrow
+   to drop in editor / dev-loop, and refuses with
+   `Error::OutOfBudget` only under `GLIBRE_ALLOC_STRICT=1`).
 4. **Eviction never deletes from disk.** `evict(hash)` drops the
    entry from `index_` and `lru_` only; the on-disk CAS file is
    untouched. Re-lookup after eviction walks the cold path and
@@ -329,13 +334,26 @@ cold_lookup(hash) :
     2. if !entry: return nullptr            // miss; not an error (§4)
     3. path := root_ / "artifacts" / hash[0:2] / hash[2:4] / hash
     4. mapping := mmap(path, MAP_PRIVATE)
-       // Read-only mmap; no copy until decode.
+       // Transient MAP_PRIVATE mmap; used only for Fory decode.
+       // The mmap is NOT kept for the artifact's lifetime; it is a
+       // decode scratch window, not a zero-copy residence.
     5. record := fory_decode<ShaderArtifactRecord>(mapping.bytes)
        // data middleman dylib (#732 fory-codegen) handles decode.
+       // Decode copies all variable-length fields (bytecode, reflection,
+       // descriptor layout) into shader-heap allocations tagged
+       // ContextTag::shader. After this step the artifact's bytes live
+       // exclusively in the shader heap, counted against the 24 MiB
+       // HotTable ceiling (§9.2 "Decoded ShaderArtifact bodies ~23 MiB").
     6. if record.artifact_hash != hash:
            return std::unexpected{Error::CacheCorrupt}
     7. artifact := ShaderArtifact::from_record(record)
-    8. munmap(mapping)                      // record is now owned in shader heap
+       // Moves heap-owned fields; record's mmap-backed storage is no
+       // longer referenced after this point.
+    8. munmap(mapping)
+       // Release the transient decode window. The artifact's bytes are
+       // now fully owned in the shader heap; the kernel page-cache
+       // backing the CAS file may or may not remain warm (irrelevant —
+       // subsequent reads go through the HotTable, not disk).
     9. return artifact
 ```
 
@@ -414,9 +432,15 @@ Cooker invariants:
    given `<library_root>` at a time. Concurrency is enforced by an
    advisory `flock(2)` on `<library_root>/.cook.lock`; a second
    cooker that fails to acquire the lock refuses with
-   `Error::CacheReadOnlyViolation` (which is a slight category abuse
-   re-used here for the writer-exclusion case; the structured log
-   carries `detail="writer_lock_busy"` to disambiguate).
+   `Error::CacheReadOnlyViolation` (which is a category abuse —
+   `CacheReadOnlyViolation` semantically covers the shipping
+   read-only-flag case, not a writer-lock-busy case; the structured
+   log carries `detail="writer_lock_busy"` to disambiguate at
+   runtime). A dedicated `Error::CacheLockContention` arm should be
+   introduced in the follow-up implementation plan that lifts §12
+   spike findings into SPEC §10 text; that plan must add the new
+   arm to the `shader::Error` closed enum before
+   `ShaderCache::cook` implementation lands.
 4. **No partial publishes.** `manifest.fory` is rewritten only after
    every step 3 entry has been atomically renamed into place. A
    reader concurrent with a cooker (editor + watcher loop) sees
@@ -479,6 +503,22 @@ that SPEC §4.6 implies but does not declare in §5.
 ```cpp
 namespace glibre::shader {
 
+// Strong alias distinguishing source-content hashes from artifact hashes.
+// Both are 32-byte BLAKE3 digests, but they carry different semantic roles:
+//   ShaderHash        — the composite CAS lookup key (§3.2; source_hash ‖ key ‖
+//                       flags_hash ‖ target, BLAKE3-collapsed). Identifies a
+//                       compiled artifact.
+//   SourceContentHash — the preprocessed source digest produced by ShaderSource
+//                       (#745 §3.7). Identifies a Slang translation unit's
+//                       content. Used as one *input component* of ShaderHash and
+//                       as the invalidation key in invalidate_by_source_hash.
+// Never pass a ShaderHash where a SourceContentHash is expected or vice versa;
+// the types are distinct to make this impossible at compile time.
+struct SourceContentHash {
+    eastl::array<std::byte, 32> bytes{};
+    [[nodiscard]] bool operator==(const SourceContentHash&) const noexcept = default;
+};
+
 class ShaderCache {
 public:
     static std::expected<ShaderCache, Error>
@@ -507,13 +547,16 @@ public:
     std::expected<Library, Error>
     cook(eastl::span<const PermutationKey> enumerated) const;
 
-    // Editor / dev-loop only: drop hot-table entries whose
-    // source_hash matches `affected_source_hash`. Returns the set of
-    // ShaderHashes evicted (used by the SPEC §8.5 publisher to drive
-    // render's PSO invalidation). On-disk CAS untouched; cooker is
-    // the sole disk writer.
+    // Editor / dev-loop only: drop hot-table entries whose embedded
+    // source_hash matches `affected_source_hash`. The parameter is a
+    // SourceContentHash (the preprocessed source digest from
+    // ShaderSource #745), NOT a ShaderHash — the two 32-byte roles
+    // are semantically distinct (see SourceContentHash above).
+    // Returns the set of ShaderHashes evicted (used by the SPEC §8.5
+    // publisher to drive render's PSO invalidation). On-disk CAS
+    // untouched; cooker is the sole disk writer.
     eastl::vector<ShaderHash>
-    invalidate_by_source_hash(const ShaderHash& affected_source_hash) noexcept;
+    invalidate_by_source_hash(const SourceContentHash& affected_source_hash) noexcept;
 
     // Tooling-only on-disk reorder; see §3.8. Offline subcommand.
     std::expected<void, Error>
@@ -528,6 +571,21 @@ private:
 
 class ShaderCache::Library {
 public:
+    // Shipping-path factory. Opens a cooked ShaderLibrary archive at
+    // `library_root` in read-only mode. Validates `manifest.fory`'s
+    // `schema_abi_hash` against the host's `glibre_types_abi_hash()`
+    // and returns a fully-initialised read-only Library; no parent
+    // ShaderCache is required.
+    //
+    // Pre-conditions: `library_root` exists, contains `manifest.fory`.
+    // Failure modes: CacheCorrupt (manifest decode failure),
+    //                CacheIntegrity (schema_abi_hash mismatch).
+    //
+    // This is the sole factory the shipping runtime calls. cook() is
+    // tooling-only and unavailable in GLIBRE_SHIPPING builds.
+    static std::expected<Library, Error>
+    open(const std::filesystem::path& library_root);
+
     const ShaderArtifact* get(const ShaderHash&) const noexcept;
 
 private:
@@ -572,6 +630,16 @@ follow-up plan that lifts spike findings into SPEC text.
   reserved for `CacheCorrupt` / `CacheIntegrity` /
   `CacheReadOnlyViolation` (the three `fatal` cache arms in SPEC
   §10.2).
+- **`ShaderCache::Library` owns its state independently.** A `Library`
+  obtained via `Library::open(path)` (shipping) or `ShaderCache::cook()`
+  (tooling) is a self-contained, standalone object. It owns its
+  `ColdLoader` and mmap'd manifest by value — it does not borrow from,
+  nor must it outlive, any `ShaderCache` instance. In shipping the
+  `Library` is the *only* runtime object; no parent `ShaderCache` is
+  created or required. In the editor / cooker path, `ShaderCache::cook()`
+  clones the relevant ColdLoader state into the returned `Library`; the
+  parent `ShaderCache`'s `cold_` member is unchanged and the two objects
+  have independent lifetimes thereafter.
 
 ### 4.3 Per-method contracts
 
@@ -598,13 +666,26 @@ follow-up plan that lifts spike findings into SPEC text.
   handle (the cooked sidecar manifest reader); the `ShaderCache`
   itself is unchanged on success (its hot table is unmodified; the
   cooked archive is a separate read root the cooker hands off).
-- **`invalidate_by_source_hash(source_hash) noexcept`** — editor /
-  dev-loop only. Drops hot-table entries whose embedded
-  `source_hash` field matches; returns the affected `ShaderHash` set
-  for the SPEC §8.5 publisher. On-disk CAS is untouched. No-op in
-  shipping (the function is link-included but unreachable; runtime
-  has no source-edit trigger).
+- **`invalidate_by_source_hash(affected_source_hash: SourceContentHash) noexcept`** —
+  editor / dev-loop only. The parameter is a `SourceContentHash`
+  (not a `ShaderHash`; see §4.1 type commentary). Drops hot-table
+  entries whose embedded `source_hash` field matches the given
+  digest; returns the affected `ShaderHash` set for the SPEC §8.5
+  publisher. On-disk CAS is untouched. No-op in shipping (the
+  function is link-included but unreachable; runtime has no
+  source-edit trigger).
 - **`compact() const`** — tooling-only on-disk reorder; see §3.8.
+- **`Library::open(library_root) [static]`** — shipping-path factory.
+  Opens a cooked `ShaderLibrary` archive in read-only mode without
+  requiring (or constructing) a parent `ShaderCache`. Validates
+  `manifest.fory`'s `schema_abi_hash` against the host's
+  `glibre_types_abi_hash()` and returns a fully-initialised `Library`.
+  Pre-conditions: `library_root` exists and contains `manifest.fory`.
+  Failure modes: `CacheCorrupt` (manifest decode failure),
+  `CacheIntegrity` (`schema_abi_hash` mismatch). This is the one
+  factory the shipping runtime uses; `ShaderCache::cook()` is
+  unavailable in `GLIBRE_SHIPPING` builds and must not be called from
+  shipping paths.
 
 ### 4.4 Public ABI surface
 
@@ -626,7 +707,10 @@ The shipping cut (SPEC §6.5) excludes `cache/cooker.cpp` and
 `ShaderCache::compact` are link-included as symbols (so the type
 remains ABI-stable across editor / shipping) but their TUs are empty
 stubs that return `Error::CacheReadOnlyViolation`. The runtime calls
-only `open` and `get`.
+only `Library::open` (shipping-path factory that requires no parent
+`ShaderCache`) and `Library::get`. `ShaderCache::open` is the
+editor/cooker bootstrap path and is never called by the shipping
+runtime.
 
 ## 5. Hot / Cold Path Split
 
@@ -668,9 +752,10 @@ build configuration:
 mu_` is acquired in shared mode by every `get`; no `unique_lock` is
 ever taken because there is no writer. Hot-table admission (the warm
 path) is the one exception: after the cold load, a single thread
-upgrades to a unique lock to insert into `index_` and `lru_`. SPSC
-admission is bounded; multi-reader steady-state is contention-free
-beyond the atomic `live_bytes_` counter.
+upgrades to a unique lock to insert into `index_` and `lru_`.
+Warm-path admission is serialised at the unique-lock boundary;
+multi-reader steady-state is contention-free beyond the atomic
+`live_bytes_` counter.
 
 Reader rules:
 
@@ -684,10 +769,13 @@ Reader rules:
    the entire MVP cooked archive fits the 24 MiB hot-set ceiling.
    The `evict` code path is linked but the call site is unreachable.
 
-### 6.2 Editor / dev-loop: SPSC writer + multi-reader
+### 6.2 Editor / dev-loop: MRSW (multi-reader, single-writer)
 
 `read_only_=false` is admitted only in editor / cooker / dev-loop
-builds. Writers and readers coexist:
+builds. This is a multi-reader / single-writer (MRSW) profile —
+many concurrent `get` readers coexist with at most one cooker writer
+at a time (not SPSC, which implies a single consumer; here readers
+are unbounded). Writers and readers coexist:
 
 - **One writer at a time.** The cooker's advisory file lock (§3.6
   invariant 3) ensures at most one process has `read_only_=false`
@@ -832,9 +920,25 @@ full `ShaderCache`. SPEC §7.5 layout, recapped:
 
 ```text
 <library_root>/
-    manifest.fory                      # ShaderCacheManifest, mmap'd at open
-    artifacts/<aa>/<bb>/<hash>         # ShaderArtifactRecord blobs, mmap'd lazily
+    manifest.fory                      # ShaderCacheManifest, mmap'd at Library::open and kept resident
+    artifacts/<aa>/<bb>/<hash>         # ShaderArtifactRecord blobs, accessed on first lookup (cold path)
 ```
+
+**Memory model for artifact blobs (copy-to-heap, not zero-copy mmap).**
+When a `ShaderHash` is first requested via `Library::get` (or
+`ShaderCache::get`) and is not yet in the hot table, the cold path
+(§3.5.1) opens a transient `MAP_PRIVATE` mmap on the CAS file,
+Fory-decodes the `ShaderArtifactRecord` into shader-heap allocations
+(tagged `ContextTag::shader`), and immediately unmaps the file. The
+decoded `ShaderArtifact` bytes live in the HotTable's shader-heap
+pool and are counted against the 24 MiB ceiling (§9.2). The CAS
+file's kernel page-cache backing may remain warm for OS-side readahead
+benefit, but the engine does not rely on it and does not count it.
+The manifest (`manifest.fory`), by contrast, is mmap'd once at open
+and kept resident for the lifetime of the `Library` / `ShaderCache`
+(it is a small index structure and is accessed frequently for binary
+search; its pages are kernel-pager-tracked and not counted against the
+24 MiB ceiling per §9.2 Allocator Rule §4).
 
 Read-only at runtime in shipping (SPEC §4.8 invariant 3); the cooker
 is the sole writer; orphan blobs and dangling references both fail
@@ -1030,13 +1134,14 @@ Allocator integration:
   `reviews/decisions/perf-budget.md` Allocator Rules.
 - Strict-mode (`GLIBRE_ALLOC_STRICT=1`) returns
   `std::unexpected{core::Error::OutOfBudget}` if an admission would
-  push live bytes over 32 MiB (the full SPEC §9.1 cell, including the
-  4 MiB ReflectionBlob row counted under decoded bodies).
+  push live bytes over 24 MiB (the SPEC §9.4 pool table ceiling for
+  the `shader` context; includes the ~0.5 MiB index and LRU
+  overhead plus the ~23 MiB decoded-body pool).
 - Shipping mode logs a once-per-frame `warn` and silently degrades
   (the new entry is evicted before admission, equivalent to a miss
   the next time the hash is requested; a re-warm follows in the next
   level-stream slot).
-- Mmap'd pages do **not** count against the 32 MiB ceiling per
+- Mmap'd pages do **not** count against the 24 MiB ceiling per
   Allocator Rule §4 (transient kernel-pager memory).
 
 ### 9.3 Eviction policy
@@ -1105,7 +1210,7 @@ the `ShaderCache`-specific trigger and recovery:
 | **`CacheCorrupt`**        | A CAS file's BLAKE3 self-check fails on cold load (§3.5.1 step 6); the manifest references a hash whose CAS file is absent (§3.7 check 1); the Fory decode raises a record-shape error. | refuse the load of the corrupt entry; surface to the editor / cooker; the cooker re-runs to repopulate. Other entries in the same manifest remain live. | `fatal`    |
 | **`CacheIntegrity`**      | `schema_abi_hash` mismatch (§7.2 case 1); `ShaderArtifactRecord.version` outside supported range (§7.2 case 2); manifest-vs-CAS skew detected by §3.7; a `ShaderHash` collision against a non-byte-equal payload during cooker insert. | refuse `open` / refuse `insert`; the in-flight artifact (if any) is dropped; the prior hash continues to resolve. Re-cook required. | `fatal`    |
 | **`CacheReadOnlyViolation`** | Shipping `shader.dylib` observes a write attempt (`insert`, `cook`, `invalidate_by_source_hash`, or `compact`) against a `read_only_=true` cache; or a second cooker process fails to acquire the writer lock (§3.6 invariant 3). | refuse the write; abort the offending caller (build-system bug, never user fault). | `fatal`    |
-| **`OutOfBudget`** (`core::Error`, not `shader::Error`) | An admission to `HotTable` would push `live_bytes_` over 32 MiB under `GLIBRE_ALLOC_STRICT=1`; or a stuck `Entry::refcount` blocks an eviction past the 50 ms watcher-thread timeout. | strict mode: surface to caller; non-strict mode: log `warn`, evict the new entry pre-admission, return a hot-table miss next time. | `fatal` (strict) / `fallback` (non-strict) |
+| **`OutOfBudget`** (`core::Error`, not `shader::Error`) | An admission to `HotTable` would push `live_bytes_` over 24 MiB (SPEC §9.4 pool table ceiling) under `GLIBRE_ALLOC_STRICT=1`; or a stuck `Entry::refcount` blocks an eviction past the 50 ms watcher-thread timeout. | strict mode: surface to caller; non-strict mode: log `warn`, evict the new entry pre-admission, return a hot-table miss next time. | `fatal` (strict) / `fallback` (non-strict) |
 
 ### 10.2 Refuse semantics
 
@@ -1164,10 +1269,16 @@ invariant.
   `Error::CacheIntegrity`. (§7.2 case 1.)
 - `shader_cache_open_succeeds_on_matching_manifest` — open a freshly-
   cooked archive; assert success and an empty hot table.
-- `shader_cache_get_returns_nullptr_on_miss` — lookup a synthetic hash
-  not in the manifest; assert `nullptr` (and, via `lookup`, an
-  engaged `unexpected` is **not** returned — the success arm with a
-  disengaged `optional` is). (§4.2 lookup-miss-is-not-an-error.)
+- `shader_cache_get_returns_nullptr_on_miss` — call `get` with a
+  synthetic `ShaderHash` not present in the manifest; assert the
+  return value is `nullptr`. (§4.2 lookup-miss-is-not-an-error;
+  `get` fast-path only.)
+- `shader_cache_lookup_returns_disengaged_optional_on_miss` — call
+  `lookup` with the same synthetic hash; assert the returned
+  `std::expected` is **not** an `unexpected` (i.e. no error arm
+  fires) and its value arm holds a disengaged `std::optional`.
+  (§4.2 lookup-miss-is-not-an-error; `lookup` structured-path
+  only.)
 - `shader_cache_get_hits_after_warm_load` — first `get` walks cold
   path and admits to hot table; second `get` returns the same
   pointer without touching disk (verified via mock `ColdLoader`).
@@ -1180,10 +1291,11 @@ invariant.
   (§4.3.)
 - `shader_cache_invalidate_by_source_hash_drops_affected_only` —
   populate the hot table with N entries where K embed
-  `source_hash=H`; call `invalidate_by_source_hash(H)`; assert the K
-  affected hashes are returned, the (N − K) unaffected hashes remain
-  resident with bit-equal pointers, and on-disk CAS files are
-  unchanged. (§4.3, §8.3.)
+  `source_hash=H`; call `invalidate_by_source_hash(SourceContentHash{H})`
+  (note: `H` is a `SourceContentHash`, not a `ShaderHash` — §4.1
+  type commentary); assert the K affected hashes are returned, the
+  (N − K) unaffected hashes remain resident with bit-equal pointers,
+  and on-disk CAS files are unchanged. (§4.3, §8.3.)
 - `shader_cache_2q_lru_resists_scan_eviction` — populate hot table
   to ceiling; warm a steady working set into `Am`; stream a scan of
   `ceil(2 × ceiling / avg_size)` cold hashes; assert the steady set
