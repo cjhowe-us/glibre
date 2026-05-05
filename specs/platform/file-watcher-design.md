@@ -61,7 +61,7 @@ What this aggregate explicitly refuses to own:
 - **Window / event pump** — `Pump`, `EventQueue<InputEvent>`,
   `EventQueue<WindowEvent>` (sibling #717). `FileEvent` is *not*
   funnelled through `Pump::drain`; it has its own per-token drain
-  (SPEC §5.8 `take_events`). The collapse rule is in §3.6 below.
+  (SPEC §5.8 `take_events`). The collapse rule is in §3.7 below.
 - **`FileIo` blocking / async I/O** — sibling #721. The watcher does
   no file *content* reads; the BLAKE3 dedup mentioned in SPEC §6.4
   reads bytes from the OS only inside the I/O thread, never on the
@@ -125,7 +125,7 @@ Glibre-native requirements added beyond harmonius:
 - **Per-token SPSC bounded ring**, never grows. Sized at construction
   (default 4096 slots × 64 B = 256 KiB; sub-arena math in §9.2). The
   writer is the I/O thread; the reader is the main thread. SPSC, not
-  MPSC, because the rename-reassembly step §3.6 requires the I/O
+  MPSC, because the rename-reassembly step §3.7 step 4 requires the I/O
   thread to be the sole writer per token.
 - **Watch token numeric identity is process-scoped, not reload-stable
   across platform self-reload.** SPEC §8.6 already locks this: peer
@@ -159,6 +159,9 @@ FileWatcher  (aggregate root, owned by platform)
 ├── FSEventStreamRef         stream_                 (one stream per FileWatcher; multi-root)
 ├── eastl::vector<RootEntry> roots_                  (main-thread authoritative subscription list;
 │                                                    guarded by cold_mutex_)
+├── std::mutex               cold_mutex_             // guards roots_ on the cold path; never taken
+│                                                    // on the FSEvents callback (§6.3 shadow-copy
+│                                                    // snapshot)
 ├── std::atomic<roots_snapshot_t*> roots_snapshot_  (lock-free read pointer for the I/O thread;
 │                                                    written with memory_order_release on mutation,
 │                                                    read with memory_order_acquire in FSEvents
@@ -1029,7 +1032,7 @@ arena. This design partitions:
 | `snapshot_pool_` (`roots_snapshot_t` ×3) | ~2 KiB         | 1 active + 2 quarantined snapshots (§3.3). Each ~512 B (14 × `RootEntry` ≈ 448 B, rounded). Absorbed within existing 256 KiB headroom.        |
 
 Arithmetic: 4 + 8 + 3584 + 256 + 64 + 16 + 2 = 3934 KiB ≈ 3.84 MiB,
-leaving ~254 KiB headroom within the 4 MiB sub-arena cell. The
+leaving ~162 KiB headroom within the 4 MiB sub-arena cell. The
 `snapshot_pool_` addition (~2 KiB) is absorbed well within the
 existing 256 KiB headroom; no arena budget amendment is required.
 The headroom is intentional: it absorbs future overhead growth (e.g. a
@@ -1320,10 +1323,14 @@ story. Neither this design nor the spike issue closes those stories.
   concrete consumers: editor hot-reload coordinator, shipping runtime asset reload. Issue number
   to be backfilled into this entry once filed; the spike must close before the first plan PR
   consuming this design.
+  STATUS: spike issue not yet filed as of #899 commit. The orchestrator (or first plan PR
+  author) must file `[SPIKE] amend-platform-spec-filewatcher-clock-injection` parented to #714
+  and backfill its issue number into this entry. Plan PRs consuming this design cannot land
+  until that spike closes.
 
 - `[NON-BLOCKING]` **Ring count set to 14 (reduced from 16).**
   The §9.2 table was updated to 14 tokens × 256 KiB = 3584 KiB,
-  leaving ~256 KiB headroom within the 4 MiB cell. The headroom
+  leaving ~162 KiB headroom within the 4 MiB cell. The headroom
   protects against future overhead growth (e.g. dedup LRU widening,
   additional per-root metadata). If a future consumer requires more
   than 14 simultaneous roots, the §9.2 arithmetic must be re-evaluated
