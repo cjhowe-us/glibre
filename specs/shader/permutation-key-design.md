@@ -491,12 +491,14 @@ construction, brace-initialization with literal enumerators,
 `from_bytes` success) does. The predicate exists for two narrow
 purposes:
 
-1. **Defensive assertion** at the `compile()` entry inside
-   `CompilationPipeline` (SPEC §4.3): the very first line of
-   `compile` is `if (!key.is_well_formed()) return
-   std::unexpected(Error::PermutationKeyMalformed);`. This catches
-   any caller that constructed a key by `static_cast`-ing arbitrary
-   ordinals (memory corruption, bad codegen-table walker).
+1. **Defensive guard** at the `compile()` entry inside
+   `CompilationPipeline` (SPEC §4.3): callers should call
+   `is_well_formed()` defensively at the earliest point they hold a
+   key produced by an untrusted source (e.g. a key deserialized from
+   an external buffer, or constructed via `static_cast` of arbitrary
+   ordinals from a memory-corrupted or codegen-table-walked path).
+   Exactly how and where `CompilationPipeline` does this is an
+   implementation detail owned by issue #749.
 2. **Bridging across the C ABI.** A plugin trait method that takes
    a `PermutationKey` by value receives it across the C ABI of the
    plugin dylib; the receiving side checks `is_well_formed()` to
@@ -1149,7 +1151,7 @@ sibling), the tests are gated by `[!hide]` until #755 closes.
 | `permutation_key_change_invalidates_shader_hash`                            | For each axis, mutating that axis in a held key produces a different `ShaderHash` (sensitivity). |
 | `permutation_key_with_reserved_bit_set_fails_manifest_load`                 | Hand-crafted manifest payload with a `FeatureSet` reserved bit set is rejected with `Error::CacheIntegrity` (the loader bubbles `PermutationKeyMalformed` up). |
 | `permutation_key_manifest_sort_is_byte_lex`                                 | `ShaderCacheManifest.enumerated_keys` produced from a shuffled input is sorted ascending by `permutation_key_byte_less`. |
-| `permutation_key_survives_plugin_swap_byte_equal`                           | Held `PermutationKey` on a `render` `MaterialBinding` survives a `shader.dylib` swap with no transformation; bytes are identical pre- and post-swap. |
+| `permutation_key_survives_plugin_swap_byte_equal`                           | Held `PermutationKey` on a `render` `MaterialBinding` survives a `shader.dylib` swap with no transformation; bytes are identical pre- and post-swap. **Migration note:** this test exercises a cross-plugin hot-reload contract (render `MaterialBinding` + `shader.dylib` swap) and is a stub here until a dedicated cross-plugin harness exists; intended destination is `tests/cross-plugin/` once that harness lands. |
 
 ### 11.3 Benchmark suite — §9 budget gates
 
