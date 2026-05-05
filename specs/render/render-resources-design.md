@@ -744,21 +744,16 @@ across the entire MVP shader set. Sixteen entries is sized for the
 union of every MVP pass's sampler use ({linear-clamp, linear-repeat,
 trilinear-anisotropic-repeat for albedo, comparison-less-clamp for
 shadow, nearest-clamp for visID resolve, …}); over-cap returns
-`render::Error::SamplerCapExceeded` — its own §5 enumerator, split
-from the previous `ResourceResidencyExceeded` arm per spike #874
-(`reviews/decisions/resourceresidency-srp.md`) so the §10.2 recovery
-ladder is dispatchable on `error.code` alone. The two failure
-conditions had different recoveries (transient-pool residency →
-`lower-tier`; sampler-cache over-cap → `abort-engine` at init /
-`lower-tier` at hot-reload register) and one variant could not
-encode that fork without making `ErrorContext.detail` load-bearing
-(forbidden by `reviews/decisions/error-model.md` line 100). The
-single construction site is `resources/sampler_cache.cpp::SamplerCache::get_or_create`
-(§10.1). Sampler-cap overflow remains a SPEC amendment trigger
-rather than a runtime concern: samplers are not data-driven in MVP,
-and if the static set ever exceeds 16, the cap is raised in a §3.13
-amendment, not at runtime. Cache lookup is linear (16 entries; one
-cache line); hit rate is 100 % under MVP's static set.
+`render::Error::SamplerCapExceeded` — its own §5 enumerator with a
+single construction site at
+`resources/sampler_cache.cpp::SamplerCache::get_or_create` (§10.1);
+the split from the former `ResourceResidencyExceeded` arm is
+documented in `reviews/decisions/resourceresidency-srp.md` (spike
+#874). Sampler-cap overflow is a SPEC amendment trigger rather than
+a runtime concern: samplers are not data-driven in MVP, and if the
+static set ever exceeds 16, the cap is raised in a §3.13 amendment,
+not at runtime. Cache lookup is linear (16 entries; one cache line);
+hit rate is 100 % under MVP's static set.
 
 ### 3.14 Hot-reload survival hook
 
@@ -1297,13 +1292,19 @@ not violate the rule:
 1. **Strict-mode `core::Error::OutOfBudget` translation.** Under
    `GLIBRE_ALLOC_STRICT=1` (`SPEC.md` §6 / §11.6 e2e fixture), the
    per-allocator wrapper that calls into `core` translates inbound
-   `core::Error::OutOfBudget` to `render::Error::ResourceResidencyExceeded`.
-   Per `reviews/decisions/error-model.md` Composition Rule 2, this
-   is a *local, explicit, unit-tested* cross-context mapping; it
-   reshapes an inbound `core::Error` rather than constructing a
-   fresh `render::Error`. The construction site for the resulting
-   `render::Error` remains attributed to the calling allocator's
-   path (transient or persistent).
+   `core::Error::OutOfBudget` at the render boundary. The
+   transient-pool wrapper translates `core::Error::OutOfBudget` to
+   `render::Error::ResourceResidencyExceeded` — that variant's sole
+   construction site under strict mode. The persistent-allocator
+   wrapper translates `core::Error::OutOfBudget` to
+   `render::Error::HeapOutOfMemory` (not `ResourceResidencyExceeded`)
+   at its own call site (consistent with §3.12 "Persistent allocator
+   exhausted → `HeapOutOfMemory`"). Each wrapper contributes to
+   exactly one construction site; one construction site per variant
+   is preserved. Per `reviews/decisions/error-model.md` Composition
+   Rule 2, both translations are *local, explicit, unit-tested*
+   cross-context mappings that reshape an inbound `core::Error`
+   rather than constructing a fresh `render::Error`.
 2. **§11.1 unit test "slot table — capacity overflow returns
    `ResourceResidencyExceeded`."** This test asserts the
    slot-table's behaviour under exhaustion. The test name is a
