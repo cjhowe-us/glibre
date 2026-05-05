@@ -535,6 +535,7 @@ namespace glibre::shader {
 enum class Error : std::uint16_t {
     SourceNotFound,
     SourceParseFailed,
+    EncodingInvalid,
     IncludeEscape,
     IncludeCycle,
     EntryPointMissing,
@@ -893,6 +894,7 @@ constexpr eastl::string_view to_string(Error e) noexcept {
     switch (e) {
         case Error::SourceNotFound:                return "SourceNotFound";
         case Error::SourceParseFailed:             return "SourceParseFailed";
+        case Error::EncodingInvalid:               return "EncodingInvalid";
         case Error::IncludeEscape:                 return "IncludeEscape";
         case Error::IncludeCycle:                  return "IncludeCycle";
         case Error::EntryPointMissing:             return "EntryPointMissing";
@@ -2007,6 +2009,7 @@ checklist against the spec without mutating §5).
 | **`SourceParseFailed`** *(SourceParseError)* | slangc rejects the Slang translation unit during preprocessing or parsing — syntax error, unresolved entry-point attribute, malformed `[shader(...)]` annotation (§4.1 inv 1). | refuse compile; capture stderr verbatim into the structured error envelope (§6.2) and surface to the editor; prior artifact (if any) remains live. | `refuse` |
 | **`IncludeEscape`** *(IncludeResolutionFailed, escape variant)* | An `#include` resolves outside the project source root, or to an absolute path (§4.1 inv 3). | refuse open; the include graph is never partially admitted — `ShaderSource` construction fails atomically. | `refuse` |
 | **`IncludeCycle`** *(IncludeResolutionFailed, cycle variant)* | The include graph contains a cycle; closure is non-finite (§4.1 inv 3). | refuse open; report the cycle path through the structured error detail. | `refuse` |
+| **`EncodingInvalid`** | A `.slang` source file (the entry file or any include target) fails UTF-8 validation during §4.1 normalization: the byte sequence is not valid UTF-8 after BOM strip, or the file is empty. Distinct from `SourceParseFailed` — this refusal fires before slangc is involved, inside the ingestion normalizer. | refuse open; the file must be re-saved as UTF-8. Editors that emit UTF-8-BOM are accepted (BOM is stripped and the normalized bytes are valid); non-UTF-8 encodings (UTF-16, latin-1, shift-jis) are rejected. | `refuse` |
 | **`EntryPointMissing`** | `compile` is invoked for an entry point name that the preprocessed `ShaderSource` does not expose. | refuse compile; surfaced to the cooker as a build-graph wiring bug, not a shader bug. | `refuse` |
 | **`EntryPointStageAmbiguous`** | An entry point carries zero or more than one `[shader(...)]` attribute (§4.1 inv 1). | refuse open. | `refuse` |
 | **`PermutationKeyMalformed`** | `PermutationKey::from_bytes` rejects bytes (e.g. enumerator out of declared range) (§4.2). | refuse decode; the cache entry that produced the bytes is quarantined and treated as `CacheCorrupt`. | `refuse` |
