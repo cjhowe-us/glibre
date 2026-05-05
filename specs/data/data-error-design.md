@@ -215,9 +215,16 @@ struct Error {
 
     // Set on tag 1: the host's compiled-in hash and the offending
     // plugin's compiled-in hash, hex form (SPEC §4.4 inv. 5).
+    // std::string_view, not eastl::string_view: the Error struct
+    // crosses the glibre-types.dylib ABI boundary (§3.3 rule 2;
+    // PHILOSOPHY §11 final sentence mandates POD-only at public ABI
+    // surfaces). Both sides of the boundary compile against the same
+    // libc++ (reviews/decisions/plugin-abi.md §"Registration Entry-
+    // Point Signature"), so std::string_view's layout is stable.
+    // EASTL containers are confined to in-process, non-ABI code.
     // Empty string_views on every other arm.
-    eastl::string_view host_hash{};
-    eastl::string_view plugin_hash{};
+    std::string_view host_hash{};
+    std::string_view plugin_hash{};
 
     // Set on tag 4 (ReservedTagViolation): the tag number whose
     // reuse was attempted; 0 on every other arm.
@@ -303,7 +310,7 @@ trigger, which payload fields the arm populates. The table lifts SPEC
 | envelope-serdes (#736) — newer-than-host      | `DeserializeError`          | Inbound payload's `SchemaVersion` exceeds the live registry's current version for the same `FQN` (SPEC §4.10 inv. 2; `envelope-serdes-design.md` §10 row "VersionUnsupported" collapsed onto this arm per §3.1.1).                                                                                                                              | `Envelope<T>::deserialize` body (SPEC §4.8 inv. 5); generated `glibre_types_deserialize_<fqn>` trampoline (SPEC §4.3 inv. 2).                                    | `at.schema`, `at.version` (the inbound version), `at.offset = 0` (the failure is at the envelope header).            |
 | envelope-serdes (#736) — body-decode mismatch | `DeserializeError`          | Payload bytes failed Fory's per-tag decode (tag-type mismatch, builtin range-check failure, nested-type decode refusal).                                                                                                                                                                                                                       | `Envelope<T>::deserialize` body — body-decode step.                                                                                                              | `at.schema`, `at.version`, `at.offset` (byte index where decode stopped).                                            |
 | envelope-serdes (#736) — bad magic / truncation| `EnvelopeTruncated`         | The inbound byte span ended before the full envelope header was read, OR the envelope's `payload_length` claimed more bytes than the remaining span carries, OR the header's magic prefix did not match `kEnvelopeMagic` (the BadMagic candidate is collapsed onto this arm per §3.1.1).                                                       | `Envelope<T>::deserialize` envelope-read step (SPEC §4.8 inv. 1, 2).                                                                                            | `at.schema` (default-constructed if the FQN field itself was truncated; populated if the header decoded enough to read it), `at.version` (likewise), `at.offset` (byte count read before truncation was detected). |
-| envelope-serdes (#736) — unknown FQN          | `SchemaUnknown`             | An inbound payload's envelope `FQN` is not present in the live `SchemaRegistry`. Distinct from `SchemaMigrationFailure` (FQN known, chain refused) and from `DeserializeError` (FQN known, payload malformed).                                                                                                                                  | `Envelope<T>::deserialize` envelope-read step; registry `lookup` returns nullptr.                                                                                | `at.schema = inbound_fqn`, `at.version = inbound_version`, `at.offset = 0`.                                          |
+| envelope-serdes (#736) — unknown FQN          | `SchemaUnknown`             | An inbound payload's envelope `FQN` is not present in the live `SchemaRegistry`. Distinct from `SchemaMigrationFailure` (FQN known, chain refused) and from `DeserializeError` (FQN known, payload malformed).                                                                                                                                  | `Envelope<T>::deserialize` envelope-read step; registry `lookup` returns nullptr.                                                                                | `at.schema = inbound_fqn`, `at.version = inbound_version`, `at.offset = 0` **(sentinel — failure is at the envelope header; no payload bytes were consumed, so offset is always 0 and carries no diagnostic byte-count information; see §3.3 note)**. |
 | migration-dispatcher (#738) — coverage gap    | `MigrationStepMissing`      | A `MigrationChain` for a known `FQN` lacks an entry whose `from_version` matches the inbound payload's version. SPEC §4.7 inv. 1's codegen check makes this impossible *for in-build types*; the arm fires only for inbound bytes from a build that has since dropped early-version migrations.                                                | `MigrationChain::dispatch` (SPEC §4.7 inv. 1); §8.3 gate 2 (Mode-B reload precondition).                                                                        | `step_schema`, `step_from = inbound_version`, `step_to = step_from + 1`.                                            |
 | migration-dispatcher (#738) — chain back-edge | `MigrationCycle`            | The composed `MigrationChain` for an `FQN` contains a step `(N → M)` where `M ≤ N`. Codegen / static-init only; runtime cannot observe.                                                                                                                                                                                                       | `glibre-foryc` chain construction (SPEC §4.2 inv. 1); middleman static-init Phase C (`middleman-dylib-design.md` §3.5).                                          | `step_schema`, `step_from = N`, `step_to = M` — the back-edge that violated ascending order.                          |
 | schema-registry (#730) — duplicate FQN        | `SchemaRegistryConflict`    | Two registry entries share an `FQN` (SPEC §4.5 inv. 1). Codegen would have caught it (§4.10 inv. 1 biconditional); the arm fires when two distinct middleman builds load into one process or when Mode-B reload's candidate registry duplicates an FQN.                                                                                       | Middleman static-init Phase C; Mode-B barrier diff registry side.                                                                                                | `step_schema = duplicated_fqn`.                                                                                      |
@@ -314,6 +321,19 @@ read date; new sibling aggregates that surface a failure surface MUST
 add a row here in the same PR that introduces the surface, and the
 spike audit checks the row's payload fields against §3.1's struct
 declaration.
+
+**Enforcement:** the exhaustiveness obligation above is mechanical once
+§11.6 golden-per-source tests land: each row in this table corresponds
+to one golden test fixture; a plan PR that adds a new failure surface
+without a corresponding golden causes the §11.6 fixture set to be
+incomplete, which the CI gate (`tests/data/errors/golden_per_source/`)
+detects by asserting that the golden count equals the row count in
+this table. Until §11.6 tests are authored (gated on the sibling
+implementation plans landing), the obligation is normative-prose-only.
+This gap is tracked in §12 [OPEN: exhaustiveness-ci-gate] and the
+intent is that the first implementation plan PR (schema-registry or
+envelope-serdes, whichever lands first) authors the §11.6 fixture
+harness alongside its own golden row.
 
 ### 3.3 Payload-fields-by-arm contract
 
@@ -332,7 +352,7 @@ single audit point):
 | `DeserializeError`        | YES         | YES          | YES         | -             | -           | -         | -           | -             | -              |
 | `ReservedTagViolation`    | -           | -            | -           | YES           | -           | -         | -           | -             | YES            |
 | `SchemaRegistryConflict`  | -           | -            | -           | YES           | -           | -         | -           | -             | -              |
-| `SchemaUnknown`           | YES         | YES          | YES         | -             | -           | -         | -           | -             | -              |
+| `SchemaUnknown`           | YES         | YES          | YES (=0, sentinel) | -      | -           | -         | -           | -             | -              |
 | `MigrationStepMissing`    | -           | -            | -           | YES           | YES         | YES       | -           | -             | -              |
 | `MigrationCycle`          | -           | -            | -           | YES           | YES         | YES       | -           | -             | -              |
 | `EnvelopeTruncated`       | YES (opt)   | YES (opt)    | YES         | -             | -           | -         | -           | -             | -              |
@@ -361,6 +381,15 @@ Discipline rules:
    Per SPEC §10.1 `WireSite::offset` documentation. Implementations
    that count from body-start MUST add `sizeof(EnvelopeHeader)` before
    populating the payload.
+5. **`at.offset = 0` for `SchemaUnknown` is a sentinel, not a byte count.**
+   The failure is at the envelope header (FQN not found in registry);
+   no payload bytes are consumed before the error fires. The field is
+   always exactly `0` and carries no diagnostic byte-count information.
+   A `YES (=0, sentinel)` cell in the table above means the field is
+   set but the value is fixed. Implementors MUST NOT treat it as a
+   variable offset. Contrast with `DeserializeError` and
+   `EnvelopeTruncated`, where `at.offset` reflects a meaningful
+   byte position.
 
 ### 3.4 `core::Error` wrapping table
 
@@ -513,6 +542,16 @@ enum at the call site (composition rule 2). The mapping for `core` is
 the §3.4 table; mapping for any other context is that context's source
 code.
 
+Note on type: `data::Error` is a **payload-bearing struct** (not an
+enum class). It is a valid arm in `glibre::Error::Variant` via the
+`template<class E> glibre::Error(E&&)` constructor documented in
+`error-model.md` §"Type Sketch"; the template is unconstrained over
+any trivially-copyable per-context error type, including structs. When
+`glibre::log_error` dispatches the Logging/Telemetry #2 path for a
+`data::Error` arm, it calls `to_string(ErrorTag)` from §7.4 (not
+`magic_enum` on the struct directly) to produce the enumerator-name
+string field in the log carrier.
+
 ## 5. Hot/cold path split
 
 Glibre's `>= 1.5 ms headroom` requirement (`perf-budget.md`) and
@@ -590,10 +629,25 @@ sibling (`"schema-registry"`, `"envelope-serdes"`,
 slot is purely informational — no engine code branches on it — and
 exists to give operators a fast-path tag in the log carrier (§7
 field 4). The `source_tag` is **opt-in**: siblings that benefit from
-the disambiguation set it; the default is the empty string. The slot
-is reset alongside the platform's prefix slot at frame phase 1; it
-shares the `__thread` struct platform owns (§6.3) and SHALL NOT
-introduce a separate TLS allocation.
+the disambiguation set it; the default is the empty string.
+
+The slot is a **data-context-owned** `thread_local` variable declared
+inside `glibre::types::data` (a separate `__thread` allocation from
+any platform-context TLS struct). This keeps the data context
+self-contained per PHILOSOPHY §1/§2 (SRP, no cross-context coupling).
+The slot holds a `std::string_view` pointing at a `static` string
+literal or a `.rodata` byte in the middleman — never a heap pointer;
+lifetime is permanent. It is reset to the empty string_view at frame
+phase 1 reset by the data context's own phase-1 hook (registered via
+`core::SystemRegistry`); no coupling to the platform prefix-slot reset
+is required.
+
+If a future spike concludes that data and platform MUST share a single
+`__thread` struct for footprint or atomicity reasons, a dedicated
+decision record `reviews/decisions/tls-layout.md` MUST be opened that
+both `platform` and `data` cite before the coupling is introduced. That
+record does not exist today; without it, shared-struct ownership is
+not permitted (see §12 [OPEN: tls-layout-decision]).
 
 ## 6. Concurrency
 
@@ -792,6 +846,16 @@ constexpr eastl::string_view kErrorTagNames[] = {
     "EnvelopeTruncated",        // 9
 };
 
+// Compile-time synchronization guard: kErrorTagNames must have exactly
+// one entry per arm (tag 0 = invalid slot) plus the highest-valued arm.
+// Adding a new ErrorTag arm without appending to this table is a
+// compile error. See §11.5 compile-fail test "name-table-sync".
+static_assert(
+    eastl::size(kErrorTagNames) ==
+        static_cast<std::uint16_t>(ErrorTag::EnvelopeTruncated) + 1,
+    "kErrorTagNames must have one entry per arm plus the invalid-0 slot; "
+    "append the new arm's name string before adding the ErrorTag enumerator");
+
 [[nodiscard]] constexpr eastl::string_view to_string(ErrorTag t) noexcept {
     const auto idx = static_cast<std::uint16_t>(t);
     return idx < eastl::size(kErrorTagNames)
@@ -899,9 +963,10 @@ error-aggregate-specific budget.
 ### 9.2 Heap impact
 
 Zero per-frame allocations from this aggregate. The `kErrorTagNames`
-table is `.rodata` (zero heap). The `source_tag` TLS slot reuses
-platform's TLS struct (§5.4). Per-call cost is a single TLS write at
-construction; per-call read at log time.
+table is `.rodata` (zero heap). The `source_tag` TLS slot is a
+data-context-owned `thread_local` variable (see §5.4 amendment); it
+does not reuse any platform-context struct. Per-call cost is a single
+TLS write at construction; per-call read at log time.
 
 The `Error` aggregate's heap footprint is its struct size: roughly
 **64 bytes** (one cache line). The aggregate is small enough that the
@@ -1109,6 +1174,13 @@ Under `tests/data/errors/compile_fail/`, using
   must fail under `-fno-exceptions`.
 - A test that handles `ErrorTag` via `switch` without a `default:`
   case and missing one arm must fail under `-Wswitch -Werror`.
+- **name-table-sync** (`compile_fail/name_table_sync_test.cpp`): a
+  translation unit that declares a `kErrorTagNames` array with one
+  fewer entry than `ErrorTag::EnvelopeTruncated + 1` must fail the
+  `static_assert` in §7.4 ("kErrorTagNames must have one entry per arm
+  plus the invalid-0 slot…"). This gates the silent-gap scenario where
+  a developer adds a new `ErrorTag` enumerator but forgets to append
+  the corresponding name string.
 
 ### 11.6 Cross-aggregate uniformity (sibling-design integration)
 
@@ -1197,3 +1269,21 @@ and fails CI.
   Resolution gate: the platform-error E2E crash-capture fixture
   extends to data-error in a follow-up spike. No data-error-
   aggregate-side residue at MVP.
+
+- [OPEN: exhaustiveness-ci-gate] §3.2 exhaustiveness obligation (one
+  row per sibling failure surface) is currently normative-prose-only.
+  CI enforcement via §11.6 golden-per-source tests lands with the
+  first implementation plan PR that authors a sibling aggregate
+  (schema-registry or envelope-serdes). That plan PR must author the
+  §11.6 fixture harness at `tests/data/errors/golden_per_source/` and
+  assert that the golden count equals the row count in the §3.2 table.
+  Until then, drift is possible and must be caught in code review.
+
+- [OPEN: tls-layout-decision] If a future spike concludes that
+  `data` and `platform` should share a single `__thread` struct for
+  footprint or atomicity reasons, a cross-context decision record
+  `reviews/decisions/tls-layout.md` must be authored and approved
+  before introducing the shared-struct coupling. Both `data` and
+  `platform` SPEC.md files must cite the record. The record does not
+  exist today; the §5.4 `source_tag` slot is therefore a separate
+  data-context-owned TLS variable.

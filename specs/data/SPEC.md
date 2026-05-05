@@ -603,14 +603,72 @@ using SchemaSourceHash = eastl::array<std::byte, 32>;
 // Closed sum of every failure the data context can raise at a public
 // boundary (§10). Per error-model.md §"Composition Rules" #2 callers
 // translate these into their own context's enum at the call site.
+// §5 uses the same ErrorTag + Error struct shape defined in §10.1.
+// The 5-arm `enum class Error` stub that previously appeared here was
+// a draft; it is superseded by the 9-arm closed sum below. See §10.1
+// for the normative definition with full payload fields and per-arm
+// trigger / recovery / severity documentation.
 namespace data {
-enum class Error : std::uint16_t {
-    AbiHashMismatch,         // §4.4 inv. 3 — hash compared at plugin load
-    SchemaMigrationFailure,  // §4.7 inv. 4 — chain step returned unexpected
-    DeserializeError,        // §4.8 inv. 5 — newer-than-host or malformed
-    ReservedTagViolation,    // §4.1 inv. 3, §4.2 inv. 4 — codegen-time
-    SchemaRegistryConflict,  // §4.5 inv. 1 — duplicate FQN at static-init
+
+// Wire-time location attached to DeserializeError / SchemaUnknown /
+// EnvelopeTruncated.
+// `offset` is the byte index within the inbound payload at which
+// decoding stopped, measured from the start of the EnvelopeHeader
+// (§4.8 inv. 2). Non-payload arms set this to a sentinel — see §10.2.
+struct WireSite {
+    SchemaId      schema{};       // the FQN the envelope claimed
+    SchemaVersion version{0};     // the version the envelope claimed
+    std::uint32_t offset{0};      // byte index where decode failed
 };
+
+// Tag values are stable across patch releases (§10 closing paragraph).
+// Removing or reordering an arm is an ABI break (§4.3 inv. 3).
+enum class ErrorTag : std::uint16_t {
+    AbiHashMismatch          = 1,  // §4.4 inv. 3 — hash compared at plugin load
+    SchemaMigrationFailure   = 2,  // §4.7 inv. 4 — chain step returned unexpected
+    DeserializeError         = 3,  // §4.8 inv. 5 — newer-than-host or malformed
+    ReservedTagViolation     = 4,  // §4.1 inv. 3, §4.2 inv. 4 — codegen-time
+    SchemaRegistryConflict   = 5,  // §4.5 inv. 1 — duplicate FQN at static-init
+    SchemaUnknown            = 6,  // FQN not in live registry at deserialize
+    MigrationStepMissing     = 7,  // coverage gap: no chain entry for inbound version
+    MigrationCycle           = 8,  // back-edge detected in migration chain
+    EnvelopeTruncated        = 9,  // physical truncation before/during envelope read
+};
+
+// Closed sum. Plain-aggregate layout so the C-ABI trampolines (§4.3 inv. 4)
+// can return it through std::expected without crossing a non-trivial type
+// boundary. See §10.1 for full payload-field documentation and §10.2 for
+// the per-arm trigger / recovery / severity / core::Error mapping table.
+struct Error {
+    ErrorTag tag{};
+
+    // Set on tags 3, 6, 9; default-constructed on every other arm.
+    WireSite at{};
+
+    // Set on tags 2, 7, 8: identifies the migration step that
+    // refused, the missing step in the chain, or the back-edge of
+    // the detected cycle. (from == 0, to == 0) on every other arm.
+    SchemaId      step_schema{};
+    SchemaVersion step_from{0};
+    SchemaVersion step_to{0};
+
+    // Set on tag 1: the host's compiled-in hash and the offending
+    // plugin's compiled-in hash, hex form (§4.4 inv. 5). Both
+    // borrow from glibre-types.dylib .rodata; lifetime is process-
+    // scoped. std::string_view (not eastl::string_view) per
+    // PHILOSOPHY §11 final sentence: public plugin ABI surfaces use
+    // POD views only; std::string_view is stable across the dylib
+    // boundary because both sides compile against the same libc++
+    // (reviews/decisions/plugin-abi.md §"Registration Entry-Point
+    // Signature"). Empty string_views on every other arm.
+    std::string_view host_hash{};
+    std::string_view plugin_hash{};
+
+    // Set on tag 4 (ReservedTagViolation): the tag number whose
+    // reuse was attempted; 0 on every other arm.
+    std::uint16_t reserved_tag{0};
+};
+
 }  // namespace data
 
 // ---- reflection.hpp (editor / tools only) -------------------------------
@@ -650,7 +708,7 @@ struct EnvelopeHeader {
 template <class T>
 struct Envelope {
     // Write envelope + payload into `dst`; returns bytes_written.
-    // Failure path is `data::Error::DeserializeError`-shaped only when
+    // Failure path is `data::ErrorTag::DeserializeError`-shaped only when
     // `dst` is too small (size queryable via the registry).
     static auto serialize(const T& value,
                           std::span<std::byte> dst) noexcept
@@ -658,8 +716,8 @@ struct Envelope {
 
     // Read envelope, dispatch by SchemaVersion, and run MigrationChain
     // when the inbound version is older (§4.7). Newer-than-host ⇒
-    // data::Error::DeserializeError; chain failure ⇒
-    // data::Error::SchemaMigrationFailure.
+    // data::ErrorTag::DeserializeError; chain failure ⇒
+    // data::ErrorTag::SchemaMigrationFailure.
     static auto deserialize(std::span<const std::byte> src) noexcept
         -> std::expected<T, data::Error>;
 };
@@ -695,7 +753,7 @@ namespace data {
 enum class RegisterStatus : std::uint16_t {
     Ok = 0,
     SchemaRegistryConflict =
-        static_cast<std::uint16_t>(Error::SchemaRegistryConflict),
+        static_cast<std::uint16_t>(ErrorTag::SchemaRegistryConflict),
 };
 }  // namespace data
 
@@ -854,9 +912,13 @@ maps to one §4 invariant:
 |---------------------------|--------------------------------------------------------------|--------------------------|
 | `AbiHashMismatch`         | plugin's compiled-in ABI hash ≠ host's                       | §4.4 inv. 3              |
 | `SchemaMigrationFailure`  | a `MigrationFn` returned `unexpected` or chain incomplete    | §4.7 inv. 1, 4           |
-| `DeserializeError`        | malformed envelope, unknown FQN, newer-than-host version     | §4.8 inv. 5              |
+| `DeserializeError`        | malformed envelope or newer-than-host version                | §4.8 inv. 5              |
 | `ReservedTagViolation`    | codegen detects reuse of a previously-shipped tag            | §4.1 inv. 3, §4.2 inv. 4 |
 | `SchemaRegistryConflict`  | static-init insert collides on FQN                           | §4.5 inv. 1              |
+| `SchemaUnknown`           | envelope FQN absent from the live `SchemaRegistry`           | §4.8 inv. 5              |
+| `MigrationStepMissing`    | chain has no entry for the inbound payload's version         | §4.7 inv. 1              |
+| `MigrationCycle`          | back-edge detected in a `MigrationChain` (codegen/init)      | §4.2 inv. 1, §4.3 inv. 5 |
+| `EnvelopeTruncated`       | byte span ends before the full envelope header is read       | §4.8 inv. 1, 2           |
 
 Plugin loader code wraps these into `core::Error` arms per
 `reviews/decisions/plugin-abi.md` §"Failure Modes → core::Error";
@@ -2353,7 +2415,8 @@ removing or reordering an arm is an ABI-breaking change that follows
 
 namespace glibre::types::data {
 
-// Wire-time location attached to DeserializeError / EnvelopeTruncated.
+// Wire-time location attached to DeserializeError / SchemaUnknown /
+// EnvelopeTruncated.
 // `offset` is the byte index *within the inbound payload* at which
 // decoding stopped, measured from the start of the EnvelopeHeader
 // (§4.8 inv. 2). Non-payload arms set this to a sentinel — see §10.2.
@@ -2380,7 +2443,7 @@ enum class ErrorTag : std::uint16_t {
 struct Error {
     ErrorTag tag{};
 
-    // Set on tags 3 and 9; default-constructed on every other arm.
+    // Set on tags 3, 6, and 9; default-constructed on every other arm.
     WireSite at{};
 
     // Set on tags 2, 7, 8: identifies the migration step that
