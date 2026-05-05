@@ -360,15 +360,22 @@ Result<PresentFence> submit_frame(MetalDevice& device,
   6. Commit in queue dependency order (compute first if compute writes
      graphics-queue inputs without a graphics-side wait; the plan's
      queue assignment fixes the order):
-     - cb_compute->commit()
-     - cb_graphics->commit()
-     - cb_copy->commit()    -- copy is independent in MVP
-     - on any commit failure → return
+     - device.queue(Compute).submit(cb_compute)
+     - device.queue(Graphics).submit(cb_graphics)
+     - device.queue(Copy).submit(cb_copy)    -- copy is independent in MVP
+     - on any submit failure → return
        unexpected{render::Error::QueueSubmitFailed}
+     MetalQueue::submit(MetalCommandBuffer&) asserts the CB's queue-role
+     tag matches the queue before calling cb->commit() internally. This
+     keeps the "Queue purity" invariant (SPEC §4.1.6 invariant 4) inside
+     MetalQueue's SRP boundary rather than in submit_frame.
 
   7. Emit PresentFence:
-     - fence_value ← graphics_queue.submit_counter_.fetch_add(1) + 1
+     - fence_value ← device.queue(Graphics).next_submit_id()
      - return PresentFence{ fence_value }
+     MetalQueue::next_submit_id() returns the counter value incremented
+     by the preceding submit() call (memory_order_acq_rel per §6.2).
+     submit_frame never touches submit_counter_ directly.
 
   8. Driver thread exits phase 7. The CBs are owned by Metal until
      completion; their lifetimes are managed by the metal-cpp
@@ -425,14 +432,14 @@ silently truncating.
 
 ### 4.1 Types (locked from SPEC §5)
 
-The metal-backend contributes exactly four classes / structs to the
-SPEC §5 public header:
+The metal-backend contributes three opaque classes, two POD structs,
+and one free function to the SPEC §5 public header:
 
 | Symbol                | Kind            | SPEC §5 line | Notes                                                                                  |
 |-----------------------|-----------------|--------------|----------------------------------------------------------------------------------------|
 | `DeviceDesc`          | `struct` (POD)  | 1252         | `prefer_low_power : bool`, `tier : QualityTier`. **§3.1 ABI add:** `headless : bool = false`, `validation : bool = false`. |
 | `MetalDevice`         | opaque class    | 1257         | `create(const DeviceDesc&)`, `capabilities()`, `queue(Queue)`, `pso_cache()`, `transient_pool()`. **§3.3 ABI add:** `attach_surface`, `detach_surface`. |
-| `MetalQueue`          | opaque class    | 1275         | `acquire_command_buffer()`, `submit(MetalCommandBuffer&)`, `role()`.                   |
+| `MetalQueue`          | opaque class    | 1275         | `acquire_command_buffer()`, `submit(MetalCommandBuffer&)`, `next_submit_id()`, `role()`. `submit()` asserts queue-role tag and increments `submit_counter_`; `next_submit_id()` returns the last-incremented value. |
 | `MetalCommandBuffer`  | opaque class    | 1291         | `push_debug_group`, `pop_debug_group`, `queue_role()`. Internal cursor not exposed.    |
 | `PresentFence`        | `struct` (POD)  | 1415         | `value : u64`. Returned by `submit_frame`.                                              |
 | `submit_frame`        | free function   | 1419         | `(MetalDevice&, const RenderFrame&) → Result<PresentFence>`.                           |
@@ -546,8 +553,11 @@ concurrent `commandBuffer` allocation and `commit`. The wrapper
 `MetalQueue` adds:
 
 - `submit_counter_` is a `std::atomic<uint64_t>` updated under
-  `memory_order_acq_rel` at every `submit()`. Readers (the
-  `PresentFence` consumer in `platform`'s phase 9) use
+  `memory_order_acq_rel` inside `submit()`. The companion
+  `next_submit_id()` reads it with `memory_order_acquire` and returns
+  the current value; callers (including `submit_frame` step 7) use
+  this accessor rather than touching `submit_counter_` directly. The
+  `PresentFence` consumer in `platform`'s phase 9 also reads via
   `memory_order_acquire`.
 - `acquire_command_buffer()` is a single `device_->commandQueue()->commandBuffer()`
   call; lock-free.
