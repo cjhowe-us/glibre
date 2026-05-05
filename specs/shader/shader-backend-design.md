@@ -1492,6 +1492,7 @@ hashes).
 | `backend.link_refuses_specialization_constant_missing`             | `SpecializationConstantMissing`                                   | Two artifacts with an unbound spec-constant; assert refuse.          |
 | `backend.link_refuses_general_link_error`                          | `LinkFailed`                                                       | Two artifacts with conflicting entry-point sets.                     |
 | `backend.shipping_compile_link_excluded`                           | `ShippingCompilationAttempted` (link-time)                        | Compile with `-DGLIBRE_SHIPPING=1`; assert `IShaderBackend::compile` symbol is absent. |
+| `backend.shipping_link_size_two_refuses`                           | `ShippingCompilationAttempted` (runtime)                          | Compile with `-DGLIBRE_SHIPPING=1`; call `link()` with a span of size 2; assert `unexpected(ShippingCompilationAttempted)` is returned without spawning a subprocess. |
 | `backend.shipping_load_library_linked`                             | (positive; §6.5 surviving cut)                                    | Compile with `-DGLIBRE_SHIPPING=1`; assert `MetalLibraryLoader::load_library` symbol is present. |
 | `loader.load_library_succeeds_with_valid_metallib`                 | (positive; §3.5)                                                  | Mock metal-cpp returns a non-null `MTL::Library*`; assert handle is constructed, reflection is **copied** into the handle, and destroying the source artifact afterward does not invalidate the handle. |
 | `loader.load_library_refuses_non_metallib_target`                  | `UnsupportedTarget`                                               | Artifact with `target == CompileTarget::DXIL`.                       |
@@ -1579,11 +1580,13 @@ obligation, PHILOSOPHY §7).
 
 ## 12. Open Questions
 
-- **[OPEN] `MetalLibraryCreateFailed` and `FunctionMissing`
-  enumerator amendment.** §10.5 proposes adding two new
-  `shader::Error` arms. Both must land in the same plan as sibling
-  spike #79's `ArtifactSizeExceeded`; until then, the implementer
-  maps both conditions onto `MetalLibEmitFailed`. Decide whether to
+- **[OPEN] `MetalLibraryCreateFailed`, `FunctionMissing`, and
+  `BackendNotFound` enumerator amendment.** §10.5 proposes adding
+  three new `shader::Error` arms. All three must land in the same
+  plan as sibling spike #79's `ArtifactSizeExceeded`; until then,
+  the implementer maps the conditions as follows: `MetalLibraryCreateFailed`
+  → `MetalLibEmitFailed`, `FunctionMissing` → `MetalLibEmitFailed`,
+  `BackendNotFound` → `CapabilityNotSupported`. Decide whether to
   fast-track the amendment plan or accept the mapping for the first
   implementation iteration.
 
