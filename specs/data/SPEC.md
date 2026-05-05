@@ -912,9 +912,13 @@ maps to one §4 invariant:
 |---------------------------|--------------------------------------------------------------|--------------------------|
 | `AbiHashMismatch`         | plugin's compiled-in ABI hash ≠ host's                       | §4.4 inv. 3              |
 | `SchemaMigrationFailure`  | a `MigrationFn` returned `unexpected` or chain incomplete    | §4.7 inv. 1, 4           |
-| `DeserializeError`        | malformed envelope, unknown FQN, newer-than-host version     | §4.8 inv. 5              |
+| `DeserializeError`        | malformed envelope or newer-than-host version                | §4.8 inv. 5              |
 | `ReservedTagViolation`    | codegen detects reuse of a previously-shipped tag            | §4.1 inv. 3, §4.2 inv. 4 |
 | `SchemaRegistryConflict`  | static-init insert collides on FQN                           | §4.5 inv. 1              |
+| `SchemaUnknown`           | envelope FQN absent from the live `SchemaRegistry`           | §4.8 inv. 5              |
+| `MigrationStepMissing`    | chain has no entry for the inbound payload's version         | §4.7 inv. 1              |
+| `MigrationCycle`          | back-edge detected in a `MigrationChain` (codegen/init)      | §4.2 inv. 1, §4.3 inv. 5 |
+| `EnvelopeTruncated`       | byte span ends before the full envelope header is read       | §4.8 inv. 1, 2           |
 
 Plugin loader code wraps these into `core::Error` arms per
 `reviews/decisions/plugin-abi.md` §"Failure Modes → core::Error";
