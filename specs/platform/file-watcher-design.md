@@ -69,7 +69,11 @@ What this aggregate explicitly refuses to own:
   the `CanonicalPath` value object and nothing else.
 - **`Clock` / time** — sibling #723. The debounce window timestamps
   events with `Clock::now()`, but the `Clock` aggregate is taken by
-  reference; the watcher does not own a time source.
+  reference via the `create(Clock&)` parameter (SPEC §4.4 inv #5);
+  the watcher does not own a time source. Two concrete callers in MVP:
+  the editor hot-reload coordinator and the shipping runtime asset
+  reload path. The SPEC §5.8 stub amendment (adding `Clock&` to
+  `create`) must land before the first plan PR; see §12.
 - **Persistence of the subscription list across process restart** —
   refused per SPEC §7.3 ("File-watcher canonical-path subscription
   list (cache)"). Subscriptions are reseated by the consumer on every
@@ -211,21 +215,29 @@ engine-installed assets). Steps:
    `watcher::detail::io_thread_main(FileWatcher::Impl*)`. Inside it:
    a. Capture `CFRunLoopGetCurrent()` into `runloop_` (this thread's
       runloop; not the main thread's).
-   b. Create an empty `FSEventStreamRef` with zero paths
-      initially — SPEC §6.4 hosts the runloop on this same thread.
-      The stream is reconstructed every time `watch` / `unwatch`
-      changes the root set (FSEvents requires recreate-on-change,
-      §3.4 step 5 below).
+   b. `stream_` is null during startup (deferred creation). The
+      first `watch()` call (§3.4 step 5) creates the stream once
+      at least one root is registered. No empty `CFArrayRef` is
+      ever passed to `FSEventStreamCreate` — `FSEventStreamCreate`
+      rejects an empty path array on macOS 12+ and would return
+      `NULL`, which `FSEventStreamScheduleWithRunLoop(nullptr, …)`
+      would subsequently crash. The stream is reconstructed on
+      every subsequent `watch` / `unwatch` that changes the root
+      set (FSEvents requires recreate-on-change, §3.4 step 5 below).
    c. Enter `CFRunLoopRun()`. Returns when `CFRunLoopStop` is called
       from the destructor (§3.9).
    Failure (thread spawn / runloop init) → translate to `IoFailure`
    per SPEC §10.2.1 (`EAGAIN` on `pthread_create` saturation maps to
    `IoFailure { OsCode { errno } }` with prefix `"resource"`).
-3. **Wait for the runloop to be live** by polling `runloop_` with a
-   bounded spin (~32 iterations, ~64 µs total under M1 thermal
-   typical). If the runloop has not appeared inside the bound, the
-   thread is joined and `IoFailure { OsCode { 0 } }` with prefix
-   `"watcher-unavailable"` is returned.
+3. **Wait for the runloop to be live** using a `std::binary_semaphore`.
+   The main thread allocates `std::binary_semaphore sem{0}` before
+   spawning the I/O thread and passes its address into the thread
+   function. The I/O thread stores `CFRunLoopGetCurrent()` into
+   `runloop_` then calls `sem.release()`. The main thread calls
+   `sem.try_acquire_for(5ms)`; on timeout, the thread is joined and
+   `IoFailure { OsCode { 0 } }` with prefix `"watcher-unavailable"`
+   is returned. The 5 ms bound is safe on loaded CI hosts where a
+   ~64 µs bounded spin would expire prematurely.
 4. **Return `FileWatcher`** by move. The aggregate's pimpl is the only
    heap reference the public `FileWatcher` holds.
 
@@ -285,11 +297,21 @@ applies to `watch` and `unwatch`). Steps:
        /*sinceWhen=*/ kFSEventStreamEventIdSinceNow,
        /*latency=*/   debounce_seconds_,                       // §3.6
        /*flags=*/     kFSEventStreamCreateFlagFileEvents
-                    | kFSEventStreamCreateFlagWatchRoot
-                    | kFSEventStreamCreateFlagNoDefer);
+                    | kFSEventStreamCreateFlagWatchRoot);
    FSEventStreamScheduleWithRunLoop(stream_, runloop_, kCFRunLoopDefaultMode);
    FSEventStreamStart(stream_);
    ```
+   Flags: only `kFSEventStreamCreateFlagFileEvents` and
+   `kFSEventStreamCreateFlagWatchRoot`. `kFSEventStreamCreateFlagNoDefer`
+   is intentionally absent — the 100 ms `latency` argument owns
+   coalescing of save→fsync→atomic-rename→unlink-old bursts. With
+   `NoDefer` present, FSEvents would fire immediately on the first
+   event in every burst, bypassing OS coalescing and making the
+   software debounce (not the OS) the load-bearing collapse mechanism;
+   BLAKE3 would then run per intermediate event rather than once on
+   the post-coalesce event. Removing the flag restores the correct
+   invariant: BLAKE3 fires only after the OS has coalesced the burst.
+
    FSEvents stream-create / start failure → `IoFailure { OsCode { 0 } }`
    with prefix `"watcher-unavailable"` (SPEC §10.5). On failure the
    token is **rolled back** (`roots_` entry removed; SPSC ring
@@ -389,8 +411,15 @@ invariant:
    per-token ring (`rings_[root_entry.ring_index]`). The push is
    non-blocking; if the ring is full (consumer fell behind by more
    than 4096 events — see §10), the watcher drops *the oldest event*
-   to make room and increments a per-token overflow counter. SPEC
-   §4.3 does not currently mandate "never drop" for `FileEvent`
+   to make room and increments a per-token `std::uint64_t` overflow
+   counter. `uint64_t` is chosen over `uint32_t` to eliminate silent
+   wrap-around: at 4096 drops/s (a realistic storm rate) a 32-bit
+   counter wraps in ~12 days, silently resetting to zero and breaking
+   the "non-zero counter triggers a log" invariant. At `uint64_t`
+   width no saturation is needed. The log fires on the first non-zero
+   observation per token-lifetime; subsequent increments accumulate
+   without log spam (rate-limited via the diagnostics channel).
+   SPEC §4.3 does not currently mandate "never drop" for `FileEvent`
    (unlike SPEC §4.2 inv #3 for `WindowEvent`), and dropping oldest
    matches the "live-reload is best-effort under storm" intent of
    the consumer (the next `Created` event will resurface the file).
@@ -549,7 +578,7 @@ using FileEvent = eastl::variant<
 
 class FileWatcher {
 public:
-    [[nodiscard]] static auto create() noexcept -> Result<FileWatcher>;
+    [[nodiscard]] static auto create(Clock& clock) noexcept -> Result<FileWatcher>;
 
     FileWatcher(FileWatcher&&) noexcept;
     FileWatcher& operator=(FileWatcher&&) noexcept;
@@ -623,10 +652,10 @@ no allocation, no syscalls beyond the SPSC dequeue):
 **Cold path** (called rarely; allocation, syscalls, OS-level resource
 juggling permitted):
 
-- `FileWatcher::create()` — once per consumer (one or two times per
-  process in MVP).
+- `FileWatcher::create(Clock&)` — once per consumer (one or two times
+  per process in MVP).
 - `FileWatcher::watch(CanonicalPath)` — once per subscribed root
-  (≤ ~16 times per process). Triggers an FSEvents stream recreate.
+  (≤ ~14 times per process). Triggers an FSEvents stream recreate.
 - `FileWatcher::unwatch(WatchToken)` — once per token, on shutdown or
   when a subscription is no longer needed. Triggers a stream recreate.
 - `~FileWatcher()` — once per instance, at process shutdown or
@@ -699,14 +728,20 @@ dispatch we're keeping out of the engine).
 - **No mutex on the hot path.** SPSC rings synchronise via
   `std::atomic_ref<std::uint32_t>` head/tail counters with
   `memory_order_acquire` / `memory_order_release` pairs.
-- **One `std::mutex` for cold-path `roots_` mutation.** Held only by
-  `watch` / `unwatch` while updating `roots_` and posting the
-  recreate block. The I/O thread also takes it briefly when reading
-  `roots_` to walk for path-prefix matching during step 2 of §3.6 —
-  but the read is rare in practice (only after a recreate, before the
-  steady state starts hitting cached prefix entries; an LRU cache of
-  the last-prefix-match keeps the per-event lookup amortised
-  lock-free in the steady state).
+- **One `std::mutex` for cold-path `roots_` mutation plus shadow-copy
+  protocol for the I/O thread.** The FSEvents callback reads a
+  lock-free snapshot pointer (`std::atomic<roots_snapshot_t*>`) —
+  it never takes the mutex. The main thread (in `watch` / `unwatch`)
+  takes the mutex, builds a new `roots_snapshot_t` in the sub-arena,
+  `atomic_store`s the pointer with `memory_order_release`, and
+  retires the old snapshot via a one-frame quarantine (safe because
+  no callback can be referencing it after the next runloop iteration).
+  The FSEvents stream recreate is dispatched via
+  `CFRunLoopPerformBlock` / `CFRunLoopWakeUp` (off the I/O thread's
+  hot path); worst-case callback blocking is zero — the callback
+  always reads from the lock-free snapshot and never waits for the
+  mutex. The `std::mutex` protects only the main-thread-side
+  `roots_` vector and the sub-arena allocations for the snapshot.
 - **No spinlocks.** macOS scheduling does not give us reliable
   spinlock semantics outside the kernel; we use `std::mutex` and
   accept the rare cold-path contention.
@@ -893,17 +928,24 @@ arena. This design partitions:
 
 | Component                                | Bytes (approx) | Notes                                                                                                |
 |------------------------------------------|---------------:|------------------------------------------------------------------------------------------------------|
-| Per-instance pimpl (`FileWatcher::Impl`) | 4 KiB          | Vectors, atomics, the `RootEntry` table.                                                             |
-| `roots_` capacity                        | 8 KiB          | 16 `RootEntry` × ~512 B each (canonical root path + flags + ring index + small per-root metadata).   |
-| Per-token SPSC rings                     | 4 MiB - X      | 16 tokens × 256 KiB each = 4 MiB. **Dominant.** Sized for the worst-case storm.                      |
-| `CanonicalPath` interner                 | 256 KiB        | Bounded; shared with the roots and with in-flight events. Old entries reclaimed when no live event references them. |
-| BLAKE3 dedup LRU                         | 64 KiB         | 1024 `(canonical_path × 32 B hash)` slots; ring-replacement, no growth.                              |
-| Rename-reassembly buffer                 | 16 KiB         | At most ~64 inflight half-renames; bounded by debounce window × event rate.                          |
+| Per-instance pimpl (`FileWatcher::Impl`) | 4 KiB          | Vectors, atomics, the `RootEntry` table.                                                                                                      |
+| `roots_` capacity                        | 8 KiB          | 14 `RootEntry` × ~512 B each (canonical root path + flags + ring index + small per-root metadata).                                            |
+| Per-token SPSC rings                     | 3584 KiB       | **14 tokens × 256 KiB each = 3584 KiB = 3.5 MiB.** Dominant. Reduced from 16 to 14 to leave headroom for overhead components.               |
+| `CanonicalPath` interner                 | 256 KiB        | Bounded; shared with the roots and with in-flight events. Old entries reclaimed when no live event references them.                            |
+| BLAKE3 dedup LRU                         | 64 KiB         | 1024 `(canonical_path × 32 B hash)` slots; ring-replacement, no growth.                                                                      |
+| Rename-reassembly buffer                 | 16 KiB         | At most ~64 inflight half-renames; bounded by debounce window × event rate.                                                                   |
 
-The arithmetic does not exactly sum to 4 MiB; the SPSC rings dominate
-and the rest is comfortably absorbed within the cell. The overflow
-behaviour for each sub-component is uniform: hitting the bound
-returns `IoFailure { OsCode { ENOBUFS } }` with prefix
+Arithmetic: 4 + 8 + 3584 + 256 + 64 + 16 = 3932 KiB ≈ 3.84 MiB,
+leaving ~256 KiB headroom within the 4 MiB sub-arena cell. The
+headroom is intentional: it absorbs future overhead growth (e.g. a
+widened dedup LRU, additional per-root metadata) without requiring an
+arena budget amendment. The ring count was reduced from 16 to 14
+(ring row previously read "16 × 256 KiB = 4 MiB exactly", leaving
+zero room for interner + dedup + reassembly + pimpl overhead).
+14 tokens covers all MVP consumer root-counts with margin (editor
+content tree ≤ 10 roots + engine-asset trees ≤ 4; see §3.4 step 5).
+The overflow behaviour for each sub-component is uniform: hitting the
+bound returns `IoFailure { OsCode { ENOBUFS } }` with prefix
 `"out-of-budget"` per `perf-budget.md` Allocator Rule #2 (strict
 mode) or logs `warn`-once-per-frame (shipping mode, Rule #3).
 
@@ -944,7 +986,7 @@ contributes nothing new"). All failures route to existing arms.
 
 | Entry point             | Returnable arms                                                                  | Trigger                                                                |
 |-------------------------|----------------------------------------------------------------------------------|------------------------------------------------------------------------|
-| `FileWatcher::create`   | `IoFailure`, `PermissionDenied`                                                  | FSEvents init failed; sandbox / TCC denial; thread spawn saturation     |
+| `FileWatcher::create(Clock&)` | `IoFailure`, `PermissionDenied`                                             | FSEvents init failed; sandbox / TCC denial; thread spawn saturation     |
 | `FileWatcher::watch`    | `Unsupported`, `NotFound`, `PermissionDenied`, `IoFailure` (prefix `"watcher-unavailable"`) | non-canonical / non-directory path; missing root; sandbox denial; FSEvents stream-create refused |
 | `FileWatcher::unwatch`  | `NotFound`                                                                       | stale `WatchToken`                                                     |
 | `FileWatcher::take_events` | `NotFound`, `Unsupported`                                                     | stale token; off-main-thread call                                      |
@@ -1081,13 +1123,18 @@ maps directly to SPEC §11 acceptance criteria #356 / #357.
     `NotFound`.
 14. **`watch_returns_unsupported_on_file_root`** — supply a regular
     file; assert `Unsupported`.
-15. **`watch_returns_permission_denied_on_sandbox_blocked_root`** —
-    test fixture installs a sandbox profile that denies a known
-    path; assert `PermissionDenied`.
+15. **`watch_returns_permission_denied_on_eperm_from_stat`** —
+    mock the internal `stat()` / `open()` seam via the
+    dependency-injected `fileio_ops_t` to return `EPERM` for the
+    target path. Assert the design routes `EPERM` through the error
+    translator → `platform::Error::PermissionDenied` (per
+    `platform-error-design.md` §3.3 admission-gate mapping). No
+    sandbox profile required; runs in standard unsigned Catch2 CI
+    without entitlement-based code signing.
 16. **`destructor_releases_all_streams_synchronously`** — subscribe
-    16 roots, drop the `FileWatcher`; assert no FSEvents stream
-    leak via the `lsof`-equivalent test fixture probe. Discharges
-    SPEC §4.3 inv #4.
+    14 roots (the MVP capacity, per §9.2), drop the `FileWatcher`;
+    assert no FSEvents stream leak via the `lsof`-equivalent test
+    fixture probe. Discharges SPEC §4.3 inv #4.
 17. **`io_thread_does_not_appear_on_main_thread_stack`** — exercise
     a long-running BLAKE3 hash on a large file; assert main-thread
     blocking time stays at 0 ms (within precision). Discharges SPEC
@@ -1161,6 +1208,24 @@ project workflow; manual PASS is the prerequisite for closing the
 story. Neither this design nor the spike issue closes those stories.
 
 ## 12. Open questions
+
+- `[BLOCKING IMPLEMENTATION]` **`FileWatcher::create()` Clock injection.**
+  `create()` must take `Clock& clock` as its sole parameter (SPEC §4.4
+  inv #5). The §5.8 stub in `specs/platform/SPEC.md` must be amended to
+  reflect this signature before the first plan PR that implements this
+  aggregate. The amendment is a one-line change to the stub (`create()`
+  → `create(Clock&)`). Two concrete callers exist in MVP: the editor
+  hot-reload coordinator and the shipping runtime asset reload path;
+  both already hold a `Clock` reference from their own injection chain.
+  The amendment spike must land before any plan PR.
+
+- `[NON-BLOCKING]` **Ring count set to 14 (reduced from 16).**
+  The §9.2 table was updated to 14 tokens × 256 KiB = 3584 KiB,
+  leaving ~256 KiB headroom within the 4 MiB cell. The headroom
+  protects against future overhead growth (e.g. dedup LRU widening,
+  additional per-root metadata). If a future consumer requires more
+  than 14 simultaneous roots, the §9.2 arithmetic must be re-evaluated
+  and the arena budget amended.
 
 - `[OPEN]` **Surface a runtime debounce-window knob.** MVP fixes
   the FSEvents `latency` argument at 100 ms (§3.6). A post-MVP
