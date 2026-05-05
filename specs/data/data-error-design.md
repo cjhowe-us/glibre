@@ -542,6 +542,16 @@ enum at the call site (composition rule 2). The mapping for `core` is
 the §3.4 table; mapping for any other context is that context's source
 code.
 
+Note on type: `data::Error` is a **payload-bearing struct** (not an
+enum class). It is a valid arm in `glibre::Error::Variant` via the
+`template<class E> glibre::Error(E&&)` constructor documented in
+`error-model.md` §"Type Sketch"; the template is unconstrained over
+any trivially-copyable per-context error type, including structs. When
+`glibre::log_error` dispatches the Logging/Telemetry #2 path for a
+`data::Error` arm, it calls `to_string(ErrorTag)` from §7.4 (not
+`magic_enum` on the struct directly) to produce the enumerator-name
+string field in the log carrier.
+
 ## 5. Hot/cold path split
 
 Glibre's `>= 1.5 ms headroom` requirement (`perf-budget.md`) and
@@ -835,6 +845,16 @@ constexpr eastl::string_view kErrorTagNames[] = {
     "MigrationCycle",           // 8
     "EnvelopeTruncated",        // 9
 };
+
+// Compile-time synchronization guard: kErrorTagNames must have exactly
+// one entry per arm (tag 0 = invalid slot) plus the highest-valued arm.
+// Adding a new ErrorTag arm without appending to this table is a
+// compile error. See §11.5 compile-fail test "name-table-sync".
+static_assert(
+    eastl::size(kErrorTagNames) ==
+        static_cast<std::uint16_t>(ErrorTag::EnvelopeTruncated) + 1,
+    "kErrorTagNames must have one entry per arm plus the invalid-0 slot; "
+    "append the new arm's name string before adding the ErrorTag enumerator");
 
 [[nodiscard]] constexpr eastl::string_view to_string(ErrorTag t) noexcept {
     const auto idx = static_cast<std::uint16_t>(t);
@@ -1153,6 +1173,13 @@ Under `tests/data/errors/compile_fail/`, using
   must fail under `-fno-exceptions`.
 - A test that handles `ErrorTag` via `switch` without a `default:`
   case and missing one arm must fail under `-Wswitch -Werror`.
+- **name-table-sync** (`compile_fail/name_table_sync_test.cpp`): a
+  translation unit that declares a `kErrorTagNames` array with one
+  fewer entry than `ErrorTag::EnvelopeTruncated + 1` must fail the
+  `static_assert` in §7.4 ("kErrorTagNames must have one entry per arm
+  plus the invalid-0 slot…"). This gates the silent-gap scenario where
+  a developer adds a new `ErrorTag` enumerator but forgets to append
+  the corresponding name string.
 
 ### 11.6 Cross-aggregate uniformity (sibling-design integration)
 
