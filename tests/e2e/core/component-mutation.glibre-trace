@@ -387,7 +387,7 @@ op: AssertState
   world:          A
   path:           world.A.target_forward_reverse_consistent
   expected:       bool { value = true }
-  evidence:       cross-aggregate invariant §4.2 inv 5 + §4.11 inv 1 —
+  evidence:       §4.2 inv 5 —
                   after the migration the forward map
                   (Entity → (Archetype, Chunk, Row)) and the reverse
                   map ((Archetype, Chunk, Row) → Entity) are mutual
@@ -686,7 +686,7 @@ op: AssertState
   path:           world.A.target_forward_reverse_consistent
   expected:       bool { value = true }
   evidence:       refusal must not perturb the forward/reverse map
-                  (§4.11 inv 1). A regression that began the migration
+                  (§4.2 inv 5). A regression that began the migration
                   and updated one of the two maps before discovering
                   the unregistered TypeId would fail this assertion.
 
