@@ -639,11 +639,11 @@ its internal kernels (per `SPEC.md` §10.1):
   encounters a Metal 4 `MTLCommandEncoderError` *or* the
   `IndirectArgsOverflow` flag was set by the kernel
   (§3.4 step 4).
-- `render::Error::MeshShaderCapabilityMissing` — only at init /
-  hot-reload register if the cull kernel cannot run on the active
-  device (the kernel has no fallback; the gbuffer pass has the
-  fallback per §3.8). Routed up via `Capability` predicate
-  evaluation in the graph builder.
+- `render::Error::CapabilityNotSupported` (`MeshShaderCapabilityMissing`
+  design-name per §10.1) — only at init / hot-reload register if the
+  cull kernel cannot run on the active device (the kernel has no
+  fallback; the gbuffer pass has the fallback per §3.8). Routed up
+  via `Capability` predicate evaluation in the graph builder.
 
 The aggregate does **not** emit `RenderGraphCycle`,
 `PassUnsupportedConfig`, `BarrierConflict` — those are graph-layer
@@ -842,10 +842,11 @@ ABI consequences (per `plugin-abi.md`):
   No external plug-in reads this buffer directly.
 - The four error arms this aggregate emits (`HeapOutOfMemory`,
   `ResourceResidencyExceeded`, `MeshletCullDispatchFailed`,
-  `MeshShaderCapabilityMissing`) are part of `render::Error`'s
-  closed sum (`SPEC.md` §10.1); none are added by this design
-  (all are already in §10.1 as either current §5 enum entries or
-  "ABI add" rows planned by §10).
+  `CapabilityNotSupported` / `MeshShaderCapabilityMissing`
+  design-name per §10.1) are part of `render::Error`'s closed sum
+  (`SPEC.md` §10.1); none are added by this design (all are already
+  in §10.1 as either current §5 enum entries or "ABI add" rows
+  planned by §10).
 
 The aggregate consumes no Fory types; therefore no migration
 bodies are required (`fory-codegen.md` §"Migration Mechanic" is
@@ -1075,7 +1076,7 @@ the §5 stub or queued as ABI-add rows per §10.1's audit):
 | `HeapOutOfMemory`                | `ResourceAllocFailed` | `HZB::ensure` cannot allocate the persistent mip chain (§3.2). Driver-side `MTLHeap::newTextureWithDescriptor:offset:` returns `nil`.       | `lower-tier`    | `warn`   | `tests/render/failure/resource_alloc_lower_tier.cpp`     |
 | `ResourceResidencyExceeded`      | `ResourceResidencyExceeded` | `HZB::ensure` would push the `ContextTag::render` HZB sub-row over its share of §9.5 persistent-textures (21 MiB cap, §9.4 above).      | `lower-tier`    | `warn`   | `tests/render/failure/residency_exceeded_lower_tier.cpp` |
 | `MeshletCullDispatchFailed`      | `MeshletCullDispatchFailed` (ABI add) | Cull kernel dispatch returns Metal 4 `MTLCommandEncoderError`, *or* the per-dispatch `IndirectArgsOverflow` flag is set on CPU readback at next frame's phase-6 entry (§3.4 step 4). | `disable-feature` (kernel error → `MeshShaders` capability cleared, fallback path takes over per §3.8); `lower-tier` (overflow → drop draw budget per `RenderSettings.per_view_draw_budget`). | `warn`   | `tests/render/failure/meshlet_dispatch_disable.cpp` (kernel) and `tests/render/failure/indirect_args_overflow_lower_tier.cpp` (overflow; ABI-add row) |
-| `MeshShaderCapabilityMissing`    | `MeshShaderCapabilityMissing` | Init or hot-reload register: the cull kernel's `Capability::MeshShaders` declared dependency is unsatisfied. Note: in MVP the cull kernel itself does **not** require `MeshShaders` (the gbuffer pass does); this arm is reserved for post-MVP cull paths that fuse mesh-shader emit. | `lower-tier` (init) / `disable-feature` (hot-reload). | `warn`   | `tests/render/failure/mesh_shader_missing.cpp`            |
+| `MeshShaderCapabilityMissing`    | `CapabilityNotSupported` (§5) + flag bit | Init or hot-reload register: the cull kernel's `Capability::MeshShaders` declared dependency is unsatisfied. Note: in MVP the cull kernel itself does **not** require `MeshShaders` (the gbuffer pass does); this arm is reserved for post-MVP cull paths that fuse mesh-shader emit. | `lower-tier` (init) / `disable-feature` (hot-reload). | `warn`   | `tests/render/failure/mesh_shader_missing.cpp`            |
 
 Cross-cutting notes (per `SPEC.md` §10.2):
 
