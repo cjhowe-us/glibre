@@ -190,8 +190,11 @@ The graph is materialised as a contiguous, ascending-sorted
 `eastl::span<const MigrationEntry>` keyed off
 `from_version` (§5 of `specs/data/SPEC.md`,
 `include/glibre/types/migration.hpp`). Lookup of edge `(N → N+1)` is
-`O(1)` via direct array index `N − v1` (where `v1 = entry[0].from_version`; the chain is dense by §3.1
-property 5); the dispatcher validates the index by checking
+`O(1)` via direct array index `N − v1` (where `v1 = entry[0].from_version`;
+SPEC §4.7 inv. 1 guarantees `v1 = 1` for all in-build chains, so
+in practice this reduces to `N − 1` — the generalized form is
+retained for defensive correctness and to match the §3.5 density
+check); the dispatcher validates the index by checking
 `entry.from_version == N` before invoking.
 
 ### 3.2 Aggregate state
@@ -300,7 +303,11 @@ construction inside `glibre-types.dylib`. It checks:
 1. **Density.** For chain length `L`, every index `i ∈ [0, L)` has
    `entry[i].from_version == v1 + i` and
    `entry[i].to_version == v1 + i + 1` (where `v1 = entry[0].from_version`,
-   the lowest version in the chain). Violation → `MigrationCycle`
+   the lowest version in the chain; SPEC §4.7 inv. 1 guarantees `v1 = 1`
+   for all in-build chains, reducing these to `i + 1` and `i + 2`
+   respectively — the generalized form matches §3.1 and handles
+   any hypothetical future chain starting above version 1).
+   Violation → `MigrationCycle`
    (gap or back-edge) or `MigrationStepMissing` (truncated chain).
 2. **Monotonic.** `entry[i].to_version > entry[i].from_version`,
    strictly. Violation → `MigrationCycle`.
@@ -432,9 +439,9 @@ namespace glibre::types {
 //     arm only — see §3.5)
 [[nodiscard]] auto dispatch_migration(
     SchemaId                          schema,
-    SchemaVersion                     current_version,
     eastl::span<const MigrationEntry> chain,
     SchemaVersion                     src_version,
+    SchemaVersion                     current_version,
     const void*                       src_payload,
     void*                             dst_payload,
     Arena&                            arena
