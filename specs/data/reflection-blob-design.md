@@ -940,7 +940,7 @@ The exact CI recipe and the linker-map pattern are deferred to
 ## 10. Failure modes
 
 The reflection blob's failure surface extends `tools::Error`
-(`specs/tools/SPEC.md` §5) with three editor-context arms. The
+(`specs/tools/SPEC.md` §5) with four editor-context arms. The
 `data::Error` enum (SPEC §10.1) is **not** extended — reflection
 is editor territory; routing failures into the data context's
 closed sum would violate `error-model.md` §"Composition Rules" #1
