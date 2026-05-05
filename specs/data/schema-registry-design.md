@@ -416,9 +416,10 @@ cost class:
 path. Implemented as a binary search over the FQN-sorted `entries_`
 vector (`specs/data/SPEC.md` §4.5 inv. 3); allocation-free,
 branch-predictable, never touches the hash map. Returns
-`const RegistryEntry*` (nullptr on miss — translated into
-`data::Error::SchemaUnknown` by the calling envelope serdes per
-`specs/data/SPEC.md` §10.2). **Per the hot/cold split (§5 below),
+`std::expected<const RegistryEntry*, data::Error>` — on a miss the
+unexpected value carries `data::Error{ .tag = ErrorTag::SchemaUnknown }`;
+the calling envelope serdes propagates this error to its own caller per
+`specs/data/SPEC.md` §10.2. **Per the hot/cold split (§5 below),
 envelope serdes calls this path *exactly once per FQN per session*:
 at codegen-emitted thunk static-init or at the hot-reload barrier's
 `SchemaRegistryChange` notification handler. The resolved
@@ -881,8 +882,14 @@ namespace glibre::types::detail {
 
 template <class T>
 auto resolve_entry_for() noexcept -> const RegistryEntry* {
-    static const RegistryEntry* cached =
-        SchemaRegistry::instance().lookup(SchemaId{fqn_for<T>()});
+    static const RegistryEntry* cached = []() -> const RegistryEntry* {
+        auto result = SchemaRegistry::instance().lookup(SchemaId{fqn_for<T>()});
+        // Schema must be present at codegen-emitted static-init time; absence is
+        // a fatal misconfiguration (the codegen tool guarantees registration
+        // occurs before any thunk is reachable).
+        GLIBRE_ASSERT(result.has_value(), "SchemaRegistry: missing entry for T at thunk init");
+        return result.value();
+    }();
     return cached;
 }
 
@@ -1008,9 +1015,10 @@ Per `specs/data/SPEC.md` §8.2 and `reviews/decisions/hot-reload-protocol.md`
    that gates `core::TypeRegistry` per §6 of its design).
 2. **Schema-set continuity check (`migrate(...)` step 1).**
    For every FQN registered in the outgoing snapshot, the
-   barrier calls `incoming.lookup(fqn)`. A nullptr return →
-   `data::Error::SchemaMigrationFailure` (`specs/data/SPEC.md`
-   §8.2 step 1) — refuse the swap.
+   barrier calls `incoming.lookup(fqn)`. A miss — indicated by
+   the returned `std::expected` holding an unexpected value —
+   causes the barrier to return `data::Error{ .tag = ErrorTag::SchemaMigrationFailure }`
+   (`specs/data/SPEC.md` §8.2 step 1) — refuse the swap.
 3. **Per-FQN version-chain query.** For every FQN whose stored
    version differs from `incoming.lookup(fqn)->version`, the
    barrier dispatches the migration chain via
@@ -1189,11 +1197,12 @@ through `lookup(fqn)->migrations`.
 
 ```cpp
 // Inside MigrationDispatcher (#738), at HotReloadBarrier step 3.
-const auto* entry = SchemaRegistry::instance().lookup(SchemaId{fqn});
-if (entry == nullptr) {
+auto entry_result = SchemaRegistry::instance().lookup(SchemaId{fqn});
+if (!entry_result.has_value()) {
     return std::unexpected(data::Error{ .tag = ErrorTag::SchemaMigrationFailure,
                                         .step_schema = SchemaId{fqn} });
 }
+const auto* entry = entry_result.value();
 for (auto v = stored_version; v < entry->version; ++v) {
     auto step = find_step(entry->migrations, v, v + 1);
     if (step == nullptr) {
@@ -1254,8 +1263,9 @@ The §10 table below transcribes the registry-relevant refusals;
 the authoritative table is `specs/data/SPEC.md` §10.2. The
 registry-specific refusals:
 
-- `SchemaUnknown` — `lookup` miss at the consumer's call site
-  (translated by envelope serdes; the registry returns nullptr).
+- `SchemaUnknown` — `lookup` miss at the consumer's call site;
+  `lookup` returns `std::unexpected(data::Error{ .tag = ErrorTag::SchemaUnknown })`
+  and the caller (envelope serdes or barrier) propagates that error.
 - `SchemaRegistryConflict` — duplicate FQN at static-init.
 - `SchemaMigrationFailure` — schema-set continuity refusal at
   the barrier.
@@ -1473,8 +1483,8 @@ Location: `tests/data/registry/schema_registry_test.cpp`.
 
 | Case                                       | Asserts                                                                       |
 |--------------------------------------------|-------------------------------------------------------------------------------|
-| `lookup_hit`                               | `lookup(fqn)` for a registered FQN returns non-null; pointer dereferences to expected `(version, source_hash)`. |
-| `lookup_miss`                              | `lookup(fqn)` for an unregistered FQN returns nullptr.                        |
+| `lookup_hit`                               | `lookup(fqn)` for a registered FQN returns a `std::expected` holding a non-null pointer; `*result` dereferences to expected `(version, source_hash)`. |
+| `lookup_miss`                              | `lookup(fqn)` for an unregistered FQN returns an `std::expected` holding `data::Error{ .tag = ErrorTag::SchemaUnknown }`. |
 | `lookup_log_n`                             | `BENCHMARK` over 1k entries asserts ≤ 10 ns per call (§9.2).                 |
 | `entries_canonical_order`                  | `entries()` returns FQN-sorted-ascending span; `is_sorted` over the FQN field. |
 | `instance_singleton`                       | Two calls to `instance()` return references to the same object.               |
