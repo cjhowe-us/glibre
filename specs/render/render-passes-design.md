@@ -758,8 +758,8 @@ Per-pass factory `declare` methods run sequentially on the graph
 builder thread (SPEC §6.3). The thread is pinned and owns the
 graph's per-frame arena; no cross-thread state is touched. Multi-view
 fan-out reuses the same thread sequentially per `View` (SPEC §6.3 +
-§3.2 collapse #7). Eleven `declare` calls per `View` × ≤ 4 views
-(MVP ceiling) = ≤ 44 calls per frame; bounded.
+§3.2 collapse #7). Twelve `declare` calls per `View` × ≤ 4 views
+(MVP ceiling) = ≤ 48 calls per frame; bounded.
 
 ### 6.2 Hot-side: per-pass encoder workers (≤ three)
 
