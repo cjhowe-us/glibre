@@ -21,8 +21,9 @@
 > except for the additive `FrameTick` / `FixedStepAccumulator` value
 > objects co-located on `glibre::platform::Clock`'s seam — both are
 > pure header-side computations on `Instant` / `Duration` and
-> introduce no new ABI symbols beyond those derivable from the
-> existing `Clock::now` / `wall` / `native_tick` triplet.
+> introduce three new ABI-tracked types (`FrameDelta` (24 B),
+> `FrameTick` (8 B), `FixedStepAccumulator` (24 B)) registered in
+> §7.3; SPEC §5.9 amendment tracked in §12 [BLOCKING].
 >
 > Harmonius prior art (`harmonius/docs/requirements/platform/
 > threading-async.md`, `harmonius/docs/design/core-runtime/
@@ -31,8 +32,8 @@
 > `PHILOSOPHY.md`.
 
 Refs: spike #723 — `[SPIKE] design-platform-clock-detailed`.
-Parent: #714. Sibling task-breakdown spike blocked-by this
-deliverable.
+Parent: #714. Story: #358 (design half). Sibling task-breakdown
+spike blocked-by this deliverable.
 
 ## 1. Purpose
 
@@ -108,8 +109,8 @@ below.
 | `threading-async.md` *wall-clock for log timestamps and crash dumps*                   | **Covered.** `Clock::wall() -> WallTime` is the only sanctioned source (§4.4 inv #3). Log helper (`glibre::log_error`) calls `Clock::wall()`; engine code never calls `time(nullptr)` / `gettimeofday`.                                              |
 | `core-runtime/game-loop.md` §Fixed Timestep Accumulator (substeps, alpha)              | **Covered, ownership split.** The numeric primitive (`FixedStepAccumulator`) lives here; the *use* (driving phase 3 physics-fixed substeps) lives in sibling `physics` (#132) and core's schedule-frame loop. §3.5.                                |
 | `core-runtime/game-loop.md` *monotonic frame counter*                                  | **Covered, ownership split.** `Clock` provides `Instant`; the `frame_index : std::uint64_t` counter itself is core's concern (incremented in phase 9 per `frame-phases.md`). Platform contributes the time, not the index.                          |
-| `core-runtime/game-loop.md` *delta-time per frame*                                     | **Covered.** `FrameTick::tick(Clock&) -> FrameDelta` returns `{ now, delta, wall_now }` (§3.4). Caller threads the `FrameTick` through frames; platform owns no global `last_now_` field — that would couple to scheduling.                          |
-| `core-runtime/game-loop.md` *max-ticks-per-frame cap (spiral-of-death prevention)*     | **Covered.** `FixedStepAccumulator::consume(max_ticks)` clamps and returns the carry-over; remaining accumulated time is preserved for the next frame so alpha stays continuous. §3.5.                                                              |
+| `core-runtime/game-loop.md` *delta-time per frame*                                     | **Covered.** `FrameTick::tick<ClockT> -> FrameDelta` returns `{ now, delta, wall_now }` (§3.4). Caller threads the `FrameTick` through frames; platform owns no global `last_now_` field — that would couple to scheduling.                          |
+| `core-runtime/game-loop.md` *max-ticks-per-frame cap (spiral-of-death prevention)*     | **Covered.** `FixedStepAccumulator::consume()` caps at `max_ticks_per_frame` and **drops** the excess accumulated time to zero; residual is not preserved across the cap. `alpha()` continuity holds only in the non-cap steady state. Excess simulation time is intentionally discarded to bound runaway-spiral cost. See §3.5 + §11.1.7.                                                              |
 | `core-runtime/game-loop.md` *interpolation alpha in `[0, 1]`*                          | **Covered.** `FixedStepAccumulator::alpha() -> float` returns the residual divided by step duration, clamped to `[0, 1]`. §3.5.                                                                                                                     |
 | `tools/profiler.md` *high-precision time deltas for span measurement*                  | **Owned by sibling `tools` profiler context.** The profiler reads `Clock::now()` like any consumer; building the span tree is not platform's concern. We guarantee `now()` is O(1) and `Instant` resolution is at least 1 ns (§9).                  |
 | `crash-reporting.md` *correlate monotonic frame-time budget overrun with wall stamp*   | **Covered.** §4.4 inv #3 makes `WallTime` the single sanctioned correlation source. The crash dump captures one `Clock::wall()` plus the most recent `Instant`; pairing these is the call site's responsibility (`obs` context, post-MVP).         |
@@ -187,7 +188,7 @@ read-cached-numer/denom + one `mach_absolute_time` syscall + one
 `FrameTick` and `FixedStepAccumulator` are pure value objects:
 copying them is well-defined, comparing them is well-defined, and
 they own no resources that could conflict on copy. They do not
-contain a `Clock&` reference; `tick(Clock&)` and `accumulate(...)`
+contain a `Clock&` reference; `tick<ClockT>` and `accumulate(...)`
 take it as a method argument. This is deliberate — embedding a
 reference would (a) prevent value-semantic copy, (b) force
 lifetime coupling when none is needed, and (c) leak `Clock`'s
@@ -211,20 +212,18 @@ auto Clock::now() const noexcept -> Instant {
         (__uint128_t(t) * info.numer) / info.denom);
 #if !defined(NDEBUG)
     // §4.4 inv #1 defensive guard: detect monotonic regression in debug.
-    // The atomic load below uses `relaxed` because the rule is
-    // a *correctness* invariant, not a synchronization point —
-    // any read that observes `last_seen` is correctness-preserving
-    // regardless of inter-thread ordering, since the only valid
-    // outcome is "no regression" or "abort".
-    static std::atomic<std::int64_t> last_seen{0};
-    auto prev = last_seen.load(std::memory_order_relaxed);
-    while (ns < prev) {
+    // The check is per-thread (thread_local).  A thread aborts iff its
+    // own observation regresses against its previous observation —
+    // guaranteed to reflect a genuine OS clock regression on that thread,
+    // never a cross-thread race.  No happens-before required because the
+    // slot is thread-private.  Cost: one TLS read + write + branch in
+    // debug builds; zero in release.
+    thread_local std::int64_t last_seen{0};
+    if (ns < last_seen) {
         // Spec invariant violated by the OS. Abort, do not clamp.
         std::abort();
     }
-    // Best-effort publish. Loss of update is fine; another thread
-    // may have already advanced it past `ns`.
-    last_seen.store(ns, std::memory_order_relaxed);
+    last_seen = ns;
 #endif
     return Instant{ns};
 }
@@ -248,11 +247,22 @@ Choices and their reasons:
   non-blocking on every subsequent call. The closure form ensures
   `mach_timebase_info` is called inside the static initializer
   only.
-- **Debug-only regression abort.** Release builds skip the load /
-  store entirely (`!defined(NDEBUG)` guard). The OS guarantees
-  monotonicity; the assertion is paranoia for catching a future
-  OS bug or a broken simulator. On regression the platform aborts
-  per §4.4 inv #1 — clamping would silently corrupt anything
+- **Debug-only regression abort via per-thread high-water mark.**
+  Release builds skip the block entirely (`!defined(NDEBUG)` guard).
+  The OS guarantees monotonicity; the assertion is paranoia for
+  catching a future OS bug or a broken simulator. The guard uses a
+  `thread_local` high-water mark rather than a shared atomic:
+  a shared atomic forces every thread to evaluate `ns < last_seen`
+  against the most-recently-stored value across all threads.  With
+  multiple threads sampling the OS clock concurrently, a slow thread
+  can read an older `ns` than a fast thread; comparing the slow read
+  against the fast write triggers a spurious abort even though neither
+  thread observed an OS regression.  Per-thread storage eliminates
+  this — only genuine same-thread regressions abort.  The
+  `thread_local` variable is still `#if !defined(NDEBUG)`-gated and
+  still in .bss (no heap).  On a genuine OS regression (this thread's
+  `now()` returns a value less than its previous return), the platform
+  aborts per §4.4 inv #1 — clamping would silently corrupt anything
   downstream that subtracts two `Instant` values.
 - **No span-based RDTSC / `clock_gettime_nsec_np` alternative.** We
   pick exactly one source and never offer a knob; second-source
@@ -331,8 +341,15 @@ public:
 
     // Stamps `now()` and returns the delta from the previous call
     // (or zero if this is the first call). Updates the internal
-    // prev_ field. The Clock& is a method parameter, not a member.
-    [[nodiscard]] auto tick(Clock& clock) noexcept -> FrameDelta {
+    // prev_ field. The ClockT& is a method parameter, not a member.
+    //
+    // Templated so that unit-test fixtures can pass a `TestClock`
+    // (§11.4) without a virtual `IClock` base and its associated
+    // vtable overhead.  The concept constraint ensures any `ClockT`
+    // provides the required `now()` / `wall()` interface.
+    template <class ClockT>
+        requires requires(const ClockT& c) { c.now(); c.wall(); }
+    [[nodiscard]] auto tick(ClockT& clock) noexcept -> FrameDelta {
         const auto t   = clock.now();
         const auto w   = clock.wall();
         const auto dt  = (prev_ == Instant{}) ? Duration::zero() : (t - prev_);
@@ -355,14 +372,21 @@ private:
 
 Choices and their reasons:
 
-- **`tick(Clock&)` returns `{ now, delta, wall }` together.**
-  Capturing both `now` and `wall` in one call removes the
-  correlation race between them: between two separate `Clock::now()`
-  + `Clock::wall()` calls a context switch could interleave a
-  wall-clock slew (NTP step) and produce a bogus delta. Reading
-  them inside the same `FrameTick::tick` keeps the gap to a few
-  hundred nanoseconds and documents that "the wall stamp belongs
-  to *this* monotonic instant".
+- **`tick<ClockT>` returns `{ now, delta, wall }` together.**
+  Capturing both `now` and `wall` in one call reduces and bounds
+  the correlation gap between them. The two calls are sequenced
+  inside a single tick body; a wall-clock step (NTP slew) that
+  fires between them produces an at-most-one-tick gap, which
+  `FrameTick` records in `FrameDelta` and exposes via the `obs`
+  context diagnostics surface (exact section to be filed in the obs
+  spec follow-up) rather than masking. A separate
+  `Clock::now()` + `Clock::wall()` call sequence at the consuming
+  site would widen the window to the caller's entire frame body —
+  potentially hundreds of microseconds — whereas the pairing here
+  keeps the gap to a few hundred nanoseconds. This documents that
+  "the wall stamp belongs to *this* monotonic instant" while
+  acknowledging that a sufficiently unlucky NTP step can still
+  produce a one-tick discontinuity.
 - **No `Clock&` member.** Reasons in §3.1. The caller owns the
   reference; `Clock::get()` is fine to pass on every call (the
   singleton accessor is itself O(1)).
@@ -562,10 +586,15 @@ struct WallTime {
 The public surface is exactly what `specs/platform/SPEC.md` §5.2 +
 §5.9 declare, plus the additive `FrameTick` /
 `FixedStepAccumulator` / `FrameDelta` value objects defined in
-§3.4 / §3.5 above. No new ABI symbols beyond those derivable from
-the existing `Clock::now` / `wall` / `native_tick`. Every public
-function is `noexcept`; none are fallible (per SPEC §10.3.4 the
-clock surface returns no `Result<T>` — see §10).
+§3.4 / §3.5 above. No new *exported ABI function symbols* beyond
+those derivable from the existing `Clock::now` / `wall` /
+`native_tick` triplet. Three new type-layout registrations
+(`FrameDelta`, `FrameTick`, `FixedStepAccumulator`) are added to
+the middleman catalogue per §7.3 — these are type-layout
+registrations, not exported function symbols, and travel through
+the data-context middleman seam, not the platform plugin's exported
+C ABI. Every public function is `noexcept`; none are fallible (per
+SPEC §10.3.4 the clock surface returns no `Result<T>` — see §10).
 
 ```cpp
 // specs/platform/clock-design.md — public seam, presented as one
@@ -646,7 +675,13 @@ class FrameTick {
 public:
     constexpr FrameTick() noexcept = default;
 
-    [[nodiscard]] auto tick(Clock& clock) noexcept -> FrameDelta;
+    // Templated on the clock type so unit tests can inject TestClock
+    // without a virtual base (see §3.4 + §11.4).
+    // Constraint: ClockT must expose now() -> Instant and wall() -> WallTime.
+    template <class ClockT>
+        requires requires(const ClockT& c) { c.now(); c.wall(); }
+    [[nodiscard]] auto tick(ClockT& clock) noexcept -> FrameDelta;
+
     constexpr auto reset() noexcept -> void { prev_ = Instant{}; }
     [[nodiscard]] constexpr auto last() const noexcept -> Instant { return prev_; }
 
@@ -720,7 +755,7 @@ cold ones. The split is fundamental to the §9 budget.
 | `Clock::now()`                    | 1, 9      | <0.001 ms         | Out-of-line (mach_absolute_time syscall is in libSystem; LTO can fold around the wrapper). |
 | `Clock::wall()`                   | 1, 9      | <0.001 ms         | Out-of-line (`std::chrono::system_clock::now`). |
 | `Instant::operator-`              | 1, 3, 6, 9| compile-time      | `constexpr`, fully inlined. |
-| `FrameTick::tick(Clock&)`         | 1         | <0.001 ms         | Header-inline; calls Clock::now + Clock::wall. |
+| `FrameTick::tick<ClockT>`         | 1         | <0.001 ms         | Header-inline; calls Clock::now + Clock::wall. |
 | `FixedStepAccumulator::accumulate`| 3         | nanoseconds       | `constexpr`, fully inlined. |
 | `FixedStepAccumulator::consume`   | 3         | nanoseconds       | `constexpr`, fully inlined. |
 | `FixedStepAccumulator::alpha`     | 6 (interp)| nanoseconds       | `constexpr`, fully inlined. |
@@ -796,12 +831,15 @@ The thread-safety story:
    threads block on the C runtime's static-init guard until the
    value is ready, then never block again. Cost is paid exactly
    once per process.
-4. **The debug-only regression guard uses relaxed atomics.** As
-   discussed in §3.2, this is not a synchronization point — it is
-   a paranoia check whose only valid outcome is "abort or move on".
-   No fence is needed; concurrent threads racing on `last_seen`
-   may each abort if they observe a regression, or each not-abort
-   if they don't, which is the correct behaviour.
+4. **The debug-only regression guard uses per-thread (thread_local)
+   storage.** As discussed in §3.2, this is not a synchronization
+   point — it is a paranoia check whose only valid outcome for this
+   thread is "abort or move on".  Each thread independently asserts
+   monotonicity against its own previous observation.  Cross-thread
+   observation differences are not visible here — there is no shared
+   atomic to race on.  A thread aborts iff its own `now()` returns a
+   value less than its previous return — genuine OS regression on that
+   thread.  No fence is needed; the slot is thread-private.
 
 There is no "current frame's time" cached on the clock — caching
 that would impose a thread-affinity (the cache must be updated by
@@ -1110,9 +1148,12 @@ consistency. Actual usage:
 - Consumer-side `FrameTick` (8 B) and `FixedStepAccumulator`
   (24 B) instances live in the *consumer's* sub-arena. Platform
   contributes none.
-- The debug-only `last_seen : std::atomic<int64_t>` is
-  `defined(NDEBUG)`-gated out in shipping; debug builds carry an
-  extra 8 bytes inside the dylib's `.bss` (still not heap).
+- The debug-only `thread_local last_seen : std::int64_t` is
+  `!defined(NDEBUG)`-gated out in shipping. Debug builds carry an
+  extra 8 bytes per OS thread in the dylib's `.tbss` (thread-local
+  BSS section), not in `.bss` and not on the heap. Per-thread cost
+  scales linearly with thread count but is not counted against the
+  platform sub-arena's heap budget.
 
 Effective platform-clock heap: **0 bytes per frame, 0 bytes
 total**. The 4 KiB bucket is a rounding artifact. SPEC §9.2's
@@ -1429,7 +1470,14 @@ public:
     [[nodiscard]] auto wall() const noexcept -> WallTime { return wall_; }
     [[nodiscard]] auto native_tick() const noexcept -> Duration { return Duration{1}; }
 
-    auto advance(Duration d) noexcept -> void;
+    // Advances both `at_` AND `wall_.point` by `d`.
+    // Tests asserting on `FrameDelta::wall` therefore see a wall-time
+    // progression equal to the monotonic progression.
+    // Test invariant: under TestClock, wall == zero_epoch + at_.
+    auto advance(Duration d) noexcept -> void {
+        at_    = at_ + d;
+        wall_.point += d;
+    }
 
 private:
     Instant   at_{};
@@ -1439,18 +1487,26 @@ private:
 }  // namespace glibre::platform::test
 ```
 
-`TestClock` is structurally compatible with `Clock&` consumers via
-templated functions (e.g. `template <class C> auto tick(C& clock)`)
-where the test fixture passes `TestClock` and the production code
-passes `Clock`. We deliberately do **not** introduce a virtual
-`IClock` base class — virtual dispatch would impose a runtime cost
-on every consumer for the sake of testability, and the templated-
-parameter pattern works at zero cost. (This mirrors the
-window-surface-design approach to hot-cold seam testability.)
+`TestClock` satisfies the `FrameTick::tick` concept constraint
+(`requires { c.now(); c.wall(); }`) and can therefore be passed
+directly to `tick<TestClock>(test_clock)` in unit-test fixtures,
+while production code calls `tick(Clock::get())`. We deliberately
+do **not** introduce a virtual `IClock` base class — virtual
+dispatch would impose a runtime cost on every consumer for the sake
+of testability, and the concept-constrained template works at zero
+cost. (This mirrors the window-surface-design approach to hot-cold
+seam testability.)
 
-In MVP, the only consumer that uses templated-clock indirection is
-the `FrameTick::tick` test fixture. Production code calls
-`tick(Clock::get())` directly.
+Two concrete instantiations exist:
+
+1. `tick(Clock&)` — production code, called from core's schedule-
+   frame loop.
+2. `tick(TestClock&)` — unit tests §11.1.10–§11.1.12 in
+   `tests/platform/test_frame_tick.cpp`.
+
+In MVP, the `FrameTick::tick` template is the only method that uses
+clock indirection. All other clock consumers (`FixedStepAccumulator`,
+integration tests) take `Clock&` directly.
 
 ### 11.5 Test summary
 
@@ -1472,13 +1528,22 @@ output.
 
 ## 12. Open questions
 
+- [OPEN] [NON-BLOCKING] **`FrameTick::tick` template instantiation
+  inventory.** Two concrete instantiations are known at design time:
+  `tick(Clock&)` in production (core's schedule-frame loop) and
+  `tick(TestClock&)` in unit tests (§11.1.10–§11.1.12). If a future
+  consumer needs a third clock type (e.g. a replay-injected clock in
+  a future net-code spike), the template satisfies that without
+  design change. Owner: task-breakdown spike for clock; re-evaluate
+  when the implementation plan for `test_frame_tick.cpp` is authored.
+
 - [OPEN] **Should `FrameTick` and `FixedStepAccumulator` live on
   `glibre::platform::` or under a dedicated `glibre::platform::time::`
   sub-namespace?** Both are *value-object utilities* layered over
   `Clock`, not aggregates of platform's OS-seam responsibility per
   se. The brief asked for them inside this aggregate, which is
   what this design delivers. Re-opens if the sibling
-  task-breakdown carve-out (issue #TBD) discovers that the
+  task-breakdown carve-out (task-breakdown spike to be filed before plan PRs land) discovers that the
   consumer-side ergonomics prefer a separate header
   (`<glibre/platform/time.hpp>`). Owner: sibling task-breakdown
   spike for clock.
@@ -1519,3 +1584,41 @@ output.
   comparison? Today, callers obtain the `int64_t` directly. Re-
   opens when the `obs` (observability) context lands and the
   field shape is normalized. Owner: future `obs` SPEC.
+
+- [BLOCKING IMPLEMENTATION] **SPEC §6.6 regression-guard amendment.**
+  Current `specs/platform/SPEC.md` §6.6 prescribes a plain
+  `assert(ns >= last)` to guard monotonic regression in debug
+  builds. `clock-design.md` §3.2 corrected this to a per-thread
+  `thread_local std::int64_t last_seen{0}` high-water mark +
+  `if (ns < last_seen) std::abort();` per-thread regression check.
+  Per-thread storage eliminates the cross-thread spurious-abort
+  that a shared atomic (or naive `static`) would introduce. An
+  implementer reading only SPEC.md §6.6 would write the plain-assert
+  version, which is racy under concurrent callers. **SPEC §6.6 must
+  be amended** — either add a forward-pointer to
+  `clock-design.md §3.2`, OR update the §6.6 code snippet to show
+  the `thread_local` guard — before the first plan PR consuming this
+  design can land. Two concrete plan-side consumers: phase-9
+  frame-tick implementation, render's frame-extract NTP-gap
+  diagnostics. Owner: platform SPEC maintainer; tracked as amendment
+  spike against sub-epic #714.
+
+- [BLOCKING IMPLEMENTATION] **SPEC §5.9 stub amendment — new
+  ABI-tracked types.** `specs/platform/SPEC.md` §5.9 currently
+  lists only `Clock` in the ABI middleman catalogue. This design
+  §7.3 introduces three new ABI-tracked types: `FrameDelta` (24 B),
+  `FrameTick` (8 B), and `FixedStepAccumulator` (24 B). **SPEC §5.9
+  must be amended** to add stub declarations for `FrameDelta`,
+  `FrameTick`, and `FixedStepAccumulator` (or a forward-reference to
+  `clock-design.md §4`) before any plan PR consuming these types
+  can land. Two concrete consumers: phase-9 frame-tick (FrameDelta),
+  shipping runtime fixed-step gameplay (FixedStepAccumulator).
+  Owner: platform SPEC maintainer; tracked as amendment spike
+  against sub-epic #714.
+
+- [NON-BLOCKING] **Task-breakdown spike — file dedicated
+  `[SPIKE] task-breakdown-clock-implementation` issue parented to
+  #714**, tracking decomposition of `clock-design.md` into plan
+  PRs. Once filed, place the issue number into §12 (the namespace
+  question entry above) and the Refs block header (line 34).
+  Owner: project manager / next planning session.
