@@ -58,6 +58,16 @@ atomic-write protocol, the path-root admission rule, the per-token slot
 discipline, or the queue-saturation refusal contract changes, this
 design changes. Anything else is out of scope.
 
+**`OpenMode` encoding.** `OpenMode` is declared in SPEC §5.11 and
+named in the preamble above, but no method in this design's API takes
+an `OpenMode` argument. The operation-named API encodes mode
+implicitly: `read_all` / `read_async` imply read + sequential-access;
+`write_atomic` / `write_atomic_async` imply create-or-replace + write.
+The `OpenMode` enum is retained in SPEC §5.11 for future API
+extensions (e.g. an `open_with_mode` surface allowing append or
+exclusive-create). Its introduction before a second consumer requires
+it is tagged in §12 [OPEN] #9.
+
 ## 2. Requirements Coverage
 
 Mapping of harmonius requirements
@@ -206,11 +216,16 @@ struct Slot {
     eastl::span<const std::byte>         result_bytes; // filled before state=Ready (release)
     Result<void>                         err;          // failure code if state=Ready and err is unexpected
     Request                              req;          // bound at enqueue, read by worker
+    const char*                          prefix;       // async-path prefix transport (§3.9); nullptr = no prefix
     std::uint32_t                        next_free;    // intrusive free-list link
 };
 
 // IoToken::Impl is just &Slot; the public IoToken from §5.11 is a
 // move-only handle that holds slot index + free-list backref.
+// Note: the `prefix` field is written by the worker (after translator runs,
+// before state=Ready release-store) and read by the consumer (after observing
+// state==Ready acquire-load). The release/acquire on `state` provides the
+// necessary ordering; no separate synchronization on `prefix` is needed.
 ```
 
 Token lifetime invariants (extending §4.6 inv #3):
@@ -280,32 +295,52 @@ configurations refuse at `create` with `Unsupported`.
 
 ### 3.5 Request queue
 
-A bounded SPSC ring (`detail/spsc_ring.hpp` shared with `event/`) sized
-to `M` entries (one per slot). The producer is the engine driver
-thread (calling `read_async` / `write_atomic_async`); the consumer is
-the worker pool's dispatcher thread (worker 0 is also the dispatcher
-when `N=1`; for `N>1` the workers themselves act as competing consumers
-via a stronger primitive — see below).
+The ring type depends on the worker count `N`.
 
-For `N=1` (no plausible MVP saturation case), the ring is plain SPSC.
-For `N>1`, the ring is **MPSC-from-the-engine + N-way work-stealing
-from workers**. Topology:
+**N == 1 (MVP default).** A bounded SPSC ring (`detail/spsc_ring.hpp`)
+sized to `M = N * queue_depth` entries. One producer (engine driver
+thread) and one consumer (worker 0). This is the same primitive used
+by `event/` and `watcher/`. Worker 0 is both dispatcher and executor.
+Saturation (`head == tail + capacity`) returns `IoFailure` with
+diagnostic prefix `"out-of-budget"` (§10.3.6 / SPEC §4.6 inv #6) —
+never grows.
 
 ```text
 engine driver thread
-        │ push(Request)        (one producer)
+        │ push(Request)          (one producer)
         ▼
-   request_ring (N * queue_depth slots, lock-free MPSC ring)
-        │ pop(Request)
+   spsc_ring (M slots, detail/spsc_ring.hpp)
+        │ pop(Request)           (one consumer)
         ▼
-worker[0] worker[1] ... worker[N-1]   (N consumers; each owns its own ring slice)
+   worker[0]
 ```
 
-The MPSC primitive is the same lock-free ring used by `event/` /
-`watcher/`, with the consumer side widened to N readers via a
-per-worker head index plus a single shared tail. Saturation
-(`tail - any_head >= capacity`) returns `IoFailure` with diagnostic
-prefix `"out-of-budget"` (§10.3.6 / SPEC §4.6 inv #6) — never grows.
+**N > 1 (post-MVP, disabled for MVP).** The SPSC ring cannot serve
+multiple consumers safely — N workers CAS'ing the same head pointer
+would be a data race. For N > 1 the ring is replaced by a separate
+MPSC ring (`detail/mpsc_ring.hpp`) with a per-consumer head index
+and a single shared tail, allowing N consumers to pop without
+contention on a single head. The `event/` / `watcher/` SPSC ring is
+**not** shared on this path; `file-io`'s N > 1 ring is a distinct
+instance with the wider consumer contract. The exact ring contract,
+work-stealing protocol, and fairness guarantees for the N > 1 path
+are captured in §12 [OPEN] #11.
+
+```text
+engine driver thread
+        │ push(Request)          (one producer)
+        ▼
+   mpsc_ring (M slots, detail/mpsc_ring.hpp)
+        │ pop(Request)           (N consumers, each with own head index)
+        ▼
+worker[0] worker[1] ... worker[N-1]
+```
+
+For MVP (`N = 2` default), only the SPSC ring is used (two workers
+do not require MPSC because the dispatch model assigns one ring to
+worker 0 and worker 1 blocks on a semaphore from worker 0 — the
+full MPSC promotion is post-MVP). Saturation is computed the same
+way regardless of ring type.
 
 A request is a fixed-size POD:
 
@@ -490,6 +525,29 @@ checked via byte-equal comparison at the consumer (no allocation,
 exactly the discipline §10.6 imposes for `"surface-lost"` /
 `"watcher-unavailable"` / `"queue-full"`).
 
+**Prefix transport by path:**
+
+- **Sync path.** The translator runs on the caller thread immediately
+  after the POSIX call returns. The TLS prefix (SPEC §3.3 of
+  `platform-error-design.md`: `set_prefix` / `current_prefix` /
+  `reset_prefix`) is written and read on the same thread before the
+  `unexpected` is returned to the caller — no cross-thread transport
+  needed.
+- **Async path.** The worker thread runs the translator after
+  `do_work(slot)` completes. Because the worker runs on its own
+  thread, its TLS prefix is invisible to the consumer thread that
+  reads `take_result()`. To bridge this: the `Slot` struct (§3.6)
+  gains a `const char* prefix` field. After the translator runs and
+  BEFORE the worker sets `state = Ready` (release), the worker
+  captures `current_prefix()` into `slot.prefix`. The consumer reads
+  `slot.prefix` (acquire-ordered by the `state` transition) and
+  compares pointer-equal against the `prefix::file_io_*` literals
+  from `fileio/error_prefixes.hpp`. This is safe because all prefixes
+  are `constinit const char*` literals with program lifetime — pointer
+  equality is valid across threads.
+
+  See §12 [OPEN] #10 for the implementation gate on this transport.
+
 ## 4. Public Surface
 
 The §5.11 stub from `specs/platform/SPEC.md` is authoritative. This
@@ -546,13 +604,21 @@ Per-method contract:
   allowed to be absent (engine-only builds without a cache dir).
   **Refusal arms.** `Unsupported` (config invalid:
   `io_thread_budget == 0` or `> 8`, or all three roots are empty);
-  `IoFailure` (worker thread spawn failed); `OutOfBudget` (cell
-  exhausted; `core::Error::OutOfBudget` per perf-budget.md).
+  `IoFailure` (worker thread spawn failed). Saturation surfaces as
+  `core::Error::OutOfBudget` at the core seam, not as a
+  `platform::Error` arm — see §10.2 for the routing.
 
 - **`read_all(p)`** — synchronous read; off-main-thread asserted in
   debug (§4.6 inv #2). Flow per §3.7.1. Returns a borrowed span;
-  lifetime is until the next `read_all` from the same `FileIo`
-  instance (per §6.9 SPEC). Callers that need persistence copy out.
+  lifetime is valid until the NEXT call to `read_all` ON THE SAME
+  THREAD (§6.9 SPEC: the `read_arena_` is per-`FileIo` instance but
+  recycled per call; concurrent `read_all` calls on different threads
+  are not supported — the synchronous surface is off-main-thread-only
+  and the arena is not designed for concurrent recycling). Callers
+  that need persistence copy out. Async path workers allocate from
+  per-worker arenas (`workerN_arena_`), not from the caller's
+  `read_arena_`; async-completion buffers have lifetime governed by
+  the consumer's `take_result()` reclaim per Slot, see §3.6.
 
 - **`write_atomic(p, bytes)`** — synchronous atomic write per
   §3.7.2. Flow goes through the temp + rename + parent-fsync
@@ -726,9 +792,10 @@ The aggregate runs across **three thread classes**:
    only one transition direction (false → true), no ABA.
 
 6. **No mutexes inside `fileio/`.** The free-list (§3.6) is a
-   treiber-stack; the MPSC ring is the lock-free primitive shared
-   with `event/` / `watcher/`; the worker dispatch is per-worker
-   atomic head indices.
+   treiber-stack; for N == 1 the request ring is `detail/spsc_ring.hpp`
+   (same primitive as `event/` / `watcher/`); for N > 1 the ring is
+   a separate `detail/mpsc_ring.hpp` instance (§3.5); the worker
+   dispatch is per-worker atomic head indices.
 
 ### 6.2 Hot-reload barrier interaction
 
@@ -1302,12 +1369,15 @@ gate's tolerance band.
 - **[OPEN] `read_arena` ownership for async path**: `read_async`
   workers need their own buffers (the synchronous `read_arena_` is
   driver-thread-only-recycled, so worker reads must not share it).
-  This design says "the worker has its own buffer" without pinning
-  the allocation site — the natural choice is one buffer per
-  `Slot` of size `read_arena_bytes / N`, but this couples slot size
-  to read size in a way the synchronous arena does not. The first
-  plan that lands the loader picks an explicit policy; this design
-  permits any policy that respects the §9 8 MiB sub-arena ceiling.
+  Workers allocate from per-worker arenas (`workerN_arena_`) as
+  described in §4.1 (`read_all`) and §3.6 (Slot reclaim). The
+  natural choice is one arena per worker of size
+  `read_arena_bytes / N`, but this couples slot size to read size
+  in a way the synchronous arena does not. The first implementation
+  PR picks the explicit policy; this design permits any policy that
+  respects the §9 8 MiB sub-arena ceiling. Per-worker arena
+  ownership stays strictly within the worker — the consumer's
+  `take_result()` reclaim (Slot → free-list) is the hand-off point.
 
 - **[OPEN] `list_dir` glob / recursion**: the MVP surface accepts a
   flat single-directory enumeration. The editor's content-tree
@@ -1323,3 +1393,31 @@ gate's tolerance band.
   differs. Out of MVP per PHILOSOPHY §1; the §3 surface is
   host-agnostic, only the §3.7 bodies change. Track at the first
   Windows-port spike.
+
+- **[OPEN] `OpenMode` API extension** [NON-BLOCKING]: `OpenMode`
+  (SPEC §5.11) is reserved for future API surfaces such as
+  `open_with_mode(path, OpenMode)`. No existing consumer requires
+  it; the enum is retained so the API slot is named. Promote to a
+  concrete method once a second consumer demonstrates the need (same
+  Occam's-razor gate as `PathOutsideRoot` arm, §12 [OPEN] #4).
+
+- **[OPEN] Async-path prefix transport — Slot gains `const char* prefix`**
+  [BLOCKING IMPLEMENTATION]: the `Slot` struct (§3.6) gains a
+  `const char* prefix` field (already reflected in §3.6 and §3.9).
+  The implementation PR must: (a) define the canonical set of
+  `prefix::file_io_*` literals in `fileio/error_prefixes.hpp`;
+  (b) have the worker capture `current_prefix()` into `slot.prefix`
+  AFTER the translator runs and BEFORE the `state = Ready`
+  release-store; (c) have the consumer read `slot.prefix` after
+  observing `state == Ready` (acquire-load). Gate the implementation
+  PR on the canonical literal set being established first.
+
+- **[OPEN] N > 1 MPSC ring for multi-worker file-IO** [NON-BLOCKING]:
+  The N > 1 worker path (§3.5) requires a separate MPSC ring
+  (`detail/mpsc_ring.hpp`) because SPSC cannot safely serve multiple
+  consumer threads. The exact ring contract (per-consumer head index,
+  shared tail, ABA hazards), work-stealing protocol, and fairness
+  guarantees are deferred to a dedicated spike. File-IO N > 1
+  enablement is post-MVP per PHILOSOPHY §5 / plans/mvp.md; the MVP
+  `N = 2` path uses a SPSC ring with dispatcher semantics (§3.5).
+  Track at `[SPIKE] iterate-platform-mpsc-ring`.
