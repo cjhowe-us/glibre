@@ -122,15 +122,20 @@ Glibre-native requirements added beyond harmonius:
 
 ```text
 CompilationPipeline (root, owned by editor / cooker)
-├── const IShaderBackend&      backend_   (ref; selected by §4.7 dispatcher)
-├── ArgvBuilder                argv_      (canonicalizer; deterministic)
-├── DriverSpawner              spawner_   (subprocess launcher — fork/exec wrapper)
-├── PayloadDecoder             decoder_   (length-prefixed stdout framer)
-├── ErrorEnvelopeReader        errors_    (stderr JSON → shader::Error)
-├── const reflection::Ingester& ingester_ (ref; §4.4 ingester)
-├── DescriptorLayout::derive   derive_    (free function; §4.5)
-└── LogSink&                   log_       (spdlog-backed)
+├── const IShaderBackend&       backend_   (ref; selected by §4.7 dispatcher)
+├── ArgvBuilder                 argv_      (canonicalizer; deterministic)
+├── DriverSpawner               spawner_   (subprocess launcher — fork/exec wrapper)
+├── PayloadDecoder              decoder_   (length-prefixed stdout framer)
+├── ErrorEnvelopeReader         errors_    (stderr JSON → shader::Error)
+├── const reflection::Ingester& ingester_  (ref; §4.4 ingester)
+└── LogSink&                    log_       (spdlog-backed)
 ```
+
+`DescriptorLayout::derive` is a free function (§4.5 aggregate); it has
+no storage and no lifetime and therefore does not appear as a member of
+the pipeline. It is called inline inside `assemble_artifact` (stage 8,
+§3.8), passing the ingested `ReflectionBlob` and receiving the
+`DescriptorLayout` value by return.
 
 Each compile job is a stack-local `Job` value (§3.2); the pipeline
 itself is a thin orchestrator with no per-job state. One pipeline
@@ -220,6 +225,18 @@ glibre-shadercc
     --output-stdout-length-prefixed
     --error-envelope=json
 ```
+
+**`--source-path` is for diagnostic attribution only.** The driver
+does not open or read the file at this path; the preprocessed source
+bytes are delivered exclusively via stdin (stage 4, §3.5). The path is
+echoed verbatim into slangc diagnostics and the stderr envelope
+(`slang_diagnostic.file`) so that the editor / cooker can surface
+human-readable file locations in the log. This resolves the apparent
+contradiction with the sandbox rationale in §3.5 stage 4: stdin piping
+keeps the project root read-deny for slangc's own descriptor table, and
+`--source-path` is a diagnostic label that crosses no sandbox boundary
+because the sandbox-profile is applied to slangc, not to the driver,
+and the driver never opens the path on slangc's behalf.
 
 The `--shader-hash-stamp` argument is **input only**: the driver
 echoes it back in the stderr envelope on failure but does not derive
@@ -514,30 +531,23 @@ other in-flight jobs except the (immutable) `IShaderBackend&` and
 the (logger) `LogSink&`. There is no cross-job mutex on the pipeline's
 hot path.
 
-### 6.2 Worker pool scales horizontally
+### 6.2 Per-invocation self-containment
 
-The cooker (`cache/cooker.cpp`) and the editor's recompile dispatcher
-each maintain an `eastl::vector<std::thread>` worker pool sized to
-`std::thread::hardware_concurrency()` (M1 baseline: 4 firestorm + 4
-icestorm = 8 cores). Each worker:
+Each `compile()` call is self-contained: it owns its subprocess pid,
+its three pipe file descriptors (`stdin`/`stdout`/`stderr`), and its
+stack-local decode buffers for the duration of a single invocation.
+Nothing from one invocation leaks into another. Two concurrent calls
+with overlapping arguments duplicate a subprocess invocation — they do
+not corrupt each other's state — because there is no shared mutable
+per-job resource.
 
-```cpp
-while (auto job = job_queue.pop()) {
-    auto result = pipeline.compile(job->source, job->key, job->target);
-    if (result) {
-        cas_store.insert(*result);   // cooker only; editor publishes via §8.5 event
-    } else {
-        log_compile_failure(*job, result.error());
-    }
-}
-```
-
-The job queue is an MPSC ring buffer with bounded capacity (256 jobs
-on the M1 baseline). Producers block on full; the cooker is the sole
-producer in the cook path, and the editor's recompile dispatcher is
-the sole producer in the editor path. Workers compete on `pop()`
-through a single mutex protecting the queue head; the contention is
-nominal because each pop is followed by a long subprocess wait.
+The worker-pool mechanics (thread count, queue capacity, MPSC
+implementation, worker loop) that drive concurrent `compile()` calls
+belong to the cooker design spike (#755-adjacent; to be tracked in a
+separate deliverable). This design records only that `compile()` is
+safe to call concurrently from any number of workers, and that its
+isolation invariant is structural (stack locality + subprocess
+ownership), not a mutex protecting shared mutable state.
 
 ### 6.3 Subprocess parallelism budget
 
