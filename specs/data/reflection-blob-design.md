@@ -140,7 +140,7 @@ reflection in shipping builds).
 | SPEC §7.2.1 `reflection_present : bool` (tag 6)                | **Covered**               | §7.2 — the `SchemaSourceRecord` field is the build-artifact gate; this design pins that the runtime path never branches on it.   |
 | SPEC §8.1 — `ReflectionBlob` interning tables for dropped types do not survive reload | **Covered** | §8 — Mode-A reload: blob spans for dropped FQNs are released after the loader's swap-completion barrier; the editor reloads the blob set on the same frame. |
 | SPEC §9.2 — 4 MiB tools-build sub-ceiling, 0 in shipping       | **Covered**               | §9 — heap accounting; allocation rules.                                                                         |
-| SPEC §10 — closed sum extension                                | **Covered**               | §10 — three new arms (`BlobLoadFailed`, `FQNNotFound`, `FieldOutOfRange`) routed to `tools::Error` in editor builds; SPEC §10 amendment proposed inline. |
+| SPEC §10 — closed sum extension                                | **Covered**               | §10 — four new arms (`BlobLoadFailed`, `FQNNotFound`, `FieldOutOfRange`, `ReflectKindMismatch`) routed to `tools::Error` in editor builds; SPEC §10 amendment proposed inline. |
 | `reviews/decisions/error-model.md` `std::expected<T, glibre::Error>` boundary | **Covered** | §4 surface — every public function returns `std::expected<T, glibre::Error>` with `tools::Error` leaf arms.     |
 | `reviews/decisions/plugin-abi.md` middleman-only ABI surface   | **Covered**               | §7.2 — the editor links the **same** `glibre-types.dylib` symbols runtime does, plus *editor-only* TUs that reference no plugin code.                |
 | `reviews/decisions/hot-reload-protocol.md` swap discipline     | **Covered**               | §8 — blob refresh is observed via `SchemaRegistry`'s post-swap barrier; no second hot-reload mechanism.         |
@@ -323,26 +323,14 @@ without scanning the whole catalog at every panel-frame, the
 codegen emits a **per-context blob span** alongside the per-FQN
 blobs:
 
-```cpp
-namespace glibre::types::reflection_table {
-
-struct ContextPartition {
-    eastl::string_view               context_prefix{};   // e.g. "glibre.physics"
-    eastl::span<const RegistryEntry* const> entries{};   // tag-sorted by FQN; entries with reflection != nullptr
-};
-
-extern const eastl::span<const ContextPartition>
-    glibre_types_reflection_partitions;
-
-}  // namespace glibre::types::reflection_table
-```
-
-The partition span is itself emitted only in editor builds and is
-empty (zero-sized span over a `nullptr` data pointer) in shipping
-builds — the `extern const` declaration always exists so the
-editor's translation units can compile against the same header in
-both build profiles, but the data is zero in shipping (consistent
-with §4.9 inv. 5 and §7.1 below).
+The canonical `ContextPartition` struct and the partition span are
+declared in the editor-gated header described in §4.2 (inside
+`namespace glibre::types`). The codegen emits the data in
+`libglibre-editor-reflection.dylib`; shipping builds provide a
+zero-sized span. Callers access partition data exclusively through
+the `all_partitions()` accessor defined in §4.3 — do not use the
+underlying symbol directly. The span is empty in shipping builds
+(consistent with §4.9 inv. 5 and §7.1 below).
 
 Partitioning rule:
 
@@ -1106,10 +1094,11 @@ Determinism (PHILOSOPHY §7):
 ### 11.3 Performance gates
 
 No CI benchmark runs for reflection (editor-only, soft budget;
-§9.4). The diagnostic `GLIBRE_ALLOC_STRICT=1` build asserts the
-4 MiB heap ceiling on the `data` tag during an editor smoke test
-(part of the editor profile's CI workflow, not the engine's
-shipping perf gate).
+§9.4). The 4 MiB `.rodata` ceiling is verified by the
+**linker-map section-size check** described in §9.4 (exact CI
+recipe deferred to §12 [OPEN] #4); `GLIBRE_ALLOC_STRICT` does
+not apply here because reflection blob storage is static
+`.rodata`, not heap-allocated (see §9.4).
 
 ### 11.4 Trace instrumentation
 
@@ -1169,7 +1158,8 @@ the `tools` context, not `data` (mirroring envelope-serdes-design
   every plugin's `.fory` schema set in CI.
 
 - [OPEN] **#5 — `tools::Error` enum amendment.** §10 proposes
-  three new arms (`BlobLoadFailed`, `FQNNotFound`, `FieldOutOfRange`).
+  four new arms (`BlobLoadFailed`, `FQNNotFound`, `FieldOutOfRange`,
+  `ReflectKindMismatch`).
   The amendment ships with the first plan PR that introduces
   `tools/glibre-editor/src/reflection.cpp`. Owner: tools sub-epic.
   Verify with `tools/SPEC.md` editor: confirm that
