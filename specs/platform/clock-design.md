@@ -1143,9 +1143,12 @@ consistency. Actual usage:
 - Consumer-side `FrameTick` (8 B) and `FixedStepAccumulator`
   (24 B) instances live in the *consumer's* sub-arena. Platform
   contributes none.
-- The debug-only `last_seen : std::atomic<int64_t>` is
-  `defined(NDEBUG)`-gated out in shipping; debug builds carry an
-  extra 8 bytes inside the dylib's `.bss` (still not heap).
+- The debug-only `thread_local last_seen : std::int64_t` is
+  `!defined(NDEBUG)`-gated out in shipping. Debug builds carry an
+  extra 8 bytes per OS thread in the dylib's `.tbss` (thread-local
+  BSS section), not in `.bss` and not on the heap. Per-thread cost
+  scales linearly with thread count but is not counted against the
+  platform sub-arena's heap budget.
 
 Effective platform-clock heap: **0 bytes per frame, 0 bytes
 total**. The 4 KiB bucket is a rounding artifact. SPEC §9.2's
@@ -1580,21 +1583,20 @@ output.
 - [BLOCKING IMPLEMENTATION] **SPEC §6.6 regression-guard amendment.**
   Current `specs/platform/SPEC.md` §6.6 prescribes a plain
   `assert(ns >= last)` to guard monotonic regression in debug
-  builds. `clock-design.md` §3.2 corrected this to a
-  monotonic-CAS loop (load `last_`, spin-CAS `ns` only when
-  `ns > last_`, terminate on `count == MAX_SPIN_CAS`) to eliminate
-  a race-induced spurious abort that would occur when two threads
-  interleave between the `mach_absolute_time` read and the
-  comparison. An implementer reading only SPEC.md §6.6 would write
-  the plain-assert version, which is both incorrect and
-  non-deterministically racy. **SPEC §6.6 must be amended** —
-  either replace the assert prose with a forward-pointer to
-  `clock-design.md §3.2`, or update the §6.6 code snippet to show
-  the CAS loop — before the first plan PR consuming this design can
-  land. Two concrete plan-side consumers: phase-9 frame-tick
-  implementation, render's frame-extract NTP-gap diagnostics.
-  Owner: platform SPEC maintainer; tracked as amendment spike
-  against sub-epic #714.
+  builds. `clock-design.md` §3.2 corrected this to a per-thread
+  `thread_local std::int64_t last_seen{0}` high-water mark +
+  `if (ns < last_seen) std::abort();` per-thread regression check.
+  Per-thread storage eliminates the cross-thread spurious-abort
+  that a shared atomic (or naive `static`) would introduce. An
+  implementer reading only SPEC.md §6.6 would write the plain-assert
+  version, which is racy under concurrent callers. **SPEC §6.6 must
+  be amended** — either add a forward-pointer to
+  `clock-design.md §3.2`, OR update the §6.6 code snippet to show
+  the `thread_local` guard — before the first plan PR consuming this
+  design can land. Two concrete plan-side consumers: phase-9
+  frame-tick implementation, render's frame-extract NTP-gap
+  diagnostics. Owner: platform SPEC maintainer; tracked as amendment
+  spike against sub-epic #714.
 
 - [BLOCKING IMPLEMENTATION] **SPEC §5.9 stub amendment — new
   ABI-tracked types.** `specs/platform/SPEC.md` §5.9 currently
