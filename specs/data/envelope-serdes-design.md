@@ -272,10 +272,11 @@ struct Envelope {
     // and the migration dispatcher (§6.3) as needed. Output value is
     // stored in `out`.
     //
-    // Failure modes: BadMagic, EnvelopeTruncated, SchemaUnknown,
-    // SourceHashMismatch, VersionUnsupported, PayloadTruncated,
-    // DeserializeError, SchemaMigrationFailure, MigrationStepMissing
-    // (§10).
+    // Failure modes: BadMagic (discriminator only — surfaces as
+    // EnvelopeTruncated arm 9), EnvelopeTruncated, SchemaUnknown,
+    // VersionUnsupported, PayloadTruncated (discriminator only —
+    // surfaces as EnvelopeTruncated arm 9), DeserializeError,
+    // SchemaMigrationFailure, MigrationStepMissing (§10).
     [[nodiscard]] static auto deserialize(
         std::span<const std::byte> src,
         T*                          out
@@ -362,7 +363,10 @@ the migration chain length).
 
    FallbackBySourceHash:
        entry := registry.lookup_by_source_hash(hdr.source_hash)
-       if entry == nullptr → SourceHashMismatch{ step_schema = hdr_fqn_or_empty, step_from = 0, step_to = 0 }
+       if entry == nullptr → SchemaUnknown{ at.offset = 0, at.schema = empty, at.version = hdr.version }
+       // SchemaUnknown (arm 6): hash-fallback miss means "schema not found by any identity" —
+       // semantically identical to the ordinal-miss case above. SourceHashMismatch (arm 10)
+       // is reserved for the Mode-A barrier-diff site at phase-8 step 2 (see §10 and §12 [OPEN] #9).
 
 5. VersionDispatch:
    if hdr.version > entry.version → VersionUnsupported (newer-than-host)
@@ -960,8 +964,8 @@ record).
 | `BadMagic` (discriminator only — maps to `EnvelopeTruncated` arm 9) | `header.magic != kEnvelopeMagic`                                                                              | step 2                       | `at.offset = 0`                                                | refuse decode    | error    | `EnvelopeTruncated` (arm 9, per `data-error-design.md` §3.1.1 Occam-collapse) |
 | `EnvelopeTruncated`       | `src.size() < 48`                                                                                              | step 1                       | `at.offset = src.size()`                                       | refuse decode    | error    | none — passed through (already in SPEC §10, arm 9) |
 | `PayloadTruncated` (discriminator only — maps to `EnvelopeTruncated` arm 9) | `48 + header.payload_len > src.size()`                                                                         | step 3                       | `at.offset = src.size()`, `at.schema = header_decoded`         | refuse decode    | error    | `EnvelopeTruncated` (arm 9, per `data-error-design.md` §3.1.1 Occam-collapse) |
-| `SchemaUnknown`           | `schema_fqn_id` ordinal exceeds registry size **and** source-hash fallback returns null                       | step 4                       | `at.offset = 0`, `at.schema = empty`, `at.version = header.version` | refuse decode    | error    | none — passed through (already in SPEC §10) |
-| `SourceHashMismatch`      | Ordinal lookup succeeded but `entry.source_hash != header.source_hash` **and** source-hash fallback returns null — i.e. the inbound save-file/snapshot bytes were stamped against a `.fory` source that is not in the live registry. This reuses SPEC §10 arm 10 (`SourceHashMismatch`, tag = 10); the SPEC arm's existing trigger note covers the phase-8 barrier-diff detection site (Mode-A plugin reload); this design adds a second trigger site: `Envelope<T>::deserialize` step 4 (FallbackBySourceHash). Both detection sites share the same arm and payload layout: `step_schema` (the drifted FQN), `step_from == step_to == 0`. | step 4 (FallbackBySourceHash) | `step_schema = entry.fqn_or_empty`, `step_from = 0`, `step_to = 0`, `host_hash = live_registry_hash_hex`, `plugin_hash = header_source_hash_hex` | refuse decode    | error    | none — passed through (arm 10 in SPEC §10) |
+| `SchemaUnknown`           | (a) `schema_fqn_id` ordinal exceeds registry size **and** source-hash fallback returns null; OR (b) ordinal is in-range but `entry.source_hash != header.source_hash` **and** source-hash fallback also returns null — i.e. the schema is not findable by any identity in the live registry. Both sub-cases collapse onto arm 6 (`SchemaUnknown`): from the envelope's POV, "hash-fallback miss" is semantically identical to "ordinal miss" — the schema was not found. | step 4 (ordinal-miss path or FallbackBySourceHash path) | `at.offset = 0`, `at.schema = empty`, `at.version = header.version` | refuse decode    | error    | none — passed through (already in SPEC §10) |
+| `SourceHashMismatch`      | Mode-A barrier diff at phase-8 step 2: the hot-reload barrier detects that a live plugin's exported `source_hash` for a FQN differs from the registry's recorded hash — i.e. a `.fory` source was modified without a version bump. This arm is **not** emitted by `Envelope<T>::deserialize` (see §12 [OPEN] #9 for the gate condition). Detection is in the loader, not the envelope. `host_hash` and `plugin_hash` are mandatory per SPEC §10.1 and `data-error-design.md` §3.3. | phase-8 step 2 (barrier-diff, loader-detected) | `step_schema` (drifted FQN), `step_from = 0`, `step_to = 0`, `host_hash = live_entry.source_hash_hex`, `plugin_hash = hdr.source_hash_hex` | refuse load (hot-reload) | error    | none — passed through (arm 10 in SPEC §10) |
 | `VersionUnsupported`      | `header.version > entry.version` (newer-than-host)                                                            | step 5                       | `at.schema = entry.fqn`, `at.version = header.version`         | refuse decode    | error    | none — passed through; sub-case of `DeserializeError` per SPEC §10 row "DeserializeError" — kept distinct here for log clarity |
 | `MigrationStepMissing`    | Older-version path: chain has no `(N → N+1)` step at the inbound version                                      | step 5 (older-version arm)   | `step_schema`, `step_from = header.version`, `step_to = step_from + 1` | refuse decode    | error    | wrapped to `core::Error::SchemaMigrationFailed` at hot-reload (already in SPEC §10) |
 | `SchemaMigrationFailure`  | Older-version path: a `MigrationFn` body returned `unexpected`                                                | step 5 (older-version arm)   | `step_schema`, `step_from`, `step_to`                          | refuse decode (cold) / refuse load (hot-reload) | error / warn | wrapped to `core::Error::SchemaMigrationFailed` (already in SPEC §10) |
@@ -1034,12 +1038,12 @@ Malformed-input tests (one Catch2 case per arm in §10):
 | `envelope_truncated_short_header`                   | A 47-byte buffer returns `EnvelopeTruncated{at.offset = 47}`                                           |
 | `envelope_payload_truncated`                        | A header claiming `payload_len = 1024` followed by 100 bytes returns `EnvelopeTruncated{at.offset = 148, at.schema = header_decoded}` (per `data-error-design.md` §3.1.1 Occam-collapse; `PayloadTruncated` is a discriminator string in §10 prose, not an `ErrorTag` arm) |
 | `envelope_schema_unknown_ordinal`                   | A header with `schema_fqn_id = 9999` (out of range) and an unknown `source_hash` returns `SchemaUnknown` |
-| `envelope_source_hash_mismatch`                     | A header with a known ordinal but a synthetic `source_hash` returns `SourceHashMismatch` (tag 10)      |
+| `envelope_schema_unknown_hash_fallback`             | A header with a known ordinal but a synthetic `source_hash` (hash-fallback also misses) returns `SchemaUnknown` (arm 6) — per §10 HIGH-1 remap: hash-fallback miss collapses onto SchemaUnknown, not SourceHashMismatch |
 | `envelope_version_unsupported_newer_than_host`      | A header with `version = entry.version + 1` returns `VersionUnsupported`                               |
 | `envelope_migration_step_missing`                   | A header with `version = N` against a registry whose chain starts at `(N+1 → N+2)` returns `MigrationStepMissing{step_from = N, step_to = N+1}` |
 | `envelope_migration_step_failed`                    | A registered migration `force_migration_failure(N → N+1)` (SPEC §8.6) yields `SchemaMigrationFailure{step_schema, step_from, step_to}` |
 | `envelope_deserialize_body_error`                   | A valid header followed by a Fory body with a tag-type mismatch returns `DeserializeError{at.offset = 48 + body_offset}` |
-| `envelope_buffer_too_small_serialize`               | `serialize(t, dst)` with `dst.size() < required` returns `BufferTooSmall`                              |
+| `envelope_buffer_too_small_serialize`               | `serialize(t, dst)` with `dst.size() < required` returns `ErrorTag::DeserializeError` with discriminator `at.kind == "buffer_too_small"` (per §10 `BufferTooSmall` deferred row: no distinct arm is assigned; serialize-path refusal uses `DeserializeError`-shaped carrier per `data-error-design.md` §12 [OPEN]) |
 | `envelope_out_unmodified_on_failure`                | On every refusal arm, `out` retains its pre-call value (random initialised, asserted byte-equal)        |
 
 Determinism (PHILOSOPHY §7):
@@ -1271,3 +1275,38 @@ context, not `data`.
   all three signatures to `include/glibre/types/envelope.hpp` and update
   the SPEC §5 stub in the same commit. Owner: data sub-epic #729 next
   plan iteration (same PR as [OPEN] #1 and [OPEN] #7).
+
+- [OPEN] **#9 — `data-error-design.md` §3.2 trigger-table row for
+  `SchemaUnknown` deserialize-time site.**
+
+  The HIGH-1 resolution in this design (PR #894 R1 review) remaps the
+  `Envelope<T>::deserialize` step-4 FallbackBySourceHash miss from
+  `SourceHashMismatch` (arm 10) to `SchemaUnknown` (arm 6). The
+  rationale: from the envelope's POV, a hash-fallback miss is
+  semantically identical to an ordinal miss — the schema was not found
+  by any identity in the live registry. Both collapse onto arm 6.
+
+  **Gate condition:** `data-error-design.md` §3.2 (the per-source
+  trigger-table, which is the authoritative cross-aggregate audit for
+  every `ErrorTag` arm's detection sites) must be amended to add a row
+  mapping:
+
+  ```
+  (envelope-serdes / deserialize / step-4 FallbackBySourceHash miss)
+      → SchemaUnknown (arm 6)
+  ```
+
+  This amendment must land before the first `envelope.cpp`
+  implementation PR can close. Until it does, the trigger-table in
+  `data-error-design.md` §3.2 is incomplete for the envelope-serdes
+  aggregate.
+
+  **Why `SourceHashMismatch` (arm 10) is NOT used here:** SPEC §10.2
+  pins arm 10 to "Mode-A barrier diff at phase-8 step 2" exclusively.
+  Adding a second trigger site (deserialize-time) would require amending
+  the §3.2 trigger table — and that amendment itself is the gate. The
+  correct gate artifact is a §3.2 row for SchemaUnknown (arm 6) at the
+  deserialize step-4 site, not a widening of arm 10.
+
+  Owner: data sub-epic #729, next plan iteration (same PR as [OPEN] #1,
+  #7, and #8).
