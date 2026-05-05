@@ -64,9 +64,6 @@
 #   F2 → debug-overlay: snapshot world.A.last_spawned_entity into
 #                       `world.A.saved_handle` (the *future stale* handle).
 #   F3 → debug-overlay: World::despawn(world.A.saved_handle).
-#   F4 → debug-overlay: World::spawn() into world A; store into
-#                       `world.A.last_spawned_entity`. (Slot recycle path —
-#                       §4.3 inv 1.)
 #   F5 → debug-overlay: probe — call set_component(world.A.saved_handle,
 #                       <DebugMarker TypeId>, {1 byte = 0x00}) on world A.
 #                       Capture the Result<void> arm into
@@ -86,7 +83,7 @@
 #                       probes; world B is the *target* of the call — see
 #                       specs/core/SPEC.md §4.3 inv 3.)
 #
-# All five debug actions exist behind the `cfg(debug_overlay)` feature
+# All six debug actions exist behind the `cfg(debug_overlay)` feature
 # gate. They are non-shipping (PHILOSOPHY §6 — no runtime reflection in
 # shipping builds).
 #
@@ -328,7 +325,7 @@ op: End
 #   * A runnable engine binary (CMakeLists.txt subdirs uncommented).
 #   * `World::spawn`, `World::despawn`, `World::is_alive`, `World::create`
 #     implemented per specs/core/SPEC.md §5.5 (currently spec-only).
-#   * The debug-overlay key bindings F1…F7 (debug-only feature gate).
+#   * The debug-overlay key bindings F1–F3, F5–F7 (debug-only feature gate).
 #   * `tools::TraceWriter` to lower this author-spec to canonical Fory bytes,
 #     OR a future `glibre-trace replay --from-author-spec` ingester.
 #   * `glibre-trace replay` CLI (specs/e2e/SPEC.md §6.5 cmd_replay.cpp).
