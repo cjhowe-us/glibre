@@ -35,7 +35,7 @@ Concretely, the aggregate owns three call sites and three only:
    little-endian header at offset 0, the regions it points at
    (cluster-DAG bytes, BLAS-recipe blob, page array, page table),
    and the per-page sub-format (page header + Draco-compressed
-   per-attribute streams + CRC32 trailer).
+   per-attribute streams + CRC32C trailer).
 2. The **writer** (`PakWriter`, cook-time-only behind
    `GLIBRE_GEOMETRY_COOK`) — turns staged `MeshletGroup` /
    `DracoStream` / `BLASRecipe` records into one `.glibre-pak` file
@@ -83,7 +83,7 @@ The aggregate's SRP boundary is sharp: if the magic, the field
 table of `PakHeader`, the cluster-DAG byte layout, the page
 sub-format, the `BLASRecipe` binary descriptor schema, the
 endianness rule, the alignment rule, the eight-step validation
-order, the `FormatHash` derivation rule, or the per-page CRC32
+order, the `FormatHash` derivation rule, or the per-page CRC32C
 algorithm changes, this design changes. Anything else routes
 elsewhere.
 
@@ -100,7 +100,7 @@ coverage. Every entry is independently re-derived.
 | Harmonius `meshlets.md` "Architecture" — `Meshlet` / `LodGroup` / `MeshletAsset` separation | **Refused (collapsed)**  | One `MeshletPak` per `MeshSource` (`SPEC.md` §3.2 collapse #1, §4.1.7 invariant 3); no parallel `MeshAsset` shipping format. The pak's region table covers all three harmonius types in one file.                  |
 | Harmonius `meshlets.md` "Pipeline" — meshopt build → DAG → page-pack → BLAS            | **Re-derived**           | §3.1 file layout matches the pipeline's terminal stage; the pak ships the post-pipeline byte image. Pipeline stage residency is owned by sibling #781; this design owns the **emission** of the pipeline's outputs. |
 | Harmonius `world-geometry.md` "Meshlet Offline Baking Pipeline" 64 KiB page size      | **Re-derived**           | §3.4 page sub-format default `target_page_size_bytes = 64 KiB` (matches `SPEC.md` §5 `PakWriterOptions`); per-pak override permitted up to `max_page_size_bytes = 256 KiB`.                                          |
-| Harmonius `world-geometry.md` "Meshlet Types" `MeshletPage` shape                      | **Re-derived (refined)** | §3.4 — page header carries the page-format-version byte, the contained `MeshletGroup` index list, the per-stream `DracoStream` offsets, and a CRC32 trailer (`SPEC.md` §4.1.6 invariants).                          |
+| Harmonius `world-geometry.md` "Meshlet Types" `MeshletPage` shape                      | **Re-derived (refined)** | §3.4 — page header carries the page-format-version byte, the contained `MeshletGroup` index list, the per-stream `DracoStream` offsets, and a CRC32C trailer (`SPEC.md` §4.1.6 invariants).                          |
 | Harmonius `world-geometry.md` `MeshletDAGNode` runtime type                            | **Refused (opaque)**     | DAG bytes ship inside the pak's `cluster-DAG region` (§3.3); never crosses the plugin boundary as a record (`SPEC.md` §4.2 invariant 9). `PakReader` exposes the byte span only; consumers go through the registry. |
 | Harmonius `world-geometry.md` "BLAS section" — BLAS built from same vertex/index streams | **Re-derived**           | §3.5 — `BLASRecipe` blob is declarative, references LOD0 cluster band only (`SPEC.md` §4.1.7.2 invariant 1, §4.2 invariant 3). Render builds the AS; geometry never enqueues GPU work.                              |
 | Harmonius `world-geometry.md` § RF-1 (Tokio/async removal)                             | **Adopted**              | Pak load is synchronous on the registry's caller thread; no async runtime, no fibers (`SPEC.md` §6.4). Off-frame work is the decode pool's; the pak is mmap-only.                                                   |
@@ -145,7 +145,7 @@ Glibre-native obligations beyond harmonius:
   equality check at load time; the source-of-truth full hash lives
   in `<pak>.cookmanifest.fory`'s `format_hash` field for tooling
   cross-reference.
-- **Per-page CRC32 is mandatory.** Pak content lives on disk for
+- **Per-page CRC32C is mandatory.** Pak content lives on disk for
   the lifetime of an installed asset; bit-rot on a network-mounted
   dev volume is the documented failure shape. CRC32C (Castagnoli,
   hardware-accelerated on M1+ via `__crc32cd` intrinsics) is the
@@ -177,7 +177,7 @@ File layout (offsets are absolute, byte units, little-endian):
   blas_end -----> Page[0] bytes                +
   page_1 -------> Page[1] bytes                |   §3.4 page sub-format;
   ...                                          |   each page self-describing,
-  page_N-1 -----> Page[N-1] bytes              |   CRC32 trailer mandatory.
+  page_N-1 -----> Page[N-1] bytes              |   CRC32C trailer mandatory.
   pages_end ----> PageTable[page_count]        (page_index -> { byte_offset,
                                                                 byte_length };
                                                  §3.6)
@@ -403,20 +403,25 @@ Offset (relative to page start)  Size   Field
                                         i.e. page_byte_length - kPageCrcSize)
 0x0008                           4      stream_count        (u32 LE; one per
                                         contained group × kPakAttributeKindCount,
-                                        excluding zero-length entries)
+                                        excluding zero-length entries;
+                                        must satisfy stream_count ≤ group_count
+                                        × kPakAttributeKindCount — enforced by
+                                        page_streams() before constructing the
+                                        StreamTableEntry span)
 0x000C                           4      reserved_align1     (u32 = 0)
                                         --- 16-byte page header end ---
 0x0010                           G×4    group_index[G]      (u32 LE per
                                         contained MeshletGroup; G = group_count)
-                                        align to 8 bytes
-   stream_table_offset ↑
-                                 S×16   StreamTableEntry[S] (S = stream_count;
-                                        16-byte record §3.4.1)
+                                 pad    zero-pad to align to 8 bytes
+                                        (pad = align8(G×4) - G×4; 0 or 4 bytes)
+   stream_table_offset ↑ = 0x0010 + align8(G×4)
+                                 S×20   StreamTableEntry[S] (S = stream_count;
+                                        20-byte record §3.4.1)
    draco_streams_offset ↑
                                  raw    Draco-compressed bytes (one stream per
                                         StreamTableEntry; entries' offsets land
                                         inside this region)
-                                 pad    zero-pad to align CRC32 to 4 bytes
+                                 pad    zero-pad to align CRC32C to 4 bytes
    crc_offset ↑ == page_byte_length - kPageCrcSize
                                  4      crc32c              (u32 LE; CRC32C
                                         of bytes [0, crc_offset))
@@ -438,21 +443,35 @@ AttributeKind)` Draco stream actually present):
 ```text
 Offset (rel.)  Size   Field
 -------------  ----   -----
-0x00           4      group_index_local    (u32 LE; index into the page's
-                                            group_index[] table, NOT the
-                                            pak-wide group index)
-0x04           1      attribute_kind       (u8; AttributeKind enumerator)
-0x05           1      draco_profile_id     (u8; index into PakHeader's
-                                            DracoQuantisationProfile)
-0x06           2      reserved_align       (u16 = 0)
-0x08           4      draco_byte_offset    (u32 LE; relative to page start,
-                                            into the page's draco_streams
-                                            region)
-0x0C           4      decoded_byte_length  (u32 LE; bytes the decoder is
-                                            expected to write; ≤ the matching
-                                            PakHeader.decode_pool_scratch_max[
-                                            attribute_kind])
+0x00           4      group_index_local       (u32 LE; index into the page's
+                                               group_index[] table, NOT the
+                                               pak-wide group index)
+0x04           1      attribute_kind          (u8; AttributeKind enumerator)
+0x05           1      draco_profile_id        (u8; index into PakHeader's
+                                               DracoQuantisationProfile)
+0x06           2      reserved_align          (u16 = 0)
+0x08           4      draco_byte_offset       (u32 LE; relative to page start,
+                                               into the page's draco_streams
+                                               region)
+0x0C           4      compressed_byte_length  (u32 LE; byte length of this
+                                               stream's Draco-compressed payload;
+                                               must satisfy draco_byte_offset +
+                                               compressed_byte_length ≤
+                                               payload_byte_length)
+0x10           4      decoded_byte_length     (u32 LE; bytes the decoder is
+                                               expected to write; ≤ the matching
+                                               PakHeader.decode_pool_scratch_max[
+                                               attribute_kind])
 ```
+
+`compressed_byte_length` is required for two purposes: (a) the reader
+uses `draco_byte_offset + compressed_byte_length` to bound-check that
+the stream lies entirely within the page's payload before returning a
+byte span to the decode pool (§4.2.3); (b) the decode pool uses it to
+slice the exact compressed byte range from the mmap without scanning
+for a delimiter. A stream whose `draco_byte_offset + compressed_byte_length
+> payload_byte_length` is rejected by `page_stream_bytes()` with
+`geometry::Error::PakHeaderOffsetOutOfRange`.
 
 `decoded_byte_length` is the decoder's pre-allocated scratch slot
 size (`SPEC.md` §4.1.12). The pool's slot is sized to the maximum
@@ -885,7 +904,9 @@ Single forward pass over the file:
    `geometry::Error::BLASRecipeInvalid`.
 7. **Emit pages.** For each page in ascending `page_index`:
    - Reserve page header.
-   - Write `group_index[]` from groups in this page.
+   - Write `group_index[]` from groups in this page; if `G` is odd,
+     append 4 zero bytes so `StreamTableEntry[]` starts at
+     `0x0010 + align8(G×4)` (8-byte aligned).
    - Write `StreamTableEntry[]` for streams in this page.
    - Append Draco bytes for each stream in `(group_index_local
      ascending, AttributeKind ascending)` order.
@@ -1000,7 +1021,7 @@ through the `Result<T>` return; the partially-constructed reader is
 discarded; the caller's mmap is unchanged. After all eight pass,
 the reader caches: header view, cluster-DAG span, BLAS-recipe span,
 page-table span, residency-hint span. No further validation runs at
-runtime — the per-page CRC32 check is the decode-time gate, not a
+runtime — the per-page CRC32C check is the decode-time gate, not a
 construction-time gate (§4.2.3).
 
 #### 4.2.2 Lock-free reads
@@ -1021,15 +1042,24 @@ array index; range check returns
 
 `page_streams(page_index)` parses the page header + stream table
 in-place (no allocation; the returned span aliases the mmap) and
-returns the `StreamTableEntry` span for the page. Per-page parsing
-runs in O(group_count + stream_count) time, ≤ a few hundred
-nanoseconds for typical S1 pages (§9 perf budget).
+returns the `StreamTableEntry` span for the page. Before constructing
+the span, the accessor asserts that the page header's `stream_count`
+satisfies the upper-bound contract: `stream_count ≤ group_count *
+kPakAttributeKindCount`. A page whose `stream_count` exceeds this
+bound is rejected with `PakHeaderOffsetOutOfRange` (a crafted page
+with an oversize `stream_count` would otherwise let the stream-table
+span stride past the page payload). Per-page parsing runs in
+O(group_count + stream_count) time, ≤ a few hundred nanoseconds for
+typical S1 pages (§9 perf budget).
 
 `page_stream_bytes(page_index, stream_index)` resolves a single
 Draco-compressed stream's byte range; this is the input the decode
 pool's worker reads. Range check returns
 `PakHeaderOffsetOutOfRange` if the stream entry's `draco_byte_offset
 + compressed_byte_length` exceeds the page's `payload_byte_length`.
+The same upper-bound contract (`stream_count ≤ group_count *
+kPakAttributeKindCount`) applies here via the validated span from
+`page_streams()`.
 
 CRC32C verification is **not** performed on these accessors (cold
 path); it runs at decode time inside `DecodePool::decode(...)`
@@ -1170,7 +1200,7 @@ input. Multiple workers may call into one reader simultaneously;
 the calls are pure reads of the immutable mmap, so contention is
 zero.
 
-The decode pool also CRC32-verifies the page bytes the reader
+The decode pool also CRC32C-verifies the page bytes the reader
 returned (`SPEC.md` §6.3.2 step 3). This means the reader's
 accessors return *unvalidated* page bytes — the integrity check is
 deliberately deferred to decode time so cold accesses for tooling
@@ -1372,7 +1402,8 @@ session, not against a per-frame ceiling).
 | `page_streams(page_index)` accessor      | **≤ 1 µs**               | Page header parse + stream-table span construction; one cache line for header, one for table prefix.                                      |
 | `page_stream_bytes(page_index, stream_index)` accessor | **≤ 100 ns**             | Stream-table O(1) + range check + span return.                                                                                            |
 | `page_hint(page_index)` accessor         | **≤ 50 ns**              | Hint-table O(1) byte read.                                                                                                                |
-| Per-page CRC32C verification (decode-time) | **≤ 5 µs / 64 KiB page** | `__crc32cd` intrinsics on M1; 2 GB/s sustained throughput; a 64 KiB page CRCs in ~30 µs even on cold cache. The 5 µs ceiling assumes warm cache; cold-cache budget is folded into the decode-pool's 5 ms p99 cluster-decode latency (`SPEC.md` §9.4). |
+| Per-page CRC32C verification (decode-time) — **warm cache** | **≤ 5 µs / 16 KiB** | `__crc32cd` intrinsics on M1; 2 GB/s sustained throughput at warm-cache rates; 16 KiB / 2 GB/s = ~8 µs, giving ≤ 5 µs headroom for typical sub-16-KiB pages. |
+| Per-page CRC32C verification (decode-time) — **full 64 KiB, warm cache** | **≤ 40 µs** | 64 KiB / 2 GB/s = ~32 µs at hardware ceiling; 40 µs ceiling adds 25 % headroom for pipeline stalls. Cold-cache cost (~30 µs additional for a fresh 64 KiB cold DRAM fetch) is folded into the decode-pool's 5 ms p99 cluster-decode latency (`SPEC.md` §9.4) and not tracked here. |
 
 The 0.5 ms-per-pak load ceiling × 200 props in the S1 fixture =
 100 ms total registry-load time at startup. The engine's startup
@@ -1560,7 +1591,7 @@ Listed in §9.4; each `BENCHMARK` assertion is a Catch2 case under
 
 - [OPEN] **#1 — Per-page hash algorithm choice.** This design pins
   CRC32C (Castagnoli, polynomial `0x1EDC6F41`) for per-page integrity
-  on the strength of M1's `__crc32cd` intrinsic and CRC32's
+  on the strength of M1's `__crc32cd` intrinsic and CRC32C's
   bit-flip-detection sufficiency for storage media. xxHash3 has
   higher throughput on x86_64 but slightly higher latency on M1; on
   Apple Silicon, CRC32C is the right pick. The question reopens if
