@@ -498,7 +498,7 @@ namespace glibre::shader {
 // Never pass a ShaderHash where a SourceContentHash is expected or vice versa;
 // the types are distinct to make this impossible at compile time.
 struct SourceContentHash {
-    std::array<std::byte, 32> bytes{};
+    eastl::array<std::byte, 32> bytes{};
     [[nodiscard]] bool operator==(const SourceContentHash&) const noexcept = default;
 };
 
