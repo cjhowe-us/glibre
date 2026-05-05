@@ -123,17 +123,35 @@ jobs:
     if: always()
     steps:
       - uses: actions/checkout@v4
-      - name: Replay every shader e2e trace
+      - name: Enumerate e2e/shader traces
+        id: list
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          traces=(tests/e2e/shader/*.glibre-trace)
-          if [ ${#traces[@]} -eq 0 ]; then
-            echo "No shader e2e traces found — failing loudly."
+          traces=$(git ls-files 'tests/e2e/shader/*.glibre-trace' || true)
+          if [ -z "$traces" ]; then
+            echo "ERROR: no .glibre-trace files found under tests/e2e/shader/ — at least one trace must be present" >&2
             exit 1
           fi
-          for t in "${traces[@]}"; do
-            echo "::group::glibre-trace replay $t"
-            glibre-trace replay "$t"
+          {
+            echo 'traces<<EOF'
+            echo "$traces"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+      - name: Replay e2e/shader traces
+        run: |
+          set -euo pipefail
+          # `glibre-trace` is the §6.5 CLI; until tools/cli/glibre-trace
+          # lands the runner is absent and this step exits non-zero —
+          # which IS the contract (specs/e2e/SPEC.md §5 / sdlc.md §5).
+          if ! command -v glibre-trace >/dev/null 2>&1; then
+            echo "glibre-trace runner not yet built — see specs/e2e/SPEC.md §6.5" >&2
+            echo "trace stories pending implementation:" >&2
+            printf '%s\n' "${{ steps.list.outputs.traces }}" >&2
+            exit 1
+          fi
+          while IFS= read -r trace; do
+            [ -n "$trace" ] || continue
+            echo "::group::replay $trace"
+            glibre-trace replay --trace "$trace" --layer inproc
             echo "::endgroup::"
-          done
+          done <<< "${{ steps.list.outputs.traces }}"

@@ -129,7 +129,7 @@ stream:
     component_path: "world/shader_inspector/lit/source/preprocessed/total_hash"
     expected:
       tag: "Blake3Hash"
-      bytes_hex: "stable@call_1"   # placeholder bound at record time
+      bytes_hex: "stable@total_hash_call_1"   # placeholder bound at record time
 
   - frame: 3
     op: InputOp
@@ -146,7 +146,7 @@ stream:
     component_path: "world/shader_inspector/lit/source/preprocessed/total_hash"
     expected:
       tag: "Blake3Hash"
-      bytes_hex: "stable@call_1"   # MUST equal id=3 (assert_eq across calls)
+      bytes_hex: "stable@total_hash_call_1"   # MUST equal id=3 (assert_eq across calls)
 
   # --- Negative scenario: ambiguous source rejects construction. ------------
   # Replace the on-disk lit.slang with the ambiguous fixture, re-validate,
