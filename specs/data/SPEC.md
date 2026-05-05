@@ -1259,11 +1259,20 @@ set produced by stage 3 of §6.2 and produces the
    `schema_source_hash(s) = blake3(canonicalize(s))` where
    `canonicalize` is the parsed-form canonicalization defined in
    §7.3 (§4.4 inv. 2). The output is a 32-byte digest.
-2. Sort the resulting digests by the byte order of each `Schema`'s
-   `FQN` (§4.4 inv. 1).
-3. Concatenate the sorted digests with no separators (each digest
-   is fixed-width, so the boundary is unambiguous).
-4. Compute `blake3(concatenation)` — the resulting 32-byte digest is
+2. Form a per-schema entry string: `fqn_utf8(s) || ":" || version_le(s)
+   || ":" || schema_source_hash(s)` where `version_le` is the declared
+   version as 4 bytes little-endian and `schema_source_hash` is the
+   hex-encoded 32-byte Blake3 digest from step 1. Sort these entry
+   strings by the byte order of each `Schema`'s `FQN` (§4.4 inv. 1).
+3. Join the sorted entry strings with a single LF byte (`\n`) between
+   each adjacent pair; no trailing newline. This is the normative rule
+   from §4.4 inv. 1 and `reviews/decisions/plugin-abi.md` §"ABI Hash
+   Function" rule 1. (An earlier draft of this section said "no
+   separators"; that was erroneous — the entry strings are
+   variable-length because FQN is unbounded, making LF separation
+   necessary for unambiguous decoding. The invariant in §4.4 and
+   plugin-abi.md is authoritative.)
+4. Compute `blake3(joined_string)` — the resulting 32-byte digest is
    the canonical `AbiHash`.
 5. Hex-encode the digest (lowercase, 64 characters) and embed it as
    a `constexpr` `const char*` string literal in
