@@ -17,9 +17,15 @@
 >
 > Refs: spike #753 — `[SPIKE] design-shader-descriptor-layout-detailed`.
 > Parent sub-epic #744. Sibling task-breakdown spike blocked-by this
-> deliverable. Does not introduce new public surface beyond
-> `specs/shader/SPEC.md` §5; deviations from that surface or the cited
-> records would require an amendment spike, not an in-place edit.
+> deliverable. Does not introduce new **C++ API surface** beyond
+> `specs/shader/SPEC.md` §5 (the `derive` function and two read
+> accessors are the locked interface). It does introduce a **Fory ABI
+> surface change**: `vertex_layout_hash` at tag 7 on
+> `DescriptorLayoutRecord` bumps `glibre_types_abi_hash` (documented
+> in §7.4); this is an ABI evolution in the Fory schema layer, not a
+> C++ API addition. Deviations from the C++ surface or the cited
+> decision records would require an amendment spike, not an in-place
+> edit.
 
 ## 1. Purpose
 
@@ -514,6 +520,17 @@ because:
 - However, the §3 collapse-4 commit (the spec freezing slot 0 as
   the push-constant slot) **prepends** the synthetic slot before
   the sort to guarantee it stays at index 0.
+
+**Shared invariant (Pass 4 → Pass 6 contract):** Pass 4 prepends
+the synthetic push-constant slot at `per_draw.slots[0]` *before*
+the list is handed to Pass 6. Pass 6 detects the synthetic slot's
+presence by checking `slots[0].kind == BindingKind::PushConstant`
+and sorts only `slots[1..]`, preserving the prepend guarantee.
+This contract is the *only* reason Pass 6 does not sort the full
+`slots` array for `per_draw`. Future contributors must maintain
+both sides of this invariant together; the unit test
+`descriptor_layout_derive_lowers_push_constants_into_per_draw_slot_zero`
+in §11 is the regression guard.
 
 Pass 6's sort is therefore stable and applied to `slots[1..]`
 only when a synthetic slot is present. This is the single
@@ -1309,13 +1326,29 @@ The §9.5 SPEC cold-start cost
 descriptor-layout aggregate's deserialize cost: each resident
 artifact's `DescriptorLayoutRecord` is decoded as part of
 loading its `ShaderArtifactRecord`. The 50 ms ceiling is
-project-wide, not per-artifact; for an MVP-scale archive of
-~10 k resident artifacts and an avg ≤ 0.10 ms deserialize per
-artifact, descriptor-layout decode contributes ≤ ~1 second of
-cold-start budget — most of which is overlapped with disk I/O
-inside the Fory loader. The ≤ 0.10 ms per-artifact ceiling is
-a per-record contract that ensures the global 50 ms holds in
-the worst case.
+project-wide, not per-artifact.
+
+**MVP artifact count bound:** The MVP shader archive is bounded to
+≤ 1 k resident artifacts (≤ 1000 `ShaderArtifactRecord`s decoded
+at open time). At an avg ≤ 0.10 ms per-artifact deserialize, this
+yields ≤ 100 ms raw deserialize budget for all layout records —
+already 2x the 50 ms ceiling. The §12 open question below tracks
+the measurement spike needed to close this gap; until it resolves,
+the 1 k artifact cap is enforced by the cooker's manifest
+`max_resident_artifacts` field and validated by a CI assertion in
+`tests/shader/descriptor_layout/perf/cold_start_bench.cpp`.
+
+**Arithmetic note:** A hypothetical 10 k artifact archive at
+0.10 ms/artifact would contribute ~1 second, which exceeds the
+50 ms ceiling 20x and can only be reconciled by I/O-overlap — an
+unvalidated assumption for MVP. The §12 open question below captures
+the measurement spike; the 1 k cap above keeps MVP arithmetic closed
+without relying on overlap characterization. The ≤ 0.10 ms
+per-artifact ceiling remains a per-record contract regardless of
+archive scale.
+
+See §12 OPEN: "Empirical I/O-overlap characterisation for cold-start
+budget at scale above 1 k artifacts."
 
 ### 9.5 CI gate
 
@@ -1570,3 +1603,18 @@ Tracked for resolution during implementation (each becomes a
   re-check. Resolution: probably yes, but as a Pass-9
   capability-validation pass introduced by a follow-up plan;
   not in MVP scope. Owner: sub-epic #744 follow-up.
+- [OPEN] **Empirical I/O-overlap characterisation for cold-start
+  budget at scale above 1 k artifacts.** §9.4 bounds the MVP
+  archive to ≤ 1 k resident artifacts to keep cold-start
+  arithmetic closed within the 50 ms ceiling. At larger scale
+  (post-MVP, e.g. 10 k artifacts), the budget closes only if
+  descriptor-layout deserialization is sufficiently overlapped with
+  disk I/O inside the Fory async loader. This overlap has not been
+  measured. Resolution: a one-session measurement spike on the M1
+  baseline — stream a 10 k artifact archive from NVMe while
+  recording wall-clock and CPU time separately; confirm I/O-bound
+  vs CPU-bound. If CPU-bound, the per-artifact budget must be
+  tightened or the decode parallelised. Owner: a follow-up
+  `[SPIKE] iterate-shader-cold-start-io-overlap` filed under
+  sub-epic #744; the 1 k artifact cap holds until the spike
+  closes.
