@@ -1267,7 +1267,7 @@ Both run on `macos-26-m1` CI only.
   e.g. `void (*)(int, const glibre::types::platform::SignalCtx&)
   noexcept`, where `SignalCtx` is a host-agnostic middleman
   wrapping the platform-specific bits the dump-writer needs.
-  **BLOCKING IMPLEMENTATION**: per the design preamble (line 19),
+  **BLOCKING IMPLEMENTATION**: per the design preamble (preamble),
   widening the `SignalHandlerFn` signature changes the §5.10
   public surface — which requires an amendment spike before any
   plan PR can adopt the wider signature. Resolution requires:
