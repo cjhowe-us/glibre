@@ -323,42 +323,74 @@ backend descriptor heaps.
    equal `ReflectionBlob` (deterministic; no compiler-stamp drift).
 3. Every reflected resource binding is annotated with exactly one
    `DescriptorFrequencyGroup` (`PerFrame | PerPass | PerMaterial |
-   PerDraw`); unassigned bindings cause construction to fail with
-   `shader::Error::DescriptorFrequencyAmbiguous`.
+   PerDraw`). An unassigned binding (no group resolution after the
+   §6.3 `frequency_tagger.hpp/.cpp` pass) causes `DescriptorLayout::derive`
+   to fail with `shader::Error::DescriptorFrequencyMissing`. A binding tagged
+   with multiple conflicting groups causes `DescriptorLayout::derive` to fail
+   with `shader::Error::DescriptorFrequencyAmbiguous`. The two arms are
+   distinct: `Missing` = no tag; `Ambiguous` = too many tags
+   (defense-in-depth against a broken tagger that writes multiple
+   annotations to one slot).
 
 ### 4.5 `DescriptorLayout` (value object)
 
 **Responsibility.** Project a `ReflectionBlob` onto a backend-neutral
 descriptor schema partitioned into the four frequency groups
-(`PerFrame`, `PerPass`, `PerMaterial`, `PerDraw`). Provides the input
-that `render` consumes to build D3D12 root signatures, Vulkan pipeline
-layouts, and Metal argument-buffer schemas. Does **not** allocate GPU
-memory; does **not** create PSOs.
+(`PerFrame`, `PerPass`, `PerMaterial`, `PerDraw`) via an eight-pass
+functional pipeline (`derive`). Provides the
+`RootSignatureSchema` that `render` consumes to build D3D12 root
+signatures, Vulkan pipeline layouts, and Metal argument-buffer schemas.
+Does **not** allocate GPU memory; does **not** create PSOs;
+does **not** re-classify bindings (the §6.3 `frequency_tagger.hpp/.cpp`
+pass is the sole classifier).
 
 - **Identity.** Value semantics; structurally equal layouts compare
   equal regardless of construction site.
 - **Owns.** The four frequency tables (each a fixed-order list of
-  `BindingSlot { kind, register/space/index, array_size, stage_mask }`)
-  and the static-sampler set.
-- **Exposes.** `DescriptorLayout`, `BindingSlot`, `RootSignatureSchema`
-  (the unified backend-neutral form `render` consumes).
-- **SRP.** "Derive the descriptor contract for one
-  `(Backend, PermutationKey)`." Backend-native object construction
+  `BindingSlot { kind, register/space/index, array_size, stage_mask }`),
+  the static-sampler side table (`RootSignatureSchema::static_samplers`),
+  and the push-constant side list (`RootSignatureSchema::push_constants`).
+  Metal: push constants are additionally lowered as a synthetic `PerDraw`
+  slot 0; D3D12 / Vulkan (post-MVP) consume the side list natively.
+- **Exposes.** `DescriptorLayout`, `DescriptorTable`, `BindingSlot`,
+  `StaticSampler`, `RootSignatureSchema`
+  (the unified backend-neutral form `render` consumes); `table(group)`
+  and `schema()` read-only accessors (both `noexcept`).
+- **SRP.** "Derive the backend-neutral descriptor contract for one
+  `(Backend, PermutationKey)` from a canonical `ReflectionBlob`, once
+  at cook time, and validate every binding invariant before publish."
+  Backend-native object construction (PSO, argument-buffer allocation)
   belongs to `render`.
 
 **Invariants.**
 
 1. A `DescriptorLayout` is **static per `(Backend, PermutationKey)`**:
-   given the same backend and the same permutation key, the derived
-   layout is structurally equal across runs and across the entire
-   project's PSOs. Layouts are computed **once** offline and cached;
-   re-derivation at runtime is forbidden.
+   given the same backend and the same permutation key, `derive` is a
+   pure function — same `ReflectionBlob` input always yields a
+   structurally-equal `std::expected<DescriptorLayout, shader::Error>`
+   output, byte-equal across runs, hosts, and toolchains. Layouts are
+   computed **once** offline and cached; re-derivation at runtime is
+   forbidden (§4.8 invariant 4).
 2. The four frequency tables partition the binding set: every
    `BindingSlot` appears in exactly one table; the tables are
-   disjoint and complete.
+   disjoint and complete.  Static samplers and the push-constant
+   synthetic slot are extracted to their side lists during derivation
+   and do **not** appear in the four frequency tables.
 3. Within a frequency table, slots are ordered deterministically
    (ascending by `(register space, register index, stage mask)`); no
-   set / map iteration order may leak.
+   set / map iteration order may leak.  The push-constant synthetic
+   `PerDraw` slot 0 (if present) is prepended before the sort and
+   remains at index 0; the sort applies to `slots[1..]` only.
+4. `derive` is the sole constructor path.  `DescriptorLayout` has no
+   default-constructed valid state accessible outside the class; the
+   private default constructor is used only by `derive` internally.
+5. Validation failures are returned as `std::expected` errors; no
+   partial layout is ever returned.  Any of the eight `derive` passes
+   may fail; the first failure short-circuits the rest.  The eight
+   passes in order: (1) pre-condition check, (2) partition into four
+   frequency groups, (3) static-sampler extraction, (4) push-constant
+   lowering, (5) vertex-IO normalization, (6) per-table sort,
+   (7) per-table cap check, (8) cross-table completeness check.
 
 ### 4.6 `ShaderCache` (aggregate, repository-shaped)
 
@@ -451,9 +483,11 @@ context:
    `ShaderCache::lookup` against a cooked `ShaderLibrary`.
    (§4.3 invariant 3; §4.6 invariant 2; §3 refusal 3.)
 4. **Static descriptor layouts.** `DescriptorLayout` is determined
-   once per `(Backend, PermutationKey)` offline; runtime descriptor
-   selection is a table lookup, never a re-derivation.
-   (§4.5 invariant 1.)
+   once per `(Backend, PermutationKey)` offline via the eight-pass
+   `derive` function; runtime descriptor selection is a table lookup,
+   never a re-derivation.  `derive` is a pure function: same
+   `ReflectionBlob` always yields a structurally-equal result.
+   (§4.5 invariants 1 and 5.)
 
 ## 5. Public Interface
 
@@ -749,11 +783,11 @@ struct RootSignatureSchema {
 
 class DescriptorLayout {
 public:
-    static std::expected<DescriptorLayout, Error>
-    derive(const ReflectionBlob&);
+    [[nodiscard]] static std::expected<DescriptorLayout, Error>
+    derive(const ReflectionBlob&) noexcept;
 
-    const DescriptorTable&     table(DescriptorFrequencyGroup) const noexcept;
-    const RootSignatureSchema& schema() const noexcept;
+    [[nodiscard]] const DescriptorTable&     table(DescriptorFrequencyGroup) const noexcept;
+    [[nodiscard]] const RootSignatureSchema& schema() const noexcept;
 
     friend bool operator==(const DescriptorLayout&, const DescriptorLayout&) noexcept = default;
 
@@ -1112,8 +1146,8 @@ The ingester is small:
 | Module | Owns | Produces |
 |--------|------|----------|
 | `slangc_reflection_ingester.hpp/.cpp` | Reads the slangc-emitted reflection JSON paired with the bytecode in the same subprocess invocation; lifts each entry-point, binding, vertex-input element, push-constant range, sampler binding, and RT payload size into the canonical `BindingSlot`-shaped temporaries. | `EntryPoint` list, untagged `BindingSlot` set, `VertexIOLayout`, `PushConstantRange` list, `rt_payload_bytes`. |
-| `frequency_tagger.hpp/.cpp` | Per-binding frequency assignment from Slang `[register(..., space=N)]` conventions and from explicit `[frequency(...)]` annotations the engine standardizes. | Each `BindingSlot` annotated with exactly one `DescriptorFrequencyGroup`. |
-| `descriptor_layout.cpp` | Project `ReflectionBlob` onto §4.5 four-frequency tables; sort each table by `(register_space, register_index, stage_mask)`. | `DescriptorLayout` + `RootSignatureSchema`. |
+| `frequency_tagger.hpp/.cpp` | Per-binding frequency assignment from Slang `[register(..., space=N)]` conventions and from explicit `[frequency(...)]` annotations the engine standardizes.  The sole classifier: refuses `DescriptorFrequencyMissing` for an unresolved binding and `DescriptorFrequencyAmbiguous` for a multiply-annotated slot (§4.4 invariant 3). | Each `BindingSlot` annotated with exactly one `DescriptorFrequencyGroup`. |
+| `descriptor_layout.cpp` | Project the fully-tagged `ReflectionBlob` onto §4.5 four-frequency tables via the eight-pass `DescriptorLayout::derive` pipeline: (1) pre-condition check, (2) partition by frequency, (3) static-sampler extraction, (4) push-constant lowering with Metal synthetic slot, (5) vertex-IO normalization and `vertex_layout_hash`, (6) per-table sort by `(register_space, register_index, stage_mask)`, (7) per-table cap check (≤31 slots per group; Metal 4 baseline), (8) cross-table completeness check.  Each pass is a free function returning `std::expected<void, shader::Error>`; the driver short-circuits on the first failure. | `DescriptorLayout` + `RootSignatureSchema`. |
 
 **Determinism.** The ingester walks slangc's reflection record in a
 fixed canonical order; the frequency tagger is a pure function of its
@@ -1289,7 +1323,7 @@ across the records above):
 | Sub-schema | Embedded in | Role |
 |------------|-------------|------|
 | `PermutationKeyRecord` | `ShaderArtifactRecord`, `ShaderCacheManifest` | 4-axis packed key (§4.2). Bit-stable `to_bytes()` / `from_bytes()` round-trip. |
-| `DescriptorLayoutRecord` | `ShaderArtifactRecord` | Backend-neutral 4-frequency-group descriptor schema (§4.5). |
+| `DescriptorLayoutRecord` | `ShaderArtifactRecord` | Backend-neutral 4-frequency-group descriptor schema (§4.5): the four `DescriptorTable`s, the `static_samplers` side list, the `push_constants` side list, and the `vertex_layout_hash` (BLAKE3 of normalized vertex-IO tuple set, computed in derive Pass 5). |
 | `BindingSlotRecord`, `VertexIOLayoutRecord`, `PushConstantRangeRecord`, `MaterialParameterBlockRecord`, `SpecializationConstantSlotRecord`, `StaticSamplerRecord`, `EntryPointRecord` | `ReflectionRecord`, `DescriptorLayoutRecord` | Element-of-vector value records mirroring §5 boundary structs. |
 
 ### 7.2 Schema sketches
@@ -1414,13 +1448,19 @@ codegen-emitted dispatcher. The shader-specific rules:
    re-typing a field requires a major version bump and a
    `migrate_ReflectionRecord_vN_to_vNplus1` provider in
    `glibre::shader::migrate`.
-3. **`DescriptorLayoutRecord` is regenerated, not migrated.** A
-   layout-record schema bump always re-derives layouts from the
-   surviving `ReflectionRecord` rather than transforming old layouts
-   in-place. The reflection record is the source of truth (§4.5
-   invariant 1); a stale layout encountered at load time is rebuilt
-   by calling `DescriptorLayout::derive(reflection)` and the result
-   replaces the on-disk record on the next cook.
+3. **`DescriptorLayoutRecord` is regenerated, not migrated.**
+   `DescriptorLayout` is a deterministic projection of `ReflectionBlob`
+   (§4.5 invariant 1, §4.8 invariant 4); there is no independent state
+   to preserve.  A layout-record schema bump always re-derives layouts
+   from the surviving `ReflectionRecord` via
+   `DescriptorLayout::derive(reflection)` (the same eight-pass pure
+   function described in §6.3) rather than transforming old layouts
+   in-place.  The reflection record is the source of truth; a stale
+   layout encountered at load time is rebuilt and the result replaces
+   the on-disk record on the next cook.  No
+   `migrate_DescriptorLayoutRecord_vN_to_vNplus1` function is ever
+   provided; the absence of a migration for this record type is
+   by-design (regenerate-not-migrate policy).
 4. **`ShaderCacheManifest` is rebuildable, not migrated.** The
    manifest is a derived index over the CAS — a version skew bumps the
    cooker, which re-walks the resolved permutation set and writes a
@@ -1603,13 +1643,16 @@ artifact bound.
    is discarded; the prior CAS entry remains the live artifact for
    that `(PermutationKey, target)`.
 3. **Reflection or descriptor-layout failure on the new bytecode.**
-   The new bytecode reflects but yields a `ReflectionBlob` whose bindings
-   include an unassigned descriptor frequency
-   (`Error::DescriptorFrequencyAmbiguous` /
-   `DescriptorFrequencyMissing`, §4.4 invariant 3) or whose
-   `DescriptorLayout::derive(...)` rejects the schema. The new
-   artifact never reaches `ShaderCache::insert`; the old artifact
-   remains live.
+   The new bytecode reflects but the §6.3 `frequency_tagger.hpp/.cpp`
+   pass rejects it: either a binding carries no `DescriptorFrequencyGroup`
+   resolution (`Error::DescriptorFrequencyMissing`, §4.4 invariant 3)
+   or a binding is annotated with multiple conflicting groups
+   (`Error::DescriptorFrequencyAmbiguous`, §4.4 invariant 3).
+   Alternatively, `DescriptorLayout::derive(...)` itself rejects the
+   fully-tagged blob for any other eight-pass validation failure
+   (overflow, push-constant size, vertex-attribute collision, etc.).
+   In all cases the new artifact never reaches `ShaderCache::insert`;
+   the old artifact remains live.
 4. **Cache integrity violation on insert.** A `ShaderHash` collision
    with a non-byte-equal payload (theoretically impossible under
    BLAKE3 but checked) or a manifest-vs-CAS skew detected by the
@@ -1793,7 +1836,7 @@ Each aggregate's per-frame contribution. The sum is the §9.1
 | `PermutationKey` (§4.2)      | codec only when render computes a `ShaderHash`; render holds keys directly | **0.000 ms** | <0.5 MiB | Dense ordinal tables baked at codegen; no allocations on hot path. |
 | `CompilationPipeline` (§4.3) | excluded entirely from shipping (§4.3 inv 3) | **0.000 ms** | 0 MiB | Subprocess driver lives in `tools/shadercc/`. |
 | `ReflectionBlob` (§4.4)      | parsed once at artifact load; immutable thereafter | **0.000 ms on hot path** | 4 MiB | One blob per resident artifact; consumers (`render`) hold const refs and never re-parse. |
-| `DescriptorLayout` (§4.5)    | derived once per `(Backend, PermutationKey)` offline; runtime is table lookup (§4.5 inv 1) | **0.000 ms** | (counted under ReflectionBlob's 4 MiB) | No runtime re-derivation. |
+| `DescriptorLayout` (§4.5)    | derived once per `(Backend, PermutationKey)` offline via the eight-pass `derive` function (§6.3); runtime is table lookup via `table(group)` / `schema()` accessors — `O(1)`, both `noexcept` (§4.5 invariant 1, §4.8 invariant 4) | **0.000 ms** | (counted under ReflectionBlob's 4 MiB; `DescriptorLayoutRecord` is embedded in each resident `ShaderArtifactRecord`, §7.1) | No runtime re-derivation.  `derive` is cook-time / hot-reload only. |
 | `ShaderCache` (§4.6)         | `lookup(ShaderHash) → optional<ShaderArtifact>` queries from `render`'s PSO build / reload paths | **~0.005 ms per lookup; 0 ms on PSOCache hit** | 24 MiB CAS in-memory hot set | Lookups are O(1) on the BLAKE3-keyed index; the 5 µs amortized cost is non-zero only on PSOCache miss and is absorbed by the *render* CPU-submit budget (`render` cell §9), not by `shader`'s 0.00 ms cell. |
 | `IShaderBackend` (§4.7)      | trait surface; shipping has no implementation linked | **0.000 ms** | 0 MiB | Backend impls live behind `#if !GLIBRE_SHIPPING`. |
 | (External) PSO queries        | render-side `PSOCache` keyed by `(shader_hash, state_hash)` (`specs/render/SPEC.md` §4.1.7) | **0 ms on cache hit; O(1) hash-map lookup on miss** | 4 MiB | The PSOCache itself is a `render` aggregate; recorded here only so the `shader` ↔ `render` seam's runtime cost is fully accounted. Any miss-path cost is render's, not shader's. |
@@ -1956,8 +1999,8 @@ checklist against the spec without mutating §5).
 | **`UnsupportedTarget`** | The slangc backend does not yet support the requested `CompileTarget` (e.g. `DXIL` before post-MVP support lands). | refuse compile; capability mismatch surfaced through `IShaderBackend::capabilities()`. | `refuse` |
 | **`MetalLibEmitFailed`** *(SlangcFailed)* | slangc emitted no `metallib`, or emitted a `metallib` whose container shape failed driver validation. | refuse compile; prior `metallib` artifact (if any) remains the live entry for this permutation. | `refuse` |
 | **`ReflectionExtractionFailed`** *(ReflectionParseError)* | The `reflection/` slangc-reflection ingester (§6.3) cannot ingest the reflection record paired with the bytecode — malformed JSON, unknown binding kind, truncated bind-table (§4.4). | refuse publish (the artifact is *not* inserted into the cache); prior `ReflectionBlob` for the prior artifact remains live; surfaces as §8.4 refusal case 3. | `refuse` |
-| **`DescriptorFrequencyAmbiguous`** *(DescriptorLayoutInvalid, ambiguous variant)* | A binding in the new `ReflectionBlob` carries no, or multiple, `DescriptorFrequencyGroup` annotations (§4.4 inv 3). | refuse publish; same path as `ReflectionExtractionFailed`. | `refuse` |
-| **`DescriptorFrequencyMissing`** *(DescriptorLayoutInvalid, missing variant)* | A binding lacks any `DescriptorFrequencyGroup` resolution after the §4.5 `DescriptorLayout::derive` pass. | refuse publish. | `refuse` |
+| **`DescriptorFrequencyAmbiguous`** *(DescriptorLayoutInvalid, ambiguous variant)* | A binding in the `ReflectionBlob` carries **multiple conflicting** `DescriptorFrequencyGroup` annotations (§4.4 invariant 3 — "too many tags" branch; also raised defense-in-depth in `DescriptorLayout::derive` Pass 2 / Pass 5 rule 5 if a sampler appears in both dynamic and immutable classifiers). | refuse publish; same path as `ReflectionExtractionFailed`. | `refuse` |
+| **`DescriptorFrequencyMissing`** *(DescriptorLayoutInvalid, missing variant)* | A binding arrives at `DescriptorLayout::derive` with **no** `DescriptorFrequencyGroup` resolution — the §6.3 `frequency_tagger.hpp/.cpp` pass left the slot untagged (§4.4 invariant 3 — "no tag" branch; raised by derive Pass 1 pre-condition check). | refuse publish; the artifact never reaches `ShaderCache::insert`; the prior cache entry for that `(PermutationKey, target)` remains live (§8.4 refusal case 3). | `refuse` |
 | **`LinkFailed`** | `IShaderBackend::link` rejected a spec-constant bake — entry-point set is incoherent, or specialization constants conflict across modules (§4.7 op `link`). | refuse compile of the linked module; per-module artifacts remain valid. | `refuse` |
 | **`SpecializationConstantMissing`** | A spec-constant referenced by the entry-point set is not bound at link time. | refuse link. | `refuse` |
 | **`CacheLookupMiss`** *(CacheMiss)* | `ShaderCache::lookup` finds no manifest entry for the requested `ShaderHash`. **This is the success case in disguise**: it is the only `Error` arm that callers are *expected* to handle non-fatally — the cooker's response is to enqueue a compile, the runtime's response is to refuse the bind (§4.6 inv 2 — runtime is read-only). | tooling: enqueue compile through `CompilationPipeline`. shipping: refuse bind; `render` falls back to its own missing-PSO policy (§render SPEC §8). | `fallback` |
