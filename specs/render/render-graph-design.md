@@ -6,7 +6,7 @@
 > §4.1.x, §5 (`GraphBuilder` + `RenderGraph` + `ExecutionPlan` surface),
 > §6.2.2 (phase 7 build/compile/record), §6.3 (concurrency), §9.3
 > (CPU phase-7 budget), §10 (graph-build / barrier / cycle errors), and
-> §11 (acceptance stories #380 #381 #382 #383 #384 #385 #400 #401 #402)
+> §11 (acceptance stories #380 #381 #382 #383 #384 #385 #386 #391 #392 #396 #399 #401 #402)
 > in place. Cites `reviews/decisions/error-model.md`,
 > `reviews/decisions/perf-budget.md`,
 > `reviews/decisions/plugin-abi.md`,
@@ -599,75 +599,15 @@ the lambda is opaque to the compiler and never inspected.
 
 ## 4. Public surface
 
-The public surface is frozen in `specs/render/SPEC.md` §5; this
-design adds no new types or signatures. For convenience, the
-load-bearing declarations (verbatim from §5):
-
-```cpp
-namespace glibre::render {
-
-struct PassDesc {
-    eastl::string_view name;
-    Queue            queue         = Queue::Graphics;
-    PassPriority     priority      = PassPriority::StandardQuality;
-    Capability       requires_caps = Capability::None;
-};
-
-struct ResourceAccess {
-    VirtualResourceHandle resource;
-    AccessKind            access;
-};
-
-using PassExecuteFn =
-    eastl::function<Result<void>(MetalCommandBuffer&, const Bindings&)>;
-
-class GraphBuilder {
-public:
-    [[nodiscard]] Result<VirtualResourceHandle>
-        declare_transient(const ResourceDesc&) noexcept;
-    [[nodiscard]] Result<VirtualResourceHandle>
-        declare_persistent(const ResourceDesc&) noexcept;
-    [[nodiscard]] Result<VirtualResourceHandle>
-        declare_imported(const ResourceDesc&, PhysicalAllocHandle) noexcept;
-
-    [[nodiscard]] Result<void>
-        add_raster_pass(const PassDesc&,
-                        eastl::span<const ResourceAccess> reads,
-                        eastl::span<const ResourceAccess> writes,
-                        PassExecuteFn                     execute) noexcept;
-    [[nodiscard]] Result<void>
-        add_compute_pass(const PassDesc&,
-                         eastl::span<const ResourceAccess> reads,
-                         eastl::span<const ResourceAccess> writes,
-                         PassExecuteFn                     execute) noexcept;
-    [[nodiscard]] Result<void>
-        add_rt_pass(const PassDesc&, TLASHandle,
-                    eastl::span<const ResourceAccess> reads,
-                    eastl::span<const ResourceAccess> writes,
-                    PassExecuteFn                     execute) noexcept;
-};
-
-class RenderGraph {
-public:
-    [[nodiscard]] static Result<eastl::unique_ptr<RenderGraph>>
-        create(MetalDevice&, ViewHandle) noexcept;
-    [[nodiscard]] GraphBuilder begin(const RenderFrame&) noexcept;
-    [[nodiscard]] Result<const ExecutionPlan*>
-        compile(CapabilitySet) noexcept;
-    [[nodiscard]] ViewHandle view() const noexcept;
-};
-
-class ExecutionPlan {
-public:
-    [[nodiscard]] Result<void>
-        record_into(MetalCommandBuffer&) const noexcept;
-    [[nodiscard]] std::size_t   pass_count()      const noexcept;
-    [[nodiscard]] std::size_t   barrier_count()   const noexcept;
-    [[nodiscard]] std::uint64_t structural_hash() const noexcept;
-};
-
-} // namespace glibre::render
-```
+The public surface is defined in `specs/render/SPEC.md` §5 and is the
+canonical, authoritative source of record for all type names,
+signatures, and declaration order. This design document adds no new
+types or signatures beyond §5; any divergence between this document
+and `SPEC.md` §5 must be resolved in favour of the SPEC. Readers
+requiring the full declaration set should consult
+`specs/render/SPEC.md` §5 directly (search for `class GraphBuilder`,
+`class RenderGraph`, `class ExecutionPlan`, `struct PassDesc`,
+`PassExecuteFn`, `GraphBuilder::ResourceAccess`).
 
 Surface invariants this design imposes on top of the §5 stub:
 
@@ -1092,7 +1032,7 @@ audit):
 | `PassDeclaredUseUnused`          | (debug-build only)    | §3.6 invariant: a declared resource was never read or written. Asserted in debug; warned in shipping.                                     | none (debug abort) | `warn` | `tests/render/failure/declared_use_unused.cpp`        |
 | `PassUndeclaredAccess`           | `GraphResourceUnknown`| §3.4 step 2 + record-time wrapper hook: a pass body recorded access to an undeclared resource.                                            | `abort-frame` (debug) / `abort-engine` (release CI gate). | `error`  | `tests/render/failure/graph_resource_unknown.cpp`     |
 | `BarrierConflict`                | `BarrierViolation`    | §3.4 step 4: writer→reader pair the planner cannot satisfy (e.g. WAW on aliased subresource without `declared_use`).                       | `abort-engine`  | `error`  | `tests/render/failure/barrier_violation.cpp`           |
-| `TransientPoolExhausted`         | `ResourceAllocFailed` (component) | §3.5 alias planner total exceeds 256 MiB transient row.                                                                       | `lower-tier`    | `warn`   | `tests/render/failure/resource_alloc_lower_tier.cpp`   |
+| `TransientPoolExhausted`         | `ResourceResidencyExceeded` (component failure) | §3.5 alias planner total exceeds 256 MiB transient row.                                                                       | `lower-tier`    | `warn`   | `tests/render/failure/resource_alloc_lower_tier.cpp`   |
 | `ResourceResidencyExceeded`      | `ResourceResidencyExceeded` | §3.5 alias planner peaks above 512 MiB ceiling (when summed with persistent + RT; rare, only when settings push tier high). | `lower-tier` | `warn` | `tests/render/failure/residency_exceeded_lower_tier.cpp` |
 | `CapabilityNotSupported`         | (composite §10.3)     | `add_rt_pass` called when `Capability::HardwareRayTrace` is absent.                                                                       | `disable-feature` | `warn`   | `tests/render/failure/rt_capability_missing.cpp`       |
 
@@ -1212,8 +1152,11 @@ story, or a §9 benchmark.
   `cross_queue_*` + record_into).
 - Every §SPEC §11 story whose acceptance criterion includes the
   graph aggregate (#380, #381, #382, #383, #384, #385, #386, #391,
-  #392, #396, #401, #402) is named in at least one TC ID's "Story"
-  column.
+  #392, #396, #399, #401, #402) is named in at least one TC ID's "Story"
+  column. (#399 "diagnostic overlay / per-pass GPU timing" is included
+  because its acceptance criterion exercises the graph aggregate's
+  timestamp-insertion boundary in `ExecutionPlan::record_into`; see
+  TC `plan_record/timestamps_inserted_at_boundaries` in §11.4.)
 - Every §9.4 benchmark is named in §11.5.
 
 The integration tests gate on the **platform-fixture-required**
