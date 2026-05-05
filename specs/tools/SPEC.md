@@ -384,12 +384,12 @@ reflection-driven inspector (§4.4), the on-viewport gizmo (§4.5), the
 asset browser (§4.6), the undo/redo command stack (§4.7), the toolbar
 play/pause/step controls (§4.8), and the trace recorder (§4.9). The
 cross-aggregate invariants that span those seams are collected in §4.10.
-A non-shipping debug-only postscript — `DebugOverlay` (§4.11) — closes
-the section: it lives behind the `cfg(debug_overlay)` feature gate, ships
-in editor + E2E builds only, and is the named aggregate the
-`.glibre-trace` E2E format cites when a trace presses an F-key debug
-binding (PHILOSOPHY §6 — no runtime reflection in shipping builds; the
-overlay is a development surface, never a runtime surface).
+A non-shipping debug-only postscript, `DebugOverlay` (§4.11), closes the
+section. It lives behind the `cfg(debug_overlay)` feature gate, ships in
+editor + E2E builds only, and is the named aggregate the `.glibre-trace`
+E2E format cites when a trace presses an F-key debug binding (PHILOSOPHY
+§6 — no runtime reflection in shipping builds; the overlay is a
+development surface, never a runtime surface).
 
 ### 4.1 `EditorHost` — root of the in-process editor shell (aggregate root)
 
@@ -1152,7 +1152,7 @@ binding name.
 | `F1` | `RegisterFixtureTypes` | Register the fixture's component types via the middleman dylib's codegen-emitted descriptors. Idempotent on repeat presses (re-registration is a no-op per `core` §4.9 inv. 1). The fixture defines which types register — `PhantomTypeId` (or any other deliberately-omitted sentinel) is **not** registered by `F1` per the fixture's contract. | None directly; subsequent bindings observe the post-registration `TypeRegistry` state. (No table writes; this is the one binding that sets up the world for later bindings to capture.) |
 | `F2` | `SpawnAndSetA` | `World::spawn()` into the inspected `GameWorld` then immediately `World::set_component(new_e, TypeIdOf<A>, A{...})` with the fixture's `A` payload. **First press** stores the returned `Entity` into `world.A.target_entity` (the fixed slot). **Subsequent presses** append to `world.A.scratch_ring` (a small ring) and leave `world.A.target_entity` unchanged. Creates the `{A}` archetype on first use per `core` §4.2 inv. 1. | `world.A.target_entity` (`core::Entity`, set on first press only); `world.A.scratch_ring` (`eastl::array<core::Entity, K>` updated on each press). |
 | `F3` | `SetBOnTarget` | `World::set_component(world.A.target_entity, TypeIdOf<B>, B{...})` with the fixture's `B` payload. Always acts on the fixed `target_entity` — never the ring head. Migrates the row from `{A}` to `{A,B}`. Subscribes to the `OnAdd`/`OnRemove`/`OnSet` observer bus (`core` §4.1 inv. 7) for the call's critical section to compute `set_component_observed_atomicity`. | `world.A.last_set_outcome` (`core::Error?`); `world.A.target_archetype_set` (`eastl::array<TypeId, N>`, sorted, post-mutation); `world.A.target_chunk_holes` (`u32`, post-mutation in target archetype); `world.A.target_forward_reverse_consistent` (`bool`, walked across both maps in the target archetype); `world.A.set_component_observed_atomicity` (`bool`); `world.A.target_archetype_chunk_count` (`u32`); `world.A.source_chunk_holes` (`u32`, in the `{A}` source archetype after the row vacated); `world.A.set_component_swap_remove_observed` (`bool`). |
-| `F4` | `SetUnregisteredOnTarget` | `World::set_component(world.A.target_entity, <unregistered TypeId>, {1 byte})`. The TypeId is a fixture-provided sentinel that `F1` deliberately did *not* register, so the call must refuse with `core::Error::TypeUnregistered` per `core` §4.1 inv. 3 *before* any storage mutation. | `world.A.last_unregistered_set_error` (`core::Error`, the u16 discriminant of the refusal); `world.A.target_archetype_set_after_refusal` (`eastl::array<TypeId, N>`, must equal `world.A.target_archetype_set` from F3 — i.e. `{A,B}` — proving no partial mutation). |
+| `F4` | `SetUnregisteredOnTarget` | `World::set_component(world.A.target_entity, <unregistered TypeId>, {1 byte})`. The TypeId is a fixture-provided sentinel that `F1` deliberately did *not* register, so the call must refuse with `core::Error::TypeUnregistered` per `core` §4.1 inv. 3 *before* any storage mutation. | `world.A.last_unregistered_set_error` (`core::Error`, the u16 discriminant of the refusal); `world.A.target_archetype_set_after_refusal` (`eastl::array<TypeId, N>`, must equal `world.A.target_archetype_set` immediately before the F4 call — i.e. the pre-call archetype set, which in the canonical trace ordering (block 3 follows block 2) is `{A}` — proving no partial mutation regardless of which concrete archetype set was current). |
 | `F5` | `RemoveBFromTarget` | `World::remove_component(world.A.target_entity, TypeIdOf<B>)`. Migrates the row from `{A,B}` back to `{A}`. | `world.A.last_remove_outcome` (`core::Error?`); `world.A.target_archetype_set` (re-read post-removal, sorted; must equal `{A}`); `world.A.source_chunk_holes` (`u32`, post-removal in the `{A,B}` source archetype the row vacated; must equal 0 via swap-remove on the source side); `world.A.target_forward_reverse_consistent` (`bool`, re-walked post-removal across the destination `{A}` archetype); `world.A.remove_component_swap_remove_observed` (`bool`). |
 | `F6` | `SnapshotAll` | Re-publish the full accumulated `DebugResourceTable` slice for the inspected `GameWorld`. F2/F3/F4/F5 each republish their *own* captured fields per the auto-publish invariant; `F6` is the trailing snapshot binding that refreshes **all** previously-published fields (so a final assertion frame sees fresh values after later bindings — including refusal bindings — have run). | Re-publishes every `DebugResource` path previously written by any binding for the inspected world. No new paths. The freshness tick is bumped on every entry. |
 | `F7` | `SetBOnScratch` | `World::set_component(scratch_e, TypeIdOf<B>, B{...})` where `scratch_e` is the ring head of `world.A.scratch_ring` (the most recently appended entity, distinct from `target_entity`). Used to populate the `{A,B}` archetype with multiple rows so the swap-remove path is load-bearing in F5. | `world.A.scratch_archetype_set` (`eastl::array<TypeId, N>`, post-mutation, sorted); `world.A.scratch_set_outcome` (`core::Error?`). |
@@ -1216,11 +1216,13 @@ The expected closed sum of arms a handler may surface:
   fixture mis-configures `target_entity` to belong to
   `EditorWorld` rather than the inspected `GameWorld`; refused
   before any storage mutation (defensive).
-- `tools::Error::Refused` with prefix `"debug-overlay-shipping-build"`
-  — emitted if a shipping build somehow invokes an overlay
-  handler (a contract violation the CI gate is supposed to
-  catch at link time; the runtime check is defence-in-depth and
-  always logs at `error` severity).
+- `tools::Error::Refused` with `ErrorContext::detail` set to
+  `"debug-overlay-shipping-build"` (the detail field, not a payload
+  variant, per `reviews/decisions/error-model.md` §Type Sketch) —
+  emitted if a shipping build somehow invokes an overlay handler (a
+  contract violation the CI gate is supposed to catch at link time;
+  the runtime check is defence-in-depth and always logs at `error`
+  severity).
 
 Successful handler return implies invariants 1–5 held for that
 press. CI exercises happy-path + each refusal arm via the E2E
