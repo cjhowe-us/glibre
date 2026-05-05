@@ -54,8 +54,14 @@ jobs:
     # That fail-state is "correct red" — the workflow encodes the trace's
     # contract so the closure-gate flips green only when the user-stories
     # cited under tests/e2e/core/ all pass replay.
+    #
+    # `if: always()` is required: without it, GitHub Actions SKIPS this job
+    # when `build` fails, turning a legitimate red into a silent skip and
+    # breaking the correct-red contract (sdlc.md §5). The Replay step already
+    # exits 1 when `glibre-trace` is absent; the job just needs to always run.
     runs-on: macos-14
     needs: build
+    if: always()
     steps:
       - uses: actions/checkout@v4
       - name: Enumerate e2e/core traces
@@ -64,9 +70,8 @@ jobs:
           set -euo pipefail
           traces=$(git ls-files 'tests/e2e/core/*.glibre-trace' || true)
           if [ -z "$traces" ]; then
-            echo "no traces under tests/e2e/core/" >&2
-            echo "traces=" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "ERROR: no .glibre-trace files found under tests/e2e/core/ — at least one trace must be present" >&2
+            exit 1
           fi
           {
             echo 'traces<<EOF'
@@ -111,8 +116,12 @@ jobs:
     # spec → story → test → code workflow (see CLAUDE.md). Once the
     # runner lands, no edits to this job are required: every new trace
     # under tests/e2e/shader/ is picked up by the glob.
+    #
+    # `if: always()` mirrors e2e-core: prevents a build failure from
+    # converting the expected-red e2e state into a silent skip.
     runs-on: macos-14
     needs: build
+    if: always()
     steps:
       - uses: actions/checkout@v4
       - name: Replay every shader e2e trace
