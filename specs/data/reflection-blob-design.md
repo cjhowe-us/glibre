@@ -403,10 +403,13 @@ The header is split between the `glibre-types.dylib` middleman and
 the editor binary:
 
 - `include/glibre/types/reflection.hpp` — the **types** (`ReflectionField`,
-  `ReflectionBlob`, `ContextPartition`). Always declared; the
+  `ReflectionBlob`). Always declared; the
   `RegistryEntry::reflection` slot needs a forward declaration in
   shipping builds so the registry struct's layout is identical
-  across configurations (§7.1).
+  across configurations (§7.1). `ContextPartition` is **not**
+  in this header — it is editor-only and belongs in
+  `tools/glibre-editor/include/glibre/editor/reflection.hpp`
+  (§4.2 Note; §12 [OPEN] #8).
 - `tools/glibre-editor/include/glibre/editor/reflection.hpp` — the
   **API** (`field_for_tag`, `partitions`, `lookup_blob`, recursion
   helpers). Compiled only when `GLIBRE_EDITOR` is defined.
@@ -477,7 +480,7 @@ struct ReflectionBlob {
 > `all_partitions()` and `partition()` in §4.3 is unchanged; only
 > the declaration home of the `ContextPartition` aggregate moves.
 > (This relocation was identified in the round-2 review; flagged as a
-> §12 [OPEN] #6 to track the mechanical refactor once the
+> §12 [OPEN] #8 to track the mechanical refactor once the
 > implementation plans under #740 begin.)
 
 These types (`ReflectionField`, `ReflectionBlob`) are POD-shaped,
@@ -1189,3 +1192,17 @@ the `tools` context, not `data` (mirroring envelope-serdes-design
   rebuilds independently when only the blob shape changes) vs.
   cohesion (same-dylib keeps the registry table and its blobs in
   one TU). Defer to the implementation plan.
+
+- [OPEN] **#8 — `ContextPartition` header relocation.** §4.2 Note
+  establishes that `ContextPartition` belongs in the editor-only
+  header (`tools/glibre-editor/include/glibre/editor/reflection.hpp`),
+  not in the always-declared middleman header
+  (`include/glibre/types/reflection.hpp`). The mechanical refactor —
+  moving the struct declaration and updating all `#include` paths
+  in codegen templates and test fixtures — is deferred until the
+  implementation plans under #740 begin. Owner: the same plan PR
+  that authors `tools/glibre-editor/src/reflection.cpp` and the
+  codegen `reflection_emitter.cpp` stage (sibling spike task-
+  breakdown #740 will sequence it). No ABI impact: `ContextPartition`
+  is not referenced by any middleman ABI type (§4.2); its move is
+  a header-only reorganisation.
