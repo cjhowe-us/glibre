@@ -323,14 +323,19 @@ backend descriptor heaps.
    equal `ReflectionBlob` (deterministic; no compiler-stamp drift).
 3. Every reflected resource binding is annotated with exactly one
    `DescriptorFrequencyGroup` (`PerFrame | PerPass | PerMaterial |
-   PerDraw`). An unassigned binding (no group resolution after the
-   §6.3 `frequency_tagger.hpp/.cpp` pass) causes `DescriptorLayout::derive`
-   to fail with `shader::Error::DescriptorFrequencyMissing`. A binding tagged
-   with multiple conflicting groups causes `DescriptorLayout::derive` to fail
-   with `shader::Error::DescriptorFrequencyAmbiguous`. The two arms are
-   distinct: `Missing` = no tag; `Ambiguous` = too many tags
-   (defense-in-depth against a broken tagger that writes multiple
-   annotations to one slot).
+   PerDraw`). An unassigned binding (no group resolution) is detected
+   by the §6.3 `frequency_tagger.hpp/.cpp` pass and surfaces as
+   `shader::Error::DescriptorFrequencyMissing` before `ReflectionBlob`
+   is returned to the caller. A binding annotated with multiple
+   conflicting groups is likewise detected by `frequency_tagger` and
+   surfaces as `shader::Error::DescriptorFrequencyAmbiguous`. The two
+   arms are distinct: `Missing` = no tag; `Ambiguous` = too many tags.
+   `DescriptorLayout::derive` receives a fully-tagged blob and does not
+   re-raise these errors; it may raise `DescriptorFrequencyMissing` or
+   `DescriptorFrequencyAmbiguous` only as a defense-in-depth assertion
+   (derive Pass 1 pre-condition check / Pass 2 partition check) if a
+   broken tagger emits an un- or multi-tagged slot despite the earlier
+   gate.
 
 ### 4.5 `DescriptorLayout` (value object)
 
@@ -1643,14 +1648,19 @@ artifact bound.
    is discarded; the prior CAS entry remains the live artifact for
    that `(PermutationKey, target)`.
 3. **Reflection or descriptor-layout failure on the new bytecode.**
-   The new bytecode reflects but the §6.3 `frequency_tagger.hpp/.cpp`
-   pass rejects it: either a binding carries no `DescriptorFrequencyGroup`
-   resolution (`Error::DescriptorFrequencyMissing`, §4.4 invariant 3)
-   or a binding is annotated with multiple conflicting groups
-   (`Error::DescriptorFrequencyAmbiguous`, §4.4 invariant 3).
-   Alternatively, `DescriptorLayout::derive(...)` itself rejects the
-   fully-tagged blob for any other eight-pass validation failure
-   (overflow, push-constant size, vertex-attribute collision, etc.).
+   The new bytecode compiles but the ingester or tagger rejects it.
+   Failure modes include: the slangc reflection ingester cannot parse
+   the reflection record (`Error::ReflectionExtractionFailed`); the
+   reflected entry-point set is invalid — absent from the
+   `ShaderSource` manifest or contains multiple vertex-stage functions
+   (`Error::EntryPointMissing`); the §6.3 `frequency_tagger.hpp/.cpp`
+   pass finds a binding with no `DescriptorFrequencyGroup` resolution
+   (`Error::DescriptorFrequencyMissing`, §4.4 invariant 3) or a
+   binding annotated with multiple conflicting groups
+   (`Error::DescriptorFrequencyAmbiguous`, §4.4 invariant 3);
+   or `DescriptorLayout::derive(...)` itself rejects the fully-tagged
+   blob for any other eight-pass validation failure (overflow,
+   push-constant size, vertex-attribute collision, etc.).
    In all cases the new artifact never reaches `ShaderCache::insert`;
    the old artifact remains live.
 4. **Cache integrity violation on insert.** A `ShaderHash` collision
