@@ -963,9 +963,10 @@ error-aggregate-specific budget.
 ### 9.2 Heap impact
 
 Zero per-frame allocations from this aggregate. The `kErrorTagNames`
-table is `.rodata` (zero heap). The `source_tag` TLS slot reuses
-platform's TLS struct (§5.4). Per-call cost is a single TLS write at
-construction; per-call read at log time.
+table is `.rodata` (zero heap). The `source_tag` TLS slot is a
+data-context-owned `thread_local` variable (see §5.4 amendment); it
+does not reuse any platform-context struct. Per-call cost is a single
+TLS write at construction; per-call read at log time.
 
 The `Error` aggregate's heap footprint is its struct size: roughly
 **64 bytes** (one cache line). The aggregate is small enough that the

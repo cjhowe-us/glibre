@@ -610,7 +610,8 @@ using SchemaSourceHash = eastl::array<std::byte, 32>;
 // trigger / recovery / severity documentation.
 namespace data {
 
-// Wire-time location attached to DeserializeError / EnvelopeTruncated.
+// Wire-time location attached to DeserializeError / SchemaUnknown /
+// EnvelopeTruncated.
 // `offset` is the byte index within the inbound payload at which
 // decoding stopped, measured from the start of the EnvelopeHeader
 // (§4.8 inv. 2). Non-payload arms set this to a sentinel — see §10.2.
@@ -707,7 +708,7 @@ struct EnvelopeHeader {
 template <class T>
 struct Envelope {
     // Write envelope + payload into `dst`; returns bytes_written.
-    // Failure path is `data::Error::DeserializeError`-shaped only when
+    // Failure path is `data::ErrorTag::DeserializeError`-shaped only when
     // `dst` is too small (size queryable via the registry).
     static auto serialize(const T& value,
                           std::span<std::byte> dst) noexcept
@@ -715,8 +716,8 @@ struct Envelope {
 
     // Read envelope, dispatch by SchemaVersion, and run MigrationChain
     // when the inbound version is older (§4.7). Newer-than-host ⇒
-    // data::Error::DeserializeError; chain failure ⇒
-    // data::Error::SchemaMigrationFailure.
+    // data::ErrorTag::DeserializeError; chain failure ⇒
+    // data::ErrorTag::SchemaMigrationFailure.
     static auto deserialize(std::span<const std::byte> src) noexcept
         -> std::expected<T, data::Error>;
 };
@@ -752,7 +753,7 @@ namespace data {
 enum class RegisterStatus : std::uint16_t {
     Ok = 0,
     SchemaRegistryConflict =
-        static_cast<std::uint16_t>(Error::SchemaRegistryConflict),
+        static_cast<std::uint16_t>(ErrorTag::SchemaRegistryConflict),
 };
 }  // namespace data
 
