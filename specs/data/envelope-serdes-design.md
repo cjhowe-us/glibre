@@ -194,7 +194,7 @@ specific `.fory` source. Without it, two builds that happen to share
 `schema_fqn_id == K` but disagree on the schema's content (e.g. one
 inserted a field at a tag the other has not declared) would silently
 mis-decode. With it, a reader detects the drift and refuses with
-`SchemaSourceMismatch` (§10).
+`SourceHashMismatch` (§10 arm 10).
 
 ### 3.2 The `(schema_fqn_id, source_hash)` identity pair
 
@@ -220,10 +220,9 @@ make this safe across builds:
    the primary FQN-sorted span (SPEC §4.5 inv. 3 already permits
    secondary indices). If the source-hash is present in the live
    registry, decode proceeds against that entry; if absent,
-   `SchemaSourceMismatch` (§10).
+   `SourceHashMismatch` (§10).
 
-The two-mode behavior is selected by a single header flag (the
-`flags` field in §3.1's reserved region is *not* used — the trigger
+The two-mode behavior requires no flag bit (the trigger
 is structural: the reader compares `schema_fqn_id` against
 `registry.entries().size()` and against `entry.source_hash`).
 Default behavior is "use the ordinal; verify the hash"; the fallback
@@ -231,7 +230,7 @@ fires only on hash-disagreement.
 
 This collapses two failure modes (forged FQN ordinal, schema source
 drift) onto one decision and one error arm
-(`SchemaSourceMismatch`).
+(`SourceHashMismatch`).
 
 ### 3.3 The `Envelope<T>` typed wrapper
 
@@ -242,11 +241,11 @@ namespace glibre::types {
 // 48-byte fixed header — see §3.1 layout. Trivially copyable, POD-
 // friendly. Never holds owning storage.
 struct EnvelopeHeader {
-    std::array<std::byte, 4> magic{};                 // = kEnvelopeMagic
-    std::uint32_t            schema_fqn_id{0};
-    SchemaVersion            version{0};               // alias for u32
-    SchemaSourceHash         source_hash{};            // 32 bytes
-    std::uint32_t            payload_len{0};
+    eastl::array<std::byte, 4> magic{};               // = kEnvelopeMagic (PHILOSOPHY §11)
+    std::uint32_t              schema_fqn_id{0};
+    SchemaVersion              version{0};             // alias for u32
+    SchemaSourceHash           source_hash{};          // 32 bytes
+    std::uint32_t              payload_len{0};
 };
 static_assert(sizeof(EnvelopeHeader) == 48);
 static_assert(std::is_trivially_copyable_v<EnvelopeHeader>);
@@ -274,7 +273,7 @@ struct Envelope {
     // stored in `out`.
     //
     // Failure modes: BadMagic, EnvelopeTruncated, SchemaUnknown,
-    // SchemaSourceMismatch, VersionUnsupported, PayloadTruncated,
+    // SourceHashMismatch, VersionUnsupported, PayloadTruncated,
     // DeserializeError, SchemaMigrationFailure, MigrationStepMissing
     // (§10).
     [[nodiscard]] static auto deserialize(
@@ -298,6 +297,30 @@ struct Envelope {
 
 }  // namespace glibre::types
 ```
+
+**Deserialize signature — out-param vs value-return (SPEC §5 amendment).** The
+SPEC §5 stub declares `deserialize(src) -> std::expected<T, data::Error>` (value
+return). This design changes the signature to `deserialize(src, T* out) ->
+std::expected<void, data::Error>` (out-param). The rationale:
+
+1. **No copy/move of T at the call site.** Generated types can be large (e.g.
+   meshes, animation tables); a value-return form forces a move of T through
+   `std::expected<T, ...>`, which cannot be elided when the expected is
+   conditionally returned. The out-param form writes `T` in-place with no
+   temporary.
+2. **Caller-controlled lifetime.** Save-file loaders pre-allocate the target
+   value slot; the out-param form writes directly into it without routing
+   through `std::expected`'s internal storage.
+3. **Consistent failure isolation.** The out-param is left unmodified on any
+   failure (§3.4 decision tree); this invariant is easier to audit in the
+   out-param form than in the value-return form where the caller must discard
+   the entire expected on error.
+
+The `error-model.md` §"Composition Rules" #3 mandates `std::expected` for the
+return type but does not prescribe whether T is the value or void — both forms
+satisfy the rule. See §12 [OPEN] #7 for the formal SPEC §5 amendment tracking
+this signature change; the amendment ships with the first implementation PR
+that introduces `data/runtime/src/envelope.cpp`.
 
 Borrow rules:
 
@@ -339,7 +362,7 @@ the migration chain length).
 
    FallbackBySourceHash:
        entry := registry.lookup_by_source_hash(hdr.source_hash)
-       if entry == nullptr → SchemaSourceMismatch{ at.schema = ?, at.version = hdr.version }
+       if entry == nullptr → SourceHashMismatch{ step_schema = hdr_fqn_or_empty, step_from = 0, step_to = 0 }
 
 5. VersionDispatch:
    if hdr.version > entry.version → VersionUnsupported (newer-than-host)
@@ -411,12 +434,13 @@ order respects 4-byte boundaries:
 The `source_hash` field is byte-aligned (it is `eastl::array<std::
 byte, 32>`); 4-byte alignment within the buffer is sufficient.
 
-**Reserved bytes.** None in the 48-byte header. Future flag-bit
-additions consume reserved bits inside `payload_len`'s u32 (the
-high 4 bits are reserved as `flags` — see §12 [OPEN] #3 — though
-default behaviour in MVP is "all 32 bits are length"). A
-flag-bit allocation that crosses the high-bit boundary forces a
-`glibre-foryc` release-time meta-schema bump (SPEC §7.6).
+**Reserved bytes.** None in the 48-byte header. In MVP all 32 bits of
+`payload_len` are length: `kMaxPayloadBytes = 4'294'967'295` (u32 max)
+is a live, enforceable bound with no encoding-invisible sub-cap. Any
+future flag-bit scheme (e.g. "payload is compressed") would require
+adding a *new field* to the 48-byte layout, which is a major-version
+bump per §7.1. No bits are pre-reserved inside `payload_len` for MVP
+— see §12 [OPEN] #3 for the post-MVP flag design option.
 
 ### 3.6 Round-trip rule (what serialize then deserialize guarantees)
 
@@ -489,14 +513,14 @@ annotations and the design's refinements (the SPEC's
 namespace glibre::types {
 
 using SchemaVersion    = std::uint32_t;
-using SchemaSourceHash = std::array<std::byte, 32>;  // Blake3-256
+using SchemaSourceHash = eastl::array<std::byte, 32>;  // Blake3-256 (PHILOSOPHY §11)
 
 struct EnvelopeHeader {
-    std::array<std::byte, 4> magic{};
-    std::uint32_t            schema_fqn_id{0};
-    SchemaVersion            version{0};
-    SchemaSourceHash         source_hash{};
-    std::uint32_t            payload_len{0};
+    eastl::array<std::byte, 4> magic{};               // PHILOSOPHY §11 — eastl:: for fixed-width byte containers
+    std::uint32_t              schema_fqn_id{0};
+    SchemaVersion              version{0};
+    SchemaSourceHash           source_hash{};
+    std::uint32_t              payload_len{0};
 
     constexpr bool operator==(const EnvelopeHeader&) const noexcept = default;
 };
@@ -713,9 +737,11 @@ migration, not runtime migration:
    Stability Rules" #5) → every plugin rebuilds against the new
    middleman → `glibre_types_abi_hash` is fresh → loader refuses any
    stale plugin (SPEC §10.2 `AbiHashMismatch`).
-2. Bit-additive flag changes within `payload_len`'s reserved high
-   bits (§3.5) → minor `glibre-foryc` version bump → middleman ABI
-   hash refreshes → still triggers plugin rebuild via the hash gate.
+2. Future flag-field addition (a new `flags : u32` at offset 48,
+   per §12 [OPEN] #3) → header grows from 48 to 52 bytes →
+   `glibre-foryc` major version bump → middleman SONAME bump →
+   every plugin rebuilds. No bit-level sub-reservation exists in
+   MVP; all 32 bits of `payload_len` are payload length (§3.5).
 
 There is no in-process "envelope v1 reader" in a build that emits
 "envelope v2". The single-live-version rule (SPEC §7.6 #3) applies.
@@ -747,7 +773,7 @@ middleman build A:
   or by source-hash fallback, §3.2). If A's `schema_fqn_id` does
   not exist in B (the schema was removed) or B's schema for the
   same FQN has a different `source_hash` (the schema's bytes
-  drifted), the reader refuses with `SchemaSourceMismatch`.
+  drifted), the reader refuses with `SourceHashMismatch`.
 - **Version must be ≤ B's current** (older versions migrate;
   newer-than-host refuses with `VersionUnsupported`).
 
@@ -814,7 +840,7 @@ data context types two refusal arms:
 `Error::SchemaMigrationFailure` (envelope-detected when the
 dispatch reaches an unsupported step). The envelope additionally
 surfaces the §10 arms `BadMagic`, `EnvelopeTruncated`,
-`SchemaUnknown`, `SchemaSourceMismatch`, `VersionUnsupported`,
+`SchemaUnknown`, `SourceHashMismatch`, `VersionUnsupported`,
 `PayloadTruncated`, `DeserializeError` to the migrate caller; per
 SPEC §8.4 these collapse onto `core::Error::SchemaMigrationFailed`
 at the loader's wrap point.
@@ -854,20 +880,25 @@ calls × 100 ns = 100 µs = 0.10 ms.
 ### 9.2 Phase-8 contribution
 
 On a hot-reload frame (S2 fixture) the envelope contributes **at
-most 0.40 ms** (SPEC §9.3 — the migration handoff cost bound). For
-a representative S2 reload (one plugin, ~200 component rows
-migrating one version), wall-time decomposes as:
+most 0.40 ms** (SPEC §9.3 — the migration handoff cost bound).
+Decomposing the budget at the worst-case per-call cost:
 
-- 200 × (100 ns header + 50 µs per-step migration + 250 ns/KB body
-  ~~ 0.5 KB row average) = 200 × ~50.225 µs ≈ 10 ms?
+- Per migrating row: 100 ns (header) + 50 µs (one migration step
+  at `migration_dispatch_v_minus_1.bench.cpp` ceiling) + body
+  at 250 ns/KB × 0.5 KB ≈ 50.225 µs/row.
+- 0.40 ms ÷ 50.225 µs/row ≈ **7.97 rows** → the S2 fixture
+  row-count bound within the 0.40 ms envelope budget is **≤ 8
+  migrating rows per hot-reload frame**.
 
-Actual S2 reloads carry far fewer rows (100 ms cap on phase 8 with
-0.40 ms `data` allocation; the envelope's 50 µs/step single-step
-migration cost from `migration_dispatch_v_minus_1.bench.cpp` SPEC
-§9.4 #3 amortises to ~8 rows/ms, i.e. ≤ ~60 rows in 8 ms is **out
-of phase-8 budget** — see §12 [OPEN] #5). The benchmark fixture
-runs at the per-call ceiling; production reloads with realistic
-schema-version gaps stay well under it.
+The S2 fixture in `perf-budget.md` represents a single one-version
+migration on a small, bounded component set; production reloads
+must stay within this ≤ 8 migrating-row bound per migration step.
+If a plugin upgrade touches more rows, the loader must defer
+migration to a background pass outside phase 8 (see §12 [OPEN] #5
+for the outstanding question on representativeness). The
+benchmark fixture runs at the per-call ceiling; same-version
+deserialize rows (the common case) are not counted against the
+migration budget.
 
 ### 9.3 Per-context heap cell
 
@@ -928,7 +959,7 @@ same PR; this design proposes the additions below (flagged §12
 | `EnvelopeTruncated`       | `src.size() < 48`                                                                                              | step 1                       | `at.offset = src.size()`                                       | refuse decode    | error    | none — passed through (already in SPEC §10) |
 | `PayloadTruncated`        | `48 + header.payload_len > src.size()`                                                                         | step 3                       | `at.offset = src.size()`, `at.schema = header_decoded`         | refuse decode    | error    | none — passed through           |
 | `SchemaUnknown`           | `schema_fqn_id` ordinal exceeds registry size **and** source-hash fallback returns null                       | step 4                       | `at.offset = 0`, `at.schema = empty`, `at.version = header.version` | refuse decode    | error    | none — passed through (already in SPEC §10) |
-| `SchemaSourceMismatch`    | Ordinal lookup succeeded but `entry.source_hash != header.source_hash` **and** source-hash fallback returns null | step 4 (FallbackBySourceHash) | `at.schema = entry.fqn`, `at.version = header.version`        | refuse decode    | error    | none — passed through; **new arm** vs SPEC §10 |
+| `SourceHashMismatch`      | Ordinal lookup succeeded but `entry.source_hash != header.source_hash` **and** source-hash fallback returns null — i.e. the inbound save-file/snapshot bytes were stamped against a `.fory` source that is not in the live registry. This reuses SPEC §10 arm 10 (`SourceHashMismatch`, tag = 10); the SPEC arm's existing trigger note covers the phase-8 barrier-diff detection site (Mode-A plugin reload); this design adds a second trigger site: `Envelope<T>::deserialize` step 4 (FallbackBySourceHash). Both detection sites share the same arm and payload layout: `step_schema` (the drifted FQN), `step_from == step_to == 0`. | step 4 (FallbackBySourceHash) | `step_schema = entry.fqn_or_empty`, `step_from = 0`, `step_to = 0`, `host_hash = live_registry_hash_hex`, `plugin_hash = header_source_hash_hex` | refuse decode    | error    | none — passed through (arm 10 in SPEC §10) |
 | `VersionUnsupported`      | `header.version > entry.version` (newer-than-host)                                                            | step 5                       | `at.schema = entry.fqn`, `at.version = header.version`         | refuse decode    | error    | none — passed through; sub-case of `DeserializeError` per SPEC §10 row "DeserializeError" — kept distinct here for log clarity |
 | `MigrationStepMissing`    | Older-version path: chain has no `(N → N+1)` step at the inbound version                                      | step 5 (older-version arm)   | `step_schema`, `step_from = header.version`, `step_to = step_from + 1` | refuse decode    | error    | wrapped to `core::Error::SchemaMigrationFailed` at hot-reload (already in SPEC §10) |
 | `SchemaMigrationFailure`  | Older-version path: a `MigrationFn` body returned `unexpected`                                                | step 5 (older-version arm)   | `step_schema`, `step_from`, `step_to`                          | refuse decode (cold) / refuse load (hot-reload) | error / warn | wrapped to `core::Error::SchemaMigrationFailed` (already in SPEC §10) |
@@ -1001,7 +1032,7 @@ Malformed-input tests (one Catch2 case per arm in §10):
 | `envelope_truncated_short_header`                   | A 47-byte buffer returns `EnvelopeTruncated{at.offset = 47}`                                           |
 | `envelope_payload_truncated`                        | A header claiming `payload_len = 1024` followed by 100 bytes returns `PayloadTruncated{at.offset = 148}` |
 | `envelope_schema_unknown_ordinal`                   | A header with `schema_fqn_id = 9999` (out of range) and an unknown `source_hash` returns `SchemaUnknown` |
-| `envelope_schema_source_mismatch`                   | A header with a known ordinal but a synthetic `source_hash` returns `SchemaSourceMismatch`             |
+| `envelope_source_hash_mismatch`                     | A header with a known ordinal but a synthetic `source_hash` returns `SourceHashMismatch` (tag 10)      |
 | `envelope_version_unsupported_newer_than_host`      | A header with `version = entry.version + 1` returns `VersionUnsupported`                               |
 | `envelope_migration_step_missing`                   | A header with `version = N` against a registry whose chain starts at `(N+1 → N+2)` returns `MigrationStepMissing{step_from = N, step_to = N+1}` |
 | `envelope_migration_step_failed`                    | A registered migration `force_migration_failure(N → N+1)` (SPEC §8.6) yields `SchemaMigrationFailure{step_schema, step_from, step_to}` |
@@ -1063,7 +1094,7 @@ context, not `data`.
   layout to the explicit 48-byte fixed-width
   `(magic, schema_fqn_id, version, source_hash, payload_len)`
   layout (§3.1). It also adds two arms to `data::Error`
-  (`SchemaSourceMismatch`, `BufferTooSmall`) and re-classifies one
+  (`SourceHashMismatch` trigger-note expansion per r1 followup, `BufferTooSmall` new arm) and re-classifies one
   (`VersionUnsupported` is currently subsumed under
   `DeserializeError` in SPEC §10.2). The amendment ships with the
   first plan PR that introduces `data/runtime/src/envelope.cpp`.
@@ -1078,13 +1109,17 @@ context, not `data`.
   CRC throughput. Decision deferred to a post-MVP `content/`
   spike that owns long-lived save-file resilience.
 
-- [OPEN] **#3 — `payload_len` high-bit flags.** §3.5 reserves the
-  high 4 bits of `payload_len`'s u32 for future flag bits (e.g.
-  "payload is compressed", "payload is encrypted", "payload is
-  zero-copy mmap-resident"). The flag bit allocation is empty in
-  MVP; the first allocation is the trigger for a `glibre-foryc`
-  release-time meta-schema bump (§7.1). Owner: post-MVP storage
-  spike.
+- [OPEN] **#3 — Future flag field.** §3.5 removes the in-band high-bit
+  reservation from `payload_len` (resolved per r1 followup review: the
+  reservation was inconsistent with `kMaxPayloadBytes = u32 max` and
+  would have silently violated the protocol for payloads above 256 MiB).
+  If a future MVP/post-MVP need arises for per-envelope flags (e.g.
+  "payload is compressed", "payload is encrypted"), the correct
+  mechanism is to add a dedicated `flags : u32` field to the header
+  layout — a 4-byte extension that bumps the header from 48 to 52
+  bytes, triggering a `glibre-foryc` major-version bump (§7.1). Until
+  two concrete users demand this, defer per PHILOSOPHY §10. Owner:
+  post-MVP storage spike.
 
 - [OPEN] **#4 — Zero-copy deserialize.** Harmonius's rkyv-based
   prior art supports zero-copy archive access (`access_archived`).
@@ -1116,3 +1151,13 @@ context, not `data`.
   hash_map` (constant-time amortised) or a sorted-array binary
   search (deterministic, matches the FQN-sorted primary). Decision
   deferred to the implementation plan.
+
+- [OPEN] **#7 — SPEC §5 `deserialize` signature amendment.**
+  §3.3 and §4.2 adopt `Envelope<T>::deserialize(src, T* out) ->
+  std::expected<void, data::Error>` (out-param form) instead of the
+  SPEC §5 stub's `deserialize(src) -> std::expected<T, data::Error>`
+  (value-return form). The justification is in §3.3 (no move of T,
+  caller-controlled lifetime, auditable failure isolation). The
+  amendment must be landed in the SPEC §5 header stub in the same
+  implementation PR that introduces `data/runtime/src/envelope.cpp`.
+  Owner: data sub-epic #729 first plan PR.
