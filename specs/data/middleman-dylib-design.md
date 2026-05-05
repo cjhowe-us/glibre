@@ -1010,7 +1010,7 @@ over the validated `Schema` set per SPEC §6.4 (re-stated in
 2. Form a per-schema entry string:
    `fqn_utf8(s) || ":" || version_le(s) || ":" || schema_source_hash(s)`
    where `version_le` is the declared version as 4 bytes little-endian,
-   and `schema_source_hash` is the hex-encoded 32-byte Blake3 digest.
+   and `schema_source_hash` is the raw 32-byte Blake3 digest.
    Sort these entry strings by FQN in canonical Unicode code-point order
    (SPEC §4.4 inv. 1).
 3. Join the sorted entry strings with a single LF byte (`\n`) between
