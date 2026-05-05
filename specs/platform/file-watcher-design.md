@@ -157,7 +157,12 @@ FileWatcher  (aggregate root, owned by platform)
 ├── std::atomic<bool>        stop_requested_         (set by ~FileWatcher; observed by io thread)
 ├── CFRunLoopRef             runloop_                (the io thread's CFRunLoop, opaque)
 ├── FSEventStreamRef         stream_                 (one stream per FileWatcher; multi-root)
-├── eastl::vector<RootEntry> roots_                  (token → canonical root + flags + ring index)
+├── eastl::vector<RootEntry> roots_                  (main-thread authoritative subscription list;
+│                                                    guarded by cold_mutex_)
+├── std::atomic<roots_snapshot_t*> roots_snapshot_  (lock-free read pointer for the I/O thread;
+│                                                    written with memory_order_release on mutation,
+│                                                    read with memory_order_acquire in FSEvents
+│                                                    callback — see §3.x and §6.3)
 ├── eastl::vector<TokenRing> rings_                  (per-token SPSC ring of FileEvent)
 ├── DedupCache               dedup_                  (LRU keyed on CanonicalPath × content_hash)
 ├── RenameReassembler        renames_                (inode-id → pending Created/Deleted pair)
@@ -198,7 +203,67 @@ struct WatchToken { std::uint64_t value{0}; constexpr bool operator==(const Watc
 - `WatchToken{0}` is the sentinel "invalid"; the aggregate never
   vends `0`. The first valid token is `1`.
 
-### 3.3 `FileWatcher::create`
+### 3.x `roots_snapshot_t` — lock-free read-side view for the I/O thread
+
+`roots_snapshot_t` is a POD struct arena-allocated from the dedicated
+`snapshot_pool_` sub-allocator (§9.2). It provides the FSEvents
+callback with a stable, lock-free view of the current subscription
+roots without the I/O thread ever taking `cold_mutex_`.
+
+```cpp
+// Internal to engine/platform/src/watcher/; never crosses the public ABI.
+struct roots_snapshot_t {
+    eastl::array<root_entry_t, 14> entries;  // 14-root bound matching §9.2 ring count
+    uint8_t                        count;    // number of valid entries (0..14)
+};
+```
+
+**Arena backing.** `snapshot_pool_` holds at most 3 live
+`roots_snapshot_t` instances simultaneously (1 active + 2
+quarantined for a 1-frame retire window). Each instance is
+approximately 14 × `root_entry_t` size ≈ 14 × ~32 B = 448 B,
+rounded up to 512 B per instance. Pool budget: 3 × 512 B =
+~1.5 KiB — see §9.2 for the table row.
+
+**Write side (main thread, inside `cold_mutex_`).** After any
+`watch` / `unwatch` that mutates `roots_`:
+
+1. Allocate a new `roots_snapshot_t` from `snapshot_pool_`.
+2. Copy the current `roots_` vector into `entries` / `count`.
+3. Store the pointer with `std::memory_order_release`:
+   ```cpp
+   roots_snapshot_.store(new_snap, std::memory_order_release);
+   ```
+4. Move the previously active snapshot to the quarantine list.
+   After two full runloop iterations on the I/O thread, the
+   quarantined snapshot is safe to reclaim back to
+   `snapshot_pool_` (no callback can still be holding a reference
+   into it after the next iteration completes).
+
+**Read side (I/O thread, inside FSEvents callback).** Load the
+pointer with `std::memory_order_acquire`:
+```cpp
+const roots_snapshot_t* snap =
+    roots_snapshot_.load(std::memory_order_acquire);
+```
+The `memory_order_release` on the write side and the
+`memory_order_acquire` on the read side establish a
+happens-before edge: all mutations to the snapshot's `entries`
+and `count` fields visible on the main thread at the time of
+`store` are visible to the I/O thread after the `load`. No
+further synchronisation is needed for reading the snapshot
+members — they are plain struct fields behind the atomic pointer.
+
+The callback never dereferences a stale pointer: the quarantine
+window (two I/O-thread runloop iterations) guarantees the
+previous snapshot outlives any concurrent callback invocation.
+The `std::atomic<roots_snapshot_t*>` itself uses only `load` /
+`store` (no compare-exchange); AArch64's release / acquire pair
+compiles to a plain store + ISH barrier + plain load (the
+compiler emits `stlr` / `ldar` on Apple Silicon), which is
+zero-overhead on the hot callback path.
+
+### 3.3 `FileWatcher::create(Clock& clock)`
 
 Called once per consumer that needs an isolated subscription set;
 typical MVP usage is one `FileWatcher` per editor or per content
@@ -557,6 +622,7 @@ boundary this design ships. Recapitulated for self-containment:
 #include <EASTL/variant.h>
 #include <glibre/error.hpp>
 #include <glibre/platform/canonical_path.hpp>
+#include <glibre/platform/clock.hpp>  // Clock& parameter of create(); use clock_fwd.hpp if clock-design §4 uses a forward-decl header
 
 namespace glibre::platform {
 
@@ -610,8 +676,13 @@ Surface invariants this design enforces beyond the SPEC §5.8 stub:
    `FSEventStreamRef`, `CFRunLoopRef`, `FSEventStreamEventFlags` and
    the rest of Core Services live in the implementation translation
    unit only. The header includes `<EASTL/variant.h>`, `<EASTL/span.h>`,
-   `<cstdint>`, `<glibre/error.hpp>`, and `<glibre/platform/canonical_path.hpp>`
-   — that is the closed list.
+   `<cstdint>`, `<glibre/error.hpp>`, `<glibre/platform/canonical_path.hpp>`,
+   and `<glibre/platform/clock.hpp>` — that is the closed list.
+   (`Clock&` is a parameter of `create`; the header must pull in its
+   definition. Verify the canonical header name against
+   `specs/platform/clock-design.md §4` — if clock-design uses a
+   forward-decl header `<glibre/platform/clock_fwd.hpp>`, substitute
+   that instead and update the `#include` in the code snippet above.)
 3. **`std::expected<T, glibre::Error>`** is the return type of every
    fallible function (`error-model.md` Decision rule 1). The aliased
    `Result<T>` is defined in `glibre/error.hpp`.
@@ -630,9 +701,15 @@ Surface invariants this design enforces beyond the SPEC §5.8 stub:
    surface to make that refusal structural.
 
 ABI shape: the public header compiles to one exported symbol per
-public method (`_ZN6glibre8platform11FileWatcher6createEv`, …) plus
-the move-constructor / move-assignment / destructor triple. None
-involves `eastl::*` template internals at the symbol level (the
+public method (`_ZN6glibre8platform11FileWatcher6createERNS0_5ClockE`,
+…) plus the move-constructor / move-assignment / destructor triple.
+(Itanium ABI mangle for `glibre::platform::FileWatcher::create(
+glibre::platform::Clock&)` — updated to reflect the `Clock&`
+parameter added per §12 [BLOCKING]. Exact mangle confirmed against
+the Itanium ABI encoding rules; verify with `c++filt` at codegen
+time. If the clock-design spike determines `Clock` lives in a
+different namespace, the mangle must be updated accordingly.)
+None involves `eastl::*` template internals at the symbol level (the
 opaque-pimpl pattern keeps `eastl::vector<…>` / `eastl::variant<…>`
 out of the exported function signatures except as the by-value
 `FileEvent` parameter, which is itself plain-trivial-layout).
@@ -728,20 +805,33 @@ dispatch we're keeping out of the engine).
 - **No mutex on the hot path.** SPSC rings synchronise via
   `std::atomic_ref<std::uint32_t>` head/tail counters with
   `memory_order_acquire` / `memory_order_release` pairs.
-- **One `std::mutex` for cold-path `roots_` mutation plus shadow-copy
-  protocol for the I/O thread.** The FSEvents callback reads a
-  lock-free snapshot pointer (`std::atomic<roots_snapshot_t*>`) —
-  it never takes the mutex. The main thread (in `watch` / `unwatch`)
-  takes the mutex, builds a new `roots_snapshot_t` in the sub-arena,
-  `atomic_store`s the pointer with `memory_order_release`, and
-  retires the old snapshot via a one-frame quarantine (safe because
-  no callback can be referencing it after the next runloop iteration).
+- **One `std::mutex` (`cold_mutex_`) for cold-path `roots_` mutation
+  plus shadow-copy protocol for the I/O thread.** The FSEvents callback
+  reads the lock-free snapshot pointer with
+  `std::memory_order_acquire`:
+  ```cpp
+  const roots_snapshot_t* snap =
+      roots_snapshot_.load(std::memory_order_acquire);
+  ```
+  It never takes `cold_mutex_`. The main thread (in `watch` /
+  `unwatch`) takes `cold_mutex_`, builds a new `roots_snapshot_t`
+  in `snapshot_pool_` (§3.x, §9.2), and stores the pointer with
+  `std::memory_order_release`:
+  ```cpp
+  roots_snapshot_.store(new_snap, std::memory_order_release);
+  ```
+  The release/acquire pair is the happens-before edge that makes all
+  `entries` / `count` writes visible to the callback thread after its
+  `load` — no additional barriers are needed to read snapshot fields.
+  The old snapshot enters a one-frame quarantine; after two I/O-thread
+  runloop iterations it is safe to reclaim to `snapshot_pool_` (the
+  callback cannot be reading a pointer it loaded before the store).
   The FSEvents stream recreate is dispatched via
   `CFRunLoopPerformBlock` / `CFRunLoopWakeUp` (off the I/O thread's
   hot path); worst-case callback blocking is zero — the callback
-  always reads from the lock-free snapshot and never waits for the
-  mutex. The `std::mutex` protects only the main-thread-side
-  `roots_` vector and the sub-arena allocations for the snapshot.
+  always reads from the lock-free snapshot and never waits for
+  `cold_mutex_`. `cold_mutex_` protects only the main-thread-side
+  `roots_` vector and the `snapshot_pool_` allocations.
 - **No spinlocks.** macOS scheduling does not give us reliable
   spinlock semantics outside the kernel; we use `std::mutex` and
   accept the rare cold-path contention.
@@ -934,10 +1024,13 @@ arena. This design partitions:
 | `CanonicalPath` interner                 | 256 KiB        | Bounded; shared with the roots and with in-flight events. Old entries reclaimed when no live event references them.                            |
 | BLAKE3 dedup LRU                         | 64 KiB         | 1024 `(canonical_path × 32 B hash)` slots; ring-replacement, no growth.                                                                      |
 | Rename-reassembly buffer                 | 16 KiB         | At most ~64 inflight half-renames; bounded by debounce window × event rate.                                                                   |
+| `snapshot_pool_` (`roots_snapshot_t` ×3) | ~2 KiB         | 1 active + 2 quarantined snapshots (§3.x). Each ~512 B (14 × `root_entry_t` ≈ 448 B, rounded). Absorbed within existing 256 KiB headroom.    |
 
-Arithmetic: 4 + 8 + 3584 + 256 + 64 + 16 = 3932 KiB ≈ 3.84 MiB,
-leaving ~256 KiB headroom within the 4 MiB sub-arena cell. The
-headroom is intentional: it absorbs future overhead growth (e.g. a
+Arithmetic: 4 + 8 + 3584 + 256 + 64 + 16 + 2 = 3934 KiB ≈ 3.84 MiB,
+leaving ~254 KiB headroom within the 4 MiB sub-arena cell. The
+`snapshot_pool_` addition (~2 KiB) is absorbed well within the
+existing 256 KiB headroom; no arena budget amendment is required.
+The headroom is intentional: it absorbs future overhead growth (e.g. a
 widened dedup LRU, additional per-root metadata) without requiring an
 arena budget amendment. The ring count was reduced from 16 to 14
 (ring row previously read "16 × 256 KiB = 4 MiB exactly", leaving
@@ -1124,9 +1217,19 @@ maps directly to SPEC §11 acceptance criteria #356 / #357.
 14. **`watch_returns_unsupported_on_file_root`** — supply a regular
     file; assert `Unsupported`.
 15. **`watch_returns_permission_denied_on_eperm_from_stat`** —
-    mock the internal `stat()` / `open()` seam via the
-    dependency-injected `fileio_ops_t` to return `EPERM` for the
-    target path. Assert the design routes `EPERM` through the error
+    Test 15 uses a test-local `fileio_ops_t` interface — defined in
+    `tests/platform/file-watcher/test_helpers.hpp` — that wraps the
+    underlying `stat()` / `open()` syscalls. The production
+    `FileWatcher` does not export this interface; it is a test-only DI
+    seam injected via a test-only constructor
+    `FileWatcher::create_for_test(Clock&, fileio_ops_t&)`. The
+    `_for_test` factory is gated by `#ifdef GLIBRE_TESTING_HOOKS` and
+    is never present in shipping builds. `fileio_ops_t` is owned by
+    the test helpers, not by `FileIo` or by `FileWatcher`: `FileIo`
+    owns production filesystem operations; tests own their own mock
+    interface — defining it test-local resolves the SRP concern
+    cleanly. The test configures the mock to return `EPERM` for the
+    target path and asserts the design routes this through the error
     translator → `platform::Error::PermissionDenied` (per
     `platform-error-design.md` §3.3 admission-gate mapping). No
     sandbox profile required; runs in standard unsigned Catch2 CI
