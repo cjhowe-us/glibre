@@ -1051,11 +1051,19 @@ plugins/shader/
 
 **SRP per directory.** Each subdirectory owns exactly one §4 aggregate:
 `source/` ↔ §4.1, `permutation/` ↔ §4.2, `backend/` ↔ §4.3 + §4.7,
-`reflection/` ↔ §4.4 + §4.5, `cache/` ↔ §4.6. No file reaches across
+`reflection/` ↔ §4.4, `cache/` ↔ §4.6. No file reaches across
 directory boundaries except through the public types declared in
 `include/glibre/shader/shader.hpp`. There is no cross-cutting
 `shader/util/` directory — utilities (BLAKE3 hasher, subprocess
 launcher) live next to their sole consumer.
+
+**§4.5 (DescriptorLayout) ownership.** `descriptor_layout.cpp`
+co-locates inside `reflection/` as an implementation convenience (it
+immediately consumes a `ReflectionBlob` output), but it is NOT governed
+by this aggregate's design. Ownership of §4.5 transfers to the
+descriptor-layout aggregate designed in spike #753. The directory
+mapping for §4.5 will be established there; readers must consult
+spike #753 for the authoritative §4.5 invariants.
 
 **Build-system gating.** The plugin's `CMakeLists.txt` partitions
 sources by shipping eligibility. Only the build system distinguishes
