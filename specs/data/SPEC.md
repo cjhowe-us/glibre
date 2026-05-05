@@ -36,7 +36,7 @@ Terms used unchanged in code, schema files, status comments, and tests.
 |------|---------|
 | Schema | A `data/schemas/<ctx>/<Type>.fory` file declaring one persistent type's fields, tags, version, and migrations. The authoring artifact. One file per persistent aggregate, owned by the originating bounded context. |
 | Schema Source Hash | Blake3 of the canonicalized bytes of a single `.fory` file. Recorded per-type in the registry. |
-| ABI Hash | `glibre_types_abi_hash()` — Blake3 over the concatenated, sorted per-type schema source hashes embedded in `glibre-types.dylib`. Single scalar the plugin loader compares on load; mismatch → refuse load. |
+| ABI Hash | `glibre_types_abi_hash()` — Blake3 over the LF-joined, FQN-sorted per-schema entries of `(fqn + ":" + version_le4 + ":" + schema_source_hash)`, embedded in `glibre-types.dylib`. Single scalar the plugin loader compares on load; mismatch → refuse load. See §4.4 inv. 1 and `reviews/decisions/plugin-abi.md` §"ABI Hash Function" rule 1. |
 | Tag | The immutable wire-level field identifier inside a schema. Once shipped, tag numbers are never reused; removed fields become `reserved` tags. Tag-sorted ascending defines generated struct field order. |
 | Reserved Tag | A previously used tag whose field was removed; codegen forbids reuse and `glibre-foryc` fails the build on a reserved-tag collision. |
 | Schema Version | Monotonically increasing integer on each schema. Bumped when fields are added/removed/renamed. Encoded in the Fory envelope of every payload. |
@@ -300,10 +300,15 @@ hash function, changing the canonicalization of the input vector.
 
 **Invariants:**
 
-1. `AbiHash := blake3( concat( sort_by_fqn( { schema_source_hash(s) :
-   s ∈ Schemas } ) ) )`. Sort key is the lexicographic byte order of
-   `FQN`; concatenation has no separators because each `schema_source_hash`
-   is fixed-width (Blake3 256-bit). The result is a 32-byte digest.
+1. `AbiHash := blake3( join( "\n", sort_by_fqn( { fqn_utf8(s) || ":" ||
+   version_le4(s) || ":" || schema_source_hash(s) : s ∈ Schemas } ) ) )`.
+   Sort key is the canonical Unicode code-point order of `FQN`;
+   entries are separated by a single LF byte (`\n`); no trailing
+   newline. `version_le4` is the declared `version` integer as 4
+   bytes little-endian; `schema_source_hash` is Blake3-256 of the
+   canonicalized `.fory` source. The outer blake3 result is a 32-byte
+   digest. Normative source: `reviews/decisions/plugin-abi.md`
+   §"ABI Hash Function" rule 1.
 2. `schema_source_hash(s) := blake3( canonicalize(s) )` where
    `canonicalize` is the rule defined in §4.1 (sorted tags, normalized
    whitespace, defaults in tag order).
