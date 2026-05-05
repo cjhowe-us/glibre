@@ -333,8 +333,18 @@ ReflectionBlob (input)
 [Pass 7] Per-table cap check                     ── len(slots) ≤ 31 per group (Metal 4 baseline)
     │                                               failure: BindingOverflow (new §10 arm)
     ▼
-[Pass 8] Validation & invariant check            ── §3.5 rules 1..8 (partition completeness, no-collision, …)
-    │                                               failure: any of the eight error arms above (whichever the rule maps to)
+[Pass 8] Cross-table completeness check          ── assert Σ len(per_*.slots) + len(static_samplers)
+    │                                                       + (1 if push-constant synthetic slot) ==
+    │                                                       len(reflection.bindings); i.e. no binding
+    │                                                       was silently dropped or double-counted
+    │                                                       across the first seven passes.
+    │                                               failure: DescriptorFrequencyAmbiguous
+    │                                               (double-counted slot or DescriptorFrequencyMissing
+    │                                               if a slot was silently dropped — this pass is
+    │                                               defense-in-depth: the individual pass guards
+    │                                               above make it unreachable in correct code, but
+    │                                               it catches any future pass logic bug before a
+    │                                               partial layout is ever published)
     ▼
 DescriptorLayout (output)
 ```
@@ -1359,10 +1369,10 @@ cooking from corrected source.
 |---------------------------------------------------------|--------------|---------|----------|----------|
 | **`DescriptorFrequencyMissing`**                        | already in §5 | Pass 1: a `BindingSlot` arrives without any `DescriptorFrequencyGroup` resolution after the §6.3 tagger ran. | refuse derive; affected permutation's prior CAS entry remains live (§8.4 case 3). | `refuse` |
 | **`DescriptorFrequencyAmbiguous`**                      | already in §5 | Pass 2 / Pass 5 (rule 5): a binding is tagged with multiple frequencies, or a sampler appears in both dynamic and immutable classifiers. | refuse derive; same path as above. | `refuse` |
-| **`BindingOverflow`** (new arm, sub-epic #69 amendment) | proposed §5 add | Pass 7: `len(table.slots) > 31` for any frequency group (Metal 4 cap). Until the §5 amendment lands, the cooker maps this onto `DescriptorFrequencyAmbiguous` (closest-fit `refuse` arm) so the closed-sum guarantee at the public boundary is preserved. The temporary mapping is unit-tested and deleted when the amendment lands. | refuse derive. | `refuse` |
-| **`IncompatibleVertexLayout`** (new arm, sub-epic #69 amendment) | proposed §5 add | Pass 5: per-stage `location` collision in vertex inputs. Temporary mapping per above. | refuse derive. | `refuse` |
-| **`SamplerLimitExceeded`** (new arm, sub-epic #69 amendment) | proposed §5 add | Pass 3 / Pass 6 (rule 6): `> 16` static samplers per stage. Temporary mapping per above. | refuse derive. | `refuse` |
-| **`PushConstantTooLarge`** (new arm, sub-epic #69 amendment) | proposed §5 add | Pass 4 (rule 7): push-constant total size > 128 bytes. Temporary mapping per above. | refuse derive. | `refuse` |
+| **`BindingOverflow`** (new arm, sub-epic #69 amendment) | proposed §5 add | Pass 7: `len(table.slots) > 31` for any frequency group (Metal 4 cap). Until the §5 amendment lands, the cooker maps this onto `DescriptorFrequencyAmbiguous` (closest-fit `refuse` arm) so the closed-sum guarantee at the public boundary is preserved. The temporary mapping is unit-tested and deleted when the amendment lands. `// TODO(#881): delete temporary proxy when sub-epic #69 §5 amendment adds BindingOverflow to shader::Error.` | refuse derive. | `refuse` |
+| **`IncompatibleVertexLayout`** (new arm, sub-epic #69 amendment) | proposed §5 add | Pass 5: per-stage `location` collision in vertex inputs. Temporary mapping per above. `// TODO(#881): delete temporary proxy when sub-epic #69 §5 amendment adds IncompatibleVertexLayout.` | refuse derive. | `refuse` |
+| **`SamplerLimitExceeded`** (new arm, sub-epic #69 amendment) | proposed §5 add | Pass 3 / Pass 6 (rule 6): `> 16` static samplers per stage. Temporary mapping per above. `// TODO(#881): delete temporary proxy when sub-epic #69 §5 amendment adds SamplerLimitExceeded.` | refuse derive. | `refuse` |
+| **`PushConstantTooLarge`** (new arm, sub-epic #69 amendment) | proposed §5 add | Pass 4 (rule 7): push-constant total size > 128 bytes. Temporary mapping per above. `// TODO(#881): delete temporary proxy when sub-epic #69 §5 amendment adds PushConstantTooLarge.` | refuse derive. | `refuse` |
 
 The four "proposed §5 add" arms are filed alongside spike #79's
 `ArtifactSizeExceeded` arm (`specs/shader/SPEC.md` §10.2.1) under
@@ -1372,7 +1382,8 @@ condition **must** map onto the closest-fit existing arm
 (`DescriptorFrequencyAmbiguous` for the four arms above) so the
 closed-sum guarantee at the public boundary is never violated.
 This temporary mapping is unit-tested and deleted when the §5
-amendment lands.
+amendment lands. Each site is tagged `TODO(#881)` referencing the
+tracking spike opened under sub-epic #69.
 
 ### 10.3 Cross-arm refusal interactions
 
