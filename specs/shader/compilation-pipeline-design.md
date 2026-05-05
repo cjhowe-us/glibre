@@ -890,7 +890,7 @@ caller composes pipeline + sibling operations and a sibling fails.
 
 Every pipeline error from §10.1 is **`refuse`** severity except
 `PermutationKeyOutOfRange` and `ShippingCompilationAttempted`
-(both `fatal`). The §10.1 contract per `shader/SPEC.md` §10.1 binds
+(both `fatal`). The §10.1 contract per `shader/SPEC.md` §10.2 binds
 the severity to a cache-state outcome:
 
 - `refuse` arms → in-flight artifact dropped; **CAS unchanged**;
@@ -1058,12 +1058,16 @@ E2E traces will exercise this design.
   schema needs to grow (e.g. when DXIL lands and the envelope adds a
   `target_specific` field).
 - [OPEN] **Worker-pool sizing override for editor vs cooker.** §6.2
-  defaults the pool to `hardware_concurrency()`. The editor's
-  on-save recompile may want a smaller pool (1–2 workers) so the
-  user's interactive frame budget is not stolen by background
-  slangc invocations. Owner: editor / `tools` context. Resolution
-  gate: when the editor's first usability test surfaces a stutter
-  during on-save recompile under contention.
+  defers worker-pool width (thread count, queue capacity) to the
+  cooker design spike (#755-adjacent); no default is specified here.
+  The open question is whether the isolation invariant (§6.2:
+  self-containment is structural, not mutex-guarded) is sufficient
+  to allow the editor's on-save recompile to share the same pool
+  configuration as the cooker, or whether the editor context must
+  override to a smaller pool (1–2 workers) to preserve the user's
+  interactive frame budget. Owner: editor / `tools` context.
+  Resolution gate: when the editor's first usability test surfaces a
+  stutter during on-save recompile under contention.
 - [OPEN] **Subprocess sandbox profile for non-macOS dev hosts.** SPEC
   §6.2 names `sandbox-exec` (macOS) and "platform-equivalent seccomp
   filter on Linux dev hosts". The exact Linux profile (allowed
