@@ -169,20 +169,27 @@
 #                       debug-resource table so the final assertion
 #                       frame sees fresh values after block 3's F4
 #                       refusal call. F3, F4, F5 each republish
-#                       their own captured fields internally; F6 is
-#                       the trailing snapshot that refreshes ALL
-#                       fields (including those populated by F5
-#                       in an earlier frame) after F4's block-3
-#                       refusal runs in frame 11. F6 fires at
-#                       frame 12 — after F4 (frame 11), not
-#                       immediately after F5 (frame 9) — because
-#                       block 3 runs after block 2.
-#   F7 → debug-overlay: World::set_component(scratch_entity,
-#                       TypeIdOf<B>, B{value=43}). Acts on the
-#                       most-recently-spawned entity in
-#                       world.A.scratch_ring (the entity last
-#                       appended by a post-first F2 press). Used
-#                       exclusively to move a bystander entity from
+#                       their own captured fields internally (each
+#                       binding publishes its captures into the
+#                       debug-resource table atomically before the
+#                       frame boundary — a contract to be specified
+#                       in specs/tools/SPEC.md §"editor debug
+#                       actions", tracked by #863); F6 is the
+#                       trailing snapshot that refreshes ALL fields
+#                       (including those populated by F5 in an
+#                       earlier frame) after F4's block-3 refusal
+#                       runs in frame 11. F6 fires at frame 12 —
+#                       after F4 (frame 11), not immediately after
+#                       F5 (frame 9) — because block 3 runs after
+#                       block 2.
+#   F7 → debug-overlay: World::set_component(scratch_e,
+#                       TypeIdOf<B>, B{value=43}). Acts on scratch_e
+#                       — the entity appended to world.A.scratch_ring
+#                       at frame 7 (the second ring element; distinct
+#                       from bystander_e, which is the entity appended
+#                       at frame 3 and is ring[0]). scratch_e is the
+#                       ring head (last appended) at the time F7 fires.
+#                       Used exclusively to migrate scratch_e from
 #                       archetype {A} to {A,B} so that the {A,B}
 #                       archetype holds two rows before F5, making
 #                       the block-2 swap-remove path load-bearing
@@ -453,19 +460,25 @@ op: AssertLogContains
 #       case (b) load-bearing).
 #
 # To make swap-remove load-bearing in {A,B}, frame 7 spawns a SECOND
-# entity (scratch_entity) into archetype {A}, and frame 8 (F7 binding)
-# migrates scratch_entity to {A,B}. The {A,B} archetype then has two
+# entity (scratch_e) into archetype {A}, and frame 8 (F7 binding)
+# migrates scratch_e to {A,B}. The {A,B} archetype then has two
 # rows before F5 fires. The removal of B from world.A.target_entity
-# then forces scratch_entity to swap into target_entity's vacated slot —
+# then forces scratch_e to swap into target_entity's vacated slot —
 # the canonical column-overwrite case (specs/core/SPEC.md §4.2 inv 4
 # "the last row in its chunk swaps into the freed slot").
 #
+# Naming: bystander_e = the entity appended to scratch_ring at frame 3
+# (ring[0]); scratch_e = the entity appended at frame 7 (ring[1],
+# ring head when F7 fires). These two names are used exclusively and
+# consistently throughout this file to avoid ambiguity for the F7
+# implementer.
+#
 # Note: after block 1's F3 migration, archetype {A} holds one row
-# (the bystander from frame 3). Frame 7's F2 press appends a SECOND
-# entity to scratch_ring; frame 8's F7 migrates that scratch entity
-# to {A,B}. F7 (not F3) is used here to keep F3 semantics unambiguous:
-# F3 always targets world.A.target_entity; F7 targets the scratch_ring
-# head (most recently appended by a post-first F2 press).
+# (bystander_e from frame 3). Frame 7's F2 press appends scratch_e
+# (the SECOND ring element) to scratch_ring; frame 8's F7 migrates
+# scratch_e to {A,B}. F7 (not F3) is used here to keep F3 semantics
+# unambiguous: F3 always targets world.A.target_entity; F7 targets
+# the scratch_ring head = scratch_e (most recently appended).
 
 frame: 7
 op: InputOp
@@ -480,11 +493,12 @@ op: InputOp
 frame: 8
 op: InputOp
   event:          KeyDown { key = F7, modifiers = {} }
-  semantics:      debug-overlay → World::set_component(scratch_entity,
-                  TypeIdOf<B>, B{value=43}). F7 targets the scratch_ring
-                  head (scratch_e from frame 7). The scratch row migrates
-                  to archetype {A,B}; world.A.target_entity is
-                  unaffected. {A,B} now holds two rows — the
+  semantics:      debug-overlay → World::set_component(scratch_e,
+                  TypeIdOf<B>, B{value=43}). F7 targets scratch_e —
+                  the scratch_ring head (appended at frame 7, ring[1]).
+                  scratch_e migrates to archetype {A,B};
+                  world.A.target_entity is unaffected. {A,B} now holds
+                  two rows (target_entity + scratch_e) — the
                   precondition for an *observable* swap-remove on F5.
 
 frame: 9
@@ -540,16 +554,18 @@ op: AssertState
   world:          A
   path:           world.A.target_archetype_chunk_count
   expected:       u32 { value = 1 }
-  evidence:       the {A} archetype holds exactly one chunk — the
-                  reborn row landed in {A}'s chunk 0 alongside any
-                  other {A}-only rows. (After frame 7's F2 spawned
+  evidence:       sanity gate — {A} holds one chunk after F5's
+                  reverse migration. (After frame 7's F2 spawned
                   scratch_e into {A} and frame 8's F7 migrated it
-                  to {A,B}, archetype {A} held one row (the bystander
+                  to {A,B}, archetype {A} held one row (bystander_e
                   from frame 3) immediately before F5; F5
                   re-introduces target_entity to {A}, giving 2 rows
-                  → 1 chunk.) Sanity gate that distinguishes the
-                  reverse-migration path from a buggy no-op that
-                  leaves the row in {A,B}.
+                  → 1 chunk.) This distinguishes the reverse-migration
+                  path from a buggy no-op that leaves the row in
+                  {A,B}. NOTE: this is a sanity gate on chunk
+                  count, not proof of tight row-count packing —
+                  §4.2 inv 4 (no holes) is the packing contract,
+                  enforced separately by id=14.
 
 op: AssertState
   id:             14
