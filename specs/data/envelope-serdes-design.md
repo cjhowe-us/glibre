@@ -118,8 +118,9 @@ Glibre-native obligations beyond harmonius:
   in-process header evolution. Glibre's meta-schema bootstrap rule
   (SPEC §7.6) collapses this onto a `glibre-foryc` release boundary:
   one envelope shape per release, the AbiHash gate forces every
-  plugin to rebuild on bump. The `flags` u32 in §3.1 is reserved for
-  future bit-additive extensions that do not change layout.
+  plugin to rebuild on bump. Future bit-additive extensions are
+  tracked in §12 [OPEN] #3 (post-MVP flag design); §3.1 currently
+  reserves no flag word.
 
 ## 3. Detailed Model
 
@@ -194,7 +195,9 @@ specific `.fory` source. Without it, two builds that happen to share
 `schema_fqn_id == K` but disagree on the schema's content (e.g. one
 inserted a field at a tag the other has not declared) would silently
 mis-decode. With it, a reader detects the drift and refuses with
-`SourceHashMismatch` (§10 arm 10).
+`SchemaUnknown` (§10 arm 6) (deserialize-path hash-fallback miss;
+arm 10 `SourceHashMismatch` is loader-only at the Mode-A
+barrier-diff site per `data-error-design.md` §3.2).
 
 ### 3.2 The `(schema_fqn_id, source_hash)` identity pair
 
@@ -220,7 +223,9 @@ make this safe across builds:
    the primary FQN-sorted span (SPEC §4.5 inv. 3 already permits
    secondary indices). If the source-hash is present in the live
    registry, decode proceeds against that entry; if absent,
-   `SourceHashMismatch` (§10).
+   `SchemaUnknown` (§10 arm 6) (deserialize-path hash-fallback miss;
+   arm 10 `SourceHashMismatch` is loader-only at the Mode-A
+   barrier-diff site per `data-error-design.md` §3.2).
 
 The two-mode behavior requires no flag bit (the trigger
 is structural: the reader compares `schema_fqn_id` against
@@ -1050,7 +1055,7 @@ Malformed-input tests (one Catch2 case per arm in §10):
 | `envelope_payload_truncated`                        | A header claiming `payload_len = 1024` followed by 100 bytes returns `EnvelopeTruncated{at.offset = 148, at.schema = header_decoded}` (per `data-error-design.md` §3.1.1 Occam-collapse; `PayloadTruncated` is a discriminator string in §10 prose, not an `ErrorTag` arm) |
 | `envelope_schema_unknown_ordinal`                   | A header with `schema_fqn_id = 9999` (out of range) and an unknown `source_hash` returns `SchemaUnknown` |
 | `envelope_schema_unknown_hash_fallback`             | A header with a known ordinal but a synthetic `source_hash` (hash-fallback also misses) returns `SchemaUnknown` (arm 6) — per §10 HIGH-1 remap: hash-fallback miss collapses onto SchemaUnknown, not SourceHashMismatch |
-| `envelope_version_unsupported_newer_than_host`      | A header with `version = entry.version + 1` returns `VersionUnsupported`                               |
+| `envelope_version_unsupported_newer_than_host`      | A header with `version = entry.version + 1` returns `ErrorTag::DeserializeError` with `at.version > host_max` (`VersionUnsupported` is a discriminator-only sub-case per §10 / `data-error-design.md` §3.1.1) |
 | `envelope_migration_step_missing`                   | A header with `version = N` against a registry whose chain starts at `(N+1 → N+2)` returns `MigrationStepMissing{step_from = N, step_to = N+1}` |
 | `envelope_migration_step_failed`                    | A registered migration `force_migration_failure(N → N+1)` (SPEC §8.6) yields `SchemaMigrationFailure{step_schema, step_from, step_to}` |
 | `envelope_deserialize_body_error`                   | A valid header followed by a Fory body with a tag-type mismatch returns `DeserializeError{at.offset = 48 + body_offset}` |
