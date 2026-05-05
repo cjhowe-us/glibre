@@ -171,9 +171,11 @@ catalog roster, in graph-build order (SPEC §6.2.2 step 1):
 depth output to produce next frame's HZB; phase 6 of frame N+1 then
 reads it. SPEC §4.1.9 invariant 1 — two-phase symmetry.)
 
-`aa_upscale` is one pass class with four bodies (`Off`, `Fxaa`,
-`Smaa`, `Taa`, `TemporalSuper`); the graph builder selects the body
-at build time from `RenderSettings.aa_mode` (§3.11). `post` is one
+`aa_upscale` is one pass class with five `aa_mode` variants (`Off`,
+`Fxaa`, `Smaa`, `Taa`, `TemporalSuper`) expanding to eight distinct
+execute lambdas across the `aa_mode × upscaler` product (see §3.11
+table); the graph builder selects the body at build time from
+`RenderSettings.aa_mode` + `RenderSettings.upscaler` (§3.11). `post` is one
 pass class with a chain of compute kernels selected from
 `RenderSettings`; the chain is composed at build time from a fixed
 table (§3.10) and the resulting `execute` lambda invokes only
