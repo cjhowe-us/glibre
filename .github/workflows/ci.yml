@@ -130,7 +130,6 @@ jobs:
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
       - name: Replay e2e/shader traces
-        if: steps.list.outputs.traces != ''
         run: |
           set -euo pipefail
           # `glibre-trace` is the §6.5 CLI; until tools/cli/glibre-trace
