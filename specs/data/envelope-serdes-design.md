@@ -1093,12 +1093,61 @@ context, not `data`.
   version:u32, payload_length:u32, flags:u32)` Fory-defined
   layout to the explicit 48-byte fixed-width
   `(magic, schema_fqn_id, version, source_hash, payload_len)`
-  layout (§3.1). It also adds two arms to `data::Error`
-  (`SourceHashMismatch` trigger-note expansion per r1 followup, `BufferTooSmall` new arm) and re-classifies one
-  (`VersionUnsupported` is currently subsumed under
-  `DeserializeError` in SPEC §10.2). The amendment ships with the
+  layout (§3.1). It also adds arms to `data::Error` and
+  re-classifies one existing arm. The amendment ships with the
   first plan PR that introduces `data/runtime/src/envelope.cpp`.
   Owner: data sub-epic #729 next plan iteration.
+
+  **Structural delta — `EnvelopeHeader` (SPEC §5 vs design §3.3):**
+  The SPEC §5 header stub (`specs/data/SPEC.md` lines 724–729) must
+  be updated to reflect the following five changes:
+  1. `magic` field added — `eastl::array<std::byte, 4>` (4 bytes;
+     holds `kEnvelopeMagic`; validated in §3.4 step 2).
+  2. `SchemaId schema{}` → `std::uint32_t schema_fqn_id{0}` — field
+     renamed **and** type changed (string-view borrow → registry
+     ordinal; saves 16 bytes of pointer-size on the stack).
+  3. `source_hash` field added — `SchemaSourceHash` (32-byte
+     BLAKE3-256 truncated to 32 B; §3.1 field-5).
+  4. `flags` field removed — `std::uint32_t flags{0}` is gone; no
+     in-band flag bits in this revision (see §12 [OPEN] #3).
+  5. `payload_length` → `payload_len` rename — snake_case consistency
+     (no type change; remains `std::uint32_t`).
+
+  **`data::Error` closed-sum dispositions for §10 failure arms:**
+  Four arms in the §10 table have no SPEC §10.1 `ErrorTag` yet.
+  Dispositions chosen and rationale:
+
+  - `BadMagic` — **new arm, tag = 11.** Distinct externally-observable
+    failure: the 4-byte magic field is wrong before any header field is
+    decoded, so callers routing on tag must distinguish it from
+    `EnvelopeTruncated` (buffer physically short) and `DeserializeError`
+    (header structurally valid, body refused). Payload: `at.offset = 0`.
+
+  - `PayloadTruncated` — **new arm, tag = 12.** Distinct from
+    `EnvelopeTruncated` (tag 9): header decoded cleanly but
+    `48 + header.payload_len > src.size()`. Callers (e.g. the cooker's
+    blob-walker) need to distinguish header-truncation from
+    payload-truncation to produce useful diagnostics. Payload:
+    `at.offset = src.size()`, `at.schema = header_decoded`.
+
+  - `VersionUnsupported` — **sub-case of `DeserializeError` (tag 3),**
+    option (b). The §10 table already documents this as "sub-case of
+    DeserializeError per SPEC §10 row — kept distinct here for log
+    clarity". The discriminator is: `at.version > entry.version` (the
+    header's claimed version exceeds the host's registered version for
+    that FQN). No new tag is needed; callers that need to distinguish
+    this sub-case check `at.version` and compare against the registry.
+    Payload: `at.schema = entry.fqn`, `at.version = header.version`.
+
+  - `BufferTooSmall` — **new arm, tag = 13.** Serialize-path only;
+    no existing arm covers a serialize pre-check refusal. Callers need
+    a distinct tag to retry with a larger buffer rather than treating
+    the result as a deserialize failure. Payload: `at.offset = dst.size()`.
+
+  SPEC §10.1 `ErrorTag` enum must be extended with arms 11, 12, and 13
+  in the same implementation PR. `VersionUnsupported` is not added to
+  the enum; its sub-case is documented in the §10.2 per-arm table via
+  a discriminator note on `DeserializeError`.
 
 - [OPEN] **#2 — Per-payload CRC.** The envelope reserves no CRC
   field; integrity is currently delegated to the storage layer
@@ -1161,3 +1210,48 @@ context, not `data`.
   amendment must be landed in the SPEC §5 header stub in the same
   implementation PR that introduces `data/runtime/src/envelope.cpp`.
   Owner: data sub-epic #729 first plan PR.
+
+- [OPEN] **#8 — SPEC §5 free-function amendment: `peek_header`,
+  `serialize_header`, `deserialize_header`.** Design §4.2 exports
+  three publicly-callable free functions in `namespace glibre::types`:
+
+  ```cpp
+  [[nodiscard]] auto peek_header(
+      std::span<const std::byte> src
+  ) noexcept -> std::expected<EnvelopeHeader, data::Error>;
+
+  [[nodiscard]] auto serialize_header(
+      const EnvelopeHeader& hdr,
+      std::span<std::byte>  dst
+  ) noexcept -> std::expected<std::size_t, data::Error>;
+
+  [[nodiscard]] auto deserialize_header(
+      std::span<const std::byte> src,
+      EnvelopeHeader*             out
+  ) noexcept -> std::expected<std::size_t, data::Error>;
+  ```
+
+  These three signatures are absent from the current SPEC §5 header
+  stub (`specs/data/SPEC.md`, `envelope.hpp` section, lines 720–750)
+  and must be added there before any implementation PR.
+
+  **Concrete users (PHILOSOPHY §10 two-concrete-users rule):**
+
+  1. `tools/glibre-cook` — the asset cooker writes Envelope blobs to
+     disk back-to-back (see §11.2 test `envelope_save_file_pack_unpack`).
+     The cooker calls `serialize_header` directly when it needs to patch
+     a header field (e.g. `payload_len`) after body serialization without
+     re-running `Envelope<T>::serialize` from scratch.
+
+  2. `tools/glibre-editor` inspector panel — parses envelope headers
+     from on-disk save files for offline schema inspection (displays FQN,
+     version, source hash in the asset browser). The inspector calls
+     `peek_header` to read the header non-destructively and
+     `deserialize_header` when it needs the returned byte-count to walk
+     the blob stream (multiple envelopes packed back-to-back).
+
+  **Blocking condition:** This amendment is blocking the implementation
+  PR that introduces `data/runtime/src/envelope.cpp`. The PR must add
+  all three signatures to `include/glibre/types/envelope.hpp` and update
+  the SPEC §5 stub in the same commit. Owner: data sub-epic #729 next
+  plan iteration (same PR as [OPEN] #1 and [OPEN] #7).
