@@ -149,6 +149,28 @@ order:
    units (`schema_registry.cpp`, `envelope.cpp`,
    `migration_dispatcher.cpp`, `register_migration.cpp`,
    `arena.cpp`, `abi_hash.cpp`, `plugin_manifest.cpp`; SPEC §6.1.2).
+
+   TU-to-aggregate mapping — which SPEC aggregate each TU implements and
+   its single reason to change:
+
+   | TU                          | SPEC aggregate         | Reason to change                                                  | Changes with        |
+   |-----------------------------|------------------------|-------------------------------------------------------------------|---------------------|
+   | `schema_registry.cpp`       | SchemaRegistry (§4.5)  | Per-entry record shape — fields added/removed from `RegistryEntry`| §4.3 / §4.5 / #730 |
+   | `envelope.cpp`              | SchemaRegistry (§4.5)  | `Envelope<T>` call-site protocol — out-pointer layout or error shape | §4.1 / §4.3      |
+   | `migration_dispatcher.cpp`  | Middleman (§4.3)       | Dispatcher consumer — chains applied to `RegistryEntry::migrations`; behavioral rules belong to #736 | #736 |
+   | `register_migration.cpp`    | Middleman (§4.3)       | `.bss` storage + `glibre_types_register_migration` C-ABI entry point signature | §4.3 / #736 |
+   | `arena.cpp`                 | SchemaRegistry (§4.5)  | Per-call scratch allocator shape used by Envelope<T> during deserialization | §4.5         |
+   | `abi_hash.cpp`              | Middleman (§4.3)       | Dylib binary contract — ABI hash trampoline signature or storage form | §4.4 / §6.4      |
+   | `plugin_manifest.cpp`       | Middleman (§4.3)       | Plugin discovery set — how manifest blobs are placed in the dylib | §6.5 / §3.9        |
+   | `static_init_check.cpp`     | Middleman (§4.3)       | Invariant assertions — Phase C validator rules derived from §4.5  | §3.5 / §4.5 / §4.7 |
+
+   An implementer touching §4.3 changes (dylib binary contract, ABI hash,
+   symbol-export set, manifest placement) edits `abi_hash.cpp`,
+   `register_migration.cpp`, or `plugin_manifest.cpp`. An implementer
+   rotating the SchemaRegistry lookup design (#730) edits
+   `schema_registry.cpp`. An implementer acting on #736's behavioral
+   specification edits `migration_dispatcher.cpp` and possibly
+   `register_migration.cpp`. No TU spans more than one aggregate.
 2. **`data/codegen-output/src/<ctx>/<Type>.cpp`** — per-type
    serializer / deserializer trampolines emitted by `glibre-foryc`
    (SPEC §6.2 stage 4 step 1).
@@ -352,19 +374,32 @@ After this phase the registry's `kRegistryCount` entries are
 addressable, FQN-sorted, with all function-pointer slots populated and
 all `migrations` spans empty.
 
-**Phase B — Migration registration.** Each owning context's
-translation unit (e.g.
-`plugins/render/src/transform_migrations.cpp`) includes the
-codegen-emitted `<Type>_migrations.hpp` companion header, which
-expands `GLIBRE_REGISTER_MIGRATION(<Type>, <N>, <N+1>, <fn>)` into a
-call to `glibre_types_register_migration` that runs at the owning
-context's static-init time. The middleman's
-`register_migration.cpp` body collects these calls into the per-FQN
-`kPerFqnMigrationTable[N]` `.bss` storage; once all calls have run
-(end of `__cxx_global_var_init`), the runtime patches each
-`RegistryEntry::migrations` span to point at its FQN's slice of that
-storage. This is the *only* mutation of the registry the middleman
+**Phase B — Migration registration.**
+
+*(a) Middleman's contribution — storage slots and C-ABI entry point.*
+The middleman supplies the `.bss` storage (`kPerFqnMigrationTable[N]`,
+one slot per registered FQN) and the single exported C-ABI entry point
+`glibre_types_register_migration` (§4.3) into which owning contexts
+call at static-init time. The middleman's `register_migration.cpp` body
+collects incoming calls into `kPerFqnMigrationTable[N]`; once all
+calls have run (end of `__cxx_global_var_init`), the runtime patches
+each `RegistryEntry::migrations` span to point at its FQN's slice of
+that storage. This is the *only* mutation of the registry the middleman
 permits, and it terminates before `main()` begins (SPEC §4.3 inv. 5).
+
+*(b) Registration protocol — behavioral rules belong to #736.*
+The behavioral rules that govern what constitutes a valid
+`glibre_types_register_migration` call — validation of `(from, to)`
+version pairs, duplicate-registration detection, ordering constraints,
+partial-chain handling, and the error path via `glibre_types_last_register_error` — are the
+`MigrationDispatcher` design's responsibility and are spec'd separately
+in #736. This document purposely does not enumerate those rules: if
+#736 changes the validation protocol (arena-reset semantics between
+steps, handling of partial chains, or error-payload fields), only §3.5
+(b) and `migration_dispatcher.cpp` / `register_migration.cpp` change,
+not the descriptor-table layout documented in (a). The SRP boundary is
+here: the middleman owns the storage and the entry point; the
+dispatcher design (#736) owns what is and is not a valid call.
 
 **Phase C — Static-init validator.** A single `__attribute__((constructor(65535)))`
 function (`data/runtime/src/static_init_check.cpp`) runs after every
@@ -711,6 +746,33 @@ no `register_*`, no `add_*`. Migration registration runs through the
 `extern "C"` `glibre_types_register_migration` (§4.3) — itself called
 only from `GLIBRE_REGISTER_MIGRATION(...)` macros at static-init
 (§3.5 phase B), never at runtime.
+
+**Normative: `RegistryEntry::serialize` and `::deserialize` are
+internal-only implementation slots.** Although `RegistryEntry` is
+accessible from outside the dylib (via `SchemaRegistry::lookup()` and
+`entries()`), its `serialize` and `deserialize` fields are C++ function
+pointers whose return types contain `std::expected<…, data::Error>` and
+`std::expected<void, data::Error>`. These types do not have a stable
+C-ABI layout across libc++ versions and must never be called directly
+across a dylib boundary (§4.1 rule). These fields are implementation
+slots consumed exclusively within the dylib by:
+
+- the `Envelope<T>` specialization trampolines (codegen-emitted, live
+  inside `glibre-types.dylib`); and
+- the `MigrationDispatcher` (TU-private; resolves them at link time
+  within the same dylib).
+
+**External callers — plugin code and host binaries — MUST use
+`Envelope<T>::serialize` / `Envelope<T>::deserialize` exclusively.**
+Direct invocation of `entry->serialize(…)` or `entry->deserialize(…)`
+from a plugin or host-binary TU is undefined behavior per §4.1 (C++
+function pointer with `std::expected` return crosses the dylib seam).
+Code review and the exported-symbol-set CI test (§3.3, §11.1) guard
+the C-ABI surface; nothing in the public headers exposes a path by
+which an external caller can call these slots without going through the
+`Envelope<T>` wrapper. If a future refactor needs to expose the raw
+function pointers externally, that requires a new C-ABI trampoline pair
+(SPEC §4.3 inv. 4) and a SPEC §4.3 / §4.4 hash change.
 
 ### 4.3 Public ABI surface (extern "C")
 
