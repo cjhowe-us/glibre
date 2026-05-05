@@ -272,17 +272,21 @@ combined with the Meyer's-singleton accessor).
 
 The 256 KiB sub-arena (SPEC §9.2) is sized for: argv ≤ 56 KiB
 (typical engine invocations are dozens of args, but the editor may
-pass long content paths; ARG_MAX is 256 KiB combined argv+env, and
-56+(128+8+32) = 224 KiB env+argv envelope leaves 32 KiB headroom
-under ARG_MAX), env ≤ 128 KiB (macOS caps `getconf ARG_MAX = 256
-KiB` for argv+env *combined*; we reserve roughly half for each),
-cwd + executable_path ≤ 8 KiB (PATH_MAX ≈ 1024 each, with slack
-for canonicalization), key→value flat-vector index ≤ 32 KiB
-(~1024 env entries × 2 spans × 16 B; sized against measured macOS
-environment populations). If any individual component overflows its
-slice the aggregate aborts at boot — argv / env that exceeds 256
-KiB is a sandbox configuration the engine cannot represent without
-reshaping its discipline; failing fast is correct.
+pass long content paths), env ≤ 128 KiB (macOS caps
+`getconf ARG_MAX = 256 KiB` for argv+env *combined*; we reserve
+roughly half for each; 56 KiB argv + 128 KiB env = 184 KiB of raw
+bytes constrained by execve(2)'s ARG_MAX (256 KiB on macOS),
+leaving 72 KiB headroom under ARG_MAX), cwd + executable_path ≤
+8 KiB (PATH_MAX ≈ 1024 each, with slack for canonicalization),
+key→value flat-vector index ≤ 32 KiB (~1024 env entries × 2 spans
+× 16 B; sized against measured macOS environment populations). The
+remaining 8+32+32 = 72 KiB of the §9 sub-arena covers
+engine-internal derived structures (cwd/executable_path copies,
+env flat-vec index, sigaltstack) not constrained by ARG_MAX. If
+any individual component overflows its slice the aggregate aborts
+at boot — argv / env that exceeds 256 KiB is a sandbox
+configuration the engine cannot represent without reshaping its
+discipline; failing fast is correct.
 
 ### 3.3 Singleton accessor + init / shutdown lifecycle
 
@@ -493,7 +497,7 @@ within 256 KiB sub-arena per §9) and calls `sigaltstack(2)`.
 32 KiB equals MINSIGSTKSZ on macOS 26 Apple Silicon (defined in
 `<sys/signal.h>`); using a smaller value causes `sigaltstack(2)` to
 return `EINVAL`, leaving `SA_ONSTACK` unconfigured — exactly the
-re-fault failure §3.5 warns about. The sigaltstack budget is pinned
+SIGSEGV stack-overflow re-fault described above. The sigaltstack budget is pinned
 at MINSIGSTKSZ; argv was trimmed from 64 KiB to 56 KiB to keep the
 §9 sub-arena at ≤ 256 KiB. The alternate stack is critical for
 SIGSEGV on stack overflow: the default-stack handler would re-fault.
@@ -1267,14 +1271,16 @@ Both run on `macos-26-m1` CI only.
   widening the `SignalHandlerFn` signature changes the §5.10
   public surface — which requires an amendment spike before any
   plan PR can adopt the wider signature. Resolution requires:
-  (1) a SPEC §5.10 amendment spike that adds `siginfo_t*` /
-  `ucontext_t*` (or a `SignalCtx` wrapper) to `SignalHandlerFn`,
-  (2) a SPEC §12 tracking entry in the platform SPEC, (3) at
-  least two concrete callers demonstrating need for the widened
-  info before approval. Defer until the in-process crash-handler
-  plugin (#TBD) is drafted; the trade-off is ABI surface growth
-  vs giving the crash-handler enough info to record register
-  state.
+  (1) a SPEC §5.10 amendment spike that widens `SignalHandlerFn`
+  signature to add `siginfo_t*` and `ucontext_t*` parameters.
+  (2) The amendment spike's PR creates the SPEC §12 tracking entry
+  as part of its scope (not at this design-PR time — the amendment
+  spike owns the SPEC.md edit).
+  (3) Two concrete callers demonstrating need for the widened
+  parameters before approval. Defer until the in-process
+  crash-handler plugin (#TBD) is drafted; the trade-off is ABI
+  surface growth vs giving the crash-handler enough info to record
+  register state.
 - **[OPEN] Env-var change at runtime.** §3.2 rule #2 documents
   "out-of-band `setenv` is unsupported and undefined". A future
   consumer (e.g. an editor "edit env var, restart engine"
