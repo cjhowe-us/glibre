@@ -15,9 +15,10 @@
 > resources / `TransientPool` heaps, §9.5 heap composition (256 MiB
 > transient + 128 MiB persistent + 16 MiB handle tables + 48 MiB RT
 > + 64 MiB PSO = 512 MiB ceiling), §9.5.1 allocator rules, and §10
-> failure-mode rows `ResourceAllocFailed` / `ResourceResidencyExceeded`
+> failure-mode rows `ResourceAllocFailed` / `ResourceResidencyExceeded` / `SamplerCapExceeded`
 > (§10 design-name labels; §5 enum identifiers are `HeapOutOfMemory` /
-> `TransientPoolExhausted` / `ResourceResidencyExceeded`).
+> `TransientPoolExhausted` / `ResourceResidencyExceeded` / `SamplerCapExceeded` — the last per spike #874 SRP split,
+> `reviews/decisions/resourceresidency-srp.md`).
 > Cites `reviews/decisions/error-model.md`,
 > `reviews/decisions/perf-budget.md`,
 > `reviews/decisions/plugin-abi.md`,
@@ -179,7 +180,7 @@ re-derived per PHILOSOPHY §"How harmonius is used"):
 | **R-2.5.9** — Lifetime-driven release (not refcount); release happens at known frame boundaries. | **Covered.** §3.7: transient releases at phase 7 exit; persistent releases by explicit `release_persistent()`; imported releases are no-ops (importer owns). No reference counting; PHILOSOPHY §"explicit lifetimes" preserved. |
 | **R-2.5.10** — Heap pool with placement-resource sub-allocation (Metal `MTLHeap`).                  | **Covered.** §3.5 transient pool + §3.6 persistent allocator: both back onto `MTL::Heap` with `MTL::HeapType::placement`, slot-allocated by best-fit-by-size on the persistent side and alias-plan-driven on the transient side. Heap creation goes through `MetalDevice::heap_allocator()`. |
 | **R-2.5.11** — Per-context allocator tagging; render owns the GPU residency tag.                    | **Covered.** §3.11 + `SPEC.md` §9.5.1: every allocation routes through `glibre::PerContextAllocator` stamped with `ContextTag::render`. CPU shadows are tagged by the requesting context; GPU bytes are render-tagged regardless of caller per `perf-budget.md` Allocator Rule 5. |
-| **R-2.5.12** — Resource exhaustion produces typed errors, not exceptions.                           | **Covered.** §3.12 + §10: `ResourceResidencyExceeded`, `HeapOutOfMemory`, `TransientPoolExhausted`, `StaleResourceHandle`, `ResourceRoleMismatch`, `ResourceImportRefused`, `CapabilityNotSupported` (for Tier-2 absence). All return `glibre::Result<T>`; no exception path. |
+| **R-2.5.12** — Resource exhaustion produces typed errors, not exceptions.                           | **Covered.** §3.12 + §10: `ResourceResidencyExceeded`, `SamplerCapExceeded`, `HeapOutOfMemory`, `TransientPoolExhausted`, `StaleResourceHandle`, `ResourceRoleMismatch`, `ResourceImportRefused`, `CapabilityNotSupported` (for Tier-2 absence). All return `glibre::Result<T>`; no exception path. |
 | Harmonius design — Free list per `MTLHeap` with first-fit / best-fit policy.                       | **Covered, simplified.** §3.6 step 3: persistent allocator uses best-fit-by-size against a fixed-bin free list (eight power-of-two size buckets); the alias planner handles transient placement and does not need a free list at all (its colouring runs cold-path each compile). PHILOSOPHY collapse: one allocator policy, not two. |
 | Harmonius design — Resource versioning per write to enable cross-pass barriers.                    | **Refused at this aggregate; routed to graph aggregate.** Read-after-write versioning is the alias planner's job (#760 §3.5). Resources only declare lifetime; the planner derives versioning from declared edges. |
 | Harmonius design — Sampler cache keyed by `MTLSamplerDescriptor`.                                  | **Covered.** §3.13: a small sampler cache (16 entries) keyed by the closed-set `SamplerDesc` value object; vended by `SamplerHandle` (using distinct `tags::sampler` — see §3.3). Samplers are persistent and alias-disjoint. |
@@ -691,7 +692,7 @@ per `perf-budget.md` Allocator Rule 5. The wiring obeys
 
 ### 3.12 Failure-mode mapping (forward reference to §10)
 
-The catalog produces seven render-error variants (§5 enum identifiers;
+The catalog produces eight render-error variants (§5 enum identifiers;
 §10 design-name labels in parentheses for cross-reference):
 
 | Trigger | §5 Variant | §10 design-name row |
@@ -702,8 +703,16 @@ The catalog produces seven render-error variants (§5 enum identifiers;
 | Stale handle (generation mismatch at lookup) | `StaleResourceHandle` | (abort-frame; see §10) |
 | Role mismatch (e.g. `release_persistent` on transient handle) | `ResourceRoleMismatch` | (cold-path assert; see §10) |
 | Genuine import-borrow refusal (write declaration on read-only borrow) | `ResourceImportRefused` | (abort-engine; see §10) |
-| Sampler cache over-capacity | `ResourceResidencyExceeded` | `ResourceResidencyExceeded` |
+| Sampler cache over-capacity | `SamplerCapExceeded` | `SamplerCapExceeded` |
 | Tier-2 bindless required, host CapabilitySet lacks `BindlessResources` | `CapabilityNotSupported` | `RtCapabilityMissing` (§10 design-name for bindless-capability arm) |
+
+`SamplerCapExceeded` was previously folded into
+`ResourceResidencyExceeded` as a second arm of one variant; spike
+#874 (`reviews/decisions/resourceresidency-srp.md`) split it out per
+the §10.1 single-construction-site SRP rule. It is now its own §5
+enumerator that rides the same render-plugin ABI bump as
+`StaleResourceHandle` / `ResourceRoleMismatch` (zero incremental ABI
+cost).
 
 Recovery routing per `SPEC.md` §10.2 is preserved verbatim;
 detail in §10 below.
@@ -735,13 +744,21 @@ across the entire MVP shader set. Sixteen entries is sized for the
 union of every MVP pass's sampler use ({linear-clamp, linear-repeat,
 trilinear-anisotropic-repeat for albedo, comparison-less-clamp for
 shadow, nearest-clamp for visID resolve, …}); over-cap returns
-`render::Error::ResourceResidencyExceeded`, consistent with the
-slot-table overflow precedent in §11.1 ("capacity overflow returns
-`ResourceResidencyExceeded`"). This is treated as a SPEC amendment
-trigger rather than a runtime concern (samplers are not data-driven
-in MVP; if the static set ever exceeds 16, the cap is raised in
-a §3.13 amendment, not at runtime). Cache lookup is linear (16
-entries; one cache line); hit rate is 100 % under MVP's static set.
+`render::Error::SamplerCapExceeded` — its own §5 enumerator, split
+from the previous `ResourceResidencyExceeded` arm per spike #874
+(`reviews/decisions/resourceresidency-srp.md`) so the §10.2 recovery
+ladder is dispatchable on `error.code` alone. The two failure
+conditions had different recoveries (transient-pool residency →
+`lower-tier`; sampler-cache over-cap → `abort-engine` at init /
+`lower-tier` at hot-reload register) and one variant could not
+encode that fork without making `ErrorContext.detail` load-bearing
+(forbidden by `reviews/decisions/error-model.md` line 99). The
+single construction site is `resources/sampler_cache.cpp::SamplerCache::get_or_create`
+(§10.1). Sampler-cap overflow remains a SPEC amendment trigger
+rather than a runtime concern: samplers are not data-driven in MVP,
+and if the static set ever exceeds 16, the cap is raised in a §3.13
+amendment, not at runtime. Cache lookup is linear (16 entries; one
+cache line); hit rate is 100 % under MVP's static set.
 
 ### 3.14 Hot-reload survival hook
 
@@ -1232,18 +1249,20 @@ performance signature.
 
 ## 10. Failure modes
 
-The aggregate produces seven distinct errors, each rolling into
-`SPEC.md` §10.1's closed sum. The three new variants
-(`StaleResourceHandle`, `ResourceRoleMismatch`, and the
-`ResourceResidencyExceeded` arm for sampler-cache overflow) are ABI
-additions that require a `SPEC.md` §5 enum amendment and an ABI bump
-per `reviews/decisions/error-model.md` Composition Rule 5.
+The aggregate produces eight distinct errors, each rolling into
+`SPEC.md` §10.1's closed sum. The four new variants
+(`StaleResourceHandle`, `ResourceRoleMismatch`, `SamplerCapExceeded`,
+plus the `ResourceImportRefused` clarification) are ABI additions
+that require a `SPEC.md` §5 enum amendment and an ABI bump per
+`reviews/decisions/error-model.md` Composition Rule 5. All four ride
+one shared bump; zero incremental ABI cost.
 
 | Render error variant | Trigger | Recovery (per §10.2) | Severity | Capability-fallback path | Test fixture |
 |----------------------|---------|----------------------|----------|---------------------------|--------------|
 | `HeapOutOfMemory` | Persistent-allocator best-fit failure: every bin of sufficient size is empty after merge attempts. Triggered cold-path (init or hot-reload register) or per-frame compile when a persistent resource is declared mid-frame. | `lower-tier` (re-plan at lower tier shrinks the working set; e.g. shadow atlas 4K → 2K). | `warn` | Lower tier's pass predicates select smaller persistent extents. | `tests/render/resources/heap_out_of_memory_lower_tier.cpp` |
 | `TransientPoolExhausted` | Alias planner produces a peak-residency for any sub-pool exceeding its cap; triggered during graph compile, phase 7 entry. | `lower-tier`. | `warn` | Same as `HeapOutOfMemory`; lower tier shrinks gbuffer / scratch targets. | `tests/render/resources/transient_pool_exhausted.cpp` |
-| `ResourceResidencyExceeded` | (a) Compile computes `total_live_bytes_after_compile > 512 MiB` (`SPEC.md` §10 row, this aggregate's primary shared trigger with `RenderGraph`); (b) sampler cache over-capacity (`sampler_cache_.size() == 16` and a new `SamplerDesc` is requested — treated as a SPEC amendment trigger in MVP; see §3.13). | `lower-tier` (case a). For case (b): `abort-engine` at init / `lower-tier` (sampler count reduction) at hot-reload; over-cap cannot arise at frame-time under MVP's static sampler set. | `warn` (a); `error` (b). | Re-plan at lower tier shrinks the working set under 512 MiB (case a only). | `tests/render/resources/residency_exceeded_lower_tier.cpp` (case a); `tests/render/resources/sampler_over_cap.cpp` (case b). |
+| `ResourceResidencyExceeded` | Compile computes `total_live_bytes_after_compile > 512 MiB` (`SPEC.md` §10 row; this aggregate's primary shared trigger with `RenderGraph`). | `lower-tier`. | `warn` | Re-plan at the lower tier shrinks the working set under 512 MiB. | `tests/render/resources/residency_exceeded_lower_tier.cpp` |
+| `SamplerCapExceeded` | Sampler cache over-capacity (`sampler_cache_.size() == 16` and a new `SamplerDesc` is requested). Triggered at init or hot-reload register; cannot arise at frame-time under MVP's static sampler set (§3.13). Split from the prior `ResourceResidencyExceeded` arm per spike #874 (`reviews/decisions/resourceresidency-srp.md`). | `abort-engine` at init / `lower-tier` (sampler count reduction) at hot-reload register. | `error` | n/a — sampler cap is a build-time / config-time invariant; lower-tier predicates do not reduce the static sampler set. | `tests/render/resources/sampler_over_cap.cpp` |
 | `StaleResourceHandle` | Generation mismatch at `SlotTable::lookup`: the handle's generation counter does not match the slot's current generation, indicating the slot was freed and reallocated since the handle was issued. Structurally distinct from a role mismatch or import refusal. | `abort-frame`. | `error` | n/a | `tests/render/resources/stale_handle.cpp` |
 | `ResourceRoleMismatch` | Role mismatch on a release API call (e.g. `release_persistent` called on a transient or imported handle). Cold-path only; cannot arise on the render-thread hot path. No state mutation. | Cold-path no-op + debug assert; surfaced as `warn` in structured log. | `warn` | n/a | `tests/render/resources/role_mismatch.cpp` |
 | `ResourceImportRefused` | Genuine import-borrow refusal: an imported handle is declared for write access on a resource whose borrow record was registered read-only (§3.8 invariant). Structurally distinct from a stale handle or role mismatch; this is a graph structural error. | `abort-engine` (graph is structurally invalid). | `error` | n/a — graph must be fixed. | `tests/render/resources/import_write_on_read_borrow.cpp` |
@@ -1259,7 +1278,8 @@ dylib:
 
 - `HeapOutOfMemory` — `resources/persistent.cpp::PersistentAllocator::allocate`.
 - `TransientPoolExhausted` — `resources/alias_planner.cpp::AliasPlanner::compute` (the planner constructs the error; the catalog forwards it through `RenderGraph::compile`).
-- `ResourceResidencyExceeded` — (a) `resources/transient_pool.cpp::TransientPool::peak_residency_check`; (b) `resources/sampler_cache.cpp::SamplerCache::get_or_create` (over-cap arm). Two construction sites for one variant is an SRP violation that must be resolved in the implementation plan: either split into separate variants (preferred; requires SPEC.md §5 ABI bump) or consolidate via a shared helper. Tracked in [SPIKE] iterate-render-resourceresidencyexceeded-srp (#874).
+- `ResourceResidencyExceeded` — `resources/transient_pool.cpp::TransientPool::peak_residency_check` (per-frame total residency > 512 MiB).
+- `SamplerCapExceeded` — `resources/sampler_cache.cpp::SamplerCache::get_or_create` (over-cap on the closed 16-entry cache; §3.13). Split from `ResourceResidencyExceeded` per spike #874 / `reviews/decisions/resourceresidency-srp.md` to honour the single-construction-site SRP rule below.
 - `StaleResourceHandle` — `resources/handle_table.cpp::SlotTable::lookup` (generation mismatch).
 - `ResourceRoleMismatch` — `resources/imported.cpp::ImportRegistry::release` (wrong release API for handle's lifetime kind).
 - `ResourceImportRefused` — `resources/imported.cpp::ImportRegistry::declare_write` (write-on-read-borrow).
@@ -1267,24 +1287,55 @@ dylib:
 
 Single construction site per variant is the SRP test: if a future
 change must construct one of these errors from a second site, the
-SRP boundary is being violated and a refactor is required.
+SRP boundary is being violated and a refactor is required. The
+`ResourceResidencyExceeded` two-site state that previously violated
+this rule is resolved by the §874 split above; the rule now stands
+unconditional.
+
+Two adjacent seams are *not* additional construction sites and do
+not violate the rule:
+
+1. **Strict-mode `core::Error::OutOfBudget` translation.** Under
+   `GLIBRE_ALLOC_STRICT=1` (`SPEC.md` §6 / §11.6 e2e fixture), the
+   per-allocator wrapper that calls into `core` translates inbound
+   `core::Error::OutOfBudget` to `render::Error::ResourceResidencyExceeded`.
+   Per `reviews/decisions/error-model.md` Composition Rule 2, this
+   is a *local, explicit, unit-tested* cross-context mapping; it
+   reshapes an inbound `core::Error` rather than constructing a
+   fresh `render::Error`. The construction site for the resulting
+   `render::Error` remains attributed to the calling allocator's
+   path (transient or persistent).
+2. **§11.1 unit test "slot table — capacity overflow returns
+   `ResourceResidencyExceeded`."** This test asserts the
+   slot-table's behaviour under exhaustion. The test name is a
+   pre-spike-#874 carry-over and may itself need realignment with
+   §10.1 — flagged as an out-of-scope follow-up in
+   `reviews/decisions/resourceresidency-srp.md` ("Out-of-scope
+   follow-ups" item 1). Resolution is its own leaf.
 
 ### 10.2 Cross-references
 
-- `SPEC.md` §10.1 — closed sum (twenty design-name rows / 24 §5 enumerators;
-  this design adds `StaleResourceHandle` and `ResourceRoleMismatch` as ABI
-  additions, plus adds `tags::sampler` to the §5 handle catalog).
+- `SPEC.md` §10.1 — closed sum (twenty-one design-name rows / 26 §5 enumerators;
+  this design adds `StaleResourceHandle`, `ResourceRoleMismatch`, and
+  `SamplerCapExceeded` as ABI additions, plus adds `tags::sampler` to
+  the §5 handle catalog).
 - `SPEC.md` §10.2 — recovery ladder.
 - `SPEC.md` §10.3 — per-variant rows. This design's contributions map
   to §10 design-name rows as follows:
   - `HeapOutOfMemory` + `TransientPoolExhausted` → `ResourceAllocFailed`
   - `ResourceResidencyExceeded` → `ResourceResidencyExceeded`
+  - `SamplerCapExceeded` → `SamplerCapExceeded` (its own §10.3 row, added by spike #874)
   - `StaleResourceHandle` + `ResourceRoleMismatch` + `ResourceImportRefused` → (resource borrow failure rows; no single §10 design-name — each has its own recovery action per §10)
   - `CapabilityNotSupported` (bindless arm) → `RtCapabilityMissing` (§10 design-name)
 - `reviews/decisions/error-model.md` — Composition Rules item 5
-  (closed sum extension is an ABI bump; `StaleResourceHandle` and
-  `ResourceRoleMismatch` are new variants requiring an ABI bump when
-  `SPEC.md` §5 is updated).
+  (closed sum extension is an ABI bump; `StaleResourceHandle`,
+  `ResourceRoleMismatch`, and `SamplerCapExceeded` are new variants
+  requiring an ABI bump when `SPEC.md` §5 is updated; all three ride
+  one shared bump).
+- `reviews/decisions/resourceresidency-srp.md` — spike #874 decision
+  record: `ResourceResidencyExceeded` SRP split into
+  `ResourceResidencyExceeded` (kept, transient-pool / aggregate
+  residency) + `SamplerCapExceeded` (new, sampler-cache over-cap).
 
 ## 11. Test plan
 
