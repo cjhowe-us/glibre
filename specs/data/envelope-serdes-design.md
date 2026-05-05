@@ -229,8 +229,9 @@ Default behavior is "use the ordinal; verify the hash"; the fallback
 fires only on hash-disagreement.
 
 This collapses two failure modes (forged FQN ordinal, schema source
-drift) onto one decision and one error arm
-(`SourceHashMismatch`).
+drift) onto one decision and one error arm (`SchemaUnknown` (arm 6),
+per §3.4 step 4 — this PR's R1 remap; arm 10 `SourceHashMismatch` is
+exclusively loader-detected at the Mode-A barrier-diff site).
 
 ### 3.3 The `Envelope<T>` typed wrapper
 
@@ -575,8 +576,11 @@ Per-method contract:
 
 - **`serialize<T>`** — Pre-allocated `dst` (caller-sized via
   `size_bytes`); writes 48 + `payload_len` bytes; returns the byte
-  count. On `dst.size() < required`, returns
-  `BufferTooSmall` with `at.offset = dst.size()`. Pure function;
+  count. On `dst.size() < required`, returns `DeserializeError`
+  with `at.offset = dst.size()` (BufferTooSmall arm deferred per
+  §10 / data-error-design.md §12 [OPEN]; serialize-path precheck
+  overflow currently surfaces under DeserializeError until a
+  concrete typed-dispatch caller emerges). Pure function;
   no allocation; no I/O. Calls
   `glibre_types_serialize_<fqn>` for the body. Wall-time: O(payload
   size); see §9.
@@ -589,8 +593,9 @@ Per-method contract:
 - **`size_bytes<T>`** — Computes the exact wire size without
   serializing. Walks `value` once at Fory's body layer to total the
   variable-length field sizes (strings, lists, bytes), adds 48.
-  Returns `data::Error::BufferTooSmall` only if the body walk would
-  itself overflow u32 (single-asset hard cap, §3.1). No allocation.
+  Returns `data::Error::DeserializeError` only if the body walk would
+  itself overflow u32 (BufferTooSmall arm deferred — see §10 row).
+  No allocation.
 - **`peek_header`** — Reads the 48-byte header only; does not call
   the registry, does not validate `schema_fqn_id`. Returns the parsed
   header on `BadMagic` / `EnvelopeTruncated`-only checks (the caller
@@ -777,7 +782,9 @@ middleman build A:
   or by source-hash fallback, §3.2). If A's `schema_fqn_id` does
   not exist in B (the schema was removed) or B's schema for the
   same FQN has a different `source_hash` (the schema's bytes
-  drifted), the reader refuses with `SourceHashMismatch`.
+  drifted), the reader refuses with `SchemaUnknown` (arm 6) (see
+  §3.4 step 4 — this PR's R1 remap; arm 10 `SourceHashMismatch` is
+  exclusively loader-detected at the Mode-A barrier-diff site).
 - **Version must be ≤ B's current** (older versions migrate;
   newer-than-host refuses with `VersionUnsupported`).
 
@@ -844,10 +851,14 @@ data context types two refusal arms:
 `Error::SchemaMigrationFailure` (envelope-detected when the
 dispatch reaches an unsupported step). The envelope additionally
 surfaces the §10 arms `BadMagic`, `EnvelopeTruncated`,
-`SchemaUnknown`, `SourceHashMismatch`, `VersionUnsupported`,
+`SchemaUnknown`, `VersionUnsupported`,
 `PayloadTruncated`, `DeserializeError` to the migrate caller; per
 SPEC §8.4 these collapse onto `core::Error::SchemaMigrationFailed`
-at the loader's wrap point.
+at the loader's wrap point. Arm 10 (`SourceHashMismatch`) reaches
+the migrate() caller via the loader's own error path at the Mode-A
+barrier-diff site (per `data-error-design.md §3.2` and SPEC §10.2),
+not via `Envelope<T>::deserialize`. The envelope's deserialize-path
+hash-fallback miss surfaces as `SchemaUnknown` (arm 6) instead.
 
 **Per-row rollback discipline.** Per SPEC §8.4 the envelope
 guarantees that on any failure during a hot-reload row's
@@ -1043,7 +1054,7 @@ Malformed-input tests (one Catch2 case per arm in §10):
 | `envelope_migration_step_missing`                   | A header with `version = N` against a registry whose chain starts at `(N+1 → N+2)` returns `MigrationStepMissing{step_from = N, step_to = N+1}` |
 | `envelope_migration_step_failed`                    | A registered migration `force_migration_failure(N → N+1)` (SPEC §8.6) yields `SchemaMigrationFailure{step_schema, step_from, step_to}` |
 | `envelope_deserialize_body_error`                   | A valid header followed by a Fory body with a tag-type mismatch returns `DeserializeError{at.offset = 48 + body_offset}` |
-| `envelope_buffer_too_small_serialize`               | `serialize(t, dst)` with `dst.size() < required` returns `ErrorTag::DeserializeError` with discriminator `at.kind == "buffer_too_small"` (per §10 `BufferTooSmall` deferred row: no distinct arm is assigned; serialize-path refusal uses `DeserializeError`-shaped carrier per `data-error-design.md` §12 [OPEN]) |
+| `envelope_buffer_too_small_serialize`               | `serialize(t, dst)` with `dst.size() < required` returns `ErrorTag::DeserializeError` with `at.offset == dst.size()` (precheck overflow site; BufferTooSmall arm deferred per §10) |
 | `envelope_out_unmodified_on_failure`                | On every refusal arm, `out` retains its pre-call value (random initialised, asserted byte-equal)        |
 
 Determinism (PHILOSOPHY §7):
