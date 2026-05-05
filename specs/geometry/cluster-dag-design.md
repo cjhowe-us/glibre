@@ -176,11 +176,7 @@ MeshletGroup (one node of the DAG; entity record inside ClusterDAG)
 ├── material          : MaterialHandle               (LOD0 cover only carries material; coarser bands inherit)
 └── reserved          : uint32_t                     (zero; reserves alignment slot for future additive field)
 
-CutState (per (View, MeshHandle) pair; render-owned scratch)
-├── frame_counter   : uint64_t                       (last frame this state was updated)
-├── selected_group  : MeshletGroupHandle             (coarsest admissible group from prior frame)
-├── prev_threshold  : float                          (pixel threshold used last frame)
-└── stale           : bool                           (true after pak hot-reload; forces full walk next frame)
+// CutState is render-owned scratch — see §3.8 for its struct definition.
 ```
 
 `ClusterDAG` is a sibling aggregate of `MeshletGroup` in the §4.1
@@ -191,13 +187,6 @@ because their invariants are inseparable. The cook-time
 in §7 below; the runtime form is a `const`-pointer view over the
 mmap'd pak bytes — geometry never copies the DAG into engine-owned
 memory.
-
-`CutState` is **owned by render's per-view scratch arena** (`render`
-SPEC §4.1.4), not by geometry. Geometry specifies its shape and
-update recurrence so render's cull pass (#770) can implement it
-without inventing a private data layout. The struct is POD; ABI
-exposure is via `eastl::span<const std::byte>` reads only —
-geometry's public surface (`SPEC.md` §5) does not name the type.
 
 ### 3.2 Band layout — CSR for cache-friendly traversal
 
@@ -374,9 +363,9 @@ fully resident.
    `selected_group` immediately. This is the temporal-coherence
    fast path; on stable scenes it dominates frame-to-frame
    (§5.1 below). `O(1)` work.
-3. **Coarsest-first descent.** Starting from any group at the
-   coarsest band (`band_offsets_[8] - 1`, walking leftward across
-   the band), evaluate the **admission predicate**:
+3. **Coarsest-first descent.** Iterate **all** groups in the coarsest
+   band (indices `[band_offsets_[7], band_offsets_[8])`) and evaluate
+   the **admission predicate** for each:
 
    ```
    admissible(g) ⇔ SSE(g) ≤ T  ∧  fully_resident(g) == true
@@ -468,12 +457,12 @@ CutState_{n+1} = select_lod_group(mesh, T_{n+1}, V_{n+1})
                  .with_stale(false)
 ```
 
-`stale` is forced `true` on three events: (a) initial allocation;
-(b) pak hot-reload publishes `MeshReplaced` (`SPEC.md` §8.5
-observer responsibility 1); (c) view-handle reuse across frames.
-Each forces a full walk on the next call. `CutState` lives in
-render's per-view scratch arena (`render` SPEC §4.1.4); geometry
-specifies the layout but never allocates it.
+`stale` is forced `true` on initial allocation (a). The remaining
+stale-trigger events are render's observer responsibilities and are
+enumerated in `SPEC.md` §8.5 observer responsibility 1; geometry
+does not own them. Each forces a full walk on the next call.
+`CutState` lives in render's per-view scratch arena (`render` SPEC
+§4.1.4); geometry specifies the layout but never allocates it.
 
 Concurrency: `CutState` is accessed by exactly one thread at a
 time (the cull-pass worker for `View` `v`). No atomics needed; the
