@@ -841,6 +841,8 @@ enum class Error : std::uint16_t {
     // Resource residency / aliasing
     ResourceResidencyExceeded,
     ResourceImportRefused,
+    StaleResourceHandle,          // ABI add: render-resources design §3.4 / §10
+    ResourceRoleMismatch,         // ABI add: render-resources design §3.7 / §10
     TransientPoolExhausted,
     HeapOutOfMemory,
 
@@ -917,6 +919,7 @@ struct view                   {};
 struct render_layer           {};
 struct pipeline_state         {};
 struct argument_buffer        {};
+struct sampler                {};   // ABI add: render-resources design §3.3
 struct virtual_resource       {};
 struct physical_allocation    {};
 struct blas                   {};
@@ -953,6 +956,7 @@ using ViewHandle             = Handle<tags::view>;
 using RenderLayerMask        = Handle<tags::render_layer>;
 using PSOHandle              = Handle<tags::pipeline_state>;
 using ArgumentBufferHandle   = Handle<tags::argument_buffer>;
+using SamplerHandle          = Handle<tags::sampler>;           // ABI add: render-resources design §3.3
 using VirtualResourceHandle  = Handle<tags::virtual_resource>;
 using PhysicalAllocHandle    = Handle<tags::physical_allocation>;
 using BLASHandle             = Handle<tags::blas>;
@@ -2712,7 +2716,7 @@ strategy, severity, and capability-fallback path. Adding or removing a
 variant is a render-plugin ABI bump (per `reviews/decisions/error-model.md`
 §"Composition Rules" item 5 and §3.2 collapse #5 of this spec).
 
-### 10.1 The closed sum (eighteen variants)
+### 10.1 The closed sum (twenty design-name rows; 24 §5 enumerators)
 
 The §5 stub publishes the canonical enumerator names; §10 names them in
 the documentation form below and notes the §5 spelling in parentheses
@@ -2728,6 +2732,8 @@ adds them in a single ABI bump alongside the §10 acceptance test.
 | `PsoCompileFailed`             | `PipelineCompileFailed` (§5)                 | phase 7 record (lazy compile)        |
 | `ResourceAllocFailed`          | `HeapOutOfMemory` (§5)                       | phase 6 plan / phase 7 record        |
 | `ResourceResidencyExceeded`    | `ResourceResidencyExceeded` (§5)             | phase 6 plan                         |
+| (stale handle)                 | ABI add `StaleResourceHandle` (§5)           | phase 7 record (lookup)              |
+| (role mismatch)                | ABI add `ResourceRoleMismatch` (§5)          | cold-path release                    |
 | `BarrierViolation`             | `BarrierConflict` (§5)                       | phase 6 graph compile                |
 | `GraphCycle`                   | `RenderGraphCycle` (§5)                      | phase 6 graph compile                |
 | `GraphResourceUnknown`         | `PassUndeclaredAccess` (§5)                  | phase 6 graph compile                |
@@ -2741,9 +2747,11 @@ adds them in a single ABI bump alongside the §10 acceptance test.
 | `GpuTimeout`                   | `FenceTimeout` (§5) + payload `gpu_fault=false` | phase 9                          |
 | `GpuFault`                     | ABI add (`GpuFault`)                          | phase 9 (Metal `executionStatus`)    |
 
-The four "ABI add" rows are the cumulative diff §5 acquires when this
-spec lands; they are testable today as `static_assert`s against the
-header in `tests/render/spec_§5_§10_consistency.cpp`.
+The six "ABI add" rows (four original + `StaleResourceHandle` +
+`ResourceRoleMismatch` added by the render-resources design) are the
+cumulative diff §5 acquires when these designs land; they are testable
+today as `static_assert`s against the header in
+`tests/render/spec_§5_§10_consistency.cpp`.
 
 ### 10.2 Recovery vocabulary
 

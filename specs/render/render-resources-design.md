@@ -15,7 +15,9 @@
 > resources / `TransientPool` heaps, §9.5 heap composition (256 MiB
 > transient + 128 MiB persistent + 16 MiB handle tables + 48 MiB RT
 > + 64 MiB PSO = 512 MiB ceiling), §9.5.1 allocator rules, and §10
-> failure-mode rows `ResourceAllocFailed` / `ResourceResidencyExceeded`.
+> failure-mode rows `ResourceAllocFailed` / `ResourceResidencyExceeded`
+> (§10 design-name labels; §5 enum identifiers are `HeapOutOfMemory` /
+> `TransientPoolExhausted` / `ResourceResidencyExceeded`).
 > Cites `reviews/decisions/error-model.md`,
 > `reviews/decisions/perf-budget.md`,
 > `reviews/decisions/plugin-abi.md`,
@@ -166,8 +168,8 @@ re-derived per PHILOSOPHY §"How harmonius is used"):
 
 | Harmonius clause                                                                                  | Glibre disposition                                                                                                                                                                                                                                                                                                       |
 |---------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **R-2.5.1** — Strongly typed handles per resource kind (texture / buffer / sampler / arg buffer / target). | **Covered.** §3.1: phantom-tagged `Handle<Tag>` template per `SPEC.md` §5 (`tags::virtual_resource`, `tags::physical_allocation`, `tags::argument_buffer`, `tags::ring_slice`, `tags::shadow_atlas`, `tags::hzb`). Cross-tag assignment is a compile error. |
-| **R-2.5.2** — Generational handles for stale-handle detection.                                       | **Covered.** §3.4: 24-bit generation + 40-bit index packed into `u64` per `SPEC.md` §5; a free-then-realloc bumps the slot's generation, stale handles fail `lookup()` with `render::Error::ResourceImportRefused` (re-used for stale-handle as it shares the "borrow rejected" semantic; documented in §10).            |
+| **R-2.5.1** — Strongly typed handles per resource kind (texture / buffer / sampler / arg buffer / target). | **Covered.** §3.1: phantom-tagged `Handle<Tag>` template per `SPEC.md` §5 (`tags::virtual_resource`, `tags::physical_allocation`, `tags::argument_buffer`, `tags::sampler`, `tags::ring_slice`, `tags::shadow_atlas`, `tags::hzb`). Cross-tag assignment is a compile error. |
+| **R-2.5.2** — Generational handles for stale-handle detection.                                       | **Covered.** §3.4: 24-bit generation + 40-bit index packed into `u64` per `SPEC.md` §5; a free-then-realloc bumps the slot's generation, stale handles fail `lookup()` with `render::Error::StaleResourceHandle` (documented in §10).            |
 | **R-2.5.3** — Transient resources with lifetime ≤ one frame; alias-eligible.                         | **Covered.** §3.2 transient role + §3.5 transient pool: `ResourceLifetime::Transient` declares; alias planner (#760) produces colouring; this layer materialises placements on the `MTL::Heap` pool. §3.7 invariant: a transient placement is freed at phase 7 exit. |
 | **R-2.5.4** — Persistent resources outliving a frame; not alias-eligible.                            | **Covered.** §3.2 persistent role + §3.6 persistent allocator: `ResourceLifetime::Persistent` allocates from the persistent slab; never enters the alias plan; survives until `release_persistent()` or plugin shutdown. |
 | **R-2.5.5** — Imported resources as borrows; lifetime owned by importer.                            | **Covered.** §3.2 imported role + §3.8 import borrow registry: `declare_imported(desc, PhysicalAllocHandle)` records a non-owning reference; `PhysicalAllocation::lifetime_imported_borrow` flag prevents this layer from calling release. Read by default; write opt-in per §4.1.4 invariant 3. |
@@ -177,10 +179,10 @@ re-derived per PHILOSOPHY §"How harmonius is used"):
 | **R-2.5.9** — Lifetime-driven release (not refcount); release happens at known frame boundaries. | **Covered.** §3.7: transient releases at phase 7 exit; persistent releases by explicit `release_persistent()`; imported releases are no-ops (importer owns). No reference counting; PHILOSOPHY §"explicit lifetimes" preserved. |
 | **R-2.5.10** — Heap pool with placement-resource sub-allocation (Metal `MTLHeap`).                  | **Covered.** §3.5 transient pool + §3.6 persistent allocator: both back onto `MTL::Heap` with `MTL::HeapType::placement`, slot-allocated by best-fit-by-size on the persistent side and alias-plan-driven on the transient side. Heap creation goes through `MetalDevice::heap_allocator()`. |
 | **R-2.5.11** — Per-context allocator tagging; render owns the GPU residency tag.                    | **Covered.** §3.11 + `SPEC.md` §9.5.1: every allocation routes through `glibre::PerContextAllocator` stamped with `ContextTag::render`. CPU shadows are tagged by the requesting context; GPU bytes are render-tagged regardless of caller per `perf-budget.md` Allocator Rule 5. |
-| **R-2.5.12** — Resource exhaustion produces typed errors, not exceptions.                           | **Covered.** §3.12 + §10: `ResourceResidencyExceeded`, `HeapOutOfMemory`, `TransientPoolExhausted`, `ResourceImportRefused`, `CapabilityNotSupported` (for Tier-2 absence). All return `glibre::Result<T>`; no exception path. |
+| **R-2.5.12** — Resource exhaustion produces typed errors, not exceptions.                           | **Covered.** §3.12 + §10: `ResourceResidencyExceeded`, `HeapOutOfMemory`, `TransientPoolExhausted`, `StaleResourceHandle`, `ResourceRoleMismatch`, `ResourceImportRefused`, `CapabilityNotSupported` (for Tier-2 absence). All return `glibre::Result<T>`; no exception path. |
 | Harmonius design — Free list per `MTLHeap` with first-fit / best-fit policy.                       | **Covered, simplified.** §3.6 step 3: persistent allocator uses best-fit-by-size against a fixed-bin free list (eight power-of-two size buckets); the alias planner handles transient placement and does not need a free list at all (its colouring runs cold-path each compile). PHILOSOPHY collapse: one allocator policy, not two. |
 | Harmonius design — Resource versioning per write to enable cross-pass barriers.                    | **Refused at this aggregate; routed to graph aggregate.** Read-after-write versioning is the alias planner's job (#760 §3.5). Resources only declare lifetime; the planner derives versioning from declared edges. |
-| Harmonius design — Sampler cache keyed by `MTLSamplerDescriptor`.                                  | **Covered.** §3.13: a small sampler cache (16 entries) keyed by the closed-set `SamplerDesc` value object; vended by `SamplerHandle` (re-using `tags::argument_buffer` namespace via a sub-tag — see §4.1). Samplers are persistent and alias-disjoint. |
+| Harmonius design — Sampler cache keyed by `MTLSamplerDescriptor`.                                  | **Covered.** §3.13: a small sampler cache (16 entries) keyed by the closed-set `SamplerDesc` value object; vended by `SamplerHandle` (using distinct `tags::sampler` — see §3.3). Samplers are persistent and alias-disjoint. |
 | Harmonius design — Per-resource debug name surfaced to Metal capture tools.                        | **Covered.** §3.1: `ResourceDesc.debug_name` propagates to `MTL::Texture::setLabel(...)` / `MTL::Buffer::setLabel(...)` at materialisation; the binder also propagates pass / material / draw frequency labels for argument buffers. Debug-only; no shipping cost. |
 | Harmonius design — Cross-process resource sharing (e.g. compositor handoff).                       | **Refused for MVP.** Single-process, single-window engine (`SPEC.md` §3.3 routed to `platform`). Imported borrows are intra-process only. Listed in §12 below. |
 | Harmonius design — Resource serialisation to disk between sessions.                                 | **Refused, hard.** PHILOSOPHY anti-pattern. The only persistent render artefact is the PSO archive (`SPEC.md` §7.1.2), which is not a resource (it's a pipeline state). Resources never persist. |
@@ -283,25 +285,26 @@ The three-role classification is a `SPEC.md` §4.1.4 invariant; the
 detailed-design contribution here is the storage path, the
 release seam, and the alias eligibility rule. Confusion between
 roles (e.g. trying to `release_persistent` on an imported handle)
-returns `render::Error::ResourceImportRefused` with no state
+returns `render::Error::ResourceRoleMismatch` with no state
 mutation.
 
-### 3.3 Public handle catalog (re-statement of `SPEC.md` §5 with sub-tag refinement)
+### 3.3 Public handle catalog (re-statement of `SPEC.md` §5 with sampler-tag refinement)
 
 `SPEC.md` §5 publishes the closed handle catalog. The detailed
 design refines two practical consequences:
 
-1. **`SamplerHandle` is a sub-tag of `tags::argument_buffer`.** The
-   header's `tags::argument_buffer` namespace declares both the
-   per-pass argument-buffer record and the sampler-state record;
-   the sub-discrimination is a private 8-bit field inside the
-   `Handle<tag::argument_buffer>`'s reserved generation byte
-   (`SPEC.md` §5: "24-bit generation"; the upper 8 bits of the
-   generation half stay reserved for sub-tag, leaving 16 bits for
-   the live wrap counter — wraps every 65 535 free-realloc cycles
-   per slot, which exceeds MVP frame counts by 30 minutes of pure
-   realloc churn). This refinement is internal; ABI-wise the
-   public handle stays a `u64`.
+1. **`SamplerHandle` uses a distinct `tags::sampler` phantom type.**
+   Samplers are GPU immutable state objects (no aliasing, no
+   reallocation mid-frame) and have a structurally different lifetime
+   from argument buffers (plugin-shutdown vs. per-pass). Giving
+   samplers their own phantom tag (`Handle<tags::sampler>`) preserves
+   the phantom-tag compile-time enforcement: cross-assignment between
+   `SamplerHandle` and `ArgumentBufferHandle` remains a compile error,
+   and the `SlotTable<MTL::SamplerState*, tags::sampler>` table can
+   use the full 24-bit generation field without reserving bits for
+   sub-tag discrimination (§3.4 below). `tags::sampler` is added to
+   `SPEC.md` §5's handle catalog as part of this refinement (see
+   §10.2 ABI note).
 2. **`RTHandle` (render-target handle) is *not* a separate public
    handle.** Render targets are `VirtualResourceHandle` instances
    whose `usage` includes `ColorAttachment` or `DepthAttachment`
@@ -316,36 +319,38 @@ Public-handle re-statement (binding):
 |-------------|-----|-----------|-------------|
 | `VirtualResourceHandle` | `tags::virtual_resource` | `GraphBuilder::declare_*` | Phase 7 exit (transient), `release_persistent`, importer (imported) |
 | `PhysicalAllocHandle`   | `tags::physical_allocation` | Internal — vended at materialisation; surfaced only to `declare_imported(..., PhysicalAllocHandle)` callers (the importer obtains it via the import-side seam in their own SPEC) | Same as the resource it backs |
-| `ArgumentBufferHandle`  | `tags::argument_buffer` (sub-tag = ArgBuf) | `argbuf_binder_.acquire(pass, frequency_group)` | Per-pass: end of pass record; per-material / per-frame: per the binder (§3.9) |
-| `SamplerHandle`         | `tags::argument_buffer` (sub-tag = Sampler) | `ResourceCatalog::sampler(SamplerDesc)` (cached) | Plugin shutdown |
+| `ArgumentBufferHandle`  | `tags::argument_buffer` | `argbuf_binder_.acquire(pass, frequency_group)` | Per-pass: end of pass record; per-material / per-frame: per the binder (§3.9) |
+| `SamplerHandle`         | `tags::sampler` | `ResourceCatalog::sampler(SamplerDesc)` (cached) | Plugin shutdown |
 | `RingSliceHandle`       | `tags::ring_slice` | `ring_buffer_mgr_.acquire_slice(kind, bytes)` | Frame retire (§3.10) |
 | `HZBHandle`, `ShadowAtlasHandle`, `ClusterCullStateHandle`, `BLASHandle`, `TLASHandle` | per-aggregate tags (`SPEC.md` §5) | Owning aggregate; resource catalog stores the underlying `PhysicalAllocHandle` only | Owning aggregate |
 
-The public surface is exactly `SPEC.md` §5; the table above is a
-read-back-into-context summary of which seam vends and releases
-each kind.
+The public surface is exactly `SPEC.md` §5 (plus `tags::sampler`
+added by this design); the table above is a read-back-into-context
+summary of which seam vends and releases each kind.
 
 ### 3.4 Generation counter — stale-handle detection
 
-Every `SlotTable<T, Tag>` slot carries a 24-bit generation counter;
-a fresh allocation takes the slot's *current* generation, a release
-*increments* the counter, and a `lookup(handle)` validates
-`handle.generation() == slots_[handle.index()].generation_` before
-returning `&slots_[index].value_`. Mismatch returns
-`render::Error::ResourceImportRefused` (semantically: "this borrow
-was rejected because the underlying slot moved on") with a
-debug-build log line carrying the handle's `(index, generation)`,
-the slot's *live* generation, and the most recent producer call site
-(captured in debug builds via `__builtin_FILE` + `__builtin_LINE`
-threaded through the `declare_*` API; release builds skip the
-capture).
+Every `SlotTable<T, Tag>` slot carries a **24-bit generation counter**
+(all 24 bits live — no sub-tag bits reserved). This applies uniformly
+to all five handle tables: `VirtualResource`, `PhysicalAlloc`,
+`ArgumentBuffer`, `Sampler` (using its own `tags::sampler` table per
+§3.3), and `RingSlice`. A fresh allocation takes the slot's *current*
+generation; a release *increments* the counter; `lookup(handle)`
+validates `handle.generation() == slots_[handle.index()].generation_`
+before returning `&slots_[index].value_`. Mismatch returns
+`render::Error::StaleResourceHandle` (generation mismatch = stale
+borrow; see §10) with a debug-build log line carrying the handle's
+`(index, generation)`, the slot's *live* generation, and the most
+recent producer call site (captured in debug builds via
+`__builtin_FILE` + `__builtin_LINE` threaded through the `declare_*`
+API; release builds skip the capture).
 
 Wrap-around safety:
 
 - 24 bits = 16 777 215 unique generations per slot before wrap.
 - At MVP S1 a transient table slot may free + realloc up to 11
   times per frame (one per `View` × 4 views × ~3 declared transients
-  per pass slot in the worst case); 16M / 11 ≈ 1.5M frames =
+  per pass slot in the worst case); 16 777 215 / 11 ≈ 1 525 200 frames
   ≈ 7 hours of continuous gameplay at 60 FPS before any one slot
   could wrap. Per `SPEC.md` §4.1.4 invariant 1 ("transient never
   outlives a frame") and `SPEC.md` §9.6's leak-guard benchmark, no
@@ -353,7 +358,8 @@ Wrap-around safety:
   boundary; wrap-around-after-7-hours therefore cannot strike a
   live observer. Persistent slot generations advance only on
   explicit release; their wrap rate is bounded by user / dev
-  action and is non-issue.
+  action and is non-issue. Sampler slots are released only at
+  plugin shutdown; their generation counter is non-issue in practice.
 - The wrap is **detected, not forbidden**. When a slot's generation
   hits `0xFFFFFF` and the next free attempts to bump, the table
   marks the slot **retired** (alive_=true, gen=0xFFFFFF, value_
@@ -497,7 +503,7 @@ their own release seam:
    slots) frees the underlying `MTL::Heap` block back to the
    matching free-list bin and advances the slot generation. Calling
    this on a transient or imported handle returns
-   `render::Error::ResourceImportRefused` with no state mutation.
+   `render::Error::ResourceRoleMismatch` with no state mutation.
    Persistent resources held by sibling aggregates (HZB,
    `ClusterCullState`, shadow atlas, RT TLAS, ring slabs) are
    released by their owning aggregate at plugin shutdown, never by
@@ -533,12 +539,17 @@ The borrow record fields:
 
 ```
 ImportedBorrow
-├── kind_              : enum { Drawable, BLAS, GeomStream, VfxBuffer }
+├── kind_              : enum { Drawable, BLAS, GeomStream }   // closed MVP set; see note below
 ├── physical_handle_   : PhysicalAllocHandle           (catalog-side)
 ├── mtl_handle_        : metal-cpp pointer (immutable post-record)
 ├── owner_drop_token_  : eastl::function<void()>       (importer-supplied; invoked on borrow rejection only)
 └── write_capability_  : bool                          (default false; opt-in per `SPEC.md` §4.1.4 invariant 3)
 ```
+
+> **Future ABI amendment (post-MVP):** When the `vfx` plugin is introduced, a `VfxBuffer` arm will
+> be added to `kind_` and the corresponding `SPEC.md` §4.1.4 ABI-add row will be filed. This
+> constitutes a minor ABI bump requiring a middleman-dylib hash update. No cross-domain abstraction
+> is introduced here before a concrete second user exists (PHILOSOPHY §5, anti-pattern rule).
 
 Write capability is only set true for the swapchain drawable in
 the `present` pass; every other import is a read-borrow. An attempt
@@ -680,15 +691,19 @@ per `perf-budget.md` Allocator Rule 5. The wiring obeys
 
 ### 3.12 Failure-mode mapping (forward reference to §10)
 
-The catalog produces five render-error variants:
+The catalog produces seven render-error variants (§5 enum identifiers;
+§10 design-name labels in parentheses for cross-reference):
 
-| Trigger | Variant | §10 row |
-|---------|---------|---------|
+| Trigger | §5 Variant | §10 design-name row |
+|---------|-----------|---------------------|
 | Persistent allocator exhausted (best-fit failed) | `HeapOutOfMemory` | `ResourceAllocFailed` |
 | Transient pool peak-residency > sub-pool cap | `TransientPoolExhausted` | `ResourceAllocFailed` |
 | Per-frame total residency > 512 MiB | `ResourceResidencyExceeded` | `ResourceResidencyExceeded` |
-| Stale handle / generation mismatch / role mismatch | `ResourceImportRefused` | (debug log + retry loop falls into `abort-frame` in release) |
-| Tier-2 bindless required, host CapabilitySet lacks `BindlessResources` | `CapabilityNotSupported` | `RtCapabilityMissing` (re-used as the bindless arm) |
+| Stale handle (generation mismatch at lookup) | `StaleResourceHandle` | (abort-frame; see §10) |
+| Role mismatch (e.g. `release_persistent` on transient handle) | `ResourceRoleMismatch` | (cold-path assert; see §10) |
+| Genuine import-borrow refusal (write declaration on read-only borrow) | `ResourceImportRefused` | (abort-engine; see §10) |
+| Sampler cache over-capacity | `ResourceResidencyExceeded` | `ResourceResidencyExceeded` |
+| Tier-2 bindless required, host CapabilitySet lacks `BindlessResources` | `CapabilityNotSupported` | `RtCapabilityMissing` (§10 design-name for bindless-capability arm) |
 
 Recovery routing per `SPEC.md` §10.2 is preserved verbatim;
 detail in §10 below.
@@ -720,10 +735,13 @@ across the entire MVP shader set. Sixteen entries is sized for the
 union of every MVP pass's sampler use ({linear-clamp, linear-repeat,
 trilinear-anisotropic-repeat for albedo, comparison-less-clamp for
 shadow, nearest-clamp for visID resolve, …}); over-cap returns
-`render::Error::ResourceImportRefused`, which is treated as a SPEC
-amendment trigger rather than a runtime concern (samplers are not
-data-driven in MVP). Cache lookup is linear (16 entries; one
-cache line); hit rate is 100 % under MVP's static set.
+`render::Error::ResourceResidencyExceeded`, consistent with the
+slot-table overflow precedent in §11.1 ("capacity overflow returns
+`ResourceResidencyExceeded`"). This is treated as a SPEC amendment
+trigger rather than a runtime concern (samplers are not data-driven
+in MVP; if the static set ever exceeds 16, the cap is raised in
+a §3.13 amendment, not at runtime). Cache lookup is linear (16
+entries; one cache line); hit rate is 100 % under MVP's static set.
 
 ### 3.14 Hot-reload survival hook
 
@@ -783,12 +801,18 @@ using ClusterCullStateHandle = Handle<tags::cluster_cull_state>;
 }  // namespace glibre::render
 ```
 
-`SamplerHandle` is a private sub-tag of `tags::argument_buffer` per
-§3.3; it is **not** exported as a separate top-level alias because
-the sampler cache is plugin-internal (no caller outside render
-needs to construct a `SamplerHandle`). The header retains
-`ArgumentBufferHandle` as the public name; samplers are vended
-through the same pathway by the binder (§3.9).
+`SamplerHandle` is `Handle<tags::sampler>` — a distinct phantom type
+separate from `ArgumentBufferHandle` (`Handle<tags::argument_buffer>`).
+`tags::sampler` gives the `SlotTable<MTL::SamplerState*, tags::sampler>`
+table the full 24-bit generation field with no sub-tag bits consumed
+(§3.4). Cross-assignment between `SamplerHandle` and
+`ArgumentBufferHandle` is a compile error enforced by the phantom-tag
+mechanism. `SamplerHandle` is plugin-internal because
+`ResourceCatalog::sampler(SamplerDesc)` is the sole vend point; no
+caller outside the render plugin needs to construct one. Samplers are
+**not** vended through the argument-buffer binder (§3.9); the binder
+receives a `SamplerHandle` produced by the sampler cache and encodes it
+into the argument buffer at bind time.
 
 ### 4.2 Methods on `GraphBuilder` (re-stated from SPEC §5)
 
@@ -1208,18 +1232,24 @@ performance signature.
 
 ## 10. Failure modes
 
-The aggregate produces five distinct errors, each rolling into
-`SPEC.md` §10.1's closed sum.
+The aggregate produces seven distinct errors, each rolling into
+`SPEC.md` §10.1's closed sum. The three new variants
+(`StaleResourceHandle`, `ResourceRoleMismatch`, and the
+`ResourceResidencyExceeded` arm for sampler-cache overflow) are ABI
+additions that require a `SPEC.md` §5 enum amendment and an ABI bump
+per `reviews/decisions/error-model.md` Composition Rule 5.
 
 | Render error variant | Trigger | Recovery (per §10.2) | Severity | Capability-fallback path | Test fixture |
 |----------------------|---------|----------------------|----------|---------------------------|--------------|
 | `HeapOutOfMemory` | Persistent-allocator best-fit failure: every bin of sufficient size is empty after merge attempts. Triggered cold-path (init or hot-reload register) or per-frame compile when a persistent resource is declared mid-frame. | `lower-tier` (re-plan at lower tier shrinks the working set; e.g. shadow atlas 4K → 2K). | `warn` | Lower tier's pass predicates select smaller persistent extents. | `tests/render/resources/heap_out_of_memory_lower_tier.cpp` |
 | `TransientPoolExhausted` | Alias planner produces a peak-residency for any sub-pool exceeding its cap; triggered during graph compile, phase 7 entry. | `lower-tier`. | `warn` | Same as `HeapOutOfMemory`; lower tier shrinks gbuffer / scratch targets. | `tests/render/resources/transient_pool_exhausted.cpp` |
-| `ResourceResidencyExceeded` | Compile computes `total_live_bytes_after_compile > 512 MiB` (`SPEC.md` §10 row, this aggregate's primary shared trigger with `RenderGraph`). | `lower-tier`. | `warn` | Re-plan at lower tier shrinks the working set under 512 MiB. | `tests/render/resources/residency_exceeded_lower_tier.cpp` (mirrors `SPEC.md` §10.3 fixture name). |
-| `ResourceImportRefused` | (a) Stale handle (generation mismatch) at lookup; (b) role mismatch (e.g. `release_persistent` on a transient handle); (c) imported-handle write declaration on a read-borrow; (d) cross-tag handle assignment caught at compile time (does not reach runtime). | (a) `abort-frame`; (b) cold-path no-op (debug assert); (c) `abort-engine` (graph is structurally invalid); (d) compile-time error. | `error` (a, b); `warn` (c — re-routed via `BarrierConflict`). | n/a | `tests/render/resources/stale_handle.cpp`, `tests/render/resources/role_mismatch.cpp`. |
+| `ResourceResidencyExceeded` | (a) Compile computes `total_live_bytes_after_compile > 512 MiB` (`SPEC.md` §10 row, this aggregate's primary shared trigger with `RenderGraph`); (b) sampler cache over-capacity (`sampler_cache_.size() == 16` and a new `SamplerDesc` is requested — treated as a SPEC amendment trigger in MVP; see §3.13). | `lower-tier` (case a). For case (b): `abort-engine` at init / `lower-tier` (sampler count reduction) at hot-reload; over-cap cannot arise at frame-time under MVP's static sampler set. | `warn` (a); `error` (b). | Re-plan at lower tier shrinks the working set under 512 MiB (case a only). | `tests/render/resources/residency_exceeded_lower_tier.cpp` (case a); `tests/render/resources/sampler_over_cap.cpp` (case b). |
+| `StaleResourceHandle` | Generation mismatch at `SlotTable::lookup`: the handle's generation counter does not match the slot's current generation, indicating the slot was freed and reallocated since the handle was issued. Structurally distinct from a role mismatch or import refusal. | `abort-frame`. | `error` | n/a | `tests/render/resources/stale_handle.cpp` |
+| `ResourceRoleMismatch` | Role mismatch on a release API call (e.g. `release_persistent` called on a transient or imported handle). Cold-path only; cannot arise on the render-thread hot path. No state mutation. | Cold-path no-op + debug assert; surfaced as `warn` in structured log. | `warn` | n/a | `tests/render/resources/role_mismatch.cpp` |
+| `ResourceImportRefused` | Genuine import-borrow refusal: an imported handle is declared for write access on a resource whose borrow record was registered read-only (§3.8 invariant). Structurally distinct from a stale handle or role mismatch; this is a graph structural error. | `abort-engine` (graph is structurally invalid). | `error` | n/a — graph must be fixed. | `tests/render/resources/import_write_on_read_borrow.cpp` |
 | `CapabilityNotSupported` (bindless arm) | `Capability::BindlessResources` absent at init while a registered pass declared it required. | `lower-tier` (init) / `disable-feature` (hot-reload register). | `warn` | Argument-buffer binder demotes to per-pass uniform binding without bindless visibility (§3.9 fallback path); per-frame and per-material binding tables become per-pass-direct. | `tests/render/resources/bindless_capability_missing.cpp`. |
 
-All five variants honour the §10.2 closed recovery ladder verbatim;
+All variants honour the §10.2 closed recovery ladder verbatim;
 no aggregate-private recovery is invented.
 
 ### 10.1 Error construction site rule
@@ -1229,8 +1259,10 @@ dylib:
 
 - `HeapOutOfMemory` — `resources/persistent.cpp::PersistentAllocator::allocate`.
 - `TransientPoolExhausted` — `resources/alias_planner.cpp::AliasPlanner::compute` (the planner constructs the error; the catalog forwards it through `RenderGraph::compile`).
-- `ResourceResidencyExceeded` — `resources/transient_pool.cpp::TransientPool::peak_residency_check`.
-- `ResourceImportRefused` — `resources/handle_table.cpp::SlotTable::lookup` (stale) and `resources/imported.cpp::ImportRegistry::release` (role mismatch).
+- `ResourceResidencyExceeded` — (a) `resources/transient_pool.cpp::TransientPool::peak_residency_check`; (b) `resources/sampler_cache.cpp::SamplerCache::get_or_create` (over-cap arm). Two construction sites for one variant is an SRP violation that must be resolved in the implementation plan: either split into separate variants (preferred; requires SPEC.md §5 ABI bump) or consolidate via a shared helper. Tracked in [SPIKE] iterate-render-resourceresidencyexceeded-srp (#874).
+- `StaleResourceHandle` — `resources/handle_table.cpp::SlotTable::lookup` (generation mismatch).
+- `ResourceRoleMismatch` — `resources/imported.cpp::ImportRegistry::release` (wrong release API for handle's lifetime kind).
+- `ResourceImportRefused` — `resources/imported.cpp::ImportRegistry::declare_write` (write-on-read-borrow).
 - `CapabilityNotSupported` — `resources/argument_buffer.cpp::ArgumentBufferBinder::ensure_bindless`.
 
 Single construction site per variant is the SRP test: if a future
@@ -1239,13 +1271,20 @@ SRP boundary is being violated and a refactor is required.
 
 ### 10.2 Cross-references
 
-- `SPEC.md` §10.1 — closed sum (eighteen variants).
+- `SPEC.md` §10.1 — closed sum (twenty design-name rows / 24 §5 enumerators;
+  this design adds `StaleResourceHandle` and `ResourceRoleMismatch` as ABI
+  additions, plus adds `tags::sampler` to the §5 handle catalog).
 - `SPEC.md` §10.2 — recovery ladder.
-- `SPEC.md` §10.3 — per-variant rows (this design's five
-  contributions appear as `ResourceAllocFailed`,
-  `ResourceResidencyExceeded`, `RtCapabilityMissing`).
+- `SPEC.md` §10.3 — per-variant rows. This design's contributions map
+  to §10 design-name rows as follows:
+  - `HeapOutOfMemory` + `TransientPoolExhausted` → `ResourceAllocFailed`
+  - `ResourceResidencyExceeded` → `ResourceResidencyExceeded`
+  - `StaleResourceHandle` + `ResourceRoleMismatch` + `ResourceImportRefused` → (resource borrow failure rows; no single §10 design-name — each has its own recovery action per §10)
+  - `CapabilityNotSupported` (bindless arm) → `RtCapabilityMissing` (§10 design-name)
 - `reviews/decisions/error-model.md` — Composition Rules item 5
-  (closed sum extension is an ABI bump).
+  (closed sum extension is an ABI bump; `StaleResourceHandle` and
+  `ResourceRoleMismatch` are new variants requiring an ABI bump when
+  `SPEC.md` §5 is updated).
 
 ## 11. Test plan
 
@@ -1263,7 +1302,7 @@ Catch2 file: `tests/render/resources/handle_table.cpp`.
 |-----------|---------|
 | `slot table — alloc / release / realloc cycles preserve generation soundness` | After `K = 10 000` cycles, every emitted handle satisfies `generation == slot.generation` at lookup; freed handles fail. |
 | `slot table — generation wrap reaches retire state at gen-cap` | With `cap = 4`, `generation_bits = 4`, the 17th realloc cycle marks the slot retired and pops the next free index. |
-| `slot table — phantom-tag prevents cross-assignment at compile time` | `static_assert` on `!std::is_assignable_v<VirtualResourceHandle&, PhysicalAllocHandle>`. |
+| `slot table — phantom-tag prevents cross-assignment at compile time` | `static_assert` on `!std::is_assignable_v<VirtualResourceHandle&, PhysicalAllocHandle>` and `!std::is_assignable_v<SamplerHandle&, ArgumentBufferHandle>` (distinct tags verify no sub-tag aliasing). |
 | `slot table — capacity overflow returns ResourceResidencyExceeded` | Exhaust `cap`; next `alloc` returns the typed error; no slot inserted. |
 | `slot table — release of stale handle is a no-op` | A handle whose generation mismatches the slot's current generation does not free the slot; idempotent. |
 
