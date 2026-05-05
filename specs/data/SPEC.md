@@ -2411,7 +2411,8 @@ removing or reordering an arm is an ABI-breaking change that follows
 
 namespace glibre::types::data {
 
-// Wire-time location attached to DeserializeError / EnvelopeTruncated.
+// Wire-time location attached to DeserializeError / SchemaUnknown /
+// EnvelopeTruncated.
 // `offset` is the byte index *within the inbound payload* at which
 // decoding stopped, measured from the start of the EnvelopeHeader
 // (§4.8 inv. 2). Non-payload arms set this to a sentinel — see §10.2.
@@ -2438,7 +2439,7 @@ enum class ErrorTag : std::uint16_t {
 struct Error {
     ErrorTag tag{};
 
-    // Set on tags 3 and 9; default-constructed on every other arm.
+    // Set on tags 3, 6, and 9; default-constructed on every other arm.
     WireSite at{};
 
     // Set on tags 2, 7, 8: identifies the migration step that
