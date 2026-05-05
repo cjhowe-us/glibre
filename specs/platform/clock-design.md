@@ -212,31 +212,18 @@ auto Clock::now() const noexcept -> Instant {
         (__uint128_t(t) * info.numer) / info.denom);
 #if !defined(NDEBUG)
     // §4.4 inv #1 defensive guard: detect monotonic regression in debug.
-    // The atomic CAS loop below uses `relaxed` ordering because the
-    // regression check is a *correctness* invariant — every thread
-    // observes a monotonically non-decreasing snapshot and aborts only
-    // if its own observation regresses against that snapshot.  No
-    // happens-before is needed because the CAS itself synchronizes the
-    // read-modify-write.  Backward writes are impossible by construction.
-    static std::atomic<std::int64_t> last_seen{0};
-    // Monotonic-CAS loop: advance last_seen forward to `ns` only if
-    // `ns` is strictly newer.  Multiple threads racing on `now()` may
-    // each observe a different `prev`; the CAS ensures only the thread
-    // that observed the oldest value wins the write, and all threads
-    // that see `prev >= ns` leave last_seen unchanged rather than
-    // writing a backward value (the plain-store bug fixed here).
-    auto prev = last_seen.load(std::memory_order_relaxed);
-    while (prev < ns &&
-           !last_seen.compare_exchange_weak(prev, ns,
-                                            std::memory_order_relaxed,
-                                            std::memory_order_relaxed)) {}
-    // After the CAS loop, `prev` holds the value we *lost* to or the
-    // value we successfully replaced.  If the OS clock genuinely
-    // regressed (ns < prev after the loop), abort per §4.4 inv #1.
-    if (ns < prev) {
+    // The check is per-thread (thread_local).  A thread aborts iff its
+    // own observation regresses against its previous observation —
+    // guaranteed to reflect a genuine OS clock regression on that thread,
+    // never a cross-thread race.  No happens-before required because the
+    // slot is thread-private.  Cost: one TLS read + write + branch in
+    // debug builds; zero in release.
+    thread_local std::int64_t last_seen{0};
+    if (ns < last_seen) {
         // Spec invariant violated by the OS. Abort, do not clamp.
         std::abort();
     }
+    last_seen = ns;
 #endif
     return Instant{ns};
 }
@@ -260,21 +247,22 @@ Choices and their reasons:
   non-blocking on every subsequent call. The closure form ensures
   `mach_timebase_info` is called inside the static initializer
   only.
-- **Debug-only regression abort via monotonic-CAS loop.** Release
-  builds skip the CAS block entirely (`!defined(NDEBUG)` guard).
+- **Debug-only regression abort via per-thread high-water mark.**
+  Release builds skip the block entirely (`!defined(NDEBUG)` guard).
   The OS guarantees monotonicity; the assertion is paranoia for
   catching a future OS bug or a broken simulator. The guard uses a
-  CAS loop (not a plain `store`) so that concurrent callers each
-  racing to publish their `ns` value never write a *backward*
-  value to `last_seen`, which a plain store would allow: Thread A
-  reads `prev=100`, Thread B reads `prev=100`, Thread B stores
-  `ns=200`, Thread A (with `ns=150`) then issues `store(150)` —
-  rewinding `last_seen` to 150 — causing Thread C's subsequent
-  call to spuriously abort even though the OS clock never
-  regressed. The CAS loop advances `last_seen` only if `ns` is
-  strictly larger; backward values are left in place. On a genuine
-  OS regression (`ns < prev` after the loop), the platform aborts
-  per §4.4 inv #1 — clamping would silently corrupt anything
+  `thread_local` high-water mark rather than a shared atomic:
+  a shared atomic forces every thread to evaluate `ns < last_seen`
+  against the most-recently-stored value across all threads.  With
+  multiple threads sampling the OS clock concurrently, a slow thread
+  can read an older `ns` than a fast thread; comparing the slow read
+  against the fast write triggers a spurious abort even though neither
+  thread observed an OS regression.  Per-thread storage eliminates
+  this — only genuine same-thread regressions abort.  The
+  `thread_local` variable is still `#if !defined(NDEBUG)`-gated and
+  still in .bss (no heap).  On a genuine OS regression (this thread's
+  `now()` returns a value less than its previous return), the platform
+  aborts per §4.4 inv #1 — clamping would silently corrupt anything
   downstream that subtracts two `Instant` values.
 - **No span-based RDTSC / `clock_gettime_nsec_np` alternative.** We
   pick exactly one source and never offer a knob; second-source
@@ -838,14 +826,15 @@ The thread-safety story:
    threads block on the C runtime's static-init guard until the
    value is ready, then never block again. Cost is paid exactly
    once per process.
-4. **The debug-only regression guard uses relaxed atomics.** As
-   discussed in §3.2, this is not a synchronization point — it is a
-   paranoia check anchored to the monotonic-CAS guard.  Under that
-   guard, concurrent threads cannot race themselves into a spurious
-   abort.  A thread aborts iff its own observed `ns < last_seen` after
-   the CAS loop terminates — which can only happen on a genuine OS-clock
-   regression, not on a race.  No racing thread can write a backward
-   `last_seen` value because the CAS only advances forward.
+4. **The debug-only regression guard uses per-thread (thread_local)
+   storage.** As discussed in §3.2, this is not a synchronization
+   point — it is a paranoia check whose only valid outcome for this
+   thread is "abort or move on".  Each thread independently asserts
+   monotonicity against its own previous observation.  Cross-thread
+   observation differences are not visible here — there is no shared
+   atomic to race on.  A thread aborts iff its own `now()` returns a
+   value less than its previous return — genuine OS regression on that
+   thread.  No fence is needed; the slot is thread-private.
 
 There is no "current frame's time" cached on the clock — caching
 that would impose a thread-affinity (the cache must be updated by
