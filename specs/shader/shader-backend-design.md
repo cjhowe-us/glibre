@@ -1440,8 +1440,7 @@ step 3 arm). No SPEC §5 change needed for that arm.
 
 All three new arms are `refuse` severity. They are **not** present
 in §5 as of the spec revision this design refines; they must be added
-in the same follow-up plan that lands the §5 amendment for sibling
-spike #79's `ArtifactSizeExceeded` (SPEC §10.2.1). Until that
+in the same follow-up plan tracked under sub-epic #69. Until that
 amendment lands, the implementer must temporarily map:
 - `MetalLibraryCreateFailed` → `Error::MetalLibEmitFailed`
 - `FunctionMissing` → `Error::MetalLibEmitFailed`
@@ -1583,7 +1582,7 @@ obligation, PHILOSOPHY §7).
 - **[OPEN] `MetalLibraryCreateFailed`, `FunctionMissing`, and
   `BackendNotFound` enumerator amendment.** §10.5 proposes adding
   three new `shader::Error` arms. All three must land in the same
-  plan as sibling spike #79's `ArtifactSizeExceeded`; until then,
+  plan tracked under sub-epic #69; until then,
   the implementer maps the conditions as follows: `MetalLibraryCreateFailed`
   → `MetalLibEmitFailed`, `FunctionMissing` → `MetalLibEmitFailed`,
   `BackendNotFound` → `CapabilityNotSupported`. Decide whether to
