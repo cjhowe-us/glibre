@@ -10,7 +10,7 @@
 > `reviews/decisions/plugin-abi.md`,
 > `reviews/decisions/hot-reload-protocol.md`,
 > `reviews/decisions/perf-budget.md`, and
-> `reviews/decisions/frame-phases.md`. Sibling siblings on `main`:
+> `reviews/decisions/frame-phases.md`. Sibling designs on `main`:
 > `specs/data/envelope-serdes-design.md`,
 > `specs/data/schema-registry-design.md`,
 > `specs/core/type-registry-design.md`. All conclusions independently
@@ -37,7 +37,7 @@ Concretely the aggregate owns, for one `(SchemaId, SchemaVersion)`
 pair:
 
 1. The list of active fields, each described by `(name, tag,
-   type_kind, since, byte_offset, byte_size)` (§3.1).
+   kind, since, byte_offset, byte_size)` (§3.1).
 2. A per-blob name interning table so name strings resolve without
    re-loading source `.fory` files (§3.2).
 3. A per-blob lookup index keyed by `tag` for `O(log N)` field
@@ -76,7 +76,7 @@ What the aggregate **explicitly refuses to own**:
   in the blob would be runtime reflection (refused).
 - **Property paths.** Harmonius R-1.3.3 (`transform.position.x`)
   is **out of MVP scope** — the editor walks one level at a time
-  via `ReflectionField::type_kind == FQN` and a recursive descent
+  via `ReflectionField::kind == FQN` and a recursive descent
   into the nested blob (§3.5). A flattened path-string API is
   post-MVP (§12 [OPEN] #1).
 - **Trait registration.** Harmonius R-1.3.7's "register
@@ -90,7 +90,7 @@ What the aggregate **explicitly refuses to own**:
 - **Attribute / metadata system.** Harmonius R-1.3.6
   (`range`, `display_name`, `serialization hints`) is **deferred
   to post-MVP** (§12 [OPEN] #2); the MVP blob carries `name`, `tag`,
-  `type_kind`, `since`. Display names and ranges live in a future
+  `kind`, `since`. Display names and ranges live in a future
   per-field annotation table.
 - **Persisted format.** The blob is a build artifact, **not** a
   wire-format. It is not a Fory-serialized payload; it is C++
@@ -120,15 +120,15 @@ reflection in shipping builds).
 | Source                                                         | Glibre disposition (MVP) | Coverage site                                                                                                  |
 |----------------------------------------------------------------|--------------------------|----------------------------------------------------------------------------------------------------------------|
 | Harmonius R-1.3.1 — runtime type registry, ≥10k types, O(1)    | **Refused (runtime)**, **Re-derived (editor)** | `core::TypeRegistry` covers ECS storage; `data::SchemaRegistry` (sibling design) covers schema catalog. The `ReflectionBlob` is *not* a runtime registry; it is per-`RegistryEntry` static data the editor reads through the existing `SchemaRegistry::lookup` (`O(log N)` over ~10⁴ FQNs). |
-| Harmonius R-1.3.2 — type descriptors with size / align / drop / clone / default | **Re-derived (narrowed)** | §3.1 — blob carries `byte_offset`, `byte_size`, `type_kind`, `since`. Size and align come from the codegen-emitted struct; drop / clone / default ctor are implicit in the typed C++ struct and **never** type-erased into a thunk table (that would be runtime reflection). |
+| Harmonius R-1.3.2 — type descriptors with size / align / drop / clone / default | **Re-derived (narrowed)** | §3.1 — blob carries `byte_offset`, `byte_size`, `kind`, `since`. Size and align come from the codegen-emitted struct; drop / clone / default ctor are implicit in the typed C++ struct and **never** type-erased into a thunk table (that would be runtime reflection). |
 | Harmonius R-1.3.3 — path-based access (`transform.position.x`), <500 ns, 8 segments | **Refused (MVP)**         | Post-MVP. §3.5 walks one level via the recursive `FQN` field-kind; multi-segment path strings deferred to §12 [OPEN] #1. The editor today drives nesting through its own widget tree, not a path string. |
-| Harmonius R-1.3.4 — uniform collection trait (Vec / HashMap)   | **Refused (MVP)**         | Post-MVP. §3.1 represents `list<T>` and `map<K,V>` as `type_kind` cases the editor renders in MVP as a read-only summary ("3 items"); structural editing of containers via reflection deferred to §12 [OPEN] #3. |
+| Harmonius R-1.3.4 — uniform collection trait (Vec / HashMap)   | **Refused (MVP)**         | Post-MVP. §3.1 represents `list<T>` and `map<K,V>` as `kind` cases the editor renders in MVP as a read-only summary ("3 items"); structural editing of containers via reflection deferred to §12 [OPEN] #3. |
 | Harmonius R-1.3.5 — `DynamicValue` interchange + diff/patch    | **Refused**               | Runtime reflection by definition. The editor reads bytes through the typed `Envelope<T>::deserialize` into a typed value, edits it via widgets, and round-trips through `serialize`. No boxed polymorphic value crosses any boundary. |
 | Harmonius R-1.3.6 — attribute system (range, display_name, …)  | **Deferred (post-MVP)**   | §12 [OPEN] #2 — MVP blob carries no attributes; the editor uses field name verbatim, no per-field range clamping, no ordering reorder. Annotations join the blob as a parallel `eastl::span<const ReflectionAttribute>` once two concrete consumers exist. |
-| Harmonius R-1.3.7 — register trait impls against TypeId        | **Refused**               | Runtime reflection. Glibre uses codegen-emitted typed trampolines (`fory-codegen.md` §"Decision" #4) — there is no runtime trait table. Editor-only "render this kind of field" dispatch is a `switch` over `ReflectionField::type_kind` (§4.3), compiled into the editor binary. |
+| Harmonius R-1.3.7 — register trait impls against TypeId        | **Refused**               | Runtime reflection. Glibre uses codegen-emitted typed trampolines (`fory-codegen.md` §"Decision" #4) — there is no runtime trait table. Editor-only "render this kind of field" dispatch is a `switch` over `ReflectionField::kind` (§4.3), compiled into the editor binary. |
 | Harmonius R-1.3.8 — `Reflect` trait + derive macro             | **Refused**               | Runtime reflection. Glibre's equivalent is `glibre-foryc` codegen: `.fory` schema → C++ struct + (editor-only) `ReflectionBlob`. No vtable, no trait object. |
 | Harmonius R-1.3.9 — `reflect(skip)`, `reflect(rename)`, `reflect(default)` | **Refused (MVP)**         | The `.fory` schema source has no equivalent attributes in MVP. Field ordering, naming, and defaults are implicit in the schema. Post-MVP attribute table (§12 [OPEN] #2) revisits this. |
-| Harmonius R-1.3.10 — sub-traits (Struct / Enum / List / Map)   | **Re-derived (narrowed)** | §3.1 — `ReflectionField::type_kind` is a closed sum the editor switches on. This is a *static dispatch* over codegen-known kinds, not a runtime sub-trait registry. |
+| Harmonius R-1.3.10 — sub-traits (Struct / Enum / List / Map)   | **Re-derived (narrowed)** | §3.1 — `ReflectionField::kind` is a closed sum the editor switches on. This is a *static dispatch* over codegen-known kinds, not a runtime sub-trait registry. |
 | Harmonius R-1.3.11 — `FromReflect`                             | **Refused**               | The editor never builds typed values from a dynamic blob; it edits raw bytes between matched `Envelope<T>::deserialize` / `serialize` calls. `FromReflect` is unnecessary. |
 | SPEC §4.9 inv. 1 — static-only, no hot-path dispatch           | **Covered**               | §4.4 — `GLIBRE_EDITOR`-gated header; `RegistryEntry::reflection` is `nullptr` in shipping (§7.1).                                |
 | SPEC §4.9 inv. 2 — read-only, never patched                    | **Covered**               | §3.6, §6 — all blob storage is `constexpr` or `const`; no API mutates it.                                       |
@@ -424,9 +424,11 @@ the editor binary:
   helpers). Compiled only when `GLIBRE_EDITOR` is defined.
 
 The runtime translation units never `#include` the editor header.
-A `static_assert(!defined(GLIBRE_EDITOR) || GLIBRE_EDITOR_OK, ...)`
-guard inside the editor TU prevents accidental inclusion via a
-plugin's transitive include graph.
+A `#if !defined(GLIBRE_EDITOR)` / `#  error` guard at the top of the
+editor header prevents accidental inclusion from a non-editor
+translation unit — this is the guard already shown in the §4.3 code
+snippet (the `#error` fires at compile time if the preprocessor
+symbol is absent).
 
 ### 4.2 Types (always declared, in the middleman header)
 
