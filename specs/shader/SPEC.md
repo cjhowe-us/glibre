@@ -324,10 +324,10 @@ backend descriptor heaps.
 3. Every reflected resource binding is annotated with exactly one
    `DescriptorFrequencyGroup` (`PerFrame | PerPass | PerMaterial |
    PerDraw`). An unassigned binding (no group resolution after the
-   §6.3 `frequency_tagger.hpp/.cpp` pass) causes construction to fail
-   with `shader::Error::DescriptorFrequencyMissing`. A binding tagged
-   with multiple conflicting groups causes construction to fail with
-   `shader::Error::DescriptorFrequencyAmbiguous`. The two arms are
+   §6.3 `frequency_tagger.hpp/.cpp` pass) causes `DescriptorLayout::derive`
+   to fail with `shader::Error::DescriptorFrequencyMissing`. A binding tagged
+   with multiple conflicting groups causes `DescriptorLayout::derive` to fail
+   with `shader::Error::DescriptorFrequencyAmbiguous`. The two arms are
    distinct: `Missing` = no tag; `Ambiguous` = too many tags
    (defense-in-depth against a broken tagger that writes multiple
    annotations to one slot).
