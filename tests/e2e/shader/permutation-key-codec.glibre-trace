@@ -55,6 +55,25 @@
 #   uniqueness + density in [0, 12288)    → AssertState  op_id=10
 # Every Gherkin "Then" clause across the three scenarios in the issue
 # body has at least one op.
+#
+# Placeholder sentinel convention (`stable@<name>`):
+#   A `bytes_hex` field whose value matches the pattern `stable@<name>`
+#   is a symbolic pre-implementation sentinel. It is NOT a literal hex
+#   string. `tools::TraceWriter` (specs/e2e/SPEC.md §3.3) resolves it
+#   at first-record time: the binder runs the implementation, captures
+#   the actual bytes produced for the named value, and writes the
+#   concrete hex into the compiled binary TraceFile. The sentinel key
+#   names the value semantically so the authoring comment can reference
+#   it unambiguously before the implementation exists. Sentinel names
+#   used in this trace:
+#     "k1"    — the 6-byte packed encoding of the sample key described
+#               in the Setup comment above (op_id=4).
+#     "table" — the 32-byte BLAKE3 hash of the full 12288-entry table's
+#               concatenated `to_bytes()` outputs in tuple-ascending
+#               order (op_id=11).
+#   Once the implementation lands the TraceWriter replaces these
+#   sentinels and the trace is replayed byte-deterministically on every
+#   subsequent CI run.
 
 magic: 0x47_4C_54_52   # "GLTR" little-endian (specs/e2e/SPEC.md §7.1.1 inv 1)
 schema_version: 1
@@ -113,7 +132,11 @@ stream:
   # (rightmost field varies fastest) is:
   #   ((Standard*64 + 3)*6 + Forward)*4 + Desktop
   #     = ((0*64+3)*6+0)*4+2 = 74.
-  # That ordinal appears as `expected_index` in op_id=4 below.
+  # That ordinal is not separately asserted by a dedicated op — k1 is a
+  # sample key chosen for the codec contract (scenarios 1 + 2); its index
+  # position is derivable from the ordering walk (op_ids=6–9) and the
+  # DensityReport (op_id=10). Op_id=4 asserts the 6-byte packed encoding
+  # of k1 (bound at record time), not a PermutationIndex field.
   # --------------------------------------------------------------------------
   - frame: 0
     op: InputOp
