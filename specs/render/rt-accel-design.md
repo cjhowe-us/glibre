@@ -213,7 +213,7 @@ graph builder):
    from render's persistent heap (48 MiB row, §9.5). The TLAS
    accel-struct object is sized for `TLAS_INSTANCE_CAP = 4096` MVP
    instances (§4.5 below); over-cap views see
-   `Error::InstanceLimitExceeded` → SPEC §10 row `TlasBuildFailed`.
+   `render::Error::TlasBuildFailed` (instance-cap arm, §10).
 2. Compute the visible-set instance list for this view by walking
    `RenderFrame::views()[i].instances()` (the SoA proxy emitted in
    phase 6). Each visible instance is a tuple
@@ -329,8 +329,10 @@ buffer at least as large as the maximum
 `refitScratchSize` (refit path) over the active set
 (BLAS subset + TLAS).
 
-Render owns one `ScratchBufferPool` against the 48 MiB §9.5 row.
-Sizing:
+Render owns one `ScratchBufferPool` backed by render's **transient
+pool** alias slot (§9.5 transient row; §9.3 below). Scratch is a
+per-frame-transient allocation — it is **not** placed in the 48 MiB
+persistent heap row. Sizing:
 
 ```
 scratch_pool_size = max(
@@ -342,19 +344,16 @@ scratch_pool_size = max(
 For MVP S1 (1 character ≈ 6 dynamic clusters, 200 props static, 8
 lights): dynamic-visible BLAS subset is ~6 entries; per-BLAS refit
 scratch is ≤512 KiB on M1; total ≤ 4 MiB. TLAS build scratch for
-4096 instances is ≤ 4 MiB. The pool ceiling is set at **8 MiB**
-inside the 48 MiB row, leaving 40 MiB for the persistent TLAS
-accel-struct (~1 MiB), BLAS instance buffers (~768 KiB), and the
-imported-BLAS GPU residency (~30 MiB headroom for the MVP mesh
-set).
+4096 instances is ≤ 4 MiB. The pool ceiling is set at **8 MiB**,
+reserved as a transient alias slot inside the 256 MiB transient pool
+(§9.5 transient row). The 48 MiB persistent row is therefore not
+charged for scratch; it covers only the persistent structures (~43 MiB
+for TLAS accel-struct, instance ring, imported BLAS residency, and
+fragmentation slack).
 
-Recycling: scratch is **not** persistent — it is allocated against
-render's transient pool slot reserved for RT (§9.5 transient row
-budget reserves 2 MiB of the 256 MiB transient pool for the
-RT-scratch alias slot; the alias planner colours it with other
-single-frame scratch). The pool is drained at phase 9 along with
-the rest of the transient pool; allocations on frame N+1 see
-fresh slots.
+Recycling: scratch is drained at phase 9 along with the rest of the
+transient pool; the alias planner colours the RT-scratch slot with
+other single-frame scratch. Allocations on frame N+1 see fresh slots.
 
 ### 3.6 Refit scheduler
 
@@ -533,8 +532,8 @@ Failure modes:
 | Error                              | Trigger                                                     |
 |------------------------------------|-------------------------------------------------------------|
 | `BlasUnavailable`                  | Visible-set references a `GpuId` whose BLAS is not registered (mesh streamed out, eviction race, version mismatch). |
-| `InstanceLimitExceeded`            | Visible-instance count > `TLAS_INSTANCE_CAP = 4096`. Maps to `SPEC.md` §10 row `TlasBuildFailed`. |
-| `ScratchExhausted`                 | Required refit + build scratch > 8 MiB. Maps to `TlasBuildFailed`. |
+| `TlasBuildFailed` (instance-cap arm) | Visible-instance count > `TLAS_INSTANCE_CAP = 4096`. Maps to `SPEC.md` §10 row `TlasBuildFailed`. |
+| `TlasBuildFailed` (scratch arm)    | Required refit + build scratch > 8 MiB. Maps to `TlasBuildFailed`. |
 | `ResourceImportRefused`            | Unknown `ViewHandle`.                                       |
 
 `ensure_tlas` does **not** issue any GPU command. It is a
@@ -564,9 +563,15 @@ Failure modes:
 
 | Error                              | Trigger                                                     |
 |------------------------------------|-------------------------------------------------------------|
-| `RefitFailed`                      | Metal 4 returns a build error (driver fault). Maps to `SPEC.md` §10 row `BlasUnavailable` for the next-frame consumer. |
 | `PassUnsupportedConfig`            | Wrong queue role.                                           |
 | `BlasUnavailable`                  | Handle no longer registered (geometry evicted between schedule and submit). |
+
+A Metal 4 encoder fault during refit surfaces as
+`render::Error::TlasBuildFailed` (driver arm) to the next-frame
+TLAS-build consumer, per §10. `submit_blas_refit` itself does not
+return a refit-specific error arm — there is no `RefitFailed`
+enumerator in `render::Error` (`SPEC.md` §5 has only `TlasBuildFailed`
+and `BlasUnavailable` for accel-struct operations).
 
 ### 4.4 Visibility mask layout
 
@@ -600,8 +605,8 @@ rationale:
 - The TLAS accel-struct buffer for 4096 instances is ~1 MiB on M1
   (Metal 4's `MTL_INSTANCE_DESCRIPTOR_SIZE` is 64 bytes; 4096 × 64
   = 256 KiB raw + acceleration-structure overhead ≈ 1 MiB).
-- Going above the cap is `Error::InstanceLimitExceeded` →
-  `TlasBuildFailed`. Recovery is `lower-tier` (drop visible
+- Going above the cap returns `render::Error::TlasBuildFailed`
+  (instance-cap arm, §10). Recovery is `lower-tier` (drop visible
   instances at the cull aggregate's budget pass).
 
 Post-MVP raise to 16 384 is a perf-budget amendment, not an SRP
@@ -748,7 +753,9 @@ Same `RenderFrame` + same registry → same `TLASHandle` payload
 `member_set_hash` is computed with a fixed seed
 (`PHILOSOPHY §7`). The instance-buffer ring write order is
 fixed by visible-set iteration order, which is canonical per
-`reviews/decisions/determinism-canonical-iteration.md`.
+PHILOSOPHY §7 ("Determinism by default — fixed container iteration
+order"). A formal decision record for EASTL canonical-iteration-order
+is flagged in §12 OPEN below.
 Determinism asserted by `tests/render/rt_accel/determinism.cpp`.
 
 ## 7. Persistence + ABI
@@ -936,18 +943,26 @@ amendment, not a re-design.
 
 ### 9.3 Memory ceilings
 
-The rt-accel aggregate's storage budget is the **48 MiB
-"RT acceleration structures"** row of `SPEC.md` §9.5, decomposed:
+The rt-accel aggregate's persistent storage budget is the **48 MiB
+"RT acceleration structures"** row of `SPEC.md` §9.5, decomposed.
+Refit + build scratch is **transient** (§3.5) and is accounted in the
+256 MiB transient pool separately — it does **not** appear in this
+48 MiB subtotal.
 
 | Sub-row                                | Ceiling   | Lifetime         | Allocator                                     |
 |----------------------------------------|-----------|------------------|-----------------------------------------------|
 | Per-`View` TLAS accel-struct           | ~1 MiB ×4 = 4 MiB | Persistent  | `glibre::PerContextAllocator(render)`, persistent slot. |
 | Imported BLAS GPU residency            | ≤ 30 MiB | Persistent       | Tagged `render` per Allocator Rule 5; bytes are render-owned, source is `geometry`. |
 | TLAS instance ring (3-frame-in-flight) | 768 KiB  | Persistent       | Render's CPU-write ring buffer.               |
-| Refit + build scratch pool             | 8 MiB    | Per-frame transient | Transient pool slot, alias-planned.        |
 | Sizes cache + registry table           | 256 KiB  | Persistent       | Standard CPU heap (counted in 16 MiB GPU-resource-handles row of §9.5, *not* in this 48 MiB row). |
-| Reserve / fragmentation slack          | ~5 MiB   | Persistent       | Heap allocator's natural fragmentation.       |
-| **Subtotal**                            | **≤ 48 MiB** | —             | Matches the §9.5 row.                          |
+| Reserve / fragmentation slack          | ~8 MiB   | Persistent       | Heap allocator's natural fragmentation.       |
+| **Subtotal (persistent row)**          | **≤ 43 MiB** | —             | Under the 48 MiB §9.5 row; ~5 MiB headroom.   |
+
+Transient (not in 48 MiB row):
+
+| Sub-row                                | Ceiling   | Lifetime            | Allocator                                    |
+|----------------------------------------|-----------|---------------------|----------------------------------------------|
+| Refit + build scratch pool             | 8 MiB    | Per-frame transient  | Transient pool alias slot (§9.5 transient row; 256 MiB pool). |
 
 Strict-mode enforcement (`GLIBRE_ALLOC_STRICT=1`) catches drift
 above these caps and returns `core::Error::OutOfBudget`, mapped
@@ -1187,3 +1202,11 @@ run on every PR (no Metal device required; the
   render-plugin internal ABI bump if `TLASInstance` ever
   becomes ABI-visible (currently it is not — the field is
   internal-only).
+- **[OPEN]** Determinism canonical-iteration decision record. §6.5
+  grounds the refit-scheduler's deterministic job order in
+  PHILOSOPHY §7 ("fixed container iteration order"). A formal
+  `reviews/decisions/determinism-canonical-iteration.md` decision
+  record spelling out which EASTL containers guarantee ordered
+  iteration and how that invariant is enforced in tests is required
+  before rt-accel's determinism tests are authoritative. Track via
+  a `[SPIKE] iterate-render-determinism-canonical-iteration` issue.
