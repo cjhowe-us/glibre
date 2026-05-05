@@ -535,9 +535,9 @@ namespace glibre::shader {
 enum class Error : std::uint16_t {
     SourceNotFound,
     SourceParseFailed,
-    EncodingInvalid,
     IncludeEscape,
     IncludeCycle,
+    EncodingInvalid,       // ingestion-phase; grouped with Include* arms (§10.2)
     EntryPointMissing,
     EntryPointStageAmbiguous,
     PermutationKeyMalformed,
@@ -894,9 +894,9 @@ constexpr eastl::string_view to_string(Error e) noexcept {
     switch (e) {
         case Error::SourceNotFound:                return "SourceNotFound";
         case Error::SourceParseFailed:             return "SourceParseFailed";
-        case Error::EncodingInvalid:               return "EncodingInvalid";
         case Error::IncludeEscape:                 return "IncludeEscape";
         case Error::IncludeCycle:                  return "IncludeCycle";
+        case Error::EncodingInvalid:               return "EncodingInvalid";
         case Error::EntryPointMissing:             return "EntryPointMissing";
         case Error::EntryPointStageAmbiguous:      return "EntryPointStageAmbiguous";
         case Error::PermutationKeyMalformed:       return "PermutationKeyMalformed";
@@ -2006,7 +2006,7 @@ checklist against the spec without mutating §5).
 | Enumerator (§5) | Trigger | Recovery | Severity |
 |-----------------|---------|----------|----------|
 | **`SourceNotFound`** | `ShaderSource::open` cannot stat the project-relative path, or the path resolves outside the project source root (§4.1 inv 3). | refuse open; caller (cooker / editor) decides whether to retry after a filesystem rename or surface to the user. | `refuse` |
-| **`SourceParseFailed`** *(SourceParseError)* | slangc rejects the Slang translation unit during preprocessing or parsing — syntax error, unresolved entry-point attribute, malformed `[shader(...)]` annotation (§4.1 inv 1). | refuse compile; capture stderr verbatim into the structured error envelope (§6.2) and surface to the editor; prior artifact (if any) remains live. | `refuse` |
+| **`SourceParseFailed`** *(SourceParseError)* | Two arms share this enumerator: **(a) ingestion-time** — `ShaderSource::open`'s §3.6 scanner detects an orphaned `[shader(...)]` attribute with no following function declaration (fires before slangc is invoked; refusal is `refuse open`); **(b) slangc-time** — slangc rejects the Slang translation unit during preprocessing or parsing — syntax error, unresolved entry-point attribute, malformed `[shader(...)]` annotation (§4.1 inv 1; refusal is `refuse compile`). | arm (a): refuse open — the `ShaderSource` is not constructed; arm (b): refuse compile — capture stderr verbatim into the structured error envelope (§6.2) and surface to the editor; prior artifact (if any) remains live. | `refuse` |
 | **`IncludeEscape`** *(IncludeResolutionFailed, escape variant)* | An `#include` resolves outside the project source root, or to an absolute path (§4.1 inv 3). | refuse open; the include graph is never partially admitted — `ShaderSource` construction fails atomically. | `refuse` |
 | **`IncludeCycle`** *(IncludeResolutionFailed, cycle variant)* | The include graph contains a cycle; closure is non-finite (§4.1 inv 3). | refuse open; report the cycle path through the structured error detail. | `refuse` |
 | **`EncodingInvalid`** | A `.slang` source file (the entry file or any include target) fails UTF-8 validation during §4.1 normalization: the byte sequence is not valid UTF-8 after BOM strip, or the file is empty. Distinct from `SourceParseFailed` — this refusal fires before slangc is involved, inside the ingestion normalizer. | refuse open; the file must be re-saved as UTF-8. Editors that emit UTF-8-BOM are accepted (BOM is stripped and the normalized bytes are valid); non-UTF-8 encodings (UTF-16, latin-1, shift-jis) are rejected. | `refuse` |

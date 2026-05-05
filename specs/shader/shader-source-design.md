@@ -517,6 +517,19 @@ public:
     const SourceId&               id()             const noexcept;
     eastl::span<const EntryPoint> entry_points()   const noexcept;
     const PreprocessedSource&     preprocessed()   const noexcept;
+
+private:
+    // Private constructor used only by the test factory and by open().
+    ShaderSource(SourceId, eastl::vector<EntryPoint>, PreprocessedSource);
+
+#if defined(GLIBRE_E2E)
+    // Grants the test-support factory access to the private constructor.
+    // This guard is the only conditional in the aggregate header; the rest
+    // of the class definition is unconditionally clean. §8.5.
+    friend std::expected<ShaderSource, Error>
+        glibre::shader::test::make_shader_source_from_bytes(
+            eastl::span<const std::byte>, SourceId);
+#endif
 };
 
 }  // namespace glibre::shader
@@ -897,10 +910,25 @@ make_shader_source_from_bytes(eastl::span<const std::byte> raw,
 } // namespace glibre::shader::test
 ```
 
-`make_shader_source_from_bytes` is a `friend` of `ShaderSource` only
-inside the test-support translation unit, not in the public header.
-The `GLIBRE_E2E` guard lives entirely in `shader_source_test_support.hpp`;
-the aggregate header is unconditionally clean. The §8.6
+`make_shader_source_from_bytes` requires access to `ShaderSource`'s
+private constructor. Because a `friend` declaration must appear inside
+the class definition — a C++ language invariant — the aggregate header
+`shader_source.hpp` carries **one** conditional guard:
+
+```cpp
+#if defined(GLIBRE_E2E)
+friend std::expected<ShaderSource, Error>
+    glibre::shader::test::make_shader_source_from_bytes(
+        eastl::span<const std::byte>, SourceId);
+#endif
+```
+
+This is the only test-framework concern in the aggregate header. The
+rest of the `ShaderSource` class definition is unconditionally clean;
+shipping builds see no test-support symbols (the `GLIBRE_E2E` block
+compiles to nothing). The full factory declaration lives in
+`tests/shader/source/shader_source_test_support.hpp`, which is
+included only from E2E test translation units. The §8.6
 "inject an Slang diff for `source_id`" bullet calls this factory.
 
 ## 9. Performance
