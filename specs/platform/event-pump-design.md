@@ -89,16 +89,18 @@ The aggregate **refuses to own**:
 The SRP boundary is sharp: if the **SDL3 event vocabulary**, the
 **SDL3 → typed-variant translation table**, the **per-device
 ordering rule**, the **bounded SPSC ring protocol**, the
-**per-frame drain trigger**, or the **drop-event routing to the
-`FileWatcher` aggregate** change, this design changes. Anything
-else — input action mapping, window aggregate state, display
-pacing — is out of scope.
+**per-frame drain trigger**, or the **drop-event routing policy**
+change, this design changes. Anything else — input action mapping,
+window aggregate state, display pacing — is out of scope.
 
-Drop-event routing is listed as a sixth responsibility for full SRP
-transparency. The §12 one-caller gate (per PHILOSOPHY §Anti-patterns)
-governs whether `ingest_drop` becomes a stable cross-aggregate API;
-the SRP boundary stays unchanged whether routing goes via
-`ingest_drop` or via a future `WindowEvent::FileDropped` variant.
+Responsibility 6 (owned, in-scope): the *policy* of drop-event
+routing — that the pump forwards `SDL_EVENT_DROP_FILE` to the
+file-watcher aggregate. This policy stays owned regardless of which
+*mechanism* implements it (current: `FileWatcher::ingest_drop` direct
+call; future option: `WindowEvent::FileDropped` via the queue, gated
+on §12 [NON-BLOCKING] one-caller audit). The SRP boundary tracks the
+policy, not the mechanism — switching mechanisms does NOT trigger an
+SRP-list edit, but adding or removing the policy itself would.
 
 ## 2. Requirements coverage
 
@@ -403,7 +405,7 @@ the event itself triggers a side effect inside the pump:
 |-------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------|
 | `SDL_EVENT_GAMEPAD_ADDED` / `_REMOVED`                                  | Update SDL3's internal gamepad table by calling `SDL_OpenGamepad` / `SDL_CloseGamepad` so subsequent axis/button events resolve a valid `device` index. No glibre `InputEvent` emitted; consumers query gamepad presence at use time. | None (R-6.1.11 partial).                     |
 | `SDL_EVENT_DISPLAY_ADDED` / `_REMOVED` / `_ORIENTATION_CHANGED`         | Cause the next `Window::display()` call to re-query SDL3's display list (`Display` is a snapshot per SPEC §4.1 inv #5, not cached). Emitted as `WindowEvent::DisplayChanged { window, display }` for the focused window.              | `WindowEvent::DisplayChanged`.                |
-| `SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED`                                | Update the owning `Window::Impl`'s cached `(LogicalSize, PhysicalSize, DpiScale)` snapshot via `surface::detail::query_layer_metrics` *before* the event becomes visible to the engine (§6.3 cross-module note in SPEC). Also updates `Pump::Impl`-cached `DpiScale_` from the new `Window::Impl` value; the updated scale is passed to `translate_mouse` on the next `SDL_EVENT_MOUSE_MOTION` in this frame (consumed by the divide-by-scale path per §3.3). | `WindowEvent::DpiChanged`.                    |
+| `SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED`                                | Update the owning `Window::Impl`'s cached `(LogicalSize, PhysicalSize, DpiScale)` snapshot via `surface::detail::query_layer_metrics` *before* the event becomes visible to the engine (§6.3 cross-module note in SPEC). Also updates the Pump::Impl-cached DpiScale value from the new `Window::Impl` value; the updated scale is passed to `translate_mouse` on the next `SDL_EVENT_MOUSE_MOTION` in this frame (consumed by the divide-by-scale path per §3.3). | `WindowEvent::DpiChanged`.                    |
 | `SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED` / `_RESIZED`                      | Update the owning `Window::Impl`'s cached `LogicalSize` / `PhysicalSize`.                                                                                                                                                            | `WindowEvent::Resized`.                       |
 | `SDL_EVENT_WINDOW_FOCUS_GAINED` / `_LOST`                               | None at the pump (the window aggregate's focus state is the queue contents themselves).                                                                                                                                              | `WindowEvent::FocusGained` / `FocusLost`.     |
 | `SDL_EVENT_WINDOW_MINIMIZED` / `_RESTORED`                              | None.                                                                                                                                                                                                                                | `WindowEvent::Minimized` / `Restored`.        |
@@ -1325,3 +1327,13 @@ hot-reload survival path; runs against the same S1 trace with a
   `u32::max`" before the first plan PR consuming this design lands.
   Two concrete consumers: shipping runtime input pump, editor input pump.
   Owner: platform-SPEC amendment — must land before plan PRs open.
+  STATUS: The amendment is a one-line edit to replace "zero / wildly
+  oversized capacity" with "capacity overflow beyond `u32::max`" in the
+  SPEC §10.3.2 trigger column. The orchestrator (or first plan PR
+  author) must either (a) file
+  `[SPIKE] amend-platform-spec-event-pump-with-capacity-trigger`
+  parented to #714 and backfill the issue number into this entry, OR
+  (b) land the one-line SPEC edit directly in the first plan PR
+  consuming this design. Plan PRs cannot land until SPEC §10.3.2 is
+  corrected via either route. Issue: #TBD (to be filed at plan-PR
+  authoring time).
