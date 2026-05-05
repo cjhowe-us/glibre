@@ -586,10 +586,15 @@ struct WallTime {
 The public surface is exactly what `specs/platform/SPEC.md` §5.2 +
 §5.9 declare, plus the additive `FrameTick` /
 `FixedStepAccumulator` / `FrameDelta` value objects defined in
-§3.4 / §3.5 above. No new ABI symbols beyond those derivable from
-the existing `Clock::now` / `wall` / `native_tick`. Every public
-function is `noexcept`; none are fallible (per SPEC §10.3.4 the
-clock surface returns no `Result<T>` — see §10).
+§3.4 / §3.5 above. No new *exported ABI function symbols* beyond
+those derivable from the existing `Clock::now` / `wall` /
+`native_tick` triplet. Three new type-layout registrations
+(`FrameDelta`, `FrameTick`, `FixedStepAccumulator`) are added to
+the middleman catalogue per §7.3 — these are type-layout
+registrations, not exported function symbols, and travel through
+the data-context middleman seam, not the platform plugin's exported
+C ABI. Every public function is `noexcept`; none are fallible (per
+SPEC §10.3.4 the clock surface returns no `Result<T>` — see §10).
 
 ```cpp
 // specs/platform/clock-design.md — public seam, presented as one
