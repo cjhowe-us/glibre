@@ -399,21 +399,6 @@ Round-trip equality (SPEC §4.2 invariant 1, §7.3 #6):
 
 Both directions are unit-tested as goldens (§11).
 
-**Error-boundary scope for `from_bytes`.** `from_bytes` is a **within-plugin** call.
-It is called only by the `shader` plugin's own serialization layer (e.g. loading
-`PermutationKeyRecord` from Fory-serialized disk bytes) and by the cooker tool,
-which links against the same plugin library. It is **never** exposed directly across
-the plugin C ABI boundary. The return type `std::expected<PermutationKey, shader::Error>`
-therefore does not violate error-model.md §Decision item 1, which requires
-`glibre::Error` only at the *engine-wide plugin boundary* (i.e. the public C ABI
-surface in the middleman dylib). At that crossing the caller's adapter is responsible
-for wrapping `shader::Error` into the `glibre::Error` variant (error-model.md
-§Composition Rules item 1). No raw `shader::Error` value ever crosses the C ABI
-directly; the adaptation is documented in §4's "Errors returned at this surface" table
-and repeated here for clarity: any future caller that invokes `from_bytes` from outside
-the shader plugin must route through the `glibre::Error` adapter, not call
-`from_bytes` through a C ABI export.
-
 ### 3.6 Equality, ordering, and iteration
 
 - **Equality** on `PermutationKey` is defaulted (`= default`,
@@ -665,6 +650,20 @@ Both wrap at the engine boundary into `glibre::Error` via the
 returns are reserved for infallible operations:
 `to_bytes`, `to_index`, `is_well_formed`, equality, the comparator,
 and every `FeatureSet` op are infallible by construction.
+
+**Error-boundary scope for `from_bytes`.** `from_bytes` is a **within-plugin** call.
+It is called only by the `shader` plugin's own serialization layer (e.g. loading
+`PermutationKeyRecord` from Fory-serialized disk bytes) and by the cooker tool,
+which links against the same plugin library. It is **never** exposed directly across
+the plugin C ABI boundary. The return type `std::expected<PermutationKey, shader::Error>`
+therefore does not violate error-model.md §Decision item 1, which requires
+`glibre::Error` only at the *engine-wide plugin boundary* (i.e. the public C ABI
+surface in the middleman dylib). At that crossing the caller's adapter is responsible
+for wrapping `shader::Error` into the `glibre::Error` variant (error-model.md
+§Composition Rules item 1). No raw `shader::Error` value ever crosses the C ABI
+directly; any future caller that invokes `from_bytes` from outside the shader plugin
+must route through the `glibre::Error` adapter, not call `from_bytes` through a C ABI
+export.
 
 **No exceptions across ABI.** Every operation listed is `noexcept`.
 The plugin compiles with `-fno-exceptions` (error-model.md

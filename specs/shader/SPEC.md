@@ -645,7 +645,6 @@ std::expected<PermutationKey, Error> from_index(const PermutationIndex&) noexcep
 // Comparator is lexicographic on to_bytes() output.
 // NOTE: when kFeatureBitCount > 8 the byte order and the mixed-radix index order diverge
 // for in-axis adjacency; this comparator is defined by byte order, not index order.
-// A static_assert(kFeatureBitCount <= 8) in the implementation guards this invariant.
 bool permutation_key_byte_less(const PermutationKey& a,
                                const PermutationKey& b) noexcept;
 
