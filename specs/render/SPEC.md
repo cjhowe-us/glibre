@@ -837,6 +837,7 @@ enum class Error : std::uint16_t {
     PipelineCompileFailed,
     PipelineCacheMiss,
     UnsupportedBackend,
+    ShaderModuleLoadFailed,        // PSO-cache design §3.5 step 4 / §10
 
     // Resource residency / aliasing
     ResourceResidencyExceeded,
@@ -1006,6 +1007,10 @@ struct RenderSettings {
     bool                    hdr_output           = false;
     DynamicResolutionBounds dynamic_resolution{};
     std::uint32_t           per_view_draw_budget = 0u;  // 0 = no budget cull.
+    std::uint32_t           warm_per_tick        = 4u;  // PSO-cache cold-build cap per
+                                                         // glibre_plugin_register tick
+                                                         // (§8.3.2 rate limiter). 0 = no cap.
+                                                         // PSO-cache design §3.8 / §4.3.
 };
 
 // -----------------------------------------------------------------------
@@ -1235,11 +1240,30 @@ struct PSOKeyHash {
 
 class PSOCache {
 public:
+    // Hot-path lookup; lazy-builds on miss. Holds a pin on the returned
+    // handle until the matching unpin / RAII PinnedPSO release.
     [[nodiscard]] Result<PSOHandle> get(PSOKey) noexcept;
+
+    // Long-lived pin (survives RenderFrame retire). Used by
+    // glibre_plugin_register (§8.3.2) and by the startup warmer.
+    [[nodiscard]] Result<PSOHandle> pin(PSOKey) noexcept;
+    void                            unpin(PSOHandle) noexcept;
+
+    // Bulk warm. Builds every key in `keys`; stops at the first
+    // ShaderModuleLoadFailed / PipelineCompileFailed and returns.
     [[nodiscard]] Result<void>      warm(eastl::span<const PSOKey>) noexcept;
 
-    void invalidate_by_shader_hash(std::uint64_t shader_hash) noexcept;
+    // Drop every entry whose key.shader_hash matches. Returns the count
+    // of entries dropped. Called by `shader`'s reload hook.
+    std::size_t invalidate_by_shader_hash(std::uint64_t shader_hash) noexcept;
+
+    // Force LRU drain to `target_size` bytes. Honours pin_count;
+    // overshoot is logged but never refused.
     void evict_lru(std::size_t target_size) noexcept;
+
+    // Diagnostic accessors — read-only, lock-free.
+    [[nodiscard]] std::size_t live_bytes()  const noexcept;
+    [[nodiscard]] std::size_t entry_count() const noexcept;
 
 protected:
     PSOCache() noexcept = default;
@@ -1807,6 +1831,9 @@ schema glibre.render.RenderSettings {
   field dyn_res_min_scale    : f32  tag 7 since 1   default 0.5
   field dyn_res_max_scale    : f32  tag 8 since 1   default 1.0
   field per_view_draw_budget : u32  tag 9 since 1   default 0      // 0 = unbounded
+  field warm_per_tick        : u32  tag 10 since 1  default 4      // PSO cold-build cap per
+                                                                    // glibre_plugin_register tick
+                                                                    // (§8.3.2); 0 = no cap.
 }
 ```
 
@@ -2716,7 +2743,7 @@ strategy, severity, and capability-fallback path. Adding or removing a
 variant is a render-plugin ABI bump (per `reviews/decisions/error-model.md`
 §"Composition Rules" item 5 and §3.2 collapse #5 of this spec).
 
-### 10.1 The closed sum (twenty design-name rows; 24 §5 enumerators)
+### 10.1 The closed sum (twenty design-name rows; 25 §5 enumerators)
 
 The §5 stub publishes the canonical enumerator names; §10 names them in
 the documentation form below and notes the §5 spelling in parentheses
@@ -2728,7 +2755,7 @@ adds them in a single ABI bump alongside the §10 acceptance test.
 |--------------------------------|----------------------------------------------|--------------------------------------|
 | `MetalDeviceUnavailable`       | `DeviceLost` + `DeviceUnsupported` (§5)      | init / phase 6 / phase 7             |
 | `SwapchainAcquireFailed`       | `SwapchainAcquireFailed` (§5)                | phase 7 acquire                      |
-| `ShaderModuleLoadFailed`       | ABI add (`ShaderModuleLoadFailed`)            | init / hot-reload register / phase 7 |
+| `ShaderModuleLoadFailed`       | `ShaderModuleLoadFailed` (§5)                | init / hot-reload register / phase 7 |
 | `PsoCompileFailed`             | `PipelineCompileFailed` (§5)                 | phase 7 record (lazy compile)        |
 | `ResourceAllocFailed`          | `HeapOutOfMemory` (§5)                       | phase 6 plan / phase 7 record        |
 | `ResourceResidencyExceeded`    | `ResourceResidencyExceeded` (§5)             | phase 6 plan                         |
@@ -2747,11 +2774,13 @@ adds them in a single ABI bump alongside the §10 acceptance test.
 | `GpuTimeout`                   | `FenceTimeout` (§5) + payload `gpu_fault=false` | phase 9                          |
 | `GpuFault`                     | ABI add (`GpuFault`)                          | phase 9 (Metal `executionStatus`)    |
 
-The six "ABI add" rows (four original + `StaleResourceHandle` +
-`ResourceRoleMismatch` added by the render-resources design) are the
-cumulative diff §5 acquires when these designs land; they are testable
-today as `static_assert`s against the header in
-`tests/render/spec_§5_§10_consistency.cpp`.
+`ShaderModuleLoadFailed` was previously "ABI add" in this table;
+it is now a real §5 enumerator (added by the PSO-cache design followup,
+PR #849 r1). Five "ABI add" rows remain (four original + `StaleResourceHandle`
++ `ResourceRoleMismatch` added by the render-resources design, minus the
+now-landed `ShaderModuleLoadFailed`): these are the cumulative diff §5
+acquires when those designs land; they are testable today as `static_assert`s
+against the header in `tests/render/spec_§5_§10_consistency.cpp`.
 
 ### 10.2 Recovery vocabulary
 
