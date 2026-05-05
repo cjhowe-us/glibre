@@ -324,15 +324,19 @@ auto current_prefix() noexcept -> const char*;
 auto set_prefix(const char* literal) noexcept -> void;
 auto reset_prefix() noexcept -> void;
 
-// Internal-helper: pre-touches all four TLS prefix slots (one
-// set_prefix(prefix::none) per slot) to force lazy-linker resolver
-// materialisation before any signal handler is installed. Any
-// __thread write resolves the lazy linker entry equally; using
-// prefix::none keeps the slot in the canonical zero-state convention
+// Internal-helper: pre-touches all three TLS slots (prefix pointer,
+// prose buffer, source_tag pointer — see §9.2) via one
+// set_prefix(prefix::none) / reset per slot to force lazy-linker
+// resolver materialisation before any signal handler is installed.
+// Any __thread write resolves the lazy linker entry equally; using
+// prefix::none keeps each slot in the canonical zero-state convention
 // used elsewhere in the design (callers can pointer-equal against
-// prefix::none to detect "no active prefix"). Two callers: any
-// plugin installing signal handlers (FileIo, Process). Called once
-// in glibre_plugin_register before Process::install_signal.
+// prefix::none to detect "no active prefix"). Two concrete callers
+// at MVP: FileIo, Process. Any future signal-installing plugin
+// (e.g. networking) adds itself here per §6.2's ownership rule —
+// the two-concrete-users gate has been satisfied; future entries do
+// not require new gate analysis. Called once in
+// glibre_plugin_register before Process::install_signal.
 auto pre_touch_all() noexcept -> void;
 
 }  // namespace glibre::platform::detail::error
@@ -631,8 +635,9 @@ a signal handler:
 - `std::unexpected` wrap: constexpr; safe.
 
 **Ordering contract within `glibre_plugin_register`:** (1) pre-touch
-all four TLS prefix slots via `detail::error::pre_touch_all()` —
-this calls `set_prefix(prefix::none)` on each slot (or equivalently
+all three TLS slots (prefix pointer, prose buffer, source_tag pointer
+— see §9.2) via `detail::error::pre_touch_all()` — this calls
+`set_prefix(prefix::none)` on each slot (or equivalently
 `reset_prefix()`), resolving the lazy linker entry on the calling
 thread and leaving each slot at the canonical non-null sentinel
 (§3.3 internal-helper); (2)
