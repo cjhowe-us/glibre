@@ -776,10 +776,16 @@ BatchToken begin_batch(SchemaRegistry&) noexcept;
 // Commit an in-flight batch: atomically publishes all entries appended
 // since begin_batch (i.e. entries_[token.start_size..size_)) by
 // advancing the registry's published-size atomic with release semantics
-// (§6.2 inv. 2). Invalidates the token.
+// (§6.2 inv. 2).
+// Success post-condition: the token is invalidated; the published
+// entry set is extended to include all entries appended since begin_batch.
+// OutOfBudget post-condition: entries_ is truncated back to
+// token.start_size (entries past the reserve ceiling are rolled back);
+// the BatchToken and any chain-pool slices appended during the batch
+// remain valid — the caller MUST call rollback_batch to complete
+// cleanup. The token is NOT invalidated by an OutOfBudget return.
 // Returns: unexpected(glibre::Error{ core::Error::OutOfBudget }) if
-// the reserve was exhausted during the batch (the entries past the
-// ceiling are rolled back before returning). On success returns void.
+// the reserve was exhausted during the batch. On success returns void.
 // noexcept: yes — the append path is pre-checked at begin_batch.
 [[nodiscard]]
 std::expected<void, glibre::Error> commit_batch(SchemaRegistry&, BatchToken&) noexcept;
@@ -787,7 +793,8 @@ std::expected<void, glibre::Error> commit_batch(SchemaRegistry&, BatchToken&) no
 // Roll back an in-flight batch: truncates entries_ back to
 // token.start_size and tombstones any chain-pool slices added during
 // the batch. Leaves the registry byte-identical to its state at
-// begin_batch. Always noexcept; the rollback path must not fail.
+// begin_batch. Invalidates the token. Always noexcept; the rollback
+// path must not fail.
 void rollback_batch(SchemaRegistry&, BatchToken&) noexcept;
 
 }  // namespace glibre::types::detail
@@ -805,14 +812,16 @@ void rollback_batch(SchemaRegistry&, BatchToken&) noexcept;
   full committed set after the fence.
 - If `rollback_batch` is called without a preceding `begin_batch`, the
   behaviour is undefined (debug builds assert).
-- After `commit_batch` or `rollback_batch`, the `BatchToken` is
-  invalidated; reuse is undefined.
+- After a **successful** `commit_batch`, or after any `rollback_batch`,
+  the `BatchToken` is invalidated; reuse is undefined.
 - `glibre::Error{ core::Error::OutOfBudget }` from `commit_batch`
-  implies the entries appended during the batch that exceeded the
-  reserve ceiling have been rolled back; the caller must treat the
-  batch as failed and call `rollback_batch` to complete the cleanup
-  of any partial chain-pool state. The engine-wide `glibre::Error`
-  wrapper is used (not the bare `core::Error`) per
+  is a **failure return**: `entries_` has been truncated back to
+  `token.start_size` (no new entries are visible to readers), but
+  chain-pool slices allocated during the batch are not yet cleaned up,
+  and the `BatchToken` remains valid. The caller **must** call
+  `rollback_batch` after an `OutOfBudget` return to complete chain-pool
+  cleanup; `rollback_batch` then invalidates the token. The engine-wide
+  `glibre::Error` wrapper is used (not the bare `core::Error`) per
   `reviews/decisions/error-model.md` §"Decision" #1 (public
   boundaries return `std::expected<T, glibre::Error>`).
 

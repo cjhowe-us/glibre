@@ -611,7 +611,7 @@ using SchemaSourceHash = eastl::array<std::byte, 32>;
 // translate these into their own context's enum at the call site.
 // §5 uses the same ErrorTag + Error struct shape defined in §10.1.
 // The 5-arm `enum class Error` stub that previously appeared here was
-// a draft; it is superseded by the 9-arm closed sum below. See §10.1
+// a draft; it is superseded by the 10-arm closed sum below. See §10.1
 // for the normative definition with full payload fields and per-arm
 // trigger / recovery / severity documentation.
 namespace data {
@@ -2577,10 +2577,10 @@ error-model rule), **info** (codegen / tools diagnostic).
 ### 10.3 Composition with `core::Error`
 
 Per `reviews/decisions/error-model.md` §"Composition Rules" #2 every
-arm above is a leaf in `data`'s context. Four arms have a dedicated
-`core::Error` wrapping (rows 1, 2, 5, 10) because the `core` plugin
+arm above is a leaf in `data`'s context. Five arms have a dedicated
+`core::Error` wrapping (rows 1, 2, 5, 7, 10) because the `core` plugin
 loader is the call site that raises them on `data`'s behalf; the
-remaining six surface to outer contexts by passing the `data::Error`
+remaining five surface to outer contexts by passing the `data::Error`
 through the `glibre::Error` variant unchanged. The mapping is fixed at
 the loader's call sites:
 
