@@ -1319,9 +1319,6 @@ public:
     [[nodiscard]] Result<TLASHandle>
         ensure_tlas(ViewHandle, const RenderFrame&) noexcept;
 
-    [[nodiscard]] Result<void>
-        submit_blas_refit(MetalCommandBuffer&, BLASHandle) noexcept;
-
 protected:
     RTAccelStructures() noexcept = default;
     ~RTAccelStructures()         = default;

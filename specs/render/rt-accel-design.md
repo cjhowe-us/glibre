@@ -4,7 +4,8 @@
 > `specs/render/SPEC.md` §4.1.8. Refines §4.1.8 (composition + four
 > public-boundary invariants), §4.2 invariant 4 (BLAS-refit precedes
 > TLAS-build), §5 (`RTAccelStructures` surface — `register_blas`,
-> `ensure_tlas`, `submit_blas_refit`), §6.1 (`render/src/rt/` module
+> `ensure_tlas`; BLAS refit encoding owned by `passes/blas_refit.cpp`),
+> §6.1 (`render/src/rt/` module
 > layout: `blas_registry`, `tlas`, `refit_scheduler`), §6.2.2 step 1.1 /
 > 1.2 (BLAS-refit pass + TLAS-build pass in phase 7), §6.4 (hybrid-RT
 > path), §7.1 (no Fory schemas — accel structs are GPU-resident,
@@ -99,9 +100,9 @@ This aggregate **refuses to own**:
   probed once by `platform` and stored in the `CapabilityMask`
   (§7.1.3). `add_rt_pass` is hard-rejected by the graph layer
   when the capability is absent (`render-graph-design.md` §10
-  row `CapabilityNotSupported`). rt-accel's surface (`ensure_tlas`,
-  `submit_blas_refit`) presupposes the capability is present;
-  callers that bypass the graph hard-reject see
+  row `CapabilityNotSupported`). rt-accel's surface (`register_blas`,
+  `ensure_tlas`) presupposes the capability is present; callers
+  that bypass the graph hard-reject see
   `render::Error::CapabilityNotSupported` as a precondition
   failure (§10 below).
 - **Fory schemas / disk persistence.** Acceleration structures
@@ -141,7 +142,7 @@ used"):
 | **R-2.5.1c** — Per-frame TLAS update ensures dynamic objects are correctly intersected.             | **Covered.** §3.6 below: every BLAS whose `dynamic` bit is set and whose source mesh is in the visible-set is refit before the TLAS is built; the graph's read-after-write edge (§4.2 invariant 4) guarantees ordering. Story #391 + integration test `rt_accel_integration/blas_refit_before_tlas_build`.                |
 | **R-2.5.1d** — Verify compaction reduces BLAS size by ≥30 % (verification clause).                  | **Refused at this aggregate.** Compaction is `geometry`'s cook output; the ≥30 % gate is asserted in `geometry`'s SPEC §11. Render verifies only that imported BLAS handles fit under the 48 MiB residency row (§9 below).                                                                                                |
 | **R-2.4.6** — BLAS built from the same vertex/index buffers used by mesh shaders (rasterization parity). | **Covered, via import contract.** rt-accel's `register_blas(BLASHandle, version)` accepts a handle whose backing accel-struct was built by `geometry` from the canonical meshlet vertex/index streams. The `(GpuId, version)` pair (§3.3) is the parity check: the BLAS version must equal the meshlet version, or the import is refused. |
-| Harmonius design — `GpuDevice::create_blas / create_tlas` API on `GpuDevice`.                       | **Refused / re-located.** glibre splits cook (geometry) from runtime (render): geometry's cook owns `create_blas` (post-MVP API not in render's §5 surface); render owns `register_blas` (import) + `ensure_tlas` (per-`View`) + `submit_blas_refit` (per-frame). The harmonius single-surface `GpuDevice` is rejected per `SPEC.md` §3.2 collapse #1 (no `IDevice` abstraction). |
+| Harmonius design — `GpuDevice::create_blas / create_tlas` API on `GpuDevice`.                       | **Refused / re-located.** glibre splits cook (geometry) from runtime (render): geometry's cook owns `create_blas` (post-MVP API not in render's §5 surface); render owns `register_blas` (import) + `ensure_tlas` (per-`View`); BLAS refit encoding is owned by `passes/blas_refit.cpp` (not a public surface method). The harmonius single-surface `GpuDevice` is rejected per `SPEC.md` §3.2 collapse #1 (no `IDevice` abstraction). |
 | Harmonius design — `CommandBuffer::build_acceleration_structure(tlas, instances)`.                  | **Covered, with a re-shape.** rt-accel does not expose a public `build_acceleration_structure` command method; instead, the graph's TLAS-build pass body (`passes/tlas_build.cpp`) is the only call site, and it records via `MTLAccelerationStructureCommandEncoder` against the rt-accel-owned scratch + instance buffer (§3.5). The instance list is derived inside `tlas/policy.cpp` from `RenderFrame`, not provided by callers.                |
 | Harmonius design — `CommandBuffer::trace_rays`.                                                     | **Refused at this aggregate; routed to pass bodies.** Trace dispatch is `passes/shadow_rt.cpp` / `passes/ao_rt.cpp` / inline ray query in `passes/lighting.cpp` (#764). rt-accel hands them a `TLASHandle` and steps out.                                                                                                |
 | Harmonius design — Per-frame TLAS instance buffer carries `BlasInstance { transform, mask, hit_index, blas }`. | **Covered.** §3.3 below: glibre's `TLASInstance` carries `(transform_3x4, instance_id, instance_mask, instance_contribution_to_hit_group_index, BLASHandle)` — a one-to-one mapping onto Metal 4's `MTLAccelerationStructureUserIDInstanceDescriptor` (§3.5). The `instance_mask` is the visibility-mask bit set used by ray queries to filter passes (§4.4 below). |
@@ -188,7 +189,7 @@ BLASRegistryEntry (one per imported BLAS)
 ├── handle_         : BLASHandle             (generational, 64-bit)
 ├── source_gpu_id_  : glibre::types::GpuId   (key into geometry's mesh table)
 ├── version_        : std::uint64_t          (matches geometry's content version)
-├── as_object_      : MTL::AccelerationStructure*  (read-only by render)
+├── as_slot_        : glibre::types::GpuTableSlot  (key into engine-wide GpuTable; accessor resolves to MTL::AccelerationStructure*)
 ├── update_size_    : std::uint64_t          (for refit scratch sizing)
 ├── dynamic_        : bool                   (skinned / deformable; refit-eligible)
 └── last_refit_frame_: std::uint64_t         (for "stale BLAS" debug diagnostics)
@@ -213,7 +214,7 @@ graph builder):
    from render's persistent heap (48 MiB row, §9.5). The TLAS
    accel-struct object is sized for `TLAS_INSTANCE_CAP = 4096` MVP
    instances (§4.5 below); over-cap views see
-   `Error::InstanceLimitExceeded` → SPEC §10 row `TlasBuildFailed`.
+   `render::Error::TlasBuildFailed` (instance-cap arm, §10).
 2. Compute the visible-set instance list for this view by walking
    `RenderFrame::views()[i].instances()` (the SoA proxy emitted in
    phase 6). Each visible instance is a tuple
@@ -266,8 +267,9 @@ registry's typed seam:
 
 Re-registration with a higher `version` (geometry re-cooked the
 mesh, e.g. asset hot-reload from `content` watcher) replaces the
-entry atomically: the `as_object_` slot rebinds; the
-`source_gpu_id_` is unchanged; the version monotonically advances.
+entry atomically: the `as_slot_` key rebinds to the new GpuTable
+entry; the `source_gpu_id_` is unchanged; the version monotonically
+advances.
 A re-register with the *same* version is a no-op (idempotent per
 plugin-abi.md). A re-register with a *lower* version is rejected
 (`Error::ResourceImportRefused`).
@@ -329,8 +331,10 @@ buffer at least as large as the maximum
 `refitScratchSize` (refit path) over the active set
 (BLAS subset + TLAS).
 
-Render owns one `ScratchBufferPool` against the 48 MiB §9.5 row.
-Sizing:
+Render owns one `ScratchBufferPool` backed by render's **transient
+pool** alias slot (§9.5 transient row; §9.3 below). Scratch is a
+per-frame-transient allocation — it is **not** placed in the 48 MiB
+persistent heap row. Sizing:
 
 ```
 scratch_pool_size = max(
@@ -342,19 +346,16 @@ scratch_pool_size = max(
 For MVP S1 (1 character ≈ 6 dynamic clusters, 200 props static, 8
 lights): dynamic-visible BLAS subset is ~6 entries; per-BLAS refit
 scratch is ≤512 KiB on M1; total ≤ 4 MiB. TLAS build scratch for
-4096 instances is ≤ 4 MiB. The pool ceiling is set at **8 MiB**
-inside the 48 MiB row, leaving 40 MiB for the persistent TLAS
-accel-struct (~1 MiB), BLAS instance buffers (~768 KiB), and the
-imported-BLAS GPU residency (~30 MiB headroom for the MVP mesh
-set).
+4096 instances is ≤ 4 MiB. The pool ceiling is set at **8 MiB**,
+reserved as a transient alias slot inside the 256 MiB transient pool
+(§9.5 transient row). The 48 MiB persistent row is therefore not
+charged for scratch; it covers only the persistent structures (~43 MiB
+for TLAS accel-struct, instance ring, imported BLAS residency, and
+fragmentation slack).
 
-Recycling: scratch is **not** persistent — it is allocated against
-render's transient pool slot reserved for RT (§9.5 transient row
-budget reserves 2 MiB of the 256 MiB transient pool for the
-RT-scratch alias slot; the alias planner colours it with other
-single-frame scratch). The pool is drained at phase 9 along with
-the rest of the transient pool; allocations on frame N+1 see
-fresh slots.
+Recycling: scratch is drained at phase 9 along with the rest of the
+transient pool; the alias planner colours the RT-scratch slot with
+other single-frame scratch. Allocations on frame N+1 see fresh slots.
 
 ### 3.6 Refit scheduler
 
@@ -377,10 +378,9 @@ new_vertex_buffer_view }`:
    the new vertices in-place.
 4. Allocate a scratch slice from the pool (§3.5); record the
    offset.
-5. Append the `BLASRefitJob` to the per-frame list. The
-   `submit_blas_refit` public entry (§5) accepts one job at a time
-   for fine-grained instrumentation; internally `passes/blas_refit.cpp`
-   loops the list inside one encoder.
+5. Append the `BLASRefitJob` to the per-frame list.
+   `passes/blas_refit.cpp` loops the list inside one encoder
+   (§4.3), calling `refitAccelerationStructure` per job.
 
 The scheduler is **deterministic** — same input visible-set yields
 the same job order, byte-equal scratch offsets, byte-equal
@@ -432,12 +432,15 @@ namespace glibre::render::rt {
 
 class RTAccelStructures {
 public:
-    // §5 surface — see specs/render/SPEC.md §5 lines 1310–1326.
-    Result<void>     register_blas(BLASHandle, std::uint64_t version) noexcept;
+    // §5 surface — two public methods; see specs/render/SPEC.md §5.
+    // submit_blas_refit is NOT on this surface: the Metal 4 encoder
+    // call lives entirely inside passes/blas_refit.cpp's execute()
+    // lambda, which consumes the read-only seams below directly.
+    Result<void>       register_blas(BLASHandle, std::uint64_t version) noexcept;
     Result<TLASHandle> ensure_tlas(ViewHandle, const RenderFrame&) noexcept;
-    Result<void>     submit_blas_refit(MetalCommandBuffer&, BLASHandle) noexcept;
 
-    // Internal seams used by passes/blas_refit.cpp + passes/tlas_build.cpp.
+    // Read-only seams used by passes/blas_refit.cpp + passes/tlas_build.cpp.
+    // Plugin-private (not exported via the public header); accept MTL::* types.
     [[nodiscard]] eastl::span<const BLASRefitJob>
         pending_refit_jobs(ViewHandle) const noexcept;
     [[nodiscard]] BuildKind
@@ -464,16 +467,22 @@ private:
 }  // namespace glibre::render::rt
 ```
 
-The internal seam methods are not in `SPEC.md` §5 (they accept
+The read-only seam methods are not in `SPEC.md` §5 (they accept
 `MTL::*` types and live behind the public-header opaque). They are
 called only from `passes/blas_refit.cpp` and
 `passes/tlas_build.cpp` inside the same plugin; cross-plugin
-callers see only the three §5 methods.
+callers see only the two §5 methods. SRP: `RTAccelStructures` owns
+CPU-side scheduling state; `passes/blas_refit.cpp` owns all Metal 4
+encoder calls. A CPU scheduling model change touches only the
+aggregate; a Metal 4 encoding API change touches only the pass body.
 
 ## 4. Public surface
 
 The §5 surface is the contract; this section refines the semantics
-of each method without amending the header.
+of each method without amending the header. The public surface is
+two methods: `register_blas` and `ensure_tlas`. `submit_blas_refit`
+is **not** a public method — it is a private implementation concern
+owned by `passes/blas_refit.cpp` (§4.3 below).
 
 ### 4.1 `register_blas(BLASHandle, std::uint64_t version)`
 
@@ -533,40 +542,55 @@ Failure modes:
 | Error                              | Trigger                                                     |
 |------------------------------------|-------------------------------------------------------------|
 | `BlasUnavailable`                  | Visible-set references a `GpuId` whose BLAS is not registered (mesh streamed out, eviction race, version mismatch). |
-| `InstanceLimitExceeded`            | Visible-instance count > `TLAS_INSTANCE_CAP = 4096`. Maps to `SPEC.md` §10 row `TlasBuildFailed`. |
-| `ScratchExhausted`                 | Required refit + build scratch > 8 MiB. Maps to `TlasBuildFailed`. |
+| `TlasBuildFailed` (instance-cap arm) | Visible-instance count > `TLAS_INSTANCE_CAP = 4096`. Maps to `SPEC.md` §10 row `TlasBuildFailed`. |
+| `TlasBuildFailed` (scratch arm)    | Required refit + build scratch > 8 MiB. Maps to `TlasBuildFailed`. |
 | `ResourceImportRefused`            | Unknown `ViewHandle`.                                       |
 
 `ensure_tlas` does **not** issue any GPU command. It is a
 CPU-only prepare; the actual encoder calls live in
 `passes/tlas_build.cpp` and `passes/blas_refit.cpp`.
 
-### 4.3 `submit_blas_refit(MetalCommandBuffer&, BLASHandle)`
+### 4.3 BLAS refit encoding — `passes/blas_refit.cpp`
 
-Called by `passes/blas_refit.cpp` inside its `execute()` lambda
-(`SPEC.md` §6.2.2 step 1.1). Preconditions:
+BLAS refit encoding is **not** a method on `RTAccelStructures`.
+Per PHILOSOPHY §1 (SRP — two reasons to change → split): the
+aggregate owns CPU-side scheduling state; the pass body owns
+GPU command encoding. A change to Metal 4's encoder API affects
+only `passes/blas_refit.cpp`; a change to refit-job scheduling
+logic affects only `RTAccelStructures`.
 
-- The command buffer's queue role is `Queue::Compute`. A
-  `Queue::Graphics` buffer is a programming error; debug build
-  asserts; release returns `Error::PassUnsupportedConfig`
-  (matches `render-graph-design.md` §10 row `queue_purity_runtime_check`).
-- The `BLASHandle` was returned by an earlier
-  `pending_refit_jobs(view)` call this frame.
+`passes/blas_refit.cpp`'s `execute()` lambda:
 
-Postconditions:
-
-- A Metal 4 `MTLAccelerationStructureCommandEncoder::refit(...)`
-  call is recorded into the command buffer, writing to the BLAS's
-  update slot (§4.1.8 invariant 3) and consuming a scratch slice.
-- `BLASRegistryEntry::last_refit_frame_` is updated.
+1. Asserts the command buffer's queue role is `Queue::Compute`. A
+   `Queue::Graphics` buffer is a programming error; debug build
+   asserts; release returns `Error::PassUnsupportedConfig`
+   (matches `render-graph-design.md` §10 row `queue_purity_runtime_check`).
+2. Calls `rt_accel.pending_refit_jobs(view)` to get the scheduled
+   job list. Missing handles (geometry evicted between schedule
+   and submit) return `Error::BlasUnavailable`.
+3. For each job, calls `rt_accel.blas_object(handle)` and
+   `rt_accel.scratch_slice(job_id)` to resolve the Metal 4
+   objects (read-only seams), then records
+   `MTLAccelerationStructureCommandEncoder::refitAccelerationStructure(...)`
+   into the command buffer, writing to the BLAS's update slot
+   (§4.1.8 invariant 3) and consuming the pre-allocated scratch slice.
+4. After recording, updates `BLASRegistryEntry::last_refit_frame_`
+   via the registry's internal mutable accessor (pass-only; not
+   in the public surface).
 
 Failure modes:
 
 | Error                              | Trigger                                                     |
 |------------------------------------|-------------------------------------------------------------|
-| `RefitFailed`                      | Metal 4 returns a build error (driver fault). Maps to `SPEC.md` §10 row `BlasUnavailable` for the next-frame consumer. |
 | `PassUnsupportedConfig`            | Wrong queue role.                                           |
 | `BlasUnavailable`                  | Handle no longer registered (geometry evicted between schedule and submit). |
+
+A Metal 4 encoder fault during refit surfaces as
+`render::Error::TlasBuildFailed` (driver arm) to the next-frame
+TLAS-build consumer, per §10. `passes/blas_refit.cpp` does not
+return a refit-specific error arm — there is no `RefitFailed`
+enumerator in `render::Error` (`SPEC.md` §5 has only `TlasBuildFailed`
+and `BlasUnavailable` for accel-struct operations).
 
 ### 4.4 Visibility mask layout
 
@@ -600,8 +624,8 @@ rationale:
 - The TLAS accel-struct buffer for 4096 instances is ~1 MiB on M1
   (Metal 4's `MTL_INSTANCE_DESCRIPTOR_SIZE` is 64 bytes; 4096 × 64
   = 256 KiB raw + acceleration-structure overhead ≈ 1 MiB).
-- Going above the cap is `Error::InstanceLimitExceeded` →
-  `TlasBuildFailed`. Recovery is `lower-tier` (drop visible
+- Going above the cap returns `render::Error::TlasBuildFailed`
+  (instance-cap arm, §10). Recovery is `lower-tier` (drop visible
   instances at the cull aggregate's budget pass).
 
 Post-MVP raise to 16 384 is a perf-budget amendment, not an SRP
@@ -632,9 +656,10 @@ allocation budget impact.
 
 ### 5.2 Hot path — per frame, inside phase 7
 
-Triggered by `ensure_tlas` and `submit_blas_refit`. Frequency:
-once per `View` per frame for `ensure_tlas`; once per dynamic-
-visible BLAS per frame for `submit_blas_refit`.
+Triggered by `ensure_tlas` (public) and the BLAS refit encoding
+in `passes/blas_refit.cpp`'s execute() lambda. Frequency: once
+per `View` per frame for `ensure_tlas`; once per dynamic-visible
+BLAS per frame for the refit encoder call.
 
 Work — `ensure_tlas` (CPU-only):
 - Visible-set walk, registry lookup per instance: O(visible
@@ -650,10 +675,11 @@ Total `ensure_tlas` CPU cost on S1: **≤ 0.06 ms** per view.
 Folded inside the 0.10 ms `graph/builder.cpp` register cell of
 `SPEC.md` §9.3.
 
-Work — `submit_blas_refit` (one Metal command per call):
-- Argument-buffer bind: ~1 µs (resolved offsets pre-computed).
-- Encoder `refit(...)` call: ~2 µs CPU; the GPU work happens
-  asynchronously.
+Work — `passes/blas_refit.cpp` execute() (one Metal command per BLAS):
+- Argument-buffer bind via `blas_object` + `scratch_slice` seams:
+  ~1 µs (resolved offsets pre-computed by the refit scheduler).
+- Encoder `refitAccelerationStructure(...)` call: ~2 µs CPU;
+  the GPU work happens asynchronously.
 - Cost folded into `passes/blas_refit.cpp`'s per-pass record
   budget (≤3 µs from `render-graph-design.md` §9.2).
 
@@ -687,10 +713,11 @@ rt-accel inherits the render plugin's thread-role triad
   the `instance_buf_` ring are mutated only on this thread inside
   phase 7. No locks needed.
 - **Per-pass GPU encoding workers (≤3).** `passes/blas_refit.cpp`
-  records on the compute-queue worker; it calls
-  `submit_blas_refit` (read-only against the registry) and the
-  internal `scratch_slice` / `blas_object` accessors (read-only
-  views into rt-accel state). `passes/tlas_build.cpp` similarly.
+  records on the compute-queue worker; it calls the read-only
+  seams `pending_refit_jobs`, `scratch_slice`, and `blas_object`
+  to obtain scheduling state and Metal 4 objects, then issues the
+  `MTLAccelerationStructureCommandEncoder::refitAccelerationStructure`
+  call directly. `passes/tlas_build.cpp` similarly.
 - **Driver thread.** Submits the recorded buffers; never touches
   rt-accel state directly.
 
@@ -732,12 +759,21 @@ plugin's thread pool. Cross-thread safety:
    are rare (asset publish); readers are frequent (builder).
    `eastl::shared_mutex` is the only synchronisation primitive
    in rt-accel.
-2. The publish happens *before* phase 6 of the frame in which
+2. The `MTLDevice::accelerationStructureSizes(descriptor)` call
+   inside `register_blas` (§3.3 step 2) is issued from the
+   loader thread. Apple's Metal documentation explicitly
+   guarantees that `MTLDevice` state-query methods (including
+   `accelerationStructureSizes`) are **thread-safe for concurrent
+   access** from multiple threads (Metal Feature Set Tables,
+   "Thread Safety" section: device-level queries are safe to
+   call from any thread simultaneously). No additional locking
+   is needed around the driver round-trip.
+3. The publish happens *before* phase 6 of the frame in which
    the new mesh becomes visible (phase ordering enforced by
    `core`'s frame-phases contract per
    `reviews/decisions/frame-phases.md`). The render thread
    never observes a half-written registry entry.
-3. Hot-reload: `register_blas` is called inside
+4. Hot-reload: `register_blas` is called inside
    `glibre_plugin_register` (phase 8) before any phase-6 work
    resumes; identical contract.
 
@@ -748,7 +784,9 @@ Same `RenderFrame` + same registry → same `TLASHandle` payload
 `member_set_hash` is computed with a fixed seed
 (`PHILOSOPHY §7`). The instance-buffer ring write order is
 fixed by visible-set iteration order, which is canonical per
-`reviews/decisions/determinism-canonical-iteration.md`.
+PHILOSOPHY §7 ("Determinism by default — fixed container iteration
+order"). A formal decision record for EASTL canonical-iteration-order
+is flagged in §12 OPEN below.
 Determinism asserted by `tests/render/rt_accel/determinism.cpp`.
 
 ## 7. Persistence + ABI
@@ -779,10 +817,11 @@ set.
 There is no cross-process contract because there is no on-disk
 artefact. The cross-version concern is **plugin ABI**:
 
-- The §5 public surface (`register_blas`, `ensure_tlas`,
-  `submit_blas_refit`) is part of the render plugin's exported
-  ABI. Any change is a render-plugin ABI bump per
-  `reviews/decisions/plugin-abi.md`.
+- The §5 public surface (`register_blas`, `ensure_tlas`) is part
+  of the render plugin's exported ABI. Any change is a
+  render-plugin ABI bump per `reviews/decisions/plugin-abi.md`.
+  `passes/blas_refit.cpp` is plugin-internal; changes to its
+  encoding logic are not ABI events.
 - `BLASHandle` and `TLASHandle` are middleman types
   (`glibre.types.render.GpuId`-keyed); their ABI is owned by
   `glibre-types`, not by render. A type-side change forces
@@ -913,7 +952,7 @@ expectation; drift trips the per-PR `perf-budget.yml` gate
 | `ensure_tlas` — `member_set_hash` compute                | 0.01 ms    | xxh3 over (BLASHandle, mask) pairs.                                                                              |
 | `ensure_tlas` — refit job list build                     | 0.005 ms   | Filter + scratch alloc; ≤6 dynamic-visible BLAS on S1.                                                            |
 | `ensure_tlas` — instance-buffer ring write               | 0.002 ms   | ≤210 × 64 B = ~13 KiB memcpy.                                                                                    |
-| `submit_blas_refit` per BLAS — encoder bind + refit call | 3 µs       | Per Metal-cpp call.                                                                                              |
+| `passes/blas_refit.cpp` execute() per BLAS — encoder bind + refit call | 3 µs | Per Metal-cpp call via `blas_object` / `scratch_slice` seams.                                               |
 | **rt-accel CPU subtotal per `View`, S1**                 | **≤ 0.06 ms** | Folded into `SPEC.md` §9.3 0.10 ms `graph/builder.cpp` row + 0.50 ms per-pass record row.                          |
 
 ### 9.2 GPU cost (per frame, S1 fixture)
@@ -936,18 +975,26 @@ amendment, not a re-design.
 
 ### 9.3 Memory ceilings
 
-The rt-accel aggregate's storage budget is the **48 MiB
-"RT acceleration structures"** row of `SPEC.md` §9.5, decomposed:
+The rt-accel aggregate's persistent storage budget is the **48 MiB
+"RT acceleration structures"** row of `SPEC.md` §9.5, decomposed.
+Refit + build scratch is **transient** (§3.5) and is accounted in the
+256 MiB transient pool separately — it does **not** appear in this
+48 MiB subtotal.
 
 | Sub-row                                | Ceiling   | Lifetime         | Allocator                                     |
 |----------------------------------------|-----------|------------------|-----------------------------------------------|
 | Per-`View` TLAS accel-struct           | ~1 MiB ×4 = 4 MiB | Persistent  | `glibre::PerContextAllocator(render)`, persistent slot. |
 | Imported BLAS GPU residency            | ≤ 30 MiB | Persistent       | Tagged `render` per Allocator Rule 5; bytes are render-owned, source is `geometry`. |
 | TLAS instance ring (3-frame-in-flight) | 768 KiB  | Persistent       | Render's CPU-write ring buffer.               |
-| Refit + build scratch pool             | 8 MiB    | Per-frame transient | Transient pool slot, alias-planned.        |
 | Sizes cache + registry table           | 256 KiB  | Persistent       | Standard CPU heap (counted in 16 MiB GPU-resource-handles row of §9.5, *not* in this 48 MiB row). |
-| Reserve / fragmentation slack          | ~5 MiB   | Persistent       | Heap allocator's natural fragmentation.       |
-| **Subtotal**                            | **≤ 48 MiB** | —             | Matches the §9.5 row.                          |
+| Reserve / fragmentation slack          | ~8 MiB   | Persistent       | Heap allocator's natural fragmentation.       |
+| **Subtotal (persistent row)**          | **≤ 43 MiB** | —             | Under the 48 MiB §9.5 row; ~5 MiB headroom.   |
+
+Transient (not in 48 MiB row):
+
+| Sub-row                                | Ceiling   | Lifetime            | Allocator                                    |
+|----------------------------------------|-----------|---------------------|----------------------------------------------|
+| Refit + build scratch pool             | 8 MiB    | Per-frame transient  | Transient pool alias slot (§9.5 transient row; 256 MiB pool). |
 
 Strict-mode enforcement (`GLIBRE_ALLOC_STRICT=1`) catches drift
 above these caps and returns `core::Error::OutOfBudget`, mapped
@@ -965,7 +1012,7 @@ benchmarks (named under `tests/render/perf/`):
 | Benchmark name                                          | Measures                                                          | Ceiling       |
 |---------------------------------------------------------|-------------------------------------------------------------------|---------------|
 | `BENCHMARK("ensure_tlas, S1 main view, p99")`           | Wall time of one `ensure_tlas` call                               | ≤ 0.06 ms     |
-| `BENCHMARK("blas refit GPU, S1, p99")`                  | GPU wall time of all `submit_blas_refit` calls in the frame       | ≤ 0.20 ms     |
+| `BENCHMARK("blas refit GPU, S1, p99")`                  | GPU wall time of all `blas_refit` pass execute() calls in the frame | ≤ 0.20 ms     |
 | `BENCHMARK("tlas build/refit GPU, S1, p99")`            | GPU wall time of `passes/tlas_build.cpp`                           | ≤ 0.10 ms     |
 | `BENCHMARK("rt-accel residency, S1")`                   | Live bytes on `ContextTag::render` attributable to rt-accel        | ≤ 48 MiB      |
 | `BENCHMARK("blas refit determinism, S1")`               | Same `RenderFrame` → same refit job order                          | byte-equal    |
@@ -995,14 +1042,14 @@ sites):
 
 | `render::Error` arm              | §10.1 row             | Trigger                                                                                                                                   | Recovery        | Severity | Test fixture                                             |
 |----------------------------------|-----------------------|-------------------------------------------------------------------------------------------------------------------------------------------|-----------------|----------|----------------------------------------------------------|
-| `BlasUnavailable`                | `BlasUnavailable`     | `ensure_tlas` finds a visible `GpuId` whose BLAS is not registered (eviction race, version mismatch, `register_blas` failed earlier), or `submit_blas_refit` finds the handle gone between schedule and submit. | `lower-tier` (drop the offending instance from the visible-set; `cull/budget.cpp` re-runs next frame). | `warn`   | `tests/render/rt_accel/blas_unavailable.cpp`            |
+| `BlasUnavailable`                | `BlasUnavailable`     | `ensure_tlas` finds a visible `GpuId` whose BLAS is not registered (eviction race, version mismatch, `register_blas` failed earlier), or `passes/blas_refit.cpp` finds the handle gone between schedule and encode. | `lower-tier` (drop the offending instance from the visible-set; `cull/budget.cpp` re-runs next frame). | `warn`   | `tests/render/rt_accel/blas_unavailable.cpp`            |
 | `TlasBuildFailed` (instance cap) | `TlasBuildFailed`     | `ensure_tlas` sees visible-instance count > 4096.                                                                                          | `lower-tier`    | `warn`   | `tests/render/rt_accel/tlas_instance_cap.cpp`           |
 | `TlasBuildFailed` (scratch)      | `TlasBuildFailed`     | `ensure_tlas` would need scratch > 8 MiB pool ceiling.                                                                                     | `lower-tier`    | `warn`   | `tests/render/rt_accel/tlas_scratch_exhausted.cpp`      |
 | `TlasBuildFailed` (driver)       | `TlasBuildFailed`     | Metal 4 returns a build error from `MTLAccelerationStructureCommandEncoder::build` (driver fault).                                          | `abort-frame` (debug) / `abort-engine` (release CI). | `error`  | `tests/render/rt_accel/tlas_driver_fault.cpp`           |
 | `CapabilityNotSupported`         | (composite §10.3)     | `register_blas` or `ensure_tlas` invoked on a host without `Capability::HardwareRayTrace`.                                                 | `disable-feature` (graph elides RT passes per `render-graph-design.md` §3.3). | `warn`   | `tests/render/rt_accel/capability_missing.cpp`          |
 | `ResourceImportRefused`          | `ResourceImportRefused` | `register_blas` with a `BLASHandle` whose payload is null, or with a lower `version` than current.                                       | `abort-engine` (programming error) / `lower-tier` (eviction race). | `error`  | `tests/render/rt_accel/import_refused.cpp`              |
 | `HeapOutOfMemory`                | `HeapOutOfMemory`     | BLAS GPU residency over 30 MiB sub-row (§9.3); strict-mode allocator returns `core::Error::OutOfBudget`, mapped here.                      | `lower-tier`    | `warn`   | `tests/render/rt_accel/blas_residency_exhausted.cpp`    |
-| `PassUnsupportedConfig`          | (composite §10.3)     | `submit_blas_refit` invoked on a non-Compute command buffer.                                                                                | `abort-engine` (programming error). | `error`  | `tests/render/rt_accel/refit_wrong_queue.cpp`           |
+| `PassUnsupportedConfig`          | (composite §10.3)     | `passes/blas_refit.cpp` execute() invoked on a non-Compute command buffer.                                                                  | `abort-engine` (programming error). | `error`  | `tests/render/rt_accel/refit_wrong_queue.cpp`           |
 
 Cross-cutting notes (per `SPEC.md` §10.2):
 
@@ -1035,7 +1082,7 @@ Cross-cutting notes (per `SPEC.md` §10.2):
   `TlasBuildFailed (driver)` because the next-frame consumer
   observes a broken acceleration-structure object; the failure
   is escalated by the consumer (TLAS-build pass), not by
-  `submit_blas_refit` itself.
+  `passes/blas_refit.cpp` itself.
 
 The aggregate does **not** emit graph-layer arms
 (`RenderGraphCycle`, `BarrierConflict`, `PassDeclaredUseUnused`);
@@ -1091,14 +1138,14 @@ acceptance story, or a §9 benchmark.
 | `rt_accel/refit_scheduler_scratch_offsets_packed`     | 6 dynamic BLAS with varying refit-scratch sizes.                         | Offsets are non-overlapping, sum ≤ pool ceiling.                            | §3.5, §3.6   | #391   |
 | `rt_accel/refit_scheduler_deterministic`              | Two runs of the same `RenderFrame`.                                      | Identical job order + identical scratch offsets.                            | §3.6, §6.5   | #391   |
 
-### 11.4 Unit tests — `submit_blas_refit`
+### 11.4 Unit tests — `passes/blas_refit.cpp` execute()
 
 | TC ID                                                 | Trigger                                                                  | Expectation                                                                | §-link        | Story  |
 |-------------------------------------------------------|--------------------------------------------------------------------------|----------------------------------------------------------------------------|---------------|--------|
-| `rt_accel/submit_records_metal_refit_call`            | `submit_blas_refit(compute_cb, blas)` with valid pre-scheduled job.      | Mock command buffer records one `refitAccelerationStructure` call.         | §4.3          | #391   |
-| `rt_accel/submit_wrong_queue_refuses`                 | `submit_blas_refit(graphics_cb, blas)`.                                  | Returns `unexpected(PassUnsupportedConfig)`.                               | §4.3, §10    | #391   |
-| `rt_accel/submit_unknown_blas_refuses`                | Handle unregistered between schedule and submit.                         | Returns `unexpected(BlasUnavailable)`.                                      | §4.3, §10    | #391   |
-| `rt_accel/submit_updates_last_refit_frame`            | Successful submit.                                                       | `BLASRegistryEntry::last_refit_frame_` advances.                           | §3.6, §4.3   | #391   |
+| `rt_accel/submit_records_metal_refit_call`            | `blas_refit` pass execute() with valid pre-scheduled job.                | Mock command buffer records one `refitAccelerationStructure` call.         | §4.3          | #391   |
+| `rt_accel/submit_wrong_queue_refuses`                 | `blas_refit` pass execute() on a `Queue::Graphics` command buffer.       | Returns `unexpected(PassUnsupportedConfig)`.                               | §4.3, §10    | #391   |
+| `rt_accel/submit_unknown_blas_refuses`                | Handle unregistered between schedule and encode.                         | Returns `unexpected(BlasUnavailable)`.                                      | §4.3, §10    | #391   |
+| `rt_accel/submit_updates_last_refit_frame`            | Successful encode.                                                       | `BLASRegistryEntry::last_refit_frame_` advances.                           | §3.6, §4.3   | #391   |
 
 ### 11.5 Integration tests — real `MetalDevice` (Apple-Silicon CI)
 
@@ -1111,7 +1158,7 @@ acceptance story, or a §9 benchmark.
 | `rt_accel_integration/multi_view_two_tlas`            | Two `View`s; each `ensure_tlas` returns a distinct `TLASHandle`.          | Both TLAS objects valid; two trace passes succeed.                          | §3.2          | #391   |
 | `rt_accel_integration/capability_fallback`            | Run on a synthetic capability set without `HardwareRayTrace`.             | `add_rt_pass` elides; `lighting.cpp` falls back to PCSS shadow.             | §10           | #392   |
 | `BENCHMARK("ensure_tlas, S1, p99")`                   | S1 fixture, 600 frames, p99 of `ensure_tlas`.                            | ≤ 0.06 ms.                                                                   | §9.4          | (perf) |
-| `BENCHMARK("blas refit GPU, S1, p99")`                | S1 fixture, GPU timestamp around all `submit_blas_refit` calls.           | ≤ 0.20 ms.                                                                   | §9.4          | #391   |
+| `BENCHMARK("blas refit GPU, S1, p99")`                | S1 fixture, GPU timestamp around all `blas_refit` pass execute() calls.   | ≤ 0.20 ms.                                                                   | §9.4          | #391   |
 | `BENCHMARK("tlas build GPU, S1, p99")`                | S1 fixture, GPU timestamp around `passes/tlas_build.cpp`.                 | ≤ 0.10 ms.                                                                   | §9.4          | #391   |
 | `BENCHMARK("rt-accel residency, S1")`                 | Live bytes on rt-accel-tagged sub-rows.                                  | ≤ 48 MiB.                                                                    | §9.4          | (perf) |
 
@@ -1187,3 +1234,11 @@ run on every PR (no Metal device required; the
   render-plugin internal ABI bump if `TLASInstance` ever
   becomes ABI-visible (currently it is not — the field is
   internal-only).
+- **[OPEN]** Determinism canonical-iteration decision record. §6.5
+  grounds the refit-scheduler's deterministic job order in
+  PHILOSOPHY §7 ("fixed container iteration order"). A formal
+  `reviews/decisions/determinism-canonical-iteration.md` decision
+  record spelling out which EASTL containers guarantee ordered
+  iteration and how that invariant is enforced in tests is required
+  before rt-accel's determinism tests are authoritative. Track via
+  a `[SPIKE] iterate-render-determinism-canonical-iteration` issue.
