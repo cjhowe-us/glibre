@@ -78,6 +78,25 @@ manifest:
 # Frames 4..7:  swap to the *escape* fixture, assert IncludeEscape.
 # Frames 8..11: swap to the *cycle* fixture pair, assert IncludeCycle.
 # Frame  12:    End.
+#
+# Cross-scenario project-state sharing (INTENTIONAL).
+# The three Gherkin scenarios in this trace share one mutable live
+# project: Scenario 2 (frames 4..7) replaces `shaders/main.slang` in
+# the project left behind by Scenario 1 (frames 0..3); Scenario 3
+# (frames 8..11) imports `shaders/a.slang` and `shaders/b.slangi` into
+# the same live project now containing the escape `main.slang`.  There
+# is no explicit per-scenario isolation reset because `TraceRunner`
+# §4.1.7 in `specs/e2e/SPEC.md` does not yet define a reset primitive.
+# This coupling is deliberate within this trace's scope: the three
+# scenarios test orthogonal error paths on the same project instance,
+# so the shared state does not invalidate any assertion.
+#
+# Once the TraceRunner isolation primitive design is resolved (see spike
+# [SPIKE] iterate-e2e-trace-runner-isolation-design (#865), filed to inform
+# specs/e2e/SPEC.md §4.1.7), authors should decide whether each
+# scenario should receive a clean project snapshot.  Until that spike
+# lands, shared mutable state across scenario boundaries is the accepted
+# pattern for single-file multi-scenario traces.
 # -----------------------------------------------------------------------------
 stream:
 
@@ -172,12 +191,16 @@ stream:
   #
   # The expected blobs below are symbolic — at record time
   # `tools::TraceWriter` replaces them with the actual 32-byte BLAKE3
-  # of each include's post-include byte stream. The placeholder
-  # `nonzero@call_1` is also the load-bearing rejection of the
-  # all-zero hash: a zero ShaderHash matching this expected blob is
-  # impossible, so the AssertState catches both "hash is zero"
-  # (Gherkin "non-zero") and "hash is not reproducible" (Gherkin
-  # "reproducible across two opens") in one comparison.
+  # of each include's post-include byte stream. The sentinels follow
+  # the `stable@<name>` convention (see permutation-key-codec.glibre-trace
+  # lines 59-76 for full convention documentation): TraceWriter resolves
+  # each sentinel at first-record time by running the implementation,
+  # capturing the actual bytes, and writing the concrete hex into the
+  # compiled binary TraceFile. Call-1 and call-2 ops share the same
+  # sentinel name (e.g. `stable@common_hash_call_1`) so the binder's
+  # byte-equal compare simultaneously catches "hash is zero" (Gherkin
+  # "non-zero") and "hash changed between calls" (Gherkin "reproducible
+  # across two opens") in a single comparison.
   - frame: 2
     op: AssertState
     id: 3
@@ -185,7 +208,7 @@ stream:
     component_path: "world/shader_inspector/main/source/preprocessed/include_closure[0]/content_hash"
     expected:
       tag: "Blake3Hash"
-      bytes_hex: "nonzero@common@call_1"   # placeholder bound at record time
+      bytes_hex: "stable@common_hash_call_1"   # placeholder bound at record time
 
   - frame: 2
     op: AssertState
@@ -194,7 +217,7 @@ stream:
     component_path: "world/shader_inspector/main/source/preprocessed/include_closure[1]/content_hash"
     expected:
       tag: "Blake3Hash"
-      bytes_hex: "nonzero@math@call_1"     # placeholder bound at record time
+      bytes_hex: "stable@math_hash_call_1"     # placeholder bound at record time
 
   # Re-issue the same command without mutating disk; both frames must
   # therefore produce byte-equal IncludeNode::content_hash entries by
@@ -215,7 +238,7 @@ stream:
     component_path: "world/shader_inspector/main/source/preprocessed/include_closure[0]/content_hash"
     expected:
       tag: "Blake3Hash"
-      bytes_hex: "nonzero@common@call_1"   # MUST equal id=3 (assert_eq across calls)
+      bytes_hex: "stable@common_hash_call_1"   # MUST equal id=3 (assert_eq across calls)
 
   - frame: 3
     op: AssertState
@@ -224,7 +247,7 @@ stream:
     component_path: "world/shader_inspector/main/source/preprocessed/include_closure[1]/content_hash"
     expected:
       tag: "Blake3Hash"
-      bytes_hex: "nonzero@math@call_1"     # MUST equal id=4 (assert_eq across calls)
+      bytes_hex: "stable@math_hash_call_1"     # MUST equal id=4 (assert_eq across calls)
 
   # --------------------------------------------------------------------------
   # Scenario 2 — escape rejection (negative path).
@@ -254,7 +277,7 @@ stream:
   # typed error payload; AssertState op_id=7 captures the typed error
   # variant and AssertLogContains op_id=8 verifies the structured log
   # channel emitted the matching diagnostic. AssertLogContains scopes
-  # its window to entries written between the previous assert (id=6)
+  # its window to entries written between the previous assert (id=7)
   # and this frame (specs/e2e/SPEC.md §6.4).
   - frame: 6
     op: AssertState
