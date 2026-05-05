@@ -108,7 +108,7 @@ below.
 | `threading-async.md` *wall-clock for log timestamps and crash dumps*                   | **Covered.** `Clock::wall() -> WallTime` is the only sanctioned source (§4.4 inv #3). Log helper (`glibre::log_error`) calls `Clock::wall()`; engine code never calls `time(nullptr)` / `gettimeofday`.                                              |
 | `core-runtime/game-loop.md` §Fixed Timestep Accumulator (substeps, alpha)              | **Covered, ownership split.** The numeric primitive (`FixedStepAccumulator`) lives here; the *use* (driving phase 3 physics-fixed substeps) lives in sibling `physics` (#132) and core's schedule-frame loop. §3.5.                                |
 | `core-runtime/game-loop.md` *monotonic frame counter*                                  | **Covered, ownership split.** `Clock` provides `Instant`; the `frame_index : std::uint64_t` counter itself is core's concern (incremented in phase 9 per `frame-phases.md`). Platform contributes the time, not the index.                          |
-| `core-runtime/game-loop.md` *delta-time per frame*                                     | **Covered.** `FrameTick::tick(Clock&) -> FrameDelta` returns `{ now, delta, wall_now }` (§3.4). Caller threads the `FrameTick` through frames; platform owns no global `last_now_` field — that would couple to scheduling.                          |
+| `core-runtime/game-loop.md` *delta-time per frame*                                     | **Covered.** `FrameTick::tick<ClockT> -> FrameDelta` returns `{ now, delta, wall_now }` (§3.4). Caller threads the `FrameTick` through frames; platform owns no global `last_now_` field — that would couple to scheduling.                          |
 | `core-runtime/game-loop.md` *max-ticks-per-frame cap (spiral-of-death prevention)*     | **Covered.** `FixedStepAccumulator::consume()` caps at `max_ticks_per_frame` and **drops** the excess accumulated time to zero; residual is not preserved across the cap. `alpha()` continuity holds only in the non-cap steady state. Excess simulation time is intentionally discarded to bound runaway-spiral cost. See §3.5 + §11.1.7.                                                              |
 | `core-runtime/game-loop.md` *interpolation alpha in `[0, 1]`*                          | **Covered.** `FixedStepAccumulator::alpha() -> float` returns the residual divided by step duration, clamped to `[0, 1]`. §3.5.                                                                                                                     |
 | `tools/profiler.md` *high-precision time deltas for span measurement*                  | **Owned by sibling `tools` profiler context.** The profiler reads `Clock::now()` like any consumer; building the span tree is not platform's concern. We guarantee `now()` is O(1) and `Instant` resolution is at least 1 ns (§9).                  |
@@ -187,7 +187,7 @@ read-cached-numer/denom + one `mach_absolute_time` syscall + one
 `FrameTick` and `FixedStepAccumulator` are pure value objects:
 copying them is well-defined, comparing them is well-defined, and
 they own no resources that could conflict on copy. They do not
-contain a `Clock&` reference; `tick(Clock&)` and `accumulate(...)`
+contain a `Clock&` reference; `tick<ClockT>` and `accumulate(...)`
 take it as a method argument. This is deliberate — embedding a
 reference would (a) prevent value-semantic copy, (b) force
 lifetime coupling when none is needed, and (c) leak `Clock`'s
@@ -211,11 +211,12 @@ auto Clock::now() const noexcept -> Instant {
         (__uint128_t(t) * info.numer) / info.denom);
 #if !defined(NDEBUG)
     // §4.4 inv #1 defensive guard: detect monotonic regression in debug.
-    // The atomic load below uses `relaxed` because the rule is
-    // a *correctness* invariant, not a synchronization point —
-    // any read that observes `last_seen` is correctness-preserving
-    // regardless of inter-thread ordering, since the only valid
-    // outcome is "no regression" or "abort".
+    // The atomic CAS loop below uses `relaxed` ordering because the
+    // regression check is a *correctness* invariant — every thread
+    // observes a monotonically non-decreasing snapshot and aborts only
+    // if its own observation regresses against that snapshot.  No
+    // happens-before is needed because the CAS itself synchronizes the
+    // read-modify-write.  Backward writes are impossible by construction.
     static std::atomic<std::int64_t> last_seen{0};
     // Monotonic-CAS loop: advance last_seen forward to `ns` only if
     // `ns` is strictly newer.  Multiple threads racing on `now()` may
@@ -382,13 +383,14 @@ private:
 
 Choices and their reasons:
 
-- **`tick(Clock&)` returns `{ now, delta, wall }` together.**
+- **`tick<ClockT>` returns `{ now, delta, wall }` together.**
   Capturing both `now` and `wall` in one call reduces and bounds
   the correlation gap between them. The two calls are sequenced
   inside a single tick body; a wall-clock step (NTP slew) that
   fires between them produces an at-most-one-tick gap, which
-  `FrameTick` records in `FrameDelta` and exposes via the §x
-  diagnostics surface rather than masking. A separate
+  `FrameTick` records in `FrameDelta` and exposes via the `obs`
+  context diagnostics surface (exact section to be filed in the obs
+  spec follow-up) rather than masking. A separate
   `Clock::now()` + `Clock::wall()` call sequence at the consuming
   site would widen the window to the caller's entire frame body —
   potentially hundreds of microseconds — whereas the pairing here
@@ -759,7 +761,7 @@ cold ones. The split is fundamental to the §9 budget.
 | `Clock::now()`                    | 1, 9      | <0.001 ms         | Out-of-line (mach_absolute_time syscall is in libSystem; LTO can fold around the wrapper). |
 | `Clock::wall()`                   | 1, 9      | <0.001 ms         | Out-of-line (`std::chrono::system_clock::now`). |
 | `Instant::operator-`              | 1, 3, 6, 9| compile-time      | `constexpr`, fully inlined. |
-| `FrameTick::tick(Clock&)`         | 1         | <0.001 ms         | Header-inline; calls Clock::now + Clock::wall. |
+| `FrameTick::tick<ClockT>`         | 1         | <0.001 ms         | Header-inline; calls Clock::now + Clock::wall. |
 | `FixedStepAccumulator::accumulate`| 3         | nanoseconds       | `constexpr`, fully inlined. |
 | `FixedStepAccumulator::consume`   | 3         | nanoseconds       | `constexpr`, fully inlined. |
 | `FixedStepAccumulator::alpha`     | 6 (interp)| nanoseconds       | `constexpr`, fully inlined. |
@@ -836,11 +838,13 @@ The thread-safety story:
    value is ready, then never block again. Cost is paid exactly
    once per process.
 4. **The debug-only regression guard uses relaxed atomics.** As
-   discussed in §3.2, this is not a synchronization point — it is
-   a paranoia check whose only valid outcome is "abort or move on".
-   No fence is needed; concurrent threads racing on `last_seen`
-   may each abort if they observe a regression, or each not-abort
-   if they don't, which is the correct behaviour.
+   discussed in §3.2, this is not a synchronization point — it is a
+   paranoia check anchored to the monotonic-CAS guard.  Under that
+   guard, concurrent threads cannot race themselves into a spurious
+   abort.  A thread aborts iff its own observed `ns < last_seen` after
+   the CAS loop terminates — which can only happen on a genuine OS-clock
+   regression, not on a race.  No racing thread can write a backward
+   `last_seen` value because the CAS only advances forward.
 
 There is no "current frame's time" cached on the clock — caching
 that would impose a thread-affinity (the cache must be updated by
