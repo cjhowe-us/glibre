@@ -131,13 +131,15 @@ subroutines, each called exactly once per `open`:
 
 ```text
 open(project_root, project_relative)
-  └── 1. resolve(project_root, project_relative) → AbsolutePath
-      └── 2. ingest_closure(AbsolutePath) → (normalized_bytes,
-                                              ordered_includes)
-          └── 3. scan_entry_points(normalized_bytes) → entry_points
-              └── 4. hash_total(normalized_bytes,
-                                ordered_includes) → ShaderHash
+  1. abs          := resolve(project_root, project_relative)    → AbsolutePath
+  2. (bytes, inc) := ingest_closure(abs)                       → (normalized_bytes, ordered_includes)
+  3. eps          := scan_entry_points(bytes)                  → entry_points
+  4. hash         := hash_total(bytes, inc)                    → ShaderHash
 ```
+
+`open` is the sole caller of all four subroutines. They are not
+chained — each subroutine receives its inputs from `open` directly,
+not from the return value of its predecessor.
 
 Each subroutine has no side effects beyond reading from the project
 source root and allocating against the `ContextTag::shader` arena
@@ -766,13 +768,26 @@ behaviour the watcher triggers.
 
 The `platform` `FileWatcher` (#719) observes a `.slang` file change
 under the project source root and emits a `(SourceId, AbsolutePath)`
-event. The `shader` plugin's editor / dev-build wrapper (a small
-adapter inside `source/`) reacts by:
+event.
+
+**Module boundary.** The two objects involved have distinct locations:
+
+- `ShaderSource::open` — the re-ingestion entry point — is
+  implemented in `plugins/shader/source/` and is the only object this
+  design adds to the `source/` sub-module.
+- The watcher-event handler (`on_source_changed`), the inverse index
+  (`included_by`), and `fire_recompile` all live in
+  `plugins/shader/cache/` — either in `cache/cooker.cpp` directly or
+  in a dedicated `cache/source_watcher_adapter.cpp`. The dependency
+  direction is **`cache/ → source/`**; `source/` does not import from
+  `cache/`.
+
+The handler running inside `cache/`:
 
 ```text
 on_source_changed(source_id, abs_path):
     new_source := ShaderSource::open(project_root, source_id.project_relative_path)
-                  // §3.2 → §3.4 → §3.6 → §3.7
+                  // calls into source/ — §3.2 → §3.4 → §3.6 → §3.7
     if new_source is unexpected:
         log_warn(error)                     # SPEC §8.4 refusal
         return                              # prior ShaderSource stays live
@@ -792,7 +807,8 @@ on_source_changed(source_id, abs_path):
 `fire_recompile` path lives in `cache/cooker.cpp` (the cooker is the
 sole writer; SPEC §6.4) and is governed by SPEC §8.5
 (`ShaderArtifactReplaced` event). The watcher integration adapter is
-the sole new code added by this design beyond the four §3 subroutines.
+the sole new code added by this design beyond the four §3 subroutines,
+and it lives entirely inside `cache/`.
 
 ### 8.2 Re-ingestion is the cheapest refresh
 
@@ -824,10 +840,12 @@ On a watcher tick for `lib/common.slang`:
    `total_hash` changes.
 
 The inverse index is **not** part of `ShaderSource`'s state; it lives
-in the cooker / editor adapter (the same place that calls
-`fire_recompile`). `ShaderSource` exposes the closure via
-`preprocessed().include_closure` for the adapter to populate the
-index.
+in `cache/` alongside the cooker / watcher adapter (the same code that
+calls `fire_recompile`). The dependency direction is
+**`cache/ → source/`** — `cache/` reads `ShaderSource`'s closure and
+maintains the inverse index; `source/` is unaware of `cache/`.
+`ShaderSource` exposes the closure via `preprocessed().include_closure`
+for the adapter to populate the index.
 
 ### 8.4 Refusal cases
 
@@ -855,12 +873,35 @@ expectation).
 ### 8.5 Test hooks
 
 `shader::test::inject_source_diff` (SPEC §8.6, `#if defined(GLIBRE_E2E)`)
-admits the same in-process trigger the watcher uses. `ShaderSource`
-exposes a friend-shaped test-only constructor that takes a
-synthesised byte stream in lieu of reading from disk; the
-normalization (§3.5), closure walk (§3.4), scan (§3.6), and hash
-(§3.7) all run identically. This is the entry point §8.6's bullet
-"inject an Slang diff for `source_id`" hooks into.
+admits the same in-process trigger the watcher uses. The production
+`ShaderSource` class definition carries **no test-specific members**;
+keeping test-framework concerns out of the aggregate header is required
+by SRP (two reasons to change: ingestion algorithm changes vs.
+test-double scaffolding changes).
+
+Instead, a dedicated test-support header
+`tests/shader/source/shader_source_test_support.hpp` — compiled only
+when `GLIBRE_E2E` is defined — declares:
+
+```cpp
+namespace glibre::shader::test {
+
+/// Constructs a ShaderSource from a synthesised byte stream without
+/// reading from disk. Normalization (§3.5), closure walk (§3.4),
+/// scan (§3.6), and hash (§3.7) run identically to ShaderSource::open.
+/// Available only in E2E builds (GLIBRE_E2E).
+std::expected<ShaderSource, shader::Error>
+make_shader_source_from_bytes(eastl::span<const std::byte> raw,
+                               SourceId id);
+
+} // namespace glibre::shader::test
+```
+
+`make_shader_source_from_bytes` is a `friend` of `ShaderSource` only
+inside the test-support translation unit, not in the public header.
+The `GLIBRE_E2E` guard lives entirely in `shader_source_test_support.hpp`;
+the aggregate header is unconditionally clean. The §8.6
+"inject an Slang diff for `source_id`" bullet calls this factory.
 
 ## 9. Performance
 
