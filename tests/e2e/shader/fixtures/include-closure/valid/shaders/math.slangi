@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// glibre — e2e fixture for shader story #321 (valid include closure).
+//
+// Leaf `.slangi` header — terminates the include chain. Used to prove
+// that PreprocessedSource::include_closure carries every transitive
+// node, not just the directly-included one.
+
+static const float kIdentityScale = 1.0;

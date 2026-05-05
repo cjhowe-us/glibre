@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// glibre — e2e fixture for shader story #321 (cycle rejection).
+//
+// Pair of `a.slang` — closes the cycle by including back into the
+// translation-unit root. See `a.slang` for the full Gherkin context.
+//
+// Note: the cycle target deliberately re-points at the `.slang` root
+// rather than a third `.slangi`, so the closure walker has to treat
+// the entry-file as part of the visited set, not just intermediate
+// `.slangi` headers.
+
+#include "a.slang"
