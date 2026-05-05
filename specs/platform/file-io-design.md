@@ -559,8 +559,9 @@ invariant. The path interner (§3.5a) replaces the inline string_view with a sta
 `static_assert(sizeof(Request) == 24)` in `request.hpp` and `static_assert(sizeof(Slot) <= 64)`
 in `token.hpp` are the compile-time gates.
 
-Pool footprint: `64 × 32 + 8 × 32 = 2 KiB + 256 B = 2.25 KiB` resident
-at default config; bounded by the §9 8 MiB sub-arena.
+Pool footprint: `64 × 32 + 8 × 32 + (24 × 8 + ~8B ring metadata) = 2 KiB + 256 B + 200 B ≈ 2.45 KiB` resident
+at default config (`queue_depth=16`, N==2); `worker_dispatch_ring_` contributes only when N>1 (at N==1 the ring
+is unused per §3.5). Bounded by the §9 8 MiB sub-arena.
 
 ### 3.7 Synchronous primitives — POSIX direct
 
@@ -657,7 +658,7 @@ share one body:
    `IoFailure { OsCode { ENOBUFS } }` with diagnostic prefix
    `"out-of-budget"` (§10.3.6).
 4. Intern `p` via the path interner (§3.5a): look up `path_index = interner.intern(p)`
-   (insert if absent; exclusive lock; returns a stable `uint32_t`). Build the
+   (insert if absent; single-writer caller-thread access — see §3.5a; returns a stable `uint32_t`). Build the
    `Request` directly into `slots_[i].req` using `path_index` (not the raw
    `CanonicalPath`); set `state = InFlight`, `abandoned = false`.
 5. Push slot index onto `requests_` ring. The push is non-blocking
@@ -1665,3 +1666,14 @@ gate's tolerance band.
   `path_index` in `Request`, ≤ M entries at any time) is unchanged by
   the substitution. Gate: `static_assert(sizeof(Request) == 24)` in
   `request.hpp` must pass before the first async enqueue test is written.
+
+- **[OPEN] SPEC §9.2 stale ring sizing** [NON-BLOCKING]: SPEC §9.2 describes
+  sub-arena contents with "SPSC request/response rings (1 MiB each)" — that
+  language pre-dates the ring topology redesign. The actual layout is a 32-slot
+  SPSC `requests_` ring + 8-slot `worker_dispatch_ring_` with no response ring
+  (per §3.5 + §3.6); total 8 MiB budget is unchanged, only the descriptive text
+  drifts. §3.5 and §3.6 are the canonical authority for sizing; §9.2 is
+  informative. The §9.2 amendment (striking "SPSC request/response rings (1 MiB
+  each)" and replacing with a summary matching §3.5/§3.6) can land alongside the
+  §5.11 and §6.5 amendments per the existing §12 entries — NOT blocking
+  implementation.
