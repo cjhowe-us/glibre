@@ -155,6 +155,15 @@ Foryc (driver, owned by main)
     └── AuditEmitter          (AbiHashManifest.fory.bin audit blob)
 ```
 
+SRP note: the six `*Emitter` siblings (Header through Reflection) each
+change only when the C++ emission format for their output type changes.
+`AuditEmitter` changes for a structurally distinct reason: the
+`AbiHashManifest` Fory schema (field additions, tag renumbering) or
+Fory-encode parameters. The two reasons are kept separate by grouping
+both under `Emitter` ownership while treating `AuditEmitter`'s
+single axis of change as `AbiHashManifest` schema evolution, not C++
+text format.
+
 Translation-unit shape (illustrative, normative only insofar as
 it names symbols the rest of the spec or sibling designs reference):
 
