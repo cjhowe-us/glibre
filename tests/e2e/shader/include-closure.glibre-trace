@@ -92,7 +92,7 @@ manifest:
 # so the shared state does not invalidate any assertion.
 #
 # Once the TraceRunner isolation primitive design is resolved (see spike
-# [SPIKE] iterate-e2e-trace-runner-isolation-design, filed to inform
+# [SPIKE] iterate-e2e-trace-runner-isolation-design (#865), filed to inform
 # specs/e2e/SPEC.md §4.1.7), authors should decide whether each
 # scenario should receive a clean project snapshot.  Until that spike
 # lands, shared mutable state across scenario boundaries is the accepted
