@@ -190,7 +190,7 @@ The graph is materialised as a contiguous, ascending-sorted
 `eastl::span<const MigrationEntry>` keyed off
 `from_version` (§5 of `specs/data/SPEC.md`,
 `include/glibre/types/migration.hpp`). Lookup of edge `(N → N+1)` is
-`O(1)` via direct array index `N − 1` (the chain is dense by §3.1
+`O(1)` via direct array index `N − v1` (where `v1 = entry[0].from_version`; the chain is dense by §3.1
 property 5); the dispatcher validates the index by checking
 `entry.from_version == N` before invoking.
 
@@ -307,10 +307,16 @@ construction inside `glibre-types.dylib`. It checks:
 3. **Function-pointer non-null.** `entry[i].invoke != nullptr`.
    Violation → `MigrationStepMissing` (a registration was elided).
 4. **Coverage to `current_version`.** `entry[L−1].to_version ==
-   current_version` (the registry's recorded version, §4.5). A
-   `current_version` higher than `entry[L−1].to_version` means a
-   chain step was forgotten between schema-bump and codegen;
-   raise `MigrationStepMissing`.
+   current_version` (the registry's recorded version, §4.5). Two
+   directions of failure:
+   - **Chain too short** (`current_version > entry[L−1].to_version`): a
+     chain step was forgotten between schema-bump and codegen; raise
+     `MigrationStepMissing`.
+   - **Chain too long** (`entry[L−1].to_version > current_version`): the
+     chain overshoots the registry's declared version — a codegen/bump
+     mismatch that structurally resembles an unregistered forward step;
+     raise `MigrationCycle` (same density-gate arm used for gaps and
+     back-edges).
 
 Validator failures at static-init are **fatal** — the middleman
 refuses to load and the process aborts via
@@ -1049,9 +1055,10 @@ Required cases:
    Asserts `MigrationStepMissing`.
 6. **Coverage past `current_version`.** `[(1→2), (2→3)]`
    with `current_version == 2`. Asserts
-   `MigrationStepMissing` (the chain reaches a higher
-   version than the registry's recorded current — a
-   build-system inconsistency).
+   `MigrationCycle` (the chain overshoots the registry's
+   declared current version — chain-too-long direction per
+   §3.5 bullet 4; same density-gate arm as gaps and
+   back-edges).
 
 Each `validate_chain` fixture asserts both the correct arm
 and the populated payload fields per `specs/data/SPEC.md`
