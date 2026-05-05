@@ -8,16 +8,18 @@
 > (`passes/hzb_build.cpp` HZB-build pass body), §6.5 step 1+4
 > (mesh-shader path interlock), §9.2 (phase-6 CPU breakdown — meshlet
 > cull line), §9.4 (GPU `meshlet-cull` slice + folded HZB-build),
-> §10 (`MeshletCullDispatchFailed`, `ResourceAllocFailed`,
+> §10 (`MeshletCullDispatchFailed`, `HeapOutOfMemory`,
 > `ResourceResidencyExceeded`), and §11 acceptance story #388 in
 > place. Cites `reviews/decisions/error-model.md`,
 > `reviews/decisions/perf-budget.md`,
 > `reviews/decisions/plugin-abi.md`,
 > `reviews/decisions/hot-reload-protocol.md`,
 > `reviews/decisions/fory-codegen.md`, and
-> `reviews/decisions/frame-phases.md`. Adds **no new public surface**
-> beyond `specs/render/SPEC.md` §5; deviation from the cited records
-> requires an amendment spike, not an in-place edit. Resolves
+> `reviews/decisions/frame-phases.md`. Adds **one ABI-add to
+> `specs/render/SPEC.md` §5**: `HZB::handle(ViewHandle) const noexcept`
+> (read-only pyramid-handle getter, required by `DiagnosticOverlay` #774;
+> see §4 and §10.1). All other deviations from the cited records require
+> an amendment spike, not an in-place edit. Resolves
 > `[SPIKE] design-render-hzb-cull-detailed` (#770). Sibling
 > `[SPIKE] task-breakdown-render-hzb-cull-detailed` (#771) is unblocked
 > by this design.
@@ -144,7 +146,7 @@ used"):
 | Harmonius design — Hi-Z occlusion test samples N×N footprint of the meshlet's screen-space AABB at the appropriate mip. | **Covered.** §3.4 step 3.2: footprint = bounds sphere projected to screen-space → `(x_min, y_min, x_max, y_max)`; mip selection = `ceil(log2(max(width_px, height_px)))` so the conservative test reads at most a 2×2 footprint per meshlet at the chosen mip. One `min`-fetch + one reverse-Z compare. |
 | Harmonius design — Phase-1 HZB cull happens in a compute pre-pass before the gbuffer.                            | **Refused / re-routed.** Glibre runs the cull on the **CPU/GPU seam in phase 6** (§6.2.1 step 2.1) so the resulting `IndirectDrawBuffer` is part of the immutable `RenderFrame` consumed by phase 7. The cull *kernel* is GPU compute (Metal 4 compute), but its dispatch lives in phase 6's `cull-extract` because the survivor set is an *input* to the graph-build step (it determines the gbuffer pass's `IndirectDrawBuffer` binding). Phase 6 is the only place ECS storage is read; the cull dispatch is the last GPU work that may consume ECS-derived inputs (§4.2 invariant 6). The harmonius "compute pre-pass before gbuffer" shape is a phase-7 affair; we collapse it into phase 6 because the alternative would force an extra graph-builder round-trip per `View`. Story #388 covers this. |
 | Harmonius design — Two-phase HZB rebuild between phases.                                                          | **Refused, see R-2.3.4 row.** One HZB build per frame, after gbuffer.                                                                                                                                                                                                                                          |
-| Harmonius design — HZB visualised in the diagnostic overlay.                                                     | **Refused at this aggregate; routed to `DiagnosticOverlay` (#774).** hzb-cull exposes `HZB::handle(view)` (already in the §5 surface via `HZBHandle`) so the overlay can sample the pyramid; the overlay rendering is not this aggregate's concern.                                                              |
+| Harmonius design — HZB visualised in the diagnostic overlay.                                                     | **Refused at this aggregate; routed to `DiagnosticOverlay` (#774).** hzb-cull exposes `HZB::handle(view)` (ABI add to the §5 stub; see §4) so the overlay can sample the pyramid; the overlay rendering is not this aggregate's concern.                                                              |
 | Harmonius design — Per-meshlet visibility persisted between frames (Hi-Z hierarchy with feedback).               | **Refused for MVP.** No persistent per-meshlet visibility cache; each frame's cull is fresh. The 0.5 ms GPU slice (§9.4 `meshlet-cull`) absorbs ~3.2k meshlets (S1) without amortisation. A feedback cache would add a frame of latency to every cull decision and complicate hot-reload (the cache would need migration). Listed in §12. |
 
 Net result: every R-2.3.* and R-2.10.4a requirement and every
@@ -281,9 +283,12 @@ cook supplies both shapes).
 #### Step 2 — Normal-cone cull
 
 Read `meshlet.normal_cone = {apex.xyz, axis.xyz, cos_half_angle}`
-(16 B). The cone is back-facing from camera position `cam.xyz`
-when `dot(axis, normalize(cam - apex)) < -cos_half_angle`. If
-fully back-facing (the strict `<` inequality), cull.
+(16 B). `axis` is **outward-facing** (points away from the meshlet's
+surface toward the outside of the cone, matching `geometry`'s cook
+convention for the meshlet header layout). The
+cone is back-facing from camera position `cam.xyz` when
+`dot(axis, normalize(cam - apex)) < -cos_half_angle`. If fully
+back-facing (the strict `<` inequality), cull.
 
 Cone cull is skipped for two-sided materials. The "two-sided" bit
 lives in `material_index[i]` high bit (the material slot index is
@@ -302,7 +307,11 @@ If steps 1+2 passed, project the bounds sphere to screen-space:
 2. Compute `ndc = clip.xyz / clip.w`.
 3. Compute screen AABB: project the four extreme points
    `center ± radius * {right, up}` to clip-space and reduce to a
-   `(x_min, y_min, x_max, y_max, z_min)` in NDC.
+   `(x_min, y_min, x_max, y_max, z_max_ndc)` in NDC. In reverse-Z,
+   **`z_max_ndc` is the NDC-Z of the sphere's closest face**
+   (closest-to-camera = largest NDC-Z value in reverse-Z). This is
+   the conservative operand: if even the front face is occluded, the
+   whole meshlet is occluded.
 4. Compute `extent_px = max((x_max - x_min) * width, (y_max - y_min) * height)`.
 5. Compute `mip = clamp(ceil(log2(extent_px)), 0, mip_count - 1)`
    so that the screen AABB samples a 2×2 footprint at the chosen
@@ -310,10 +319,12 @@ If steps 1+2 passed, project the bounds sphere to screen-space:
 6. Sample the prev-frame HZB at the chosen mip — exactly four
    `texture.read(uint2)` calls at the four corners of the AABB.
    The pyramid mip stores `min` of the four mip-`mip-1` parents,
-   and the cull test is `min(four_samples) > z_min` where `>` is
-   reverse-Z's "behind-the-occluder" comparison (`SPEC.md` §4.1.9
-   invariant 3). If the four samples agree the meshlet is entirely
-   behind the occluder, cull.
+   and the cull test is `min(four_samples) > z_max_ndc` where `>`
+   is reverse-Z's "behind-the-occluder" comparison (`SPEC.md` §4.1.9
+   invariant 3): the occluder's HZB depth (closest occluder surface,
+   larger NDC-Z) exceeds the meshlet's closest face. If the four
+   samples agree the meshlet's closest face is behind the occluder,
+   cull the entire meshlet.
 
 If the meshlet's projected sphere straddles the near plane
 (`clip.w` <= near-plane epsilon), skip the occlusion test — the
@@ -349,11 +360,11 @@ back at the next CPU sync point and translated to
 `MeshletCullDispatchFailed` with the
 `IndirectArgsOverflow` payload (§10 below).
 
-The compaction is per-material, not per-instance — instances of
-the same material collapse into one indirect-args entry with
-`instance_count = N`. (The MVP kernel treats `instance_count = 1`
-because the survivor count atomic is per-meshlet; instance
-batching is a §12 follow-up.)
+The compaction is per-material, per-meshlet. Each surviving meshlet
+emits one `MTLDrawIndirectArguments` record with `instance_count = 1`
+because the survivor count atomic is per-meshlet. Instance fan-out
+(collapsing multiple instances of the same mesh into a single record
+with `instance_count = N`) is a §12 follow-up.
 
 ### 3.5 The `hzb_build` kernel
 
@@ -397,8 +408,10 @@ convention as the gbuffer. The convention lives in one header:
 `include/glibre/render/internal/reverse_z.hpp`, exposing
 `ReverseZ::kFar = 0.0f` and `ReverseZ::kNear = 1.0f`. The HZB stores
 **raw** depth values (not transformed); the cull kernel's
-"behind-the-occluder" comparison is `meshlet_z_min > hzb_min` in
-reverse-Z. Both kernels include the same header; no per-pass
+"behind-the-occluder" comparison is `z_max_ndc > hzb_min` in
+reverse-Z (where `z_max_ndc` is the sphere's closest face — largest
+NDC-Z — and `hzb_min` is the HZB sample's `min` of four texels at
+the chosen mip). Both kernels include the same header; no per-pass
 override (`SPEC.md` §4.1.9 invariant 3 explicitly).
 
 ### 3.6 Resource model
@@ -526,15 +539,23 @@ The aggregate's interface to the rest of the render plug-in:
 
 Nothing else crosses the boundary. The `HZBHandle` is the single
 typed seam exposed in §5; `HZB::ensure` / `HZB::invalidate` are the
-only mutation entry points. The cull and build kernels are
-accessible only to the render plug-in's pass-body code; external
-plug-ins do not register cull or HZB-build passes.
+only mutation entry points; `HZB::handle(ViewHandle)` (ABI add; §4)
+is the only read entry point available outside render-internal pass
+code. The cull and build kernels are accessible only to the render
+plug-in's pass-body code; external plug-ins do not register cull or
+HZB-build passes.
 
 ## 4. Public surface
 
-The public surface is frozen in `specs/render/SPEC.md` §5; this
-design adds no new types or signatures. For convenience, the
-load-bearing declarations (verbatim from §5):
+The public surface is frozen in `specs/render/SPEC.md` §5. This
+design adds **one new method** to the §5 `HZB` stub: a read-only
+`handle(ViewHandle)` getter required so that `DiagnosticOverlay`
+(#774) can sample the HZB pyramid without reaching into
+render-internal storage. This is an **ABI add** (noted in §10.1's
+audit column per the §5 rule: new methods require an amendment to
+the §5 stub and must not remove or reorder existing declarations).
+For convenience, the load-bearing declarations (§5 verbatim plus
+the ABI-add getter):
 
 ```cpp
 namespace glibre::render {
@@ -549,6 +570,13 @@ class HZB {
 public:
     [[nodiscard]] Result<HZBHandle> ensure(ViewHandle, HZBDesc) noexcept;
     void                            invalidate(ViewHandle) noexcept;
+
+    // ABI add (this design) — read-only handle accessor for
+    // DiagnosticOverlay (#774) and other render-internal readers.
+    // Returns an empty optional when the view has no live pyramid
+    // (not yet ensure'd, or after invalidate before next ensure).
+    [[nodiscard]] eastl::optional<HZBHandle>
+                                    handle(ViewHandle) const noexcept;
 
 protected:
     HZB()  noexcept = default;
@@ -572,7 +600,7 @@ Surface invariants this design imposes on top of the §5 stub:
 2. **`HZBDesc::mips == 0` selects auto.** A caller passing zero
    means "use `ceil_log2(max(width, height))`"; any non-zero value
    is honoured up to the 14-mip cap and rejected with
-   `ResourceAllocFailed` if it exceeds the cap or is not in
+   `HeapOutOfMemory` if it exceeds the cap or is not in
    `[1, ceil_log2(max(width,height))]`.
 3. **`HZBHandle` is generational.** Per the `SPEC.md` §5 invariant
    ("Resource handles are 64-bit generational `Handle<Tag>` values
@@ -602,7 +630,7 @@ Surface invariants this design imposes on top of the §5 stub:
 Error arms emitted directly by this aggregate's public surface and
 its internal kernels (per `SPEC.md` §10.1):
 
-- `render::Error::ResourceAllocFailed` — `HZB::ensure` cannot
+- `render::Error::HeapOutOfMemory` — `HZB::ensure` cannot
   allocate the persistent mip chain (§9.5 row "persistent textures
   + buffers" exhausted).
 - `render::Error::ResourceResidencyExceeded` — same, but the
@@ -611,11 +639,11 @@ its internal kernels (per `SPEC.md` §10.1):
   encounters a Metal 4 `MTLCommandEncoderError` *or* the
   `IndirectArgsOverflow` flag was set by the kernel
   (§3.4 step 4).
-- `render::Error::MeshShaderCapabilityMissing` — only at init /
-  hot-reload register if the cull kernel cannot run on the active
-  device (the kernel has no fallback; the gbuffer pass has the
-  fallback per §3.8). Routed up via `Capability` predicate
-  evaluation in the graph builder.
+- `render::Error::CapabilityNotSupported` (`MeshShaderCapabilityMissing`
+  design-name per §10.1) — only at init / hot-reload register if the
+  cull kernel cannot run on the active device (the kernel has no
+  fallback; the gbuffer pass has the fallback per §3.8). Routed up
+  via `Capability` predicate evaluation in the graph builder.
 
 The aggregate does **not** emit `RenderGraphCycle`,
 `PassUnsupportedConfig`, `BarrierConflict` — those are graph-layer
@@ -812,12 +840,13 @@ ABI consequences (per `plugin-abi.md`):
   **render-internal**; the gbuffer pass and the fallback gbuffer
   pass are the only consumers and live inside the same plug-in.
   No external plug-in reads this buffer directly.
-- The four error arms this aggregate emits (`ResourceAllocFailed`,
+- The four error arms this aggregate emits (`HeapOutOfMemory`,
   `ResourceResidencyExceeded`, `MeshletCullDispatchFailed`,
-  `MeshShaderCapabilityMissing`) are part of `render::Error`'s
-  closed sum (`SPEC.md` §10.1); none are added by this design
-  (all are already in §10.1 as either current §5 enum entries or
-  "ABI add" rows planned by §10).
+  `CapabilityNotSupported` / `MeshShaderCapabilityMissing`
+  design-name per §10.1) are part of `render::Error`'s closed sum
+  (`SPEC.md` §10.1); none are added by this design (all are already
+  in §10.1 as either current §5 enum entries or "ABI add" rows
+  planned by §10).
 
 The aggregate consumes no Fory types; therefore no migration
 bodies are required (`fory-codegen.md` §"Migration Mechanic" is
@@ -902,7 +931,7 @@ phase-8 work.
 
 The hzb-cull aggregate contributes one refusal cause:
 
-- **`render::Error::ResourceAllocFailed`** raised at the first
+- **`render::Error::HeapOutOfMemory`** raised at the first
   post-resume frame's `HZB::ensure`. Indicates the new plug-in's
   `HZBDesc` (e.g. a higher mip count from a settings change) cannot
   fit inside the persistent-resource budget. This rolls up to
@@ -1044,10 +1073,10 @@ the §5 stub or queued as ABI-add rows per §10.1's audit):
 
 | `render::Error` arm              | §10.1 row             | Trigger                                                                                                                                   | Recovery        | Severity | Test fixture                                             |
 |----------------------------------|-----------------------|-------------------------------------------------------------------------------------------------------------------------------------------|-----------------|----------|----------------------------------------------------------|
-| `ResourceAllocFailed`            | `ResourceAllocFailed` | `HZB::ensure` cannot allocate the persistent mip chain (§3.2). Driver-side `MTLHeap::newTextureWithDescriptor:offset:` returns `nil`.       | `lower-tier`    | `warn`   | `tests/render/failure/resource_alloc_lower_tier.cpp`     |
+| `HeapOutOfMemory`                | `ResourceAllocFailed` | `HZB::ensure` cannot allocate the persistent mip chain (§3.2). Driver-side `MTLHeap::newTextureWithDescriptor:offset:` returns `nil`.       | `lower-tier`    | `warn`   | `tests/render/failure/resource_alloc_lower_tier.cpp`     |
 | `ResourceResidencyExceeded`      | `ResourceResidencyExceeded` | `HZB::ensure` would push the `ContextTag::render` HZB sub-row over its share of §9.5 persistent-textures (21 MiB cap, §9.4 above).      | `lower-tier`    | `warn`   | `tests/render/failure/residency_exceeded_lower_tier.cpp` |
 | `MeshletCullDispatchFailed`      | `MeshletCullDispatchFailed` (ABI add) | Cull kernel dispatch returns Metal 4 `MTLCommandEncoderError`, *or* the per-dispatch `IndirectArgsOverflow` flag is set on CPU readback at next frame's phase-6 entry (§3.4 step 4). | `disable-feature` (kernel error → `MeshShaders` capability cleared, fallback path takes over per §3.8); `lower-tier` (overflow → drop draw budget per `RenderSettings.per_view_draw_budget`). | `warn`   | `tests/render/failure/meshlet_dispatch_disable.cpp` (kernel) and `tests/render/failure/indirect_args_overflow_lower_tier.cpp` (overflow; ABI-add row) |
-| `MeshShaderCapabilityMissing`    | `MeshShaderCapabilityMissing` | Init or hot-reload register: the cull kernel's `Capability::MeshShaders` declared dependency is unsatisfied. Note: in MVP the cull kernel itself does **not** require `MeshShaders` (the gbuffer pass does); this arm is reserved for post-MVP cull paths that fuse mesh-shader emit. | `lower-tier` (init) / `disable-feature` (hot-reload). | `warn`   | `tests/render/failure/mesh_shader_missing.cpp`            |
+| `CapabilityNotSupported`         | `MeshShaderCapabilityMissing` (design-name; §10.1) | Init or hot-reload register: the cull kernel's `Capability::MeshShaders` declared dependency is unsatisfied. Note: in MVP the cull kernel itself does **not** require `MeshShaders` (the gbuffer pass does); this arm is reserved for post-MVP cull paths that fuse mesh-shader emit. | `lower-tier` (init) / `disable-feature` (hot-reload). | `warn`   | `tests/render/failure/mesh_shader_missing.cpp`            |
 
 Cross-cutting notes (per `SPEC.md` §10.2):
 
@@ -1076,7 +1105,7 @@ Cross-cutting notes (per `SPEC.md` §10.2):
   is wired so a post-MVP "fused mesh-shader emit" cull path can
   declare the capability and fail closed. Listed in §12.
 - **Severity escalation under hot-reload.** When raised inside the
-  first post-resume `HZB::ensure`, `ResourceAllocFailed` /
+  first post-resume `HZB::ensure`, `HeapOutOfMemory` /
   `ResourceResidencyExceeded` log at `warn` and roll up under
   `core::Error::HotReloadRefused` (`SPEC.md` §8.4); the previous
   plug-in keeps running. At engine startup (no prior-good plug-in),
@@ -1122,8 +1151,9 @@ story, or a §9 benchmark.
 |-------------------------------------------------------|------------------------------------------------------------------------------------------|----------------------------------------------------------------------------|---------------|--------|
 | `hzb_math/sample_mip_choice`                          | Bounds projects to a 8×8 px screen AABB.                                                 | Mip = 3 (`ceil(log2(8))`); 2×2 footprint.                                  | §3.4 step 3.5 | #388   |
 | `hzb_math/sample_min_reduce`                          | HZB pyramid mip 1 is `min` of mip 0's 2×2 children.                                      | Sample at mip 1 returns `min` of four children.                            | §3.5          | #388   |
-| `hzb_math/reverse_z_compare`                          | `meshlet_z_min = 0.7`, HZB sample = 0.6 (reverse-Z; closer = larger).                    | `meshlet_z_min < hzb_min` ⇒ keep (in front of occluder).                    | §3.5          | #388   |
-| `hzb_math/reverse_z_compare_culled`                   | `meshlet_z_min = 0.5`, HZB sample = 0.6 (occluder is closer than meshlet).                | `meshlet_z_min > hzb_min` ⇒ cull (behind occluder).                         | §3.5          | #388   |
+| `hzb_math/reverse_z_compare`                          | `z_max_ndc = 0.7` (sphere's closest face in reverse-Z), HZB sample = 0.6 (closer occluder = larger NDC-Z). | `z_max_ndc < hzb_min` ⇒ keep (front face is in front of occluder). | §3.4 step 3.6 | #388   |
+| `hzb_math/reverse_z_compare_culled`                   | `z_max_ndc = 0.5` (sphere's closest face), HZB sample = 0.6 (occluder is closer than sphere's front face). | `z_max_ndc > hzb_min` ⇒ cull (entire sphere behind occluder).   | §3.4 step 3.6 | #388   |
+| `hzb_math/sphere_endpoint_closest_face`               | Sphere with center NDC-Z = 0.6, radius = 0.1 (reverse-Z). `z_max_ndc = 0.7` (closest face); `z_min_ndc = 0.5` (farthest face). HZB sample = 0.65. | Cull test uses `z_max_ndc = 0.7 > 0.65` ⇒ keep (front face is not behind occluder). Using `z_min_ndc = 0.5` instead would produce a false cull. | §3.4 step 3.3 | #388   |
 | `hzb_math/sentinel_keeps_all`                         | Prev HZB is the sentinel "no occlusion data" pyramid.                                    | Cull bit = 0 for all meshlets (pyramid samples to `+inf`).                 | §3.6          | #388   |
 | `hzb_math/near_plane_skip_test`                       | Bounds sphere `clip.w` < near-plane epsilon.                                             | HZB step skipped; frustum + cone result determines keep.                   | §3.4 step 3   | #388   |
 
@@ -1134,7 +1164,7 @@ story, or a §9 benchmark.
 | `hzb_lifecycle/ensure_first_call_allocates`           | Fresh `HZB`; `ensure(view, {1920, 1080, 0})`.                                            | Returns `HZBHandle`; mip count = 11; ring slots allocated.                 | §3.2          | #388   |
 | `hzb_lifecycle/ensure_idempotent`                     | Two `ensure(view, desc)` calls with matching `desc`.                                     | Returns the same `HZBHandle` (cache hit).                                  | §3.2          | #388   |
 | `hzb_lifecycle/ensure_resize_triggers_realloc`        | `ensure(view, {1920, 1080, 0})` then `ensure(view, {1280, 720, 0})`.                     | Returns a new `HZBHandle`; old storage destroyed.                          | §3.2          | #388   |
-| `hzb_lifecycle/ensure_invalid_mips_rejected`          | `ensure(view, {1920, 1080, 99})` (mips above cap).                                       | Returns `unexpected(ResourceAllocFailed)`.                                 | §4 invariant 2| #388   |
+| `hzb_lifecycle/ensure_invalid_mips_rejected`          | `ensure(view, {1920, 1080, 99})` (mips above cap).                                       | Returns `unexpected(HeapOutOfMemory)`.                                     | §4 invariant 2| #388   |
 | `hzb_lifecycle/invalidate_clears_data_keeps_handle`   | `invalidate(view)` then `ensure(view, desc)`.                                            | Same `HZBHandle`; data cleared.                                            | §3.2 + §4 inv 3| #388   |
 | `hzb_lifecycle/invalidate_unknown_view_noop`          | `invalidate(view)` for a `View` never `ensure`d.                                         | Returns `void`; no error logged.                                           | §4 invariant 1| #388   |
 | `hzb_lifecycle/multi_view_independent`                | Two `View`s `ensure`d with different extents.                                            | Two distinct `HZBHandle`s; storage not aliased.                            | §3.6 + §4.1.9 inv 2| #388 |
