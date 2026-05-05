@@ -125,7 +125,7 @@ that may fail: any `PermutationKey` value the code holds is
 ill-formed bytes are rejected at the `from_bytes` boundary, never as a
 held value.
 
-Sizing and alignment (SPEC §5 lines 569–583):
+Sizing and alignment (SPEC §5, PermutationKey POD struct, §4.2 invariant 1):
 
 ```
 sizeof(PermutationKey)  = 6 bytes
@@ -445,11 +445,10 @@ the shader plugin must route through the `glibre::Error` adapter, not call
   is documented for the day a 9th feature bit lands; today the two
   orders coincide.
 
-  #### §3.6 Warning — bit-count growth boundary
-
-  The implementation MUST include the following guard so that any
-  future addition of a 9th feature bit produces a hard build failure
-  rather than a silent behavioural change in the comparator / cooker:
+**Warning — bit-count growth boundary.** The implementation MUST include
+the following guard so that any future addition of a 9th feature bit
+produces a hard build failure rather than a silent behavioural change in
+the comparator / cooker:
 
   ```cpp
   // In the .cpp implementation file, near permutation_key_byte_less:
@@ -465,7 +464,9 @@ the shader plugin must route through the `glibre::Error` adapter, not call
     unit suite to reflect the diverged ordering;
   - (c) audit any cooker code that assumed byte order and index order are
     equivalent and update accordingly.
+
   This guard is tracked as §12 OPEN item "static_assert bit-count guard".
+
 - **Hashing.** `PermutationKey` is *not* a key in a `std::unordered_*`
   container in engine code. EASTL's hash containers in the cooker
   hash the 6 bytes via a small inline mixer (FNV-1a or xxhash;
