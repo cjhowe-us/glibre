@@ -1383,7 +1383,7 @@ story. Neither this design nor the spike issue closes those stories.
 
 - `[NON-BLOCKING]` **Ring count set to 14 (reduced from 16).**
   The §9.2 table was updated to 14 tokens × 256 KiB = 3584 KiB,
-  leaving ~162 KiB headroom within the 4 MiB cell. The headroom
+  leaving ~163 KiB headroom within the 4 MiB cell. The headroom
   protects against future overhead growth (e.g. dedup LRU widening,
   additional per-root metadata). If a future consumer requires more
   than 14 simultaneous roots, the §9.2 arithmetic must be re-evaluated
