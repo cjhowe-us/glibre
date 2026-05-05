@@ -223,7 +223,7 @@ OS source. They are free functions — not member functions of a
 "translator class" — to make the SRP boundary mechanical: each
 function depends on exactly one OS header, is a pure transform over
 its input `OsCode` plus one well-defined side-effect (stamping the
-per-thread TLS prefix slot via `set_active_prefix`; skipped on the
+per-thread TLS prefix slot via `set_prefix`; skipped on the
 signal-handler path per §6.2), and is trivially callable from the
 signal-safe path (§6.2). No global heap state, no cross-thread
 state, no I/O — exactly one process-local write per call.
@@ -900,9 +900,7 @@ Every translator test asserts:
 3. Emitting the arm via `glibre::log_error` into a spdlog test-sink
    produces the expected structured-field set — every arm emits the
    expected field set; no field is omitted; no extra field is added.
-4. `eastl::variant_size_v<platform::Error>` equals the number of
-   distinct `arm_tag` values the structured-field carrier emits, as
-   verified by a compile-time `static_assert`.
+4. Literal `static_assert(eastl::variant_size_v<platform::Error> == 7u)` per §8.2 — fires at compile time when arm count drifts from 7. No runtime carrier-emission check; no arm_tag enumeration.
 
 ### 11.2 Cross-aggregate uniformity tests
 
@@ -999,7 +997,8 @@ before first plan PR merges against this design), [NON-BLOCKING]
   Budget saturation is correctly modelled as
   `IoFailure { OsCode }` with prefix `"out-of-budget"` per §3.3 and
   SPEC §10.3.6. The correct form is
-  `std::unexpected{ platform::Error{ IoFailure{ OsCode{ prefix:"out-of-budget", code:0 } } } }`.
+  `// Translator stamps "out-of-budget" into the TLS prefix slot via set_prefix() before constructing OsCode.`
+  `std::unexpected{ platform::Error{ IoFailure{ OsCode{ .value = 0 } } } }`.
   **Blocks platform-error implementation PR**: SPEC §9.2 must be
   amended before the first plan runs against this design.
   Track amendment via a follow-up spike to correct SPEC §9.2.
