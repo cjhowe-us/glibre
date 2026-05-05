@@ -325,11 +325,14 @@ auto set_prefix(const char* literal) noexcept -> void;
 auto reset_prefix() noexcept -> void;
 
 // Internal-helper: pre-touches all four TLS prefix slots (one
-// set_prefix(nullptr) per slot) to force lazy-linker resolver
-// materialisation before any signal handler is installed.
-// Two callers: any plugin installing signal handlers (FileIo,
-// Process). Called once in glibre_plugin_register before
-// Process::install_signal.
+// set_prefix(prefix::none) per slot) to force lazy-linker resolver
+// materialisation before any signal handler is installed. Any
+// __thread write resolves the lazy linker entry equally; using
+// prefix::none keeps the slot in the canonical zero-state convention
+// used elsewhere in the design (callers can pointer-equal against
+// prefix::none to detect "no active prefix"). Two callers: any
+// plugin installing signal handlers (FileIo, Process). Called once
+// in glibre_plugin_register before Process::install_signal.
 auto pre_touch_all() noexcept -> void;
 
 }  // namespace glibre::platform::detail::error
@@ -629,8 +632,10 @@ a signal handler:
 
 **Ordering contract within `glibre_plugin_register`:** (1) pre-touch
 all four TLS prefix slots via `detail::error::pre_touch_all()` —
-this calls `set_prefix(nullptr)` on each slot, resolving the lazy
-linker entry on the calling thread (§3.3 internal-helper); (2)
+this calls `set_prefix(prefix::none)` on each slot (or equivalently
+`reset_prefix()`), resolving the lazy linker entry on the calling
+thread and leaving each slot at the canonical non-null sentinel
+(§3.3 internal-helper); (2)
 install signal handlers via `Process::install_signal`. Reversing
 the order can produce a signal-handler invocation that races against
 the lazy resolver — UB on macOS (lazy stub is not
@@ -900,7 +905,7 @@ Every translator test asserts:
 3. Emitting the arm via `glibre::log_error` into a spdlog test-sink
    produces the expected structured-field set — every arm emits the
    expected field set; no field is omitted; no extra field is added.
-4. Literal `static_assert(eastl::variant_size_v<platform::Error> == 7u)` per §8.2 — fires at compile time when arm count drifts from 7. No runtime carrier-emission check; no arm_tag enumeration.
+4. `STATIC_REQUIRE(eastl::variant_size_v<platform::Error> == 7u)` — the Catch2 compile-time assertion emitted in each translator test TU. Distinct from assertions 1–3 (which are runtime `REQUIRE`s): `STATIC_REQUIRE` evaluates at compile time within the unit-test TU, not at test-runner execution time. This is also distinct from the §11.5 CMake-level compile-fail grep test, which covers the standalone `static_assert` in production code; this row covers the unit-test TU's static guard. No runtime carrier-emission check; no arm_tag enumeration.
 
 ### 11.2 Cross-aggregate uniformity tests
 
