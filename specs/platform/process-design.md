@@ -437,8 +437,7 @@ Properties:
 
 `install_signal(Signal s, SignalHandlerFn fn)`:
 
-**Pre-condition (caller obligation — applies to any `glibre_plugin_register` that calls `install_signal`):**
-<!-- matches platform-error-design.md §6.2's per-plugin ownership rule — any peer plugin (e.g. core/crash) installing signals must satisfy the ordering -->
+**Pre-condition (caller obligation — applies to any `glibre_plugin_register` that calls `install_signal`; per `platform-error-design.md` §6.2 per-plugin ownership rule):**
 Plugin's `glibre_plugin_register` MUST call
 `glibre::platform::detail::error::pre_touch_all()` BEFORE invoking
 `Process::install_signal`. `pre_touch_all()` pre-touches the three
@@ -501,6 +500,7 @@ return `EINVAL`, leaving `SA_ONSTACK` unconfigured — exactly the
 SIGSEGV stack-overflow re-fault described above. Budget arithmetic:
 argv was trimmed 64→56 KiB to keep the §9 sub-arena at 256 KiB
 exactly; full breakdown in §9 table.
+
 The alt-stack lives for the program's lifetime and is freed by the
 singleton's destructor.
 
