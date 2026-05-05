@@ -123,15 +123,18 @@ Glibre-native requirements added beyond harmonius:
 
 ```text
 FileIo (root, owned by platform)
-├── PathRoots                  roots_       (sandbox-root registry; §3.2)
-├── PathInterner               interner_    (uint32_t ↔ CanonicalPath map; §3.5a)
-├── eastl::array<Worker, N>    workers_     (N = FileIoConfig.io_thread_budget; §3.4)
-├── RequestRing<Request>       requests_    (SPSC for N==1 MVP, MPSC for N>1 post-MVP — see §3.5; bounded)
-├── eastl::array<Slot, M>      slots_       (M = N * queue_depth; §3.6)
-├── eastl::array<const char*, M> prefixes_  (parallel prefix array for async error transport; §3.6 / §3.9)
-├── SlotFreeList               free_slots_  (lock-free LIFO; §3.6)
-├── ReadAllArena               read_arena_  (per-call buffer for sync read_all; §6.9)
-└── PlatformAllocator&         alloc_       (sub-arena handle, ContextTag::platform)
+├── PathRoots                  roots_              (sandbox-root registry; §3.2)
+├── PathInterner               interner_           (uint32_t ↔ CanonicalPath map; §3.5a)
+├── eastl::array<Worker, N>    workers_            (N = FileIoConfig.io_thread_budget; §3.4)
+├── RequestRing<Request>       requests_           (SPSC for N==1 MVP, MPSC for N>1 post-MVP — see §3.5; bounded)
+├── SpscRing<Request>          worker_dispatch_ring_  (worker-0→worker-1 forwarding; owned by FileIo root;
+│                                                  populated by worker 0, consumed by worker 1;
+│                                                  only present when worker_count > 1; null/unused for N==1)
+├── eastl::array<Slot, M>      slots_              (M = N * queue_depth; §3.6)
+├── eastl::array<const char*, M> prefixes_         (parallel prefix array for async error transport; §3.6 / §3.9)
+├── SlotFreeList               free_slots_         (lock-free LIFO; §3.6)
+├── ReadAllArena               read_arena_         (per-call buffer for sync read_all; §6.9)
+└── PlatformAllocator&         alloc_              (sub-arena handle, ContextTag::platform)
 ```
 
 The aggregate owns no OS file handles across calls — each operation
@@ -269,9 +272,30 @@ ceiling 8) at `FileIo::create`. Each worker is a `std::thread` named
 `"glibre-fileio-N"` whose body is:
 
 ```text
-worker_loop:
+# Worker 0 (dispatcher + executor; N==1 and N==2 MVP)
+worker_0_loop:
     while (!stopping):
-        slot = requests_.pop_blocking()        # SPSC dequeue (§3.5)
+        slot = requests_.pop_blocking()        # SPSC dequeue from main ring (§3.5)
+        if slot.state == Cancelled:
+            release(slot)
+            continue
+        if N > 1 AND worker_0_sub_pool_saturated(slot):
+            # Forward to worker 1 via dispatch ring (§3.5 worker-dispatch-ring)
+            if worker_dispatch_ring_.push(slot) fails:
+                # Dispatch ring full — worker 1 not draining
+                slots_[slot].err = IoFailure { OsCode { ENOBUFS } }
+                set_prefix(prefix::out_of_budget)       # TLS prefix (§3.9)
+                slots_[slot].state = Ready (release)    # §10.1 AsyncQueueFull arm
+            continue
+        do_work(slot)                          # POSIX call; §3.7
+        slot.state = Ready (release)
+        if slot.abandoned:
+            release(slot)                      # §3.3 two-phase abandon
+
+# Worker 1 (secondary executor; N==2 MVP only; dequeues from dispatch ring, not requests_)
+worker_1_loop:
+    while (!stopping):
+        slot = worker_dispatch_ring_.pop_blocking()    # dequeue from dispatch ring (§3.5)
         if slot.state == Cancelled:
             release(slot)
             continue
@@ -279,6 +303,9 @@ worker_loop:
         slot.state = Ready (release)
         if slot.abandoned:
             release(slot)                      # §3.3 two-phase abandon
+
+# N==1: worker_dispatch_ring_ is null/unused; worker 0 runs the first loop only
+#       (the N>1 branch is compiled out or guarded by runtime check).
 ```
 
 The pool is **plain `std::thread`**, not libdispatch / GCD. Reasoning:
@@ -346,11 +373,11 @@ engine driver thread
 worker[0] worker[1] ... worker[N-1]
 ```
 
-For MVP (`N = 2` default), only the SPSC ring is used (two workers
-do not require MPSC because the dispatch model assigns one ring to
-worker 0 and worker 1 blocks on a semaphore from worker 0 — the
-full MPSC promotion is post-MVP). Saturation is computed the same
-way regardless of ring type.
+For MVP (`N = 2` default), only the SPSC ring is used; the full
+MPSC promotion is post-MVP — at N=2, the SPSC ring with the
+Worker-0→Worker-1 forwarding ring (described below) handles the N=2
+case without MPSC. Saturation is computed the same way regardless of
+ring type.
 
 **Worker-0 → Worker-1 dispatch primitive (MVP N=2).** When worker 0
 dequeues a `Request` from the main SPSC `requests_` ring, it first
@@ -364,10 +391,14 @@ room to cover half the inflight requests it can service-and-forward before
 blocking.
 
 Saturation contract: if the `worker_dispatch_ring` is full (worker 1 is
-not draining), worker 0 returns `core::Error::OutOfBudget` to the caller
-via the slot's completion path — the same saturation contract as the main
-`requests_` ring per §10.2. Worker 0 does NOT block waiting for worker 1
-to drain; it refuses immediately.
+not draining), worker 0 writes `IoFailure { OsCode { ENOBUFS } }` with
+prefix `prefix::out_of_budget` into `slots_[i].err` and sets
+`state = Ready` (release) — identical to the slot-pool exhaustion arm in
+§3.8 step 3 and §10.1 (`AsyncQueueFull` row). Worker 0 does NOT block
+waiting for worker 1 to drain; it refuses immediately via the slot's
+completion path. This preserves the §10.2 invariant that `fileio/` never
+constructs `core::Error` — the platform arm `IoFailure { OsCode { ENOBUFS } }`
+is the correct surface here.
 
 This topology is specific to `N = 2` MVP and the SPSC ring. For N > 1
 post-MVP, the separate MPSC ring (§3.5, N > 1 block) replaces both the
@@ -424,18 +455,23 @@ struct PathInterner {
 
 Design rules:
 
-- **Single-writer, reader-snapshot.** The interner is written exclusively on the
+- **Single-writer, lock-free reader.** The interner is written exclusively on the
   caller thread (the engine driver thread that calls `read_async` / `write_atomic_async`).
-  The caller holds a mutex-guarded exclusive lock while inserting a new entry. Workers
-  receive the `path_index`; they look up `by_id[path_index]` under a read-lock
-  (a single shared reader snapshot suffices for MVP because the map is written only
-  before the `Request` is pushed — the worker sees the entry before it pops the ring,
-  ordered by the ring's push-before-pop memory contract).
+  Synchronisation: lock-free single-writer-multi-reader. The caller thread is the sole
+  writer (inserts new entries before pushing the `Request` to `requests_`). Workers read
+  `by_id[path_index]` after dequeuing the `Request`. Memory ordering is provided by the
+  SPSC ring's release-store-on-push / acquire-load-on-pop contract — no mutex required,
+  consistent with §6.1 rule 6. The interner's storage uses `eastl::flat_map` with stable
+  indices; the worker sees a consistent snapshot of all entries pushed before the `Request`
+  whose `path_index` it now resolves.
 - **Intern on enqueue, release on slot reclaim.** A new `CanonicalPath` is interned at
   `read_async` / `write_atomic_async` time (before the `Request` is written). The
   interner entry is retained until the slot is returned to `free_slots_` — at that point
-  the caller thread removes the entry (under exclusive lock). This keeps the interner
-  size ≤ M (slot count) at all times.
+  the caller thread removes the entry. No lock is required at removal either: the caller
+  thread is the sole writer and removal happens on the caller thread after the worker has
+  already finished reading the entry (the slot's `state = Ready` release-store from the
+  worker provides the happens-before ordering for the subsequent caller-side removal).
+  This keeps the interner size ≤ M (slot count) at all times.
 - **Reverse hash-index for O(1) intern.** The `by_path` flat_map provides the
   `CanonicalPath → id` reverse lookup needed to intern without inserting a duplicate.
   At MVP the map is tiny; if a profile shows the O(log N) lookup is a bottleneck,
