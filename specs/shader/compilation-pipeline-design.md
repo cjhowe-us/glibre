@@ -122,15 +122,20 @@ Glibre-native requirements added beyond harmonius:
 
 ```text
 CompilationPipeline (root, owned by editor / cooker)
-├── const IShaderBackend&      backend_   (ref; selected by §4.7 dispatcher)
-├── ArgvBuilder                argv_      (canonicalizer; deterministic)
-├── DriverSpawner              spawner_   (subprocess launcher — fork/exec wrapper)
-├── PayloadDecoder             decoder_   (length-prefixed stdout framer)
-├── ErrorEnvelopeReader        errors_    (stderr JSON → shader::Error)
-├── const reflection::Ingester& ingester_ (ref; §4.4 ingester)
-├── DescriptorLayout::derive   derive_    (free function; §4.5)
-└── LogSink&                   log_       (spdlog-backed)
+├── const IShaderBackend&       backend_   (ref; selected by §4.7 dispatcher)
+├── ArgvBuilder                 argv_      (canonicalizer; deterministic)
+├── DriverSpawner               spawner_   (subprocess launcher — fork/exec wrapper)
+├── PayloadDecoder              decoder_   (length-prefixed stdout framer)
+├── ErrorEnvelopeReader         errors_    (stderr JSON → shader::Error)
+├── const reflection::Ingester& ingester_  (ref; §4.4 ingester)
+└── LogSink&                    log_       (spdlog-backed)
 ```
+
+`DescriptorLayout::derive` is a free function (§4.5 aggregate); it has
+no storage and no lifetime and therefore does not appear as a member of
+the pipeline. It is called inline inside `assemble_artifact` (stage 8,
+§3.8), passing the ingested `ReflectionBlob` and receiving the
+`DescriptorLayout` value by return.
 
 Each compile job is a stack-local `Job` value (§3.2); the pipeline
 itself is a thin orchestrator with no per-job state. One pipeline
@@ -220,6 +225,18 @@ glibre-shadercc
     --output-stdout-length-prefixed
     --error-envelope=json
 ```
+
+**`--source-path` is for diagnostic attribution only.** The driver
+does not open or read the file at this path; the preprocessed source
+bytes are delivered exclusively via stdin (stage 4, §3.5). The path is
+echoed verbatim into slangc diagnostics and the stderr envelope
+(`slang_diagnostic.file`) so that the editor / cooker can surface
+human-readable file locations in the log. This resolves the apparent
+contradiction with the sandbox rationale in §3.5 stage 4: stdin piping
+keeps the project root read-deny for slangc's own descriptor table, and
+`--source-path` is a diagnostic label that crosses no sandbox boundary
+because the sandbox-profile is applied to slangc, not to the driver,
+and the driver never opens the path on slangc's behalf.
 
 The `--shader-hash-stamp` argument is **input only**: the driver
 echoes it back in the stderr envelope on failure but does not derive
@@ -332,7 +349,7 @@ ShaderHash compose_cache_key(
   h.update(key.to_bytes());                            //  6 B
   h.update(flags.hash.bytes);                          // 32 B
   std::byte t = static_cast<std::byte>(target);
-  h.update(eastl::span(&t, 1));                        //  1 B
+  h.update(eastl::span<const std::byte>(&t, 1));        //  1 B
   return ShaderHash{h.finalize()};
 }
 ```
@@ -514,30 +531,23 @@ other in-flight jobs except the (immutable) `IShaderBackend&` and
 the (logger) `LogSink&`. There is no cross-job mutex on the pipeline's
 hot path.
 
-### 6.2 Worker pool scales horizontally
+### 6.2 Per-invocation self-containment
 
-The cooker (`cache/cooker.cpp`) and the editor's recompile dispatcher
-each maintain an `eastl::vector<std::thread>` worker pool sized to
-`std::thread::hardware_concurrency()` (M1 baseline: 4 firestorm + 4
-icestorm = 8 cores). Each worker:
+Each `compile()` call is self-contained: it owns its subprocess pid,
+its three pipe file descriptors (`stdin`/`stdout`/`stderr`), and its
+stack-local decode buffers for the duration of a single invocation.
+Nothing from one invocation leaks into another. Two concurrent calls
+with overlapping arguments duplicate a subprocess invocation — they do
+not corrupt each other's state — because there is no shared mutable
+per-job resource.
 
-```cpp
-while (auto job = job_queue.pop()) {
-    auto result = pipeline.compile(job->source, job->key, job->target);
-    if (result) {
-        cas_store.insert(*result);   // cooker only; editor publishes via §8.5 event
-    } else {
-        log_compile_failure(*job, result.error());
-    }
-}
-```
-
-The job queue is an MPSC ring buffer with bounded capacity (256 jobs
-on the M1 baseline). Producers block on full; the cooker is the sole
-producer in the cook path, and the editor's recompile dispatcher is
-the sole producer in the editor path. Workers compete on `pop()`
-through a single mutex protecting the queue head; the contention is
-nominal because each pop is followed by a long subprocess wait.
+The worker-pool mechanics (thread count, queue capacity, MPSC
+implementation, worker loop) that drive concurrent `compile()` calls
+belong to the cooker design spike (#755-adjacent; to be tracked in a
+separate deliverable). This design records only that `compile()` is
+safe to call concurrently from any number of workers, and that its
+isolation invariant is structural (stack locality + subprocess
+ownership), not a mutex protecting shared mutable state.
 
 ### 6.3 Subprocess parallelism budget
 
@@ -751,20 +761,31 @@ this aggregate.
 ### 9.2 Per-cook total budget
 
 The cooker walks the resolved permutation set (SPEC §6.4 step 1).
-For an MVP project size of ~10 k artifacts and an 8-wide worker pool
-on M1, total cook wall-clock is bounded by:
+The worker-pool sizing and scheduling policy are deferred to the
+cooker-design spike (#710); §6.2 of this design provides background
+context only. Using `N` = artifact count, `P` = pool width, and
+`T` = per-job typical wall-clock, the cook total is bounded by:
 
 ```text
-total ≈ ceil(artifacts / pool_size) × per_job_typical
-      ≈ ceil(10000 / 8) × 0.9 s
-      ≈ ~1100 s typical
-      ≈ ~18 min
+total ≈ ceil(N / P) × T
 ```
 
+For planning purposes (non-binding datum from spike #710's harness —
+subject to the cooker spike's final contract):
+
+```text
+  N ≈ 10 000 artifacts (MVP project estimate)
+  P ≈ 8 workers (M1 baseline: 4 firestorm + 4 icestorm cores)
+  T ≈ 0.9 s (per-job typical; §9.1)
+
+  → total ≈ ceil(10 000 / 8) × 0.9 s ≈ ~1 100 s ≈ ~18 min
+```
+
+These numbers are planning datums, not design commitments. The
+`shader-cook-time-budget` spike owns the final contract; this design
+records only the per-job constraint (`T`) that contributes to it.
 This is offline build cost and is **not** part of the per-frame
-budget (`reviews/decisions/perf-budget.md`). The
-`shader-cook-time-budget` spike owns the contract; this design
-records only the per-job constraint that contributes to it.
+budget (`reviews/decisions/perf-budget.md`).
 
 ### 9.3 In-flight memory ceiling
 
@@ -844,7 +865,8 @@ when the pipeline calls into that sibling.
 |------------|---------|----------|----------|
 | `EntryPointMissing` | The requested job names a non-existent entry point on the source. | refuse compile; pipeline propagates from `IShaderBackend::compile` argument check before spawn. | refuse |
 | `EntryPointStageAmbiguous` | Source carries an entry point with zero or multiple `[shader(...)]` tags (caught by §4.1, surfaced through pipeline). | refuse compile; defer to source aggregate's resolution. | refuse |
-| `PermutationKeyOutOfRange` | `key.is_well_formed()` is `false` at job construction. | refuse compile; codegen-table drift between caller and pipeline. | fatal |
+| `PermutationKeyMalformed` | Primary trigger (SPEC §10.2): `PermutationKey::from_bytes` rejects bytes during cache-aggregate deserialization — enumerator bits outside the declared axis range (§4.2); the cache entry is quarantined and treated as `CacheCorrupt` by the cache aggregate. Defense-in-depth: the pipeline also checks `key.is_well_formed()` at job construction and refuses compile before spawn if the caller somehow passes a malformed key that evaded the cache-aggregate decode step. | Primary path: refuse decode (cache aggregate); cache entry quarantined as `CacheCorrupt`. Defense-in-depth path: refuse compile; pipeline returns without touching the driver; no cache state modified. | refuse |
+| `PermutationKeyOutOfRange` | A `PermutationIndex` exceeds the §4.2 cardinality product — codegen-table drift between the build that emitted the index and the build that consumes it. | refuse compile; fatal because it indicates a mismatched code-generation table that cannot be resolved without a rebuild. | fatal |
 | `CompilerInvocationFailed` | `posix_spawn` failed; sandbox profile rejected; driver binary missing or not executable; envelope parse failed (driver protocol violation). | refuse compile; no retry; surface to caller for human triage. | refuse |
 | `CompilerExitNonZero` | Driver exited non-zero; `errors[]` non-empty; slang frontend or backend diagnostic. | refuse compile; forward `errors[]` JSON verbatim to editor / cooker logs; prior CAS entry remains live for that key. | refuse |
 | `CompilerTimedOut` | `EVFILT_TIMER` fired before `EVFILT_PROC` (NOTE_EXIT). | refuse compile; **no in-process retry**; the cooker / editor may re-queue at its layer. | refuse |
@@ -868,7 +890,7 @@ caller composes pipeline + sibling operations and a sibling fails.
 
 Every pipeline error from §10.1 is **`refuse`** severity except
 `PermutationKeyOutOfRange` and `ShippingCompilationAttempted`
-(both `fatal`). The §10.1 contract per `shader/SPEC.md` §10.1 binds
+(both `fatal`). The §10.1 contract per `shader/SPEC.md` §10.2 binds
 the severity to a cache-state outcome:
 
 - `refuse` arms → in-flight artifact dropped; **CAS unchanged**;
@@ -891,8 +913,12 @@ The pipeline owns this discipline through RAII helpers:
 class SubprocessHandle {
 public:
     ~SubprocessHandle() {
-        if (pid_ != -1) {
-            kill(pid_, SIGKILL);  // belt-and-suspenders
+        if (pid_ != -1 && !reaped_) {
+            // Only send a signal if the pid has not been waited on yet.
+            // Stage 5 calls waitpid() to capture the exit status, which
+            // marks the process as reaped; the destructor must not
+            // signal a pid that may have been recycled by the OS.
+            kill(pid_, SIGKILL);  // belt-and-suspenders on abnormal paths
             int status;
             ::waitpid(pid_, &status, 0);
         }
@@ -900,27 +926,37 @@ public:
         close_if_open(stdout_fd_);
         close_if_open(stderr_fd_);
     }
+
+    // Called by stage 5 after a successful waitpid(); prevents the
+    // destructor from signalling a now-recycled pid.
+    void mark_reaped() noexcept { reaped_ = true; }
+
 private:
     pid_t pid_{-1};
     int   stdin_fd_{-1};
     int   stdout_fd_{-1};
     int   stderr_fd_{-1};
+    bool  reaped_{false};
 };
 ```
 
 The destructor is the pipeline's last line of defense against zombie
 pids and leaked fds. Every error path that returns out of `compile`
 runs this destructor by stack-unwinding through `std::expected`'s
-construction.
+construction. `mark_reaped()` is called at the end of stage 5 (`await_exit`)
+immediately after `waitpid` captures the exit status, so the destructor
+never sends `SIGKILL` to a pid that the OS may have recycled for a new
+process.
 
 ### 10.4 Logging
 
 Per `error-model.md`:
 
 - `error` severity: `CompilerInvocationFailed`,
-  `CompilerTimedOut`, `MetalLibEmitFailed`, `CacheReadOnlyViolation`
-  (if the pipeline is mistakenly invoked against a read-only cache),
+  `CompilerTimedOut`, `MetalLibEmitFailed`,
   `ShippingCompilationAttempted` (`fatal` — also aborts the thread).
+  (`CacheReadOnlyViolation` is not pipeline-emitted; it belongs to the
+  cache aggregate — see the "does not emit" paragraph at the end of §10.1.)
 - `warn` severity: `CompilerExitNonZero` (Slang diagnostic — author
   bug, not engine bug), `EntryPointMissing`,
   `EntryPointStageAmbiguous`.
@@ -1022,12 +1058,16 @@ E2E traces will exercise this design.
   schema needs to grow (e.g. when DXIL lands and the envelope adds a
   `target_specific` field).
 - [OPEN] **Worker-pool sizing override for editor vs cooker.** §6.2
-  defaults the pool to `hardware_concurrency()`. The editor's
-  on-save recompile may want a smaller pool (1–2 workers) so the
-  user's interactive frame budget is not stolen by background
-  slangc invocations. Owner: editor / `tools` context. Resolution
-  gate: when the editor's first usability test surfaces a stutter
-  during on-save recompile under contention.
+  defers worker-pool width (thread count, queue capacity) to the
+  cooker design spike (#755-adjacent); no default is specified here.
+  The open question is whether the isolation invariant (§6.2:
+  self-containment is structural, not mutex-guarded) is sufficient
+  to allow the editor's on-save recompile to share the same pool
+  configuration as the cooker, or whether the editor context must
+  override to a smaller pool (1–2 workers) to preserve the user's
+  interactive frame budget. Owner: editor / `tools` context.
+  Resolution gate: when the editor's first usability test surfaces a
+  stutter during on-save recompile under contention.
 - [OPEN] **Subprocess sandbox profile for non-macOS dev hosts.** SPEC
   §6.2 names `sandbox-exec` (macOS) and "platform-equivalent seccomp
   filter on Linux dev hosts". The exact Linux profile (allowed
