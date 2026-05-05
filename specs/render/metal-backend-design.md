@@ -176,7 +176,7 @@ SurfaceAttachment (optional, child of MetalDevice)
 ├── CA::MetalLayer*           layer_                   // borrowed from platform; NOT owned
 ├── MTL::PixelFormat          color_format_            // chosen at attach
 ├── std::uint8_t              max_drawables_           // 2 or 3 (frames-in-flight)
-├── eastl::array<float,2>     drawable_size_           // updated on platform resize
+├── std::atomic<std::uint64_t> drawable_size_           // packed (width_f32 | height_f32<<32); updated on platform resize; read lock-free in phase 7
 └── ResizeCallback            on_resize_               // platform invokes from phase 1
 
 PresentFence (POD, returned by submit_frame)
@@ -188,6 +188,33 @@ optional surface; queues are non-movable, non-copyable, and outlive
 every command buffer they vend; a `MetalCommandBuffer` is a
 single-frame value and is committed-or-discarded inside one phase 7
 tick (SPEC §6.2.2 step 3).
+
+`MetalDevice` and `MetalQueue` explicitly delete all copy and move
+constructors and assignment operators:
+
+```cpp
+MetalDevice(const MetalDevice&)                      = delete;
+MetalDevice& operator=(const MetalDevice&)           = delete;
+MetalDevice(MetalDevice&&)                           = delete;
+MetalDevice& operator=(MetalDevice&&)                = delete;
+
+MetalQueue(const MetalQueue&)                        = delete;
+MetalQueue& operator=(const MetalQueue&)             = delete;
+MetalQueue(MetalQueue&&)                             = delete;
+MetalQueue& operator=(MetalQueue&&)                  = delete;
+
+MetalCommandBuffer(const MetalCommandBuffer&)        = delete;
+MetalCommandBuffer& operator=(const MetalCommandBuffer&) = delete;
+MetalCommandBuffer(MetalCommandBuffer&&)             = delete;
+MetalCommandBuffer& operator=(MetalCommandBuffer&&)  = delete;
+```
+
+`MetalCommandBuffer` owns a `MTL::CommandBuffer*` that must not alias; the
+explicit `= delete` declarations above enforce the same non-copyable,
+non-movable contract as `MetalDevice` and `MetalQueue`. These deletes are the
+enforcement mechanism for the "engine-singleton" and "thread-affine"
+contracts stated in §6.1 and §6.3; any `std::move` or copy attempt on
+these types is a compile error with a clear diagnostic.
 
 ### 3.2 `MetalDevice::create` — cold-path device acquisition
 
@@ -251,8 +278,10 @@ Result<void> attach_surface(MTL::Layer* layer,
        return unexpected{render::Error::ResourceImportRefused}
        (one surface per device in MVP; multi-surface is post-MVP).
   2. Reject if layer is null:
-       return unexpected{render::Error::SwapchainAcquireFailed}
-       (no surface to attach).
+       return unexpected{render::Error::ResourceImportRefused}
+       (null layer is a caller-precondition violation; no frame is
+       running yet, so re-present is meaningless — recovery is
+       abort-engine, matching the double-attach case in step 1).
   3. Configure the layer (caller-vended; mutated under platform's
      contract that it survives until detach):
        - layer->setDevice(device_)
@@ -337,15 +366,22 @@ Result<PresentFence> submit_frame(MetalDevice& device,
   6. Commit in queue dependency order (compute first if compute writes
      graphics-queue inputs without a graphics-side wait; the plan's
      queue assignment fixes the order):
-     - cb_compute->commit()
-     - cb_graphics->commit()
-     - cb_copy->commit()    -- copy is independent in MVP
-     - on any commit failure → return
+     - device.queue(Compute).submit(cb_compute)
+     - device.queue(Graphics).submit(cb_graphics)
+     - device.queue(Copy).submit(cb_copy)    -- copy is independent in MVP
+     - on any submit failure → return
        unexpected{render::Error::QueueSubmitFailed}
+     MetalQueue::submit(MetalCommandBuffer&) asserts the CB's queue-role
+     tag matches the queue before calling cb->commit() internally. This
+     keeps the "Queue purity" invariant (SPEC §4.1.6 invariant 4) inside
+     MetalQueue's SRP boundary rather than in submit_frame.
 
   7. Emit PresentFence:
-     - fence_value ← graphics_queue.submit_counter_.fetch_add(1) + 1
+     - fence_value ← device.queue(Graphics).next_submit_id()
      - return PresentFence{ fence_value }
+     MetalQueue::next_submit_id() returns the counter value incremented
+     by the preceding submit() call (memory_order_acq_rel per §6.2).
+     submit_frame never touches submit_counter_ directly.
 
   8. Driver thread exits phase 7. The CBs are owned by Metal until
      completion; their lifetimes are managed by the metal-cpp
@@ -402,14 +438,14 @@ silently truncating.
 
 ### 4.1 Types (locked from SPEC §5)
 
-The metal-backend contributes exactly four classes / structs to the
-SPEC §5 public header:
+The metal-backend contributes three opaque classes, two POD structs,
+and one free function to the SPEC §5 public header:
 
 | Symbol                | Kind            | SPEC §5 line | Notes                                                                                  |
 |-----------------------|-----------------|--------------|----------------------------------------------------------------------------------------|
 | `DeviceDesc`          | `struct` (POD)  | 1252         | `prefer_low_power : bool`, `tier : QualityTier`. **§3.1 ABI add:** `headless : bool = false`, `validation : bool = false`. |
 | `MetalDevice`         | opaque class    | 1257         | `create(const DeviceDesc&)`, `capabilities()`, `queue(Queue)`, `pso_cache()`, `transient_pool()`. **§3.3 ABI add:** `attach_surface`, `detach_surface`. |
-| `MetalQueue`          | opaque class    | 1275         | `acquire_command_buffer()`, `submit(MetalCommandBuffer&)`, `role()`.                   |
+| `MetalQueue`          | opaque class    | 1275         | `acquire_command_buffer()`, `submit(MetalCommandBuffer&)`, `next_submit_id()`, `role()`. `submit()` asserts queue-role tag and increments `submit_counter_`; `next_submit_id()` returns the last-incremented value. |
 | `MetalCommandBuffer`  | opaque class    | 1291         | `push_debug_group`, `pop_debug_group`, `queue_role()`. Internal cursor not exposed.    |
 | `PresentFence`        | `struct` (POD)  | 1415         | `value : u64`. Returned by `submit_frame`.                                              |
 | `submit_frame`        | free function   | 1419         | `(MetalDevice&, const RenderFrame&) → Result<PresentFence>`.                           |
@@ -417,9 +453,14 @@ SPEC §5 public header:
 The §3.1 / §3.3 ABI adds (`headless`, `validation`, `attach_surface`,
 `detach_surface`) are landed in a single render-plugin ABI bump
 alongside the metal-backend implementation; they are listed here so the
-sibling task-breakdown spike can scope the surface diff. No new error
-variants are needed (the SPEC §5 closed sum already covers every
-backend failure mode — see §10).
+sibling task-breakdown spike can scope the surface diff. One new error
+variant is required: `GpuFault` (SPEC §10.1 table row 20, marked "ABI
+add"). All other backend failure modes map to existing §5 enumerators.
+The `GpuFault` enumerator lands alongside the metal-backend
+implementation in the same render-plugin ABI bump; the sibling
+task-breakdown spike must scope this surface diff explicitly (see §8.5
+and §10 for the trigger and recovery protocol, and §11.1
+`gpu_fault_capture.cpp` + §11.4 story #398 for coverage).
 
 ### 4.2 New surface-attach descriptor
 
@@ -499,7 +540,15 @@ contract:
   boundaries (SPEC §8.3) under the loader's exclusive ownership.
 - `surface_` mutation happens only at `attach_surface` / `detach_surface`
   call sites; concurrent reads from phase 7 are forbidden by the
-  schedule (resize callback updates `drawable_size_` only, atomic).
+  schedule.
+- `drawable_size_` is a `std::atomic<std::uint64_t>` packing the two
+  32-bit IEEE floats as `(width_bits | uint64_t(height_bits) << 32)`.
+  The resize callback (phase 1) stores with `memory_order_release`; the
+  phase-7 submit-frame reader loads with `memory_order_acquire`. This
+  establishes the required happens-before: the phase-loop barrier between
+  phase 1 and phase 7 is already a sequenced point, but the atomic also
+  guards the rare case where the resize callback fires from a platform
+  thread asynchronously before the barrier.
 - All hot-path readers (graph builder, encoders, driver) treat
   `MetalDevice` as `const &`. No locks.
 
@@ -510,8 +559,11 @@ concurrent `commandBuffer` allocation and `commit`. The wrapper
 `MetalQueue` adds:
 
 - `submit_counter_` is a `std::atomic<uint64_t>` updated under
-  `memory_order_acq_rel` at every `submit()`. Readers (the
-  `PresentFence` consumer in `platform`'s phase 9) use
+  `memory_order_acq_rel` inside `submit()`. The companion
+  `next_submit_id()` reads it with `memory_order_acquire` and returns
+  the current value; callers (including `submit_frame` step 7) use
+  this accessor rather than touching `submit_counter_` directly. The
+  `PresentFence` consumer in `platform`'s phase 9 also reads via
   `memory_order_acquire`.
 - `acquire_command_buffer()` is a single `device_->commandQueue()->commandBuffer()`
   call; lock-free.
@@ -759,13 +811,13 @@ test-fixture columns are SPEC §10.3's authoritative rows.
 |-------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------|
 | `DeviceUnsupported` (a.k.a. `MetalDeviceUnavailable`) | `MTLCreateSystemDefaultDevice` returns null at `create()`, or `newCommandQueue` returns null for any of the three roles.                                       | row 1 (`abort-engine`).                 |
 | `DeviceLost`                  | `MTL::CommandBuffer.status == .error` with `.deviceRemoved` reason observed by `submit_frame` on commit (rare; eGPU detach, kext crash).                                       | row 1 (`abort-engine`).                 |
-| `SwapchainAcquireFailed`      | `attach_surface` called with null `layer`; or `nextDrawable` returns null inside `submit_frame` after the platform-defined acquire timeout (SPEC §9.4 budget = 1.5 ms). | row 2 (`abort-frame`).                  |
+| `SwapchainAcquireFailed`      | `nextDrawable` returns null inside `submit_frame` after the platform-defined acquire timeout (SPEC §9.4 budget = 1.5 ms). | row 2 (`abort-frame`).                  |
 | `SwapchainOutOfDate`          | Resize callback fires from `platform` phase 1 between frames; the next `submit_frame` re-checks `drawable_size_` against the plan's expected view extent and returns this variant if the plan was compiled for the old size.                  | (folded into SPEC §10 follow-up — re-plan on next frame). |
 | `QueueSubmitFailed` (a.k.a. `FrameSubmitFailed`) | `MTL::CommandQueue.commit` returns failure (transient driver error, queue overflow); not a device loss.                                                                          | row 15 (`abort-frame`).                 |
 | `PresentFailed`               | `presentDrawable` rejected by Metal (drawable was already presented or texture wrong format).                                                                                    | (folded into row 15 / row 16).          |
 | `FenceTimeout` (a.k.a. `PresentTimeout` / `GpuTimeout`) | The CPU-side `PresentFence` consumer in `platform` phase 9 fence-wait exceeds the 16.6 ms budget by > 2× without a GPU-side completion signal.                                | rows 16, 17 (`abort-frame` / `lower-tier`). |
 | `GpuFault`                    | `MTL::CommandBuffer.status == .error` with `.faulted` reason; surfaced via the backend's diag-capture path (§8.5; SPEC §10.4).                                                  | row 18 (`hot-reload-restart`).          |
-| `ResourceImportRefused`       | `attach_surface` called twice without an intervening `detach_surface`; or surface attach attempted from a non-cold-path frame phase.                                            | (no recovery — caller bug; `abort-engine`). |
+| `ResourceImportRefused`       | `attach_surface` called with a null `layer` (caller-precondition violation, abort-engine); or called twice without an intervening `detach_surface`; or surface attach attempted from a non-cold-path frame phase.  | (no recovery — caller bug; `abort-engine`). |
 | `CapabilityNotSupported`      | `attach_surface` requested HDR colorspace on a host without the `HdrPresent` capability bit; or `create()` succeeded but a downstream pass requires a missing capability bit.    | rows 13, 14 (`lower-tier` / `disable-feature`). |
 
 The backend never fabricates a variant outside this list; every
@@ -813,9 +865,9 @@ infrastructure that depends on `metal-cpp` headers.
 | `device_create_capabilities_probed.cpp`             | Fake reports `Apple7` + `Metal3` + raytracing; the resulting `CapabilitySet` carries `MeshShaders | RayQuery | HardwareRayTrace`. |
 | `device_headless.cpp`                               | `DeviceDesc{ .headless = true }` constructs a device with `surface_ == nullptr`; `submit_frame` skips the present pass. |
 | `surface_attach_happy.cpp`                          | `attach_surface(SurfaceAttachDesc{ .layer = &fake_layer, ... })` calls `setDevice`, `setPixelFormat`, `setMaximumDrawableCount` on the fake; `surface_` becomes non-null. |
-| `surface_attach_null_layer.cpp`                     | Returns `unexpected{SwapchainAcquireFailed}` for a null `layer`.                                                   |
+| `surface_attach_null_layer.cpp`                     | Returns `unexpected{ResourceImportRefused}` for a null `layer` (caller-precondition violation; recovery abort-engine, not abort-frame). |
 | `surface_attach_double.cpp`                         | A second `attach_surface` without intervening detach returns `unexpected{ResourceImportRefused}`.                  |
-| `surface_resize_callback.cpp`                       | The callback registered at attach is invoked when the fake reports a resize; `drawable_size_` updates atomically.  |
+| `surface_resize_callback.cpp`                       | The callback registered at attach is invoked when the fake reports a resize; `drawable_size_` stores with `memory_order_release` and a concurrent phase-7 reader load with `memory_order_acquire` observes the new dimensions without a data race.  |
 | `submit_frame_happy.cpp`                            | One CB acquired per used queue; `record_into` called per CB; `nextDrawable` called once; `presentDrawable` called once; commits in plan order; fence increments by 1. |
 | `submit_frame_drawable_null.cpp`                    | `nextDrawable` returning null returns `unexpected{SwapchainAcquireFailed}`; no `commit` issued.                    |
 | `submit_frame_commit_fail.cpp`                      | A commit failure returns `unexpected{QueueSubmitFailed}`; subsequent commits are skipped; sibling CBs released.    |
@@ -826,6 +878,7 @@ infrastructure that depends on `metal-cpp` headers.
 | `device_lost_path.cpp`                              | A fake CB that resolves to `.error` with `.deviceRemoved` causes `submit_frame` to return `unexpected{DeviceLost}`. |
 | `gpu_fault_capture.cpp`                             | A fake CB that resolves to `.error` with `.faulted` triggers the diag-capture entry; the fault payload is forwarded via `render_report_gpu_fault`. |
 | `present_fence_monotonic.cpp`                       | Across N successful submits, the returned `PresentFence::value` strictly increases by 1 per submit; concurrent reads see a consistent value. |
+| `present_fence_timeout.cpp`                         | A fake where the platform's phase-9 fence-wait callback fires with an elapsed time exceeding 2× the 16.6 ms budget ceiling returns `unexpected{FenceTimeout}` (SPEC §10.3 rows 16/17); distinct from the drawable-nil path (`SwapchainAcquireFailed`) exercised by `submit_frame_drawable_null.cpp`. |
 
 ### 11.2 Integration tests (real device under platform fixture)
 
@@ -862,8 +915,11 @@ The metal-backend's contribution to the SPEC §11 user-story matrix:
   `present_fence_monotonic.cpp` cover the unit half;
   `tests/e2e/render/present.glibre-trace` covers the E2E half.
 - #397 (`render: PresentTimeout (>2× budget) triggers abort-frame`) —
-  `submit_frame_drawable_null.cpp` covers the unit half; the e2e
-  trace inserts a deliberate drawable-pool starve.
+  `present_fence_timeout.cpp` covers the unit half (see §11.1 below);
+  the e2e trace inserts a deliberate GPU stall that exhausts the phase-9
+  fence-wait deadline. Note: `submit_frame_drawable_null.cpp` tests the
+  `SwapchainAcquireFailed` path (nextDrawable nil), which is a distinct
+  failure from `FenceTimeout` (SPEC §10.3 rows 16/17 vs. row 2).
 - #398 (`render: GpuFault triggers hot-reload-restart with diag
   capture`) — `gpu_fault_capture.cpp` covers the unit half; the e2e
   trace runs the full §10.4 protocol.
