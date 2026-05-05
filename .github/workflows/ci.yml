@@ -44,6 +44,55 @@ jobs:
       - name: Verify acceptance ↔ test mapping
         run: 'true  # TODO: enable once tooling lands'
 
+  e2e-core:
+    # Replays every `tests/e2e/core/*.glibre-trace` via `glibre-trace replay`
+    # (specs/e2e/SPEC.md §6.5). Per .claude/skills/go/references/sdlc.md §5
+    # ("Testing — acceptance authoring") and specs/e2e/SPEC.md §4.1.7 inv 5
+    # ("Always emits a report"), this job is expected to fail loudly until
+    # the engine binary, `World::spawn`/`despawn`/`create`, the debug-overlay
+    # bindings, `tools::TraceWriter`, and the `glibre-trace` CLI all land.
+    # That fail-state is "correct red" — the workflow encodes the trace's
+    # contract so the closure-gate flips green only when the user-stories
+    # cited under tests/e2e/core/ all pass replay.
+    runs-on: macos-14
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enumerate e2e/core traces
+        id: list
+        run: |
+          set -euo pipefail
+          traces=$(git ls-files 'tests/e2e/core/*.glibre-trace' || true)
+          if [ -z "$traces" ]; then
+            echo "no traces under tests/e2e/core/" >&2
+            echo "traces=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo 'traces<<EOF'
+            echo "$traces"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+      - name: Replay e2e/core traces
+        if: steps.list.outputs.traces != ''
+        run: |
+          set -euo pipefail
+          # `glibre-trace` is the §6.5 CLI; until tools/cli/glibre-trace
+          # lands the runner is absent and this step exits non-zero —
+          # which IS the contract (specs/e2e/SPEC.md §5 / sdlc.md §5).
+          if ! command -v glibre-trace >/dev/null 2>&1; then
+            echo "glibre-trace runner not yet built — see specs/e2e/SPEC.md §6.5" >&2
+            echo "trace stories pending implementation:" >&2
+            printf '%s\n' "${{ steps.list.outputs.traces }}" >&2
+            exit 1
+          fi
+          while IFS= read -r trace; do
+            [ -n "$trace" ] || continue
+            echo "::group::replay $trace"
+            glibre-trace replay --trace "$trace" --layer inproc
+            echo "::endgroup::"
+          done <<< "${{ steps.list.outputs.traces }}"
+
   dep-check:
     runs-on: ubuntu-latest
     steps:
