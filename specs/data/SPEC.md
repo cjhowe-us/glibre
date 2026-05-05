@@ -816,8 +816,10 @@ struct RegistryEntry {
 class SchemaRegistry {
 public:
     // Binary search by FQN (§4.5 inv. 3). O(log N), allocation-free.
-    // Returns nullptr if no entry matches.
-    auto lookup(SchemaId schema) const noexcept -> const RegistryEntry*;
+    // Returns unexpected(data::Error{ .tag = ErrorTag::SchemaUnknown })
+    // if no entry matches; otherwise a non-null pointer into entries_.
+    auto lookup(SchemaId schema) const noexcept
+        -> std::expected<const RegistryEntry*, data::Error>;
 
     // FQN-sorted iteration order, matching AbiHash canonicalization
     // (§4.4 inv. 1, §4.5 inv. 3).
