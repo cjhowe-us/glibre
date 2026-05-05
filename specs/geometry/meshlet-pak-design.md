@@ -744,21 +744,17 @@ upstream.
 #if defined(GLIBRE_GEOMETRY_COOK)
 namespace glibre::geometry::cook::pak {
 
+// PakWriter's narrowed projection of the cook pipeline's internal group
+// record (#781).  Only the four fields the writer actually consumes are
+// present here; bounds, cone, SSE, meshlet ranges, and DAG adjacency lists
+// live exclusively in the cook pipeline's own group record and are never
+// passed across the writer boundary.
 struct StagedMeshletGroup {
     std::uint32_t                   group_index;     // pak-wide
-    LODBand                         band;
-    BoundingSphere                  bounds;
-    BoundingCone                    cone;
-    float                           screen_space_error;
-    MaterialHandle                  material;
-    std::uint32_t                   meshlet_first;   // index into Meshlet[]
-    std::uint32_t                   meshlet_count;
-    std::uint32_t                   parent_first;    // adjacency table
-    std::uint32_t                   parent_count;
-    std::uint32_t                   child_first;
-    std::uint32_t                   child_count;
     std::uint32_t                   page_index;      // owning PakPage
+    LODBand                         band;            // used for LOD0 cross-check (§4.1.3 step 6)
     eastl::array<std::uint32_t, kAttributeKindCount> draco_decoded_byte_length{};
+    // decode-pool-max derivation (§4.1.3 step 4)
 };
 
 struct StagedDracoStream {
@@ -769,16 +765,19 @@ struct StagedDracoStream {
     std::uint32_t                   decoded_byte_length;
 };
 
+// Callers must resolve MaterialHandle → slot index before populating this
+// struct; the writer writes material_slot_index directly as a u32 LE into
+// the binary BLAS descriptor (§3.5.1) without any handle accessor call.
 struct StagedBLASGeometryDescriptor {
-    std::uint32_t                   group_index;     // LOD0 only
+    std::uint32_t                   group_index;         // LOD0 only
     std::uint32_t                   vertex_byte_offset;
     std::uint32_t                   vertex_count;
     std::uint32_t                   vertex_stride_bytes;
     std::uint32_t                   index_byte_offset;
     std::uint32_t                   index_count;
-    std::uint8_t                    index_format;    // 0=u32, 1=u16
+    std::uint8_t                    index_format;        // 0=u32, 1=u16
     std::uint8_t                    vertex_format;
-    MaterialHandle                  material;
+    std::uint32_t                   material_slot_index; // resolved from MaterialHandle by caller; written as u32 LE (§3.5.1)
 };
 
 struct StagedPak {
@@ -901,7 +900,11 @@ Single forward pass over the file:
 6. **Emit BLAS-recipe region.** Write blob header (§3.5), then
    each descriptor in sorted order; verify all `group_index`
    reference an LOD0 group else refuse with
-   `geometry::Error::BLASRecipeInvalid`.
+   `geometry::Error::BLASRecipeInvalid`. Write
+   `descriptor.material_slot_index` verbatim as u32 LE into the
+   `material_slot_index` field of the binary record (§3.5.1); the
+   caller has already resolved any `MaterialHandle` to its slot index
+   before staging (see `StagedBLASGeometryDescriptor` comment).
 7. **Emit pages.** For each page in ascending `page_index`:
    - Reserve page header.
    - Write `group_index[]` from groups in this page; if `G` is odd,
