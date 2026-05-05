@@ -21,8 +21,9 @@
 > except for the additive `FrameTick` / `FixedStepAccumulator` value
 > objects co-located on `glibre::platform::Clock`'s seam — both are
 > pure header-side computations on `Instant` / `Duration` and
-> introduce no new ABI symbols beyond those derivable from the
-> existing `Clock::now` / `wall` / `native_tick` triplet.
+> introduce three new ABI-tracked types (`FrameDelta` (24 B),
+> `FrameTick` (8 B), `FixedStepAccumulator` (24 B)) registered in
+> §7.3; SPEC §5.9 amendment tracked in §12 [BLOCKING].
 >
 > Harmonius prior art (`harmonius/docs/requirements/platform/
 > threading-async.md`, `harmonius/docs/design/core-runtime/
@@ -1545,7 +1546,7 @@ output.
   `Clock`, not aggregates of platform's OS-seam responsibility per
   se. The brief asked for them inside this aggregate, which is
   what this design delivers. Re-opens if the sibling
-  task-breakdown carve-out (issue #TBD) discovers that the
+  task-breakdown carve-out (task-breakdown spike to be filed before plan PRs land) discovers that the
   consumer-side ergonomics prefer a separate header
   (`<glibre/platform/time.hpp>`). Owner: sibling task-breakdown
   spike for clock.
@@ -1586,3 +1587,42 @@ output.
   comparison? Today, callers obtain the `int64_t` directly. Re-
   opens when the `obs` (observability) context lands and the
   field shape is normalized. Owner: future `obs` SPEC.
+
+- [BLOCKING IMPLEMENTATION] **SPEC §6.6 regression-guard amendment.**
+  Current `specs/platform/SPEC.md` §6.6 prescribes a plain
+  `assert(ns >= last)` to guard monotonic regression in debug
+  builds. `clock-design.md` §3.2 corrected this to a
+  monotonic-CAS loop (load `last_`, spin-CAS `ns` only when
+  `ns > last_`, terminate on `count == MAX_SPIN_CAS`) to eliminate
+  a race-induced spurious abort that would occur when two threads
+  interleave between the `mach_absolute_time` read and the
+  comparison. An implementer reading only SPEC.md §6.6 would write
+  the plain-assert version, which is both incorrect and
+  non-deterministically racy. **SPEC §6.6 must be amended** —
+  either replace the assert prose with a forward-pointer to
+  `clock-design.md §3.2`, or update the §6.6 code snippet to show
+  the CAS loop — before the first plan PR consuming this design can
+  land. Two concrete plan-side consumers: phase-9 frame-tick
+  implementation, render's frame-extract NTP-gap diagnostics.
+  Owner: platform SPEC maintainer; tracked as amendment spike
+  against sub-epic #714.
+
+- [BLOCKING IMPLEMENTATION] **SPEC §5.9 stub amendment — new
+  ABI-tracked types.** `specs/platform/SPEC.md` §5.9 currently
+  lists only `Clock` in the ABI middleman catalogue. This design
+  §7.3 introduces three new ABI-tracked types: `FrameDelta` (24 B),
+  `FrameTick` (8 B), and `FixedStepAccumulator` (24 B). **SPEC §5.9
+  must be amended** to add stub declarations for `FrameDelta`,
+  `FrameTick`, and `FixedStepAccumulator` (or a forward-reference to
+  `clock-design.md §4`) before any plan PR consuming these types
+  can land. Two concrete consumers: phase-9 frame-tick (FrameDelta),
+  shipping runtime fixed-step gameplay (FixedStepAccumulator).
+  Owner: platform SPEC maintainer; tracked as amendment spike
+  against sub-epic #714.
+
+- [NON-BLOCKING] **Task-breakdown spike — file dedicated
+  `[SPIKE] task-breakdown-clock-implementation` issue parented to
+  #714**, tracking decomposition of `clock-design.md` into plan
+  PRs. Once filed, place the issue number into §12 (the namespace
+  question entry above) and the Refs block header (line 34).
+  Owner: project manager / next planning session.
