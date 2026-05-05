@@ -1060,10 +1060,10 @@ launcher) live next to their sole consumer.
 **§4.5 (DescriptorLayout) ownership.** `descriptor_layout.cpp`
 co-locates inside `reflection/` as an implementation convenience (it
 immediately consumes a `ReflectionBlob` output), but it is NOT governed
-by this aggregate's design. Ownership of §4.5 transfers to the
-descriptor-layout aggregate designed in spike #753. The directory
-mapping for §4.5 will be established there; readers must consult
-spike #753 for the authoritative §4.5 invariants.
+by this aggregate's design. §4.5 is governed by the descriptor-layout
+aggregate designed in spike #753; that spike is the authoritative owner
+of §4.5 invariants. The directory mapping for §4.5 will be established
+there; readers must consult spike #753 for those invariants.
 
 **Build-system gating.** The plugin's `CMakeLists.txt` partitions
 sources by shipping eligibility. Only the build system distinguishes
@@ -2017,8 +2017,8 @@ checklist against the spec without mutating §5).
 | **`UnsupportedTarget`** | The slangc backend does not yet support the requested `CompileTarget` (e.g. `DXIL` before post-MVP support lands). | refuse compile; capability mismatch surfaced through `IShaderBackend::capabilities()`. | `refuse` |
 | **`MetalLibEmitFailed`** *(SlangcFailed)* | slangc emitted no `metallib`, or emitted a `metallib` whose container shape failed driver validation. | refuse compile; prior `metallib` artifact (if any) remains the live entry for this permutation. | `refuse` |
 | **`ReflectionExtractionFailed`** *(ReflectionParseError)* | The `reflection/` slangc-reflection ingester (§6.3) cannot ingest the reflection record paired with the bytecode — malformed JSON, unknown binding kind, truncated bind-table (§4.4). | refuse publish (the artifact is *not* inserted into the cache); prior `ReflectionBlob` for the prior artifact remains live; surfaces as §8.4 refusal case 3. | `refuse` |
-| **`DescriptorFrequencyAmbiguous`** *(DescriptorLayoutInvalid, ambiguous variant)* | A binding in the `ReflectionBlob` carries **multiple conflicting** `DescriptorFrequencyGroup` annotations (§4.4 invariant 3 — "too many tags" branch; also raised defense-in-depth in `DescriptorLayout::derive` Pass 2 / Pass 5 rule 5 if a sampler appears in both dynamic and immutable classifiers). | refuse publish; same path as `ReflectionExtractionFailed`. | `refuse` |
-| **`DescriptorFrequencyMissing`** *(DescriptorLayoutInvalid, missing variant)* | A binding arrives at `DescriptorLayout::derive` with **no** `DescriptorFrequencyGroup` resolution — the §6.3 `frequency_tagger.hpp/.cpp` pass left the slot untagged (§4.4 invariant 3 — "no tag" branch; raised by derive Pass 1 pre-condition check). | refuse publish; the artifact never reaches `ShaderCache::insert`; the prior cache entry for that `(PermutationKey, target)` remains live (§8.4 refusal case 3). | `refuse` |
+| **`DescriptorFrequencyAmbiguous`** *(DescriptorLayoutInvalid, ambiguous variant)* | The §6.3 `frequency_tagger.hpp/.cpp` pass detects a binding annotated with **multiple conflicting** `DescriptorFrequencyGroup` values before `ReflectionBlob` is returned (§4.4 invariant 3 — "too many tags" branch). `DescriptorLayout::derive` Pass 2 repeats the check as a defense-in-depth assertion only; it is not the primary detection site. | refuse publish; same path as `ReflectionExtractionFailed`. | `refuse` |
+| **`DescriptorFrequencyMissing`** *(DescriptorLayoutInvalid, missing variant)* | The §6.3 `frequency_tagger.hpp/.cpp` pass cannot assign exactly one `DescriptorFrequencyGroup` — the slot is left untagged (§4.4 invariant 3 — "no tag" branch). `frequency_tagger` raises this error before `ReflectionBlob` is returned to the caller; `DescriptorLayout::derive` Pass 1 pre-condition check repeats it as a defense-in-depth assertion only. | refuse publish; the artifact never reaches `ShaderCache::insert`; the prior cache entry for that `(PermutationKey, target)` remains live (§8.4 refusal case 3). | `refuse` |
 | **`LinkFailed`** | `IShaderBackend::link` rejected a spec-constant bake — entry-point set is incoherent, or specialization constants conflict across modules (§4.7 op `link`). | refuse compile of the linked module; per-module artifacts remain valid. | `refuse` |
 | **`SpecializationConstantMissing`** | A spec-constant referenced by the entry-point set is not bound at link time. | refuse link. | `refuse` |
 | **`CacheLookupMiss`** *(CacheMiss)* | `ShaderCache::lookup` finds no manifest entry for the requested `ShaderHash`. **This is the success case in disguise**: it is the only `Error` arm that callers are *expected* to handle non-fatally — the cooker's response is to enqueue a compile, the runtime's response is to refuse the bind (§4.6 inv 2 — runtime is read-only). | tooling: enqueue compile through `CompilationPipeline`. shipping: refuse bind; `render` falls back to its own missing-PSO policy (§render SPEC §8). | `fallback` |
