@@ -234,10 +234,14 @@ Snapshot policy:
    sub-arena and split on the *first* `=` to populate a
    `(view-key, view-value)` pair into a small flat sorted vector
    for `O(log N)` `env(name)` lookups. Duplicate keys (legal in
-   POSIX; the *first* wins in shells but not in `getenv`) are
-   resolved by **last-wins** — the aggregate matches `getenv`
-   semantics so engine code that previously called `getenv`
-   directly can be migrated mechanically.
+   POSIX) are resolved by **first-wins**. The aggregate matches
+   POSIX `getenv` semantics on macOS / glibc / musl, all of which
+   scan `environ` top-to-bottom and return the first matching
+   entry. (Shells such as bash/zsh typically apply last-wins when
+   assigning variables, but `getenv()` reads first-wins — the
+   design aligns with C library behavior, not shell assignment
+   behavior.) Engine code that previously called `getenv` directly
+   can be migrated mechanically.
 3. **CWD.** `getcwd(buf, PATH_MAX)` once; copy the byte sequence
    into the sub-arena; canonicalize via
    `CanonicalPath::from_absolute(view)` (SPEC §5.2). Store the
@@ -427,6 +431,18 @@ Properties:
 
 `install_signal(Signal s, SignalHandlerFn fn)`:
 
+**Pre-condition (caller obligation — applies to `glibre_plugin_register`):**
+Plugin's `glibre_plugin_register` MUST call
+`glibre::platform::detail::error::pre_touch_all()` BEFORE invoking
+`Process::install_signal`. `pre_touch_all()` pre-touches the three
+TLS slots (prefix pointer, prose buffer, source_tag pointer — per
+`platform-error-design.md` §9.2) so that the lazy linker stub
+resolver for those `__thread` variables is resolved on the calling
+thread before any signal can fire. If the resolver has not run and
+a signal fires first, the lazy stub itself is not async-signal-safe —
+UB on macOS. See `platform-error-design.md` §6.2 for the mandatory
+ordering contract.
+
 1. Lock `g_install_mutex`.
 2. Find the slot for `s`; if its `fn` is non-null,
    `unlock + return Error::AlreadyExists`.
@@ -469,12 +485,14 @@ install is main-thread-only by convention) produce a deterministic
 orphans one handler.
 
 `SA_ONSTACK` requires an alternate signal stack; the aggregate
-allocates a 32 KiB `sigaltstack` once during `init` (in the same
+allocates a **24 KiB** `sigaltstack` once during `init` (in the same
 sub-arena, so it counts against the 256 KiB ceiling — fits with
-slack to spare) and `sigaltstack(2)` it. The alternate stack is
-critical for SIGSEGV on stack overflow: the default-stack handler
-would re-fault. The alt-stack lives for the program's lifetime and
-is freed by the singleton's destructor.
+margin within 256 KiB sub-arena per §9) and calls `sigaltstack(2)`.
+24 KiB gives 8 KiB headroom above the POSIX `SIGSTKSZ` minimum
+(typically 16–32 KiB on macOS). The alternate stack is critical for
+SIGSEGV on stack overflow: the default-stack handler would re-fault.
+The alt-stack lives for the program's lifetime and is freed by the
+singleton's destructor.
 
 ### 3.6 Exit-code latch
 
@@ -924,16 +942,21 @@ This design partitions it as (§3.2):
 | Argv copy                     | ≤ 64 KiB   | `init`    | shutdown      |
 | Env copy                      | ≤ 128 KiB  | `init`    | shutdown      |
 | Cwd + executable_path copies  | ≤ 8 KiB    | `init`    | shutdown      |
-| Env (key, value) flat-vec idx | ≤ 56 KiB   | `init`    | shutdown      |
-| Sigaltstack                   | 32 KiB     | `init`    | shutdown      |
+| Env (key, value) flat-vec idx | ≤ 32 KiB   | `init`    | shutdown      |
+| Sigaltstack                   | 24 KiB     | `init`    | shutdown      |
 | Handler table                 | trivial    | static    | static        |
 | **Total**                     | **≤ 256 KiB** | —      | —             |
 
-Slack (≤ ~32 KiB across slices) absorbs argv/env at the upper
-end of typical macOS limits (`getconf ARG_MAX = 262144`). If the
-total snapshot exceeds 256 KiB at boot, `init` aborts with a
-clear diagnostic — strictly preferable to silent truncation that
-would orphan environment variables a tool relies on.
+Slice arithmetic: 64 + 128 + 8 + 32 + 24 = 256 KiB exactly,
+meeting the SPEC §9.2 ceiling. The env flat-vec index slice was
+reduced from 56 KiB to 32 KiB (sufficient for up to ~1024
+`(view-key, view-value)` pairs at 32 bytes each — well above
+typical macOS `environ` cardinality) and sigaltstack was trimmed
+from 32 KiB to 24 KiB (8 KiB above the POSIX `SIGSTKSZ` floor;
+see §3.5 and §12 [NON-BLOCKING] open item). If the total snapshot
+exceeds 256 KiB at boot, `init` aborts with a clear diagnostic —
+strictly preferable to silent truncation that would orphan
+environment variables a tool relies on.
 
 Steady-state allocation rate (post-`init`): **0 bytes per frame**.
 Every aggregate function on the public surface is annotated with
@@ -1213,19 +1236,28 @@ Both run on `macos-26-m1` CI only.
   consumer: `tools/glibre-editor`'s "build" / "cook" / "codegen"
   panel; until that work lands, shell invocation remains
   sufficient.
-- **[OPEN] Signal handlers that need access to per-thread
-  state.** The current `SignalHandlerFn = void (*)(int signal)
-  noexcept` takes only the signum. R-14.4.6 GPU breadcrumbs +
-  R-14.4.1 stack-trace capture want access to the faulting
-  thread's `siginfo_t` and `ucontext_t`. The trampoline already
-  receives them (it uses `SA_SIGINFO`); exposing them would
-  widen `SignalHandlerFn` to e.g. `void (*)(int, const
-  glibre::types::platform::SignalCtx&) noexcept`, where
-  `SignalCtx` is a host-agnostic middleman wrapping the
-  platform-specific bits the dump-writer needs. Defer until the
-  in-process crash-handler plugin (#TBD) lands; the trade-off is
-  ABI surface growth vs giving the crash-handler enough info
-  to record register state.
+- **[OPEN] [BLOCKING IMPLEMENTATION] Signal handlers that need
+  access to per-thread state.** The current
+  `SignalHandlerFn = void (*)(int signal) noexcept` takes only
+  the signum. R-14.4.6 GPU breadcrumbs + R-14.4.1 stack-trace
+  capture want access to the faulting thread's `siginfo_t` and
+  `ucontext_t`. The trampoline already receives them (it uses
+  `SA_SIGINFO`); exposing them would widen `SignalHandlerFn` to
+  e.g. `void (*)(int, const glibre::types::platform::SignalCtx&)
+  noexcept`, where `SignalCtx` is a host-agnostic middleman
+  wrapping the platform-specific bits the dump-writer needs.
+  **BLOCKING IMPLEMENTATION**: per the design preamble (line 19),
+  widening the `SignalHandlerFn` signature changes the §5.10
+  public surface — which requires an amendment spike before any
+  plan PR can adopt the wider signature. Resolution requires:
+  (1) a SPEC §5.10 amendment spike that adds `siginfo_t*` /
+  `ucontext_t*` (or a `SignalCtx` wrapper) to `SignalHandlerFn`,
+  (2) a SPEC §12 tracking entry in the platform SPEC, (3) at
+  least two concrete callers demonstrating need for the widened
+  info before approval. Defer until the in-process crash-handler
+  plugin (#TBD) is drafted; the trade-off is ABI surface growth
+  vs giving the crash-handler enough info to record register
+  state.
 - **[OPEN] Env-var change at runtime.** §3.2 rule #2 documents
   "out-of-band `setenv` is unsupported and undefined". A future
   consumer (e.g. an editor "edit env var, restart engine"
@@ -1233,12 +1265,16 @@ Both run on `macos-26-m1` CI only.
   separate spike; expected resolution is "we don't mutate; we
   restart the engine binary with new argv/env" — preserving
   the snapshot-once invariant. Open until a consumer exists.
-- **[OPEN] Sigaltstack size.** 32 KiB is conservative; macOS
-  default `MINSIGSTKSZ` is 32 KiB and the alt-stack handler
-  body is small. If a future crash-handler implementation needs
-  more (e.g. it walks the stack into a 16 KiB scratch buffer),
-  bump to 64 KiB. Defer until the in-process crash handler is
-  drafted and benchmarked.
+- **[OPEN] [NON-BLOCKING] Sigaltstack size.** The current 24 KiB
+  allocation (§3.5, §9 table) is 8 KiB above the POSIX
+  `SIGSTKSZ` floor and fits the 256 KiB sub-arena ceiling
+  exactly (see §9). If runtime stack-overflow signals are
+  observed in benchmarks (e.g. a crash-handler that walks the
+  stack into a 16 KiB scratch buffer), consider growing
+  sigaltstack to 32 KiB and trimming a different slice (e.g.
+  Argv from 64 KiB to 56 KiB) or filing a SPEC §9.2 amendment
+  to widen the sub-arena ceiling. Defer until the in-process
+  crash handler is drafted and benchmarked.
 - **[OPEN] Closed signal-enum growth.** §3.4 documents which
   signals are exposed today (6) and why others are not. A
   future consumer (e.g. SIGUSR1 used as a reload trigger from a
