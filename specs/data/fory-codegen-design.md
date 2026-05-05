@@ -359,9 +359,8 @@ SPEC §4.1 inv. 4):
    current run; otherwise → `SchemaUnknown` (SPEC §10 row 6;
    codegen-time variant of that arm — a build with a dangling
    reference fails before any source is emitted).
-3. The type graph is acyclic. A cycle → `MigrationCycle` re-used
-   at the type-graph level (SPEC §10 row 8 — the codegen-time
-   path).
+3. The type graph is acyclic. A cycle → `TypeRefCycle` (SPEC §10
+   row 8 — the codegen-time path for type-graph cycles).
 
 **Reserved-tag enforcement** (SPEC §4.1 inv. 3, §4.2 inv. 4).
 The validator loads the **prior committed schema** from a
@@ -797,8 +796,8 @@ stage 3 and produces the `_abi_hash.cpp` translation unit by:
    order (SPEC §4.4 inv. 1).
 3. Build the preimage by concatenating, for each schema `s` in
    sorted order, the entry
-   `fqn_utf8(s) || ":" || version_le4(s) || ":" || schema_source_hash(s)`
-   where `fqn_utf8` is the FQN as UTF-8 bytes, `version_le4` is the
+   `fqn_utf8(s) || ":" || version_le(s) || ":" || schema_source_hash(s)`
+   where `fqn_utf8` is the FQN as UTF-8 bytes, `version_le` is the
    declared `version` integer as 4 bytes little-endian, and
    `schema_source_hash` is the 32-byte blake3 digest from step 1.
    Entries are separated by a single LF byte (`0x0A`); no trailing
@@ -1010,7 +1009,7 @@ status to decide whether to fail the build cleanly.
 | 0    | Success — every input parsed, validated, and emitted.                  | (none)                                       | (none)                       |
 | 1    | `ParseError` family — lex / parse / encoding diagnostic.               | EncodingViolation, LexError, ParseError      | ReservedTagViolation         |
 | 2    | `SchemaInvariant` — single-schema validator failure.                   | SchemaInvariant                              | ReservedTagViolation / SchemaUnknown |
-| 3    | `SchemaCycle` — cross-schema duplicate FQN, dangling type ref, or type-graph cycle. | DuplicateFqn, DanglingTypeRef, TypeGraphCycle | SchemaRegistryConflict / SchemaUnknown / MigrationCycle |
+| 3    | `SchemaCycle` — cross-schema duplicate FQN, dangling type ref, or type-graph cycle. | DuplicateFqn, DanglingTypeRef, TypeGraphCycle | SchemaRegistryConflict / SchemaUnknown / TypeRefCycle |
 | 4    | `VersionRegression` — reserved-tag reuse, layout non-additive, migration coverage gap or cycle. | ReservedTagReuse, LayoutNonAdditive, MigrationCoverageGap, MigrationCycle | ReservedTagViolation / MigrationStepMissing / MigrationCycle |
 | 5    | `EmitError` — disk / permission / checksum failure during stage 4.     | EmitFailure                                  | (codegen-time only; surfaces externally as `core::Error::EmitError`)|
 | 6    | `IOError` — stage-1 file walk failure (schema root missing, history file corrupt, etc.). | HistoryFileCorrupt + I/O variants  | (codegen-time only)          |
@@ -1321,10 +1320,10 @@ source including `data/schemas/meta/*.fory` and
 stage 3 of this design) — one entry is formed:
 
 ```
-<fqn_utf8> ":" <version_le4> ":" <schema_source_blake3>
+<fqn_utf8> ":" <version_le> ":" <schema_source_blake3>
 ```
 
-where `fqn_utf8` is the FQN as UTF-8 bytes, `version_le4` is the
+where `fqn_utf8` is the FQN as UTF-8 bytes, `version_le` is the
 declared `version` integer as 4 bytes little-endian, and
 `schema_source_blake3` is the 32-byte blake3 digest of the
 canonicalized source (§7.3 of SPEC; §4.4 inv. 2). Entries are
@@ -1570,7 +1569,7 @@ action, and the mapping onto SPEC §10 / `core::Error`.
 | `SchemaInvariant`           | Single-schema invariant from SPEC §4.1 / §7.1 violated (FQN regex, version > 0, since ≤ version, default-on-non-option, etc.). | Stage 3 (validate, per-schema). | `ReservedTagViolation` / `SchemaUnknown` (depending on arm) | 2                 | abort build      | info     |
 | `DuplicateFqn`              | Two `Schema`s share an `fqn`.                                                                            | Stage 3 (validate, cross-schema).                        | `SchemaRegistryConflict` (§10 row 5; codegen-time path) | 3      | abort build      | info     |
 | `DanglingTypeRef`           | A `TypeRef::Generated` resolves to no `Schema` in the current run.                                       | Stage 3 (validate, cross-schema).                        | `SchemaUnknown` (codegen-time path)      | 3                 | abort build      | info     |
-| `TypeGraphCycle`            | The schema-to-schema reference graph contains a cycle.                                                   | Stage 3 (validate, cross-schema).                        | `MigrationCycle` (codegen-time, type-graph variant) | 3      | abort build      | info     |
+| `TypeGraphCycle`            | The schema-to-schema reference graph contains a cycle.                                                   | Stage 3 (validate, cross-schema).                        | `TypeRefCycle` (codegen-time, type-graph variant) | 3        | abort build      | info     |
 | `ReservedTagReuse`          | A schema reuses a tag number that the prior committed version of the same FQN retired into reserved.    | Stage 3 (validate, history-comparison).                  | `ReservedTagViolation` (§10 row 4)       | 4                 | abort build      | info     |
 | `LayoutNonAdditive`         | A schema introduces a tag whose sorted offset is not append-past-end of the prior version's last field. | Stage 3 (validate, history-comparison).                  | `ReservedTagViolation` (with structured detail) | 4         | abort build      | info     |
 | `MigrationCoverageGap`      | A schema with `version >= 2` lacks a `migration vN_to_vN+1` clause for some N in `1..version-1`.         | Stage 3 (validate).                                      | `MigrationStepMissing` (§10 row 7; codegen-time path) | 4    | abort build      | info     |
