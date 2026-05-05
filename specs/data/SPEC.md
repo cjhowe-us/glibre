@@ -656,7 +656,8 @@ struct Error {
     // detected cycle (tags 2/7/8), or the drifted FQN (tag 10).
     // For tag 10 (SourceHashMismatch): step_schema = the drifted FQN;
     // step_from == step_to == 0 (no version change, only hash changed).
-    // (from == 0, to == 0) on arms 2, 7, 8 and always 0 on arm 10.
+    // (from, to) are non-zero on arms 2, 7, 8; (from==0, to==0) on arm 10
+    // only (no version change, only hash changed).
     SchemaId      step_schema{};
     SchemaVersion step_from{0};
     SchemaVersion step_to{0};
@@ -2498,7 +2499,8 @@ struct Error {
     // detected cycle (tags 2/7/8), or the drifted FQN (tag 10).
     // For tag 10 (SourceHashMismatch): step_schema = the drifted FQN;
     // step_from == step_to == 0 (no version change, only hash changed).
-    // (from == 0, to == 0) on arms 2, 7, 8 and always 0 on arm 10.
+    // (from, to) are non-zero on arms 2, 7, 8; (from==0, to==0) on arm 10
+    // only (no version change, only hash changed).
     SchemaId      step_schema{};
     SchemaVersion step_from{0};
     SchemaVersion step_to{0};
