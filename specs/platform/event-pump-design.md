@@ -57,9 +57,12 @@ The aggregate **refuses to own**:
   dereferences it. Ownership of `Window` / `Display` / `Surface`
   belongs to the sibling design `specs/platform/window-display-design.md`
   (spike #715).
-- **File watching.** `EventQueue<FileEvent>` is fed by the
-  `FileWatcher` I/O thread on a separate ring; the pump never
-  touches that queue. Routed to the sibling design (spike #719).
+- **File watching.** The pump does not own or write to
+  `FileWatcher::EventQueue<FileEvent>`. `SDL_EVENT_DROP_FILE` values
+  are forwarded to `FileWatcher::ingest_drop` (see §3.6 + responsibility
+  6 in §1), which is the file-watcher's own enqueue path — the pump
+  produces a single function call, not a ring write. Routed to the
+  sibling design (spike #719).
 - **Per-device polling.** Gamepad / sensor state polling
   (`SDL_GetGamepadAxis`) is *not* the pump's responsibility; SDL3
   delivers gamepad axis / button changes as events through
@@ -117,7 +120,7 @@ design below or explicitly refused with rationale. Inputs:
 | **R-6.1.1** key press/release/repeat with scancode + keycode + modifiers                                                             | **Covered.** §5.4 emits `input::KeyDown { KeyCode, ScanCode, ModifierMask, repeat }` and `input::KeyUp { KeyCode, ScanCode, ModifierMask }`. The translation table maps `SDL_EVENT_KEY_DOWN`/`UP` and `SDL_KeyboardEvent::repeat` directly into the typed payload (§3.3 below).                                                                            |
 | **R-6.1.2** scancode normalisation to USB HID                                                                                        | **Covered (delegated to SDL3).** SDL3's `SDL_Scancode` *is* the USB-HID-aligned namespace; the translation step is identity-by-cast into `glibre::platform::ScanCode`, sealed at compile time so a future SDL3 enum extension is a deliberate central edit, not a silent expansion (§3.3).                                                                |
 | **R-6.1.3** mouse button events (L / R / M / X1 / X2)                                                                                | **Covered.** `input::MouseButtonEv { MouseButton, pressed, x, y, click_count }`. SDL3's button index 1..5 maps to the closed enum `MouseButton::Left/Right/Middle/X1/X2`. Scroll lives in `Wheel` (§5.4 / §3.3).                                                                                                                                            |
-| **R-6.1.4** mouse delta / position in high-DPI                                                                                       | **Covered.** `MouseMove { x, y, dx, dy }` reports all four fields in logical points. Absolute `x/y` from `SDL_MouseMotionEvent` are already in logical points (matching `LogicalSize` when `SDL_WINDOW_HIGH_PIXEL_DENSITY` is set). Relative `dx/dy` from `SDL_SetRelativeMouseMode` are in physical pixels and must be divided by `window.dpi_scale()` (from window-surface-design.md) before being placed in the payload. Invariant: every `MouseMove` payload reports x, y, dx, dy in logical points (see §3.3 for the rescale and unit test).                                                                       |
+| **R-6.1.4** mouse delta / position in high-DPI                                                                                       | **Covered.** `MouseMove { x, y, dx, dy }` reports all four fields in logical points. Absolute `x/y` from `SDL_MouseMotionEvent` are already in logical points (matching `LogicalSize` when `SDL_WINDOW_HIGH_PIXEL_DENSITY` is set). Relative `dx/dy` from `SDL_SetRelativeMouseMode` are in physical pixels and must be divided by `Pump::Impl`-cached `DpiScale` (initialised `1.0f`, refreshed in §3.5 on `SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED`) before being placed in the payload. The cached copy is passed by value to `translate_mouse` — no cross-aggregate call on the hot translation path. See §3.3 mouse-coord rule. Invariant: every `MouseMove` payload reports x, y, dx, dy in logical points (see §3.3 for the rescale and unit test).                                          |
 | **R-6.1.5** trackpad continuous scroll vs discrete wheel                                                                             | **Covered.** `Wheel { dx, dy, flipped }`. SDL3's `SDL_MouseWheelEvent::direction` produces `flipped`; floating-point `dx/dy` carries the precise trackpad delta. Discrete vs continuous distinction is not exposed as a separate field — consumers that need it inspect the magnitude (≥ 1.0 ⇒ likely discrete) per the input-plugin's interpretation rule. |
 | **R-6.1.6** unified gamepad abstraction (buttons, axes, triggers)                                                                    | **Covered.** `input::GamepadButtonEv { device, GamepadBtn, pressed }`, `input::GamepadAxisEv { device, GamepadAxis, value }`. Trigger is an axis (`LeftTrigger`, `RightTrigger`) per the `GamepadAxis` enum. Sticks rescale `[-32768, 32767]` to `[-1, 1]`; triggers rescale `[0, 32767]` to `[-1, 1]` using formula `axis = (raw / 32767.0f) * 2.0f - 1.0f`. Consequently a fully-released trigger (raw=0) reports `axis=-1.0f`; gameplay code wanting released-as-zero must remap: `(axis + 1.0f) / 2.0f`. See §3.3 for the formula and unit tests.        |
 | **R-6.1.7** gyroscope / accelerometer as ECS events                                                                                  | **Refused for MVP, deferred.** Sensor events would require new variants in the closed `InputEvent` sum (§4.2 inv #5: sealed at compile time). VR / motion-controller scope is out of MVP per `specs/platform/SPEC.md` §3 refusals; reopening the sum is a deliberate amendment spike when a controller-with-IMU lands as a target device.                  |
@@ -996,6 +999,15 @@ the failure is *not* an SDL3 error — it is a glibre invariant
 violation. The `"queue-full"` prefix is stamped into the thread-local
 diagnostic buffer at the same site.
 
+Note: `specs/platform/SPEC.md` §10.3.2 predates this design refinement
+and still reads "zero / wildly oversized capacity" as the sole trigger
+for `Unsupported` from `EventQueue<T>::with_capacity`. This design
+canonicalises silent round-up to the next power-of-two (§3.4) — a
+non-power-of-two capacity is not an error. SPEC §10.3.2 must be amended
+to replace the trigger description with "capacity overflow beyond
+`u32::max`" before the first plan PR consuming this design lands.
+Tracked in §12 [BLOCKING IMPLEMENTATION].
+
 ### 10.2 `SDLPollFailed` recovery shape
 
 `Pump::drain()` interprets `SDL_PollEvent` returning a negative value
@@ -1302,3 +1314,14 @@ hot-reload survival path; runs against the same S1 trace with a
   Integration test #6 (`event_pump_quit_synthesises_close_requested`)
   is the acceptance gate; no E2E trace covers menu-driven quit.
   Trigger to close: the user-story for Cmd-Q app quit lands in scope.
+- [BLOCKING IMPLEMENTATION] **SPEC §10.3.2 `EventQueue::with_capacity`
+  trigger column amendment.** The current SPEC §10.3.2 entry describes
+  the `Unsupported` trigger as "zero / wildly oversized capacity". This
+  design (§10.1 + §3.4) establishes silent round-up to the next
+  power-of-two — a non-power-of-two capacity is not an error, and
+  `Unsupported` is only emitted when the requested capacity overflows
+  `u32::max` (the sub-arena ceiling). SPEC §10.3.2 must be amended to
+  replace the trigger description with "capacity overflow beyond
+  `u32::max`" before the first plan PR consuming this design lands.
+  Two concrete consumers: shipping runtime input pump, editor input pump.
+  Owner: platform-SPEC amendment — must land before plan PRs open.
