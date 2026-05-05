@@ -1262,7 +1262,7 @@ set produced by stage 3 of §6.2 and produces the
 2. Form a per-schema entry string: `fqn_utf8(s) || ":" || version_le(s)
    || ":" || schema_source_hash(s)` where `version_le` is the declared
    version as 4 bytes little-endian and `schema_source_hash` is the
-   hex-encoded 32-byte Blake3 digest from step 1. Sort these entry
+   raw 32-byte Blake3 digest from step 1. Sort these entry
    strings by the byte order of each `Schema`'s `FQN` (§4.4 inv. 1).
 3. Join the sorted entry strings with a single LF byte (`\n`) between
    each adjacent pair; no trailing newline. This is the normative rule
@@ -1622,7 +1622,10 @@ schema glibre.data.AbiHashManifest {
 
 - `abi_hash_hex` is a 64-character lowercase hex Blake3-256 string
   (§4.4 inv. 1) computed exactly as
-  `blake3( concat( sort_by_fqn( source_hash(s) for s in entries ) ) )`.
+  `blake3( join( "\n", sort_by_fqn( { fqn_utf8(s) || ":" || version_le(s) || ":" || schema_source_hash(s) : s ∈ entries } ) ) )`;
+  the 32-byte digest is then hex-encoded to produce the 64-char string
+  stored in this field. Entry strings use the same LF separator and
+  no trailing newline as §4.4 inv. 1 specifies.
 - `foryc_version` is the `glibre-foryc` SemVer that produced this
   manifest. It exists for diagnostic reproducibility — two builds
   with byte-identical entries but different `foryc_version` must

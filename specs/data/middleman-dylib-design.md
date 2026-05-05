@@ -546,7 +546,7 @@ in the plugin's own `.rodata` are **two copies of the same byte
 sequence**. This is intentional, not an oversight. The two-copy
 design follows directly from the separate responsibilities of
 `glibre-foryc` and the plugin-abi decision record
-(`reviews/decisions/plugin-abi.md` §"Plugin file shape" step 2 +
+(`reviews/decisions/plugin-abi.md` §"Plugin file shape" step 3 +
 §"Consequences" bullet 1 + SPEC §6.5):
 
 1. **Copy A — the plugin's own `manifest.cpp` (in the plugin's dylib).** 
@@ -640,7 +640,7 @@ enum class CStatus : std::uint16_t {
 // full nine-arm CStatus here would mislead implementers about which
 // arms are reachable and would diverge from the normative SPEC §5
 // declaration (data::RegisterStatus). The failure payload (when arm
-// SchemaRegistryConflict or SchemaUnknown fires) is surfaced via TLS
+// SchemaRegistryConflict fires) is surfaced via TLS
 // rather than an out-pointer: register_migration has no useful
 // per-call out-pointer slot (it registers an entry, it does not
 // produce a value), so the TLS getter glibre_types_last_register_error()
@@ -837,7 +837,7 @@ const glibre_types_data_Error* glibre_types_last_register_error(void) noexcept;
 ```
 
 The header `glibre/types/c_abi.hpp` declares C-shaped projections of
-`SchemaId`, `MigrationEntry`, `data::Error`, and the `CStatus` enum,
+`SchemaId`, `MigrationEntry`, `data::Error`, and the `CStatus` / `RegisterStatus` enums,
 all of which are POD aggregates so the C-ABI boundary stays free of
 non-trivial types. The C++ public surface in §4.2 wraps these with
 typed templates that resolve to the matching `extern "C"` trampoline
