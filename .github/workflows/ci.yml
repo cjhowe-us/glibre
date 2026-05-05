@@ -52,3 +52,31 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: 'true  # TODO: enable once tooling lands'
+
+  e2e-shader:
+    # Runs every committed `.glibre-trace` under tests/e2e/shader/
+    # through the glibre-trace replay CLI. The CLI does not exist yet
+    # (specs/e2e/SPEC.md §6.5; tracked under e2e sub-epic) — this job
+    # therefore fails loudly until `ShaderSource::open` and the
+    # trace-runner stack land. That is the expected red state under the
+    # spec → story → test → code workflow (see CLAUDE.md). Once the
+    # runner lands, no edits to this job are required: every new trace
+    # under tests/e2e/shader/ is picked up by the glob.
+    runs-on: macos-14
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replay every shader e2e trace
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          traces=(tests/e2e/shader/*.glibre-trace)
+          if [ ${#traces[@]} -eq 0 ]; then
+            echo "No shader e2e traces found — failing loudly."
+            exit 1
+          fi
+          for t in "${traces[@]}"; do
+            echo "::group::glibre-trace replay $t"
+            glibre-trace replay "$t"
+            echo "::endgroup::"
+          done
