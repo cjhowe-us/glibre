@@ -45,7 +45,7 @@
 #   window_size:        1280x720
 #   dpi_scale:          1.0
 #   rng_seed:           0x0000_0000_0000_0001
-#   frame_budget:       max_frames=64                # 32 authored × 2× safety
+#   frame_budget:       max_frames=64                # frames 0–14 (15 slots) × ~4× safety = 64
 #   golden_refs:        []                           # AssertEcsSnapshot/Screenshot not used
 #
 # ─────────────────────────────────────────────────────────────────────────────
@@ -64,9 +64,6 @@
 #   F2 → debug-overlay: snapshot world.A.last_spawned_entity into
 #                       `world.A.saved_handle` (the *future stale* handle).
 #   F3 → debug-overlay: World::despawn(world.A.saved_handle).
-#   F4 → debug-overlay: World::spawn() into world A; store into
-#                       `world.A.last_spawned_entity`. (Slot recycle path —
-#                       §4.3 inv 1.)
 #   F5 → debug-overlay: probe — call set_component(world.A.saved_handle,
 #                       <DebugMarker TypeId>, {1 byte = 0x00}) on world A.
 #                       Capture the Result<void> arm into
@@ -86,7 +83,7 @@
 #                       probes; world B is the *target* of the call — see
 #                       specs/core/SPEC.md §4.3 inv 3.)
 #
-# All five debug actions exist behind the `cfg(debug_overlay)` feature
+# All six debug actions exist behind the `cfg(debug_overlay)` feature
 # gate. They are non-shipping (PHILOSOPHY §6 — no runtime reflection in
 # shipping builds).
 #
@@ -213,6 +210,14 @@ op: AssertState
                   Encodes the Gherkin `assert_error(World::resolve(e),
                   Error::EntityStale)`.
 
+# AssertLogContains id=8 is placed on a distinct successor frame (frame 9)
+# rather than on frame 8 alongside AssertState id=7. Per specs/e2e/SPEC.md
+# §4.1.7 inv 4 (fail-fast), if AssertState id=7 fails the runner aborts
+# immediately and any same-frame successor op is unreachable — the log-channel
+# axis would be invisible precisely when state-checking fails. A successor
+# frame guarantees the log window spans a full frame boundary and that
+# id=8 runs independently of id=7's outcome.
+frame: 9
 op: AssertLogContains
   id:             8
   is_regex:       false
@@ -237,12 +242,12 @@ op: AssertLogContains
 # expose `World::create()` returning a second `World*` from the debug
 # overlay even though gameplay only ever uses one world in MVP.
 
-frame: 9
+frame: 10
 op: InputOp
   event:          KeyDown { key = F6, modifiers = {} }
   semantics:      debug-overlay → World::create() → world B (id 2)
 
-frame: 10
+frame: 11
 op: InputOp
   event:          KeyDown { key = F7, modifiers = {} }
   semantics:      debug-overlay → probe-foreign — calls
@@ -250,7 +255,7 @@ op: InputOp
                   captures returned core::Error into
                   world.A.last_foreign_probe_error.
 
-frame: 11
+frame: 12
 op: AssertState
   id:             9
   world:          A
@@ -261,6 +266,10 @@ op: AssertState
                   severity error). Encodes the Gherkin `assert_error(...,
                   Error::EntityForeignWorld)`.
 
+# AssertLogContains id=10 is placed on frame 13 (successor to AssertState
+# id=9 on frame 12) for the same reason as id=8 above: fail-fast inv 4
+# would skip the log-channel check if AssertState id=9 fails on the same frame.
+frame: 13
 op: AssertLogContains
   id:             10
   is_regex:       false
@@ -280,7 +289,7 @@ op: AssertLogContains
 # Termination
 # ============================================================================
 
-frame: 12
+frame: 14
 op: End
   evidence:       specs/e2e/SPEC.md §4.1.1 inv 5 — exactly one End op,
                   emitted last; specs/e2e/SPEC.md §7.1.5 EndPayload.
@@ -316,7 +325,7 @@ op: End
 #   * A runnable engine binary (CMakeLists.txt subdirs uncommented).
 #   * `World::spawn`, `World::despawn`, `World::is_alive`, `World::create`
 #     implemented per specs/core/SPEC.md §5.5 (currently spec-only).
-#   * The debug-overlay key bindings F1…F7 (debug-only feature gate).
+#   * The debug-overlay key bindings F1–F3, F5–F7 (debug-only feature gate).
 #   * `tools::TraceWriter` to lower this author-spec to canonical Fory bytes,
 #     OR a future `glibre-trace replay --from-author-spec` ingester.
 #   * `glibre-trace replay` CLI (specs/e2e/SPEC.md §6.5 cmd_replay.cpp).
