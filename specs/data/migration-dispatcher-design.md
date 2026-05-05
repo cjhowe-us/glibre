@@ -91,7 +91,7 @@ The SRP boundary is sharp by construction: every other migration-shape
 concern (chain construction at codegen time, registration at
 static-init, arena ownership at the barrier, envelope decode at the
 deserialize site) lives in a sibling aggregate or a sibling context.
-The dispatcher is a single function — `dispatch(...)` — and a single
+The dispatcher is a single function — `dispatch_migration(...)` — and a single
 cycle/coverage validator that runs at static-init.
 
 ## 2. Requirements coverage
@@ -190,8 +190,11 @@ The graph is materialised as a contiguous, ascending-sorted
 `eastl::span<const MigrationEntry>` keyed off
 `from_version` (§5 of `specs/data/SPEC.md`,
 `include/glibre/types/migration.hpp`). Lookup of edge `(N → N+1)` is
-`O(1)` via direct array index `N − 1` (the chain is dense by §3.1
-property 5); the dispatcher validates the index by checking
+`O(1)` via direct array index `N − v1` (where `v1 = entry[0].from_version`;
+SPEC §4.7 inv. 1 guarantees `v1 = 1` for all in-build chains, so
+in practice this reduces to `N − 1` — the generalized form is
+retained for defensive correctness and to match the §3.5 density
+check); the dispatcher validates the index by checking
 `entry.from_version == N` before invoking.
 
 ### 3.2 Aggregate state
@@ -240,7 +243,7 @@ src_version` hops in ascending order. Each hop:
    `MigrationFn<VN, VNplus1>` per the registration macro (§5 of
    `specs/data/SPEC.md`, `migration.hpp`).
 5. **Branch.** Non-default `out_err` →
-   `data::Error::MigrateFunctionFailed` (§10), wrap the inner
+   `data::Error::SchemaMigrationFailure` (§10), wrap the inner
    error's `(FQN, from, to)` triple, return `unexpected`.
 6. **Reset.** Reset the arena to its pre-step high-water mark
    (§4.7 inv. 5 of `specs/data/SPEC.md`); the just-produced
@@ -292,24 +295,35 @@ amends §3.4 here, not the dispatcher's contract elsewhere.
 
 ### 3.5 Static-init chain validator
 
-`validate_chain(span<const MigrationEntry>) -> RegisterStatus` runs
+`validate_chain(SchemaId, SchemaVersion, span<const MigrationEntry>) -> std::expected<void, data::Error>` runs
 once per FQN at middleman static-init (§4.3 inv. 5 of
 `specs/data/SPEC.md`), called from the codegen-emitted registry
 construction inside `glibre-types.dylib`. It checks:
 
 1. **Density.** For chain length `L`, every index `i ∈ [0, L)` has
-   `entry[i].from_version == i + 1` and
-   `entry[i].to_version == i + 2`. Violation → `MigrationCycle`
+   `entry[i].from_version == v1 + i` and
+   `entry[i].to_version == v1 + i + 1` (where `v1 = entry[0].from_version`,
+   the lowest version in the chain; SPEC §4.7 inv. 1 guarantees `v1 = 1`
+   for all in-build chains, reducing these to `i + 1` and `i + 2`
+   respectively — the generalized form matches §3.1 and handles
+   any hypothetical future chain starting above version 1).
+   Violation → `MigrationCycle`
    (gap or back-edge) or `MigrationStepMissing` (truncated chain).
 2. **Monotonic.** `entry[i].to_version > entry[i].from_version`,
    strictly. Violation → `MigrationCycle`.
 3. **Function-pointer non-null.** `entry[i].invoke != nullptr`.
    Violation → `MigrationStepMissing` (a registration was elided).
 4. **Coverage to `current_version`.** `entry[L−1].to_version ==
-   current_version` (the registry's recorded version, §4.5). A
-   `current_version` higher than `entry[L−1].to_version` means a
-   chain step was forgotten between schema-bump and codegen;
-   raise `MigrationStepMissing`.
+   current_version` (the registry's recorded version, §4.5). Two
+   directions of failure:
+   - **Chain too short** (`current_version > entry[L−1].to_version`): a
+     chain step was forgotten between schema-bump and codegen; raise
+     `MigrationStepMissing`.
+   - **Chain too long** (`entry[L−1].to_version > current_version`): the
+     chain overshoots the registry's declared version — a codegen/bump
+     mismatch that structurally resembles an unregistered forward step;
+     raise `MigrationCycle` (same density-gate arm used for gaps and
+     back-edges).
 
 Validator failures at static-init are **fatal** — the middleman
 refuses to load and the process aborts via
@@ -375,29 +389,36 @@ declares.
 #include <glibre/error.hpp>
 #include <glibre/types/identity.hpp>
 #include <glibre/types/migration.hpp>      // MigrationEntry, Arena
-#include <glibre/types/registry.hpp>       // RegistryEntry, SchemaRegistry
 
 namespace glibre::types {
 
-// Walk the per-FQN MigrationChain stored in `entry` from
-// `src_version` up to `entry.version` (the current version), invoking
-// each codegen-emitted single-step MigrationFn against the arena and
-// the caller-supplied destination cell.
+// Walk the per-FQN migration chain from `src_version` up to
+// `current_version`, invoking each codegen-emitted single-step
+// MigrationFn against the arena and the caller-supplied destination
+// cell.
+//
+// Only the fields actually consumed are passed: the registry's
+// recorded current version, the chain span, and the schema identifier
+// for error payload population.  The caller (barrier sweep) extracts
+// these from RegistryEntry before calling; this keeps the internal
+// seam narrow and simplifies unit-test fixture construction (no full
+// RegistryEntry needed).
 //
 // Preconditions (asserted in debug; UB in release if violated — the
 // dispatcher trusts the registry and the barrier):
-//   - `entry` is non-null and points into the live SchemaRegistry.
+//   - `chain` is the validated (§3.5) MigrationEntry slice for
+//     `schema`.
 //   - `src_payload` points to a fully-initialised V<src_version>
-//     value sized per `entry`'s recorded V<src_version>::sizeof.
+//     value sized per the schema's recorded V<src_version>::sizeof.
 //   - `dst_payload` points to a destination cell sized per
 //     `sizeof(V<current_version>)` and aligned per
 //     `alignof(V<current_version>)`.
 //   - `arena` has at least `2 * max_over_chain(sizeof(Vk)) +
 //     max_over_chain(scratch_step_k)` bytes free (caller-sized).
-//   - `src_version >= 1` and `src_version <= entry.version`.
+//   - `src_version >= 1` and `src_version <= current_version`.
 //
 // Postconditions on success:
-//   - `*dst_payload` holds a fully-initialised V<entry.version> value.
+//   - `*dst_payload` holds a fully-initialised V<current_version> value.
 //   - The arena is reset to its pre-call high-water mark.
 //   - `src_payload` is unread after return (caller may free / reuse).
 //
@@ -410,39 +431,40 @@ namespace glibre::types {
 //
 // Failure arms (mapping in §10):
 //   - data::Error::MigrationStepMissing
-//   - data::Error::MigrateFunctionFailed (carried in glibre::Error
-//     via data::Error::SchemaMigrationFailure per §10.1
-//     of specs/data/SPEC.md)
+//   - data::Error::SchemaMigrationFailure (body returned unexpected;
+//     carries the (FQN, from, to) triple of the refusing step per
+//     §10.1 of specs/data/SPEC.md)
 //   - data::Error::ArenaExhausted (post-MVP arm; #499 refuse policy)
 //   - data::Error::MigrationCycle (impossible at runtime; static-init
 //     arm only — see §3.5)
 [[nodiscard]] auto dispatch_migration(
-    const RegistryEntry& entry,
-    SchemaVersion        src_version,
-    const void*          src_payload,
-    void*                dst_payload,
-    Arena&               arena
+    SchemaId                          schema,
+    eastl::span<const MigrationEntry> chain,
+    SchemaVersion                     src_version,
+    SchemaVersion                     current_version,
+    const void*                       src_payload,
+    void*                             dst_payload,
+    Arena&                            arena
 ) noexcept -> std::expected<void, ::glibre::Error>;
 
 // Invoked exactly once per FQN at middleman static-init from inside
 // glibre_types_register_migration's chain-finalisation pass (§4.3
 // inv. 5 of specs/data/SPEC.md). Validates the chain density,
-// monotonicity, and coverage gates of §3.5. Returns Ok or one of
-// {SchemaRegistryConflict, MigrationStepMissing, MigrationCycle}
-// per data::RegisterStatus (§5 of specs/data/SPEC.md).
+// monotonicity, and coverage gates of §3.5. Returns void on success
+// or data::Error carrying one of {MigrationStepMissing, MigrationCycle}
+// on violation (see §3.5 for each gate's arm).
 [[nodiscard]] auto validate_chain(
     SchemaId                          schema,
     SchemaVersion                     current_version,
     eastl::span<const MigrationEntry> chain
-) noexcept -> data::RegisterStatus;
+) noexcept -> std::expected<void, data::Error>;
 
 }  // namespace glibre::types
 ```
 
 The public surface is two free functions; no new struct, no new
 enum, no new class. The `data::Error` arms `MigrationStepMissing`,
-`MigrationCycle`, `MigrateFunctionFailed` (collapsed into
-`SchemaMigrationFailure`), and the new `ArenaExhausted` arm
+`MigrationCycle`, `SchemaMigrationFailure`, and the new `ArenaExhausted` arm
 (amendment, see §10) are the only failure types crossing the
 boundary. Both functions are `noexcept` and `-fno-exceptions`-clean
 per the engine-wide error-model rule (`error-model.md` "Decision"
@@ -923,7 +945,7 @@ The complete dispatcher-emitted arm set is below.
 | Arm                              | Trigger                                                                                                                  | Detection point                  | Recovery                                                                                                                                           | Severity | core::Error wrapping                                                          |
 |----------------------------------|--------------------------------------------------------------------------------------------------------------------------|----------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|----------|-------------------------------------------------------------------------------|
 | `MigrationStepMissing`           | The chain table for `(FQN, src_version)` lacks the entry whose `from_version == src_version` (`specs/data/SPEC.md` §10.1 row 7). | `dispatch_migration` step 1 (§3.3 index) | refuse decode (cold path); refuse load (warm path — barrier rolls back).                                                                            | error / warn | `core::Error::SchemaMigrationFailed` per `specs/data/SPEC.md` §10.3.        |
-| `MigrateFunctionFailed`          | A `MigrationFn` body returned `std::unexpected(...)` (§10.1 row 2 of `specs/data/SPEC.md`, collapsed under `SchemaMigrationFailure`). | `dispatch_migration` step 5 (§3.3 branch) | refuse decode (cold path); refuse load (warm path). Per-row rollback discipline (§4.7 inv. 4 of `specs/data/SPEC.md`); destination untouched.       | error / warn | `core::Error::SchemaMigrationFailed`; the data arm carries the `(FQN, from, to)` of the refusing step. |
+| `SchemaMigrationFailure`         | A `MigrationFn` body returned `std::unexpected(...)` (§10.1 row 2 of `specs/data/SPEC.md`). | `dispatch_migration` step 5 (§3.3 branch) | refuse decode (cold path); refuse load (warm path). Per-row rollback discipline (§4.7 inv. 4 of `specs/data/SPEC.md`); destination untouched.       | error / warn | `core::Error::SchemaMigrationFailed`; the data arm carries the `(FQN, from, to)` of the refusing step. |
 | `ArenaExhausted` (NEW)           | The arena cannot satisfy a hop's allocation request; #499 refuse policy.                                                  | `dispatch_migration` step 3 (§3.3 allocate) | refuse decode (cold path); refuse load (warm path). The arena was already at capacity before the dispatcher entered; no partial bytes published.   | error / warn | `core::Error::SchemaMigrationFailed` (collapses into the same loader response as `MigrationStepMissing` — operator profiles the migration set and either reduces row count or, post-#499, increases the arena). |
 | `MigrationCycle`                 | The chain table contains a back-edge or a non-monotonic `from → to`. Codegen-time and static-init time only; never reaches `dispatch_migration`. | `validate_chain` (§3.5)         | abort build (codegen path) / process abort (static-init path). Same as `specs/data/SPEC.md` §10.1 arm 8.                                              | info / fatal | None — codegen / static-init arm; never crosses into normal runtime. |
 | (impossible at runtime: `SchemaRegistryConflict`, `ReservedTagViolation`, `DeserializeError`, `EnvelopeTruncated`, `SchemaUnknown`, `AbiHashMismatch`) | These arms exist elsewhere in `data::Error`; the dispatcher does not raise them. The registry is read-only by the time the dispatcher runs; the envelope was already decoded; the registry lookup already succeeded. | (other aggregates) | (other recovery paths) | (other) | (per `specs/data/SPEC.md` §10) |
@@ -1049,9 +1071,10 @@ Required cases:
    Asserts `MigrationStepMissing`.
 6. **Coverage past `current_version`.** `[(1→2), (2→3)]`
    with `current_version == 2`. Asserts
-   `MigrationStepMissing` (the chain reaches a higher
-   version than the registry's recorded current — a
-   build-system inconsistency).
+   `MigrationCycle` (the chain overshoots the registry's
+   declared current version — chain-too-long direction per
+   §3.5 bullet 4; same density-gate arm as gaps and
+   back-edges).
 
 Each `validate_chain` fixture asserts both the correct arm
 and the populated payload fields per `specs/data/SPEC.md`
@@ -1079,7 +1102,7 @@ Required cases:
    FQN was encountered) are surfaced to the loader.
 3. **Sweep refusal — body fails.** Inject `force_migration_failure`
    for a known `(FQN, from, to)` (per
-   `specs/data/SPEC.md` §8.6). Assert `unexpected(MigrationStepMissing)`
+   `specs/data/SPEC.md` §8.6). Assert `unexpected(SchemaMigrationFailure)`
    wraps the failing triple, the world is byte-identical to
    the pre-`migrate` state, the arena is reset.
 4. **Sweep refusal — arena exhaustion.** Use a
