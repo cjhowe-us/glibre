@@ -778,7 +778,7 @@ at phase 8. For the render-frame-extract aggregate, drain does:
 
 1. Walk the slot pool. For each slot in `READ` role, read
    `pin_count_` atomically (no blocking wait — the driver thread must
-   not spin or sleep; see `SPEC.md` §6.3). If any slot carries a
+   not spin or sleep; see `reviews/decisions/hot-reload-protocol.md §Drain`). If any slot carries a
    non-zero pin count, drain **returns immediately** with
    `core::Error::HotReloadRefused` (the one-frame deferral path
    described in §8.5 below). The loader's `pending_reloads` counter is
@@ -845,7 +845,12 @@ state. The contract:
    the loader escalates to `core::Error::HotReloadRefused` proper
    (per the protocol's drain-timeout rule). At that point, render's
    reload is refused and the prior plugin remains live; the operator
-   must close whichever observer is holding the pin.
+   must close whichever observer is holding the pin. The 3-attempt
+   threshold is loader-side policy: the loader tracks the attempt
+   count externally in its per-request state; drain always returns
+   the same `core::Error::HotReloadRefused` enumerator on deferral
+   and on final refusal — the loader uses its own counter to
+   discriminate deferral (re-queue) from refusal (drop request).
 
 The pin-deferral path is exercised by the test fixture
 `tests/render/extract/pin_defers_reload.cpp` (§11 below).
@@ -964,7 +969,7 @@ sum carries the load.
 
 ### 10.1 Variant-by-variant
 
-| Variant                                | Trigger (extract walk)                                                                                              | §10 routing in `SPEC.md`                       | Recovery (per `SPEC.md` §10.2)                          | Test fixture (under `tests/render/extract/`)  |
+| Condition                              | Trigger (extract walk)                                                                                              | §10 routing in `SPEC.md`                       | Recovery (per `SPEC.md` §10.2)                          | Test fixture (under `tests/render/extract/`)  |
 |----------------------------------------|---------------------------------------------------------------------------------------------------------------------|-----------------------------------------------|---------------------------------------------------------|-----------------------------------------------|
 | `ArenaExhausted`                       | `RenderFrameSlot::arena_.allocate(N)` returns `nullptr` because the bump pointer would exceed the per-slot 1 MiB limit. The renderable SoA is the dominant consumer; a scene whose visible-set or meshlet-bounds count exceeds the §9.2 sizing trips this. | Maps to **`render::Error::TransientPoolExhausted`** (existing `SPEC.md` §10 enum). Different aggregate (resources/transient_pool, the GPU-side pool); same enumerator because the arena is the CPU-side mirror of that resource role. The trigger column in `SPEC.md` §10.3 row `ResourceAllocFailed` is widened to include the snapshot arena via this design. | `lower-tier` — drop `RenderSettings.quality_tier` one step; the next frame's per_view_draw_budget shrinks; cull retains fewer rows; arena fits. | `arena_exhausted_lower_tier.cpp`              |
 | `MissingComponent`                     | Walk step 3 encounters an entity in the renderable archetype whose `MaterialComponent` is the sentinel "unset" handle (e.g. material was hot-unloaded mid-frame, before phase 8). | Maps to **`render::Error::PassUnsupportedConfig`** (existing). The column write would otherwise emit a default handle; we refuse and return the error so the missing component is loud, not silent. | `abort-frame` — skip phase 7 for this frame; previous frame is re-presented; the next frame retries (the reload will have completed by then or the entity will have been respawned). | `missing_component_abort_frame.cpp`           |
