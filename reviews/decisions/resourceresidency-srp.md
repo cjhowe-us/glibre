@@ -96,7 +96,7 @@ call the helper; the helper is the lone construction site, satisfying
 - Recovery routing must inspect `kind` (or `detail`) to pick a
   ladder rung, breaking the §10.2 contract that recovery is
   dispatchable on `error.code` alone.
-- `error-model.md` line 99 binds `ErrorContext.detail` as "optional
+- `error-model.md` line 100 binds `ErrorContext.detail` as "optional
   human hint, never load-bearing"; making it dispatch-bearing
   contradicts the engine-wide error contract.
 - Telemetry dashboards keyed off `error.code` (per error-model.md
@@ -158,7 +158,7 @@ language unchanged.
 - **Closed recovery ladder dispatchability (§10.2).** Recovery
   must be a function of `error.code` alone. Alternatives B and C
   smuggle dispatch-relevant data into `ErrorContext.detail` /
-  `file` / `line`, contradicting `error-model.md` line 99.
+  `file` / `line`, contradicting `error-model.md` line 100.
 - **Telemetry stays unambiguous.** `glibre::log_error` formats
   `error.code` as the structured dispatch field; one variant per
   semantic class keeps dashboards meaningful.
@@ -213,9 +213,9 @@ session.
    *not* include a slot-table site for this variant, so either the
    §11.1 test has the wrong return value (it should be a different
    variant — likely `HeapOutOfMemory` or a new slot-table-specific
-   variant) or §10.1 is missing a row. Resolving this is its own
-   leaf — flag as a follow-up spike (`type:spike`) parented to
-   epic #83. Not blocking this PR.
+   variant) or §10.1 is missing a row. Tracked as follow-up spike
+   #904 (`[SPIKE] iterate-render-spec-§11.1-slot-table-overflow-test-naming`)
+   parented to epic #83. Not blocking this PR.
 2. **`core::Error::OutOfBudget` translation under
    `GLIBRE_ALLOC_STRICT=1`.** SPEC §6 ("Strict-mode enforcement"
    line 2629) and `render-resources-design.md` §11.6 ("strict-mode

@@ -752,7 +752,7 @@ conditions had different recoveries (transient-pool residency →
 `lower-tier`; sampler-cache over-cap → `abort-engine` at init /
 `lower-tier` at hot-reload register) and one variant could not
 encode that fork without making `ErrorContext.detail` load-bearing
-(forbidden by `reviews/decisions/error-model.md` line 99). The
+(forbidden by `reviews/decisions/error-model.md` line 100). The
 single construction site is `resources/sampler_cache.cpp::SamplerCache::get_or_create`
 (§10.1). Sampler-cap overflow remains a SPEC amendment trigger
 rather than a runtime concern: samplers are not data-driven in MVP,
@@ -1250,12 +1250,11 @@ performance signature.
 ## 10. Failure modes
 
 The aggregate produces eight distinct errors, each rolling into
-`SPEC.md` §10.1's closed sum. The four new variants
-(`StaleResourceHandle`, `ResourceRoleMismatch`, `SamplerCapExceeded`,
-plus the `ResourceImportRefused` clarification) are ABI additions
-that require a `SPEC.md` §5 enum amendment and an ABI bump per
-`reviews/decisions/error-model.md` Composition Rule 5. All four ride
-one shared bump; zero incremental ABI cost.
+`SPEC.md` §10.1's closed sum. The three new variants
+(`StaleResourceHandle`, `ResourceRoleMismatch`, `SamplerCapExceeded`)
+are ABI additions that require a `SPEC.md` §5 enum amendment and an
+ABI bump per `reviews/decisions/error-model.md` Composition Rule 5.
+All three ride one shared bump; zero incremental ABI cost.
 
 | Render error variant | Trigger | Recovery (per §10.2) | Severity | Capability-fallback path | Test fixture |
 |----------------------|---------|----------------------|----------|---------------------------|--------------|
