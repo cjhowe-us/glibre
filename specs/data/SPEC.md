@@ -651,22 +651,28 @@ struct Error {
     // Set on tags 3, 6, 9; default-constructed on every other arm.
     WireSite at{};
 
-    // Set on tags 2, 7, 8: identifies the migration step that
-    // refused, the missing step in the chain, or the back-edge of
-    // the detected cycle. (from == 0, to == 0) on every other arm.
+    // Set on tags 2, 7, 8, and 10: identifies the migration step that
+    // refused, the missing step in the chain, the back-edge of the
+    // detected cycle (tags 2/7/8), or the drifted FQN (tag 10).
+    // For tag 10 (SourceHashMismatch): step_schema = the drifted FQN;
+    // step_from == step_to == 0 (no version change, only hash changed).
+    // (from == 0, to == 0) on arms 2, 7, 8 and always 0 on arm 10.
     SchemaId      step_schema{};
     SchemaVersion step_from{0};
     SchemaVersion step_to{0};
 
-    // Set on tag 1: the host's compiled-in hash and the offending
-    // plugin's compiled-in hash, hex form (§4.4 inv. 5). Both
-    // borrow from glibre-types.dylib .rodata; lifetime is process-
-    // scoped. std::string_view (not eastl::string_view) per
-    // PHILOSOPHY §11 final sentence: public plugin ABI surfaces use
-    // POD views only; std::string_view is stable across the dylib
-    // boundary because both sides compile against the same libc++
-    // (reviews/decisions/plugin-abi.md §"Registration Entry-Point
-    // Signature"). Empty string_views on every other arm.
+    // Set on tags 1 and 10: the host's compiled-in hash and the
+    // offending plugin's compiled-in hash, hex form. For tag 1
+    // (AbiHashMismatch) these are the global glibre_types_abi_hash
+    // values (§4.4 inv. 5). For tag 10 (SourceHashMismatch) these are
+    // the per-FQN SchemaSourceHash values (hex-encoded, §3.2 of
+    // schema-registry-design.md). Both borrow from glibre-types.dylib
+    // .rodata; lifetime is process-scoped. std::string_view (not
+    // eastl::string_view) per PHILOSOPHY §11 final sentence: public
+    // plugin ABI surfaces use POD views only; std::string_view is stable
+    // across the dylib boundary because both sides compile against the
+    // same libc++ (reviews/decisions/plugin-abi.md §"Registration
+    // Entry-Point Signature"). Empty string_views on every other arm.
     std::string_view host_hash{};
     std::string_view plugin_hash{};
 
@@ -2470,6 +2476,11 @@ enum class ErrorTag : std::uint16_t {
     MigrationStepMissing     = 7,
     MigrationCycle           = 8,
     EnvelopeTruncated        = 9,
+    SourceHashMismatch       = 10,  // §3.8 of schema-registry-design.md: same FQN +
+                                    // same version, byte-different SchemaSourceHash.
+                                    // Distinct from AbiHashMismatch (arm 1), which
+                                    // compares the global glibre_types_abi_hash; this
+                                    // arm fires when only one FQN's source bytes drifted.
 };
 
 // Closed sum. Plain-aggregate layout so the C-ABI trampolines in §5
@@ -2480,16 +2491,21 @@ struct Error {
     // Set on tags 3, 6, and 9; default-constructed on every other arm.
     WireSite at{};
 
-    // Set on tags 2, 7, 8: identifies the migration step that
-    // refused, the missing step in the chain, or the back-edge of
-    // the detected cycle. (from == 0, to == 0) on every other arm.
+    // Set on tags 2, 7, 8, and 10: identifies the migration step that
+    // refused, the missing step in the chain, the back-edge of the
+    // detected cycle (tags 2/7/8), or the drifted FQN (tag 10).
+    // For tag 10 (SourceHashMismatch): step_schema = the drifted FQN;
+    // step_from == step_to == 0 (no version change, only hash changed).
+    // (from == 0, to == 0) on arms 2, 7, 8 and always 0 on arm 10.
     SchemaId      step_schema{};
     SchemaVersion step_from{0};
     SchemaVersion step_to{0};
 
-    // Set on tag 1: the host's compiled-in hash and the offending
-    // plugin's compiled-in hash, hex form (§4.4 inv. 5). Empty
-    // string_views on every other arm.
+    // Set on tags 1 and 10: the host's compiled-in hash and the offending
+    // plugin's compiled-in hash, hex form (§4.4 inv. 5). For arm 1 these
+    // are the global glibre_types_abi_hash values; for arm 10 they are
+    // the per-FQN SchemaSourceHash values (hex-encoded, §3.2 of
+    // schema-registry-design.md). Empty string_views on every other arm.
     std::string_view host_hash{};
     std::string_view plugin_hash{};
 
@@ -2554,16 +2570,17 @@ error-model rule), **info** (codegen / tools diagnostic).
 | `MigrationStepMissing` | A `MigrationChain` for a known `FQN` lacks an entry whose `from_version` matches the inbound payload's recorded version. Detected at deserialize (an inbound `vN` payload with no `vN → vN+1` step in the chain) and at the §8.3 gate-2 coverage check (Mode-B middleman reload precondition). | `MigrationChain::dispatch` (§4.7 inv. 1); §8.3 gate 2. | `step_schema`, `step_from` (the inbound version), `step_to` (the live version — i.e. the version the chain failed to *reach*). | refuse decode (deserialize path) / refuse load (Mode-B reload). The §4.7 inv. 1 codegen check makes this arm impossible *for in-build types*; it fires only when the inbound bytes carry a version older than the lowest registered chain entry — i.e. a save file or snapshot from a build that has since dropped early-version migrations. | error (deserialize) / warn (hot-reload). | Wrapped by `core::Error::SchemaMigrationFailed` when surfaced through the loader (`reviews/decisions/plugin-abi.md` §"Failure Modes" row 11). The data arm distinguishes "missing step" from "step returned unexpected" so operators can tell a coverage gap from a buggy migration body; both wrap into the same `core::Error` arm because the loader's response is identical. |
 | `MigrationCycle` | The composed `MigrationChain` for an `FQN` contains a back-edge — i.e. a step `(N → M)` where `M ≤ N`. §4.7 inv. 2 mandates strictly ascending application; a cycle would violate it. Detected at codegen time (when `Foryc` builds the chain and asserts strict-ascending) and at static-init time (when `glibre_types_register_migration` wires entries into the per-FQN table). | `Foryc` chain construction (§4.2 inv. 1, deterministic ordering); middleman static-init (§4.3 inv. 5). | `step_schema`, `step_from`, `step_to` — the back-edge that violated ascending order. | abort build (codegen path) / process abort (static-init path — a registered cycle means the build is corrupt and the spine refuses to run, mirroring `SchemaRegistryConflict`). | info (codegen) / fatal (static-init). | None — codegen / static-init arm; never crosses into normal runtime. The static-init fatal path is logged + `std::abort`. |
 | `EnvelopeTruncated` | The inbound byte span ended before the full envelope header was read (`src.size() < sizeof(EnvelopeHeader)` after Fory's variable-width fields), OR the envelope's `payload_length` claimed more bytes than the remaining span carries. (Distinct from `DeserializeError`: that arm covers structurally-complete-but-semantically-invalid payloads; this arm covers physically-incomplete byte runs.) | `Envelope<T>::deserialize` envelope-read step (§4.8 inv. 1, 2). | `at.schema` (default-constructed if the FQN field itself was truncated), `at.version` (likewise), `at.offset` (the byte count of the payload that *was* read before truncation was detected). | refuse decode — caller drops / re-requests. World untouched. | error | `core::Error` has no dedicated arm; passed through. Save-file readers surface this as a "truncated record" diagnostic and continue past the next valid envelope; per-frame deserializers (rare, see §9 budget) escalate. |
+| `SourceHashMismatch` | An existing `(FQN, version)` pair appears in a candidate plugin with a byte-different `SchemaSourceHash` — i.e. the schema source bytes changed without a version bump. Distinct from `AbiHashMismatch` (arm 1), which fires on a global `glibre_types_abi_hash` mismatch; this arm fires when only one FQN's source bytes drifted. Defined in `specs/data/schema-registry-design.md` §3.8. | Mode-A barrier diff at phase-8 step 2 (`schema-registry-design.md` §8.1 row "source-hash drift"). | `step_schema` (the drifted FQN), `host_hash` (live registry's hex-encoded `SchemaSourceHash`), `plugin_hash` (incoming candidate's hex-encoded `SchemaSourceHash`). `step_from == step_to == 0` (no version change). | refuse load — `rollback_batch` (§8.4 of schema-registry-design.md); log at `warn`; leave previous-good plugin live. The operator must version-bump the schema and write a migration rather than recompile against the new middleman (the remediation differs from arm 1). | warn | `core::Error::PluginAbiHashMismatch`. Both arm 1 and arm 10 wrap into the same `core::Error` arm because the loader's response is identical (refuse, log warn, leave live); the `data::Error` distinction gives operators the per-FQN detail they need to diagnose the root cause. |
 
 ### 10.3 Composition with `core::Error`
 
 Per `reviews/decisions/error-model.md` §"Composition Rules" #2 every
-arm above is a leaf in `data`'s context. Three arms have a dedicated
-`core::Error` wrapping (rows 1, 2, 5) because the `core` plugin loader
-is the call site that raises them on `data`'s behalf; the remaining
-six surface to outer contexts by passing the `data::Error` through
-the `glibre::Error` variant unchanged. The mapping is fixed at the
-loader's call sites:
+arm above is a leaf in `data`'s context. Four arms have a dedicated
+`core::Error` wrapping (rows 1, 2, 5, 10) because the `core` plugin
+loader is the call site that raises them on `data`'s behalf; the
+remaining six surface to outer contexts by passing the `data::Error`
+through the `glibre::Error` variant unchanged. The mapping is fixed at
+the loader's call sites:
 
 | `data::Error` arm | When `core` raises it | `core::Error` wrapping |
 |-------------------|-----------------------|------------------------|
@@ -2572,6 +2589,7 @@ loader's call sites:
 | `MigrationStepMissing` | Phase-8 step 11 (chain coverage gap discovered during migrate); §8.3 gate 2. | `SchemaMigrationFailed` — same wrap as `SchemaMigrationFailure`; the loader's response (refuse, log, leave previous-good live) is identical for both arms. |
 | `SchemaRegistryConflict` | Mode-B reload only; the static-init path is fatal and never reaches the loader. | `HotReloadRefused` carrying the `data::Error` in `ErrorContext::detail`. |
 | `MigrationCycle` | Never — cycles are codegen-time or static-init time exclusively. | None. |
+| `SourceHashMismatch` | Phase-8 barrier diff step 2 (Mode-A only); `schema-registry-design.md` §8.1. | `PluginAbiHashMismatch` — same wrapping as arm 1 (`AbiHashMismatch`); the loader's response (refuse load, log warn, leave previous-good live) is identical. The `data::Error` arm carries the per-FQN detail; the `core::Error` arm provides a uniform hot-reload-refusal surface to callers above `core`. |
 | `DeserializeError`, `EnvelopeTruncated`, `ReservedTagViolation`, `SchemaUnknown` | Surface only at the `data` layer; `core` does not wrap them. | None — they appear in `glibre::Error::Variant` as the `data::Error` arm directly. |
 
 Two arms collapse onto one `core::Error::SchemaMigrationFailed`
@@ -2593,7 +2611,7 @@ The data context never logs from inside `Envelope<T>::deserialize`,
 `MigrationChain::dispatch`, or `migrate(...)`. The handler — which
 is either:
 
-- the `core` plugin loader (for arms 1, 2, 5, 7), or
+- the `core` plugin loader (for arms 1, 2, 5, 7, 10), or
 - the calling context's deserialize site (for arms 3, 6, 9), or
 - `glibre-foryc` itself (for arms 4, 8 codegen path), or
 - the middleman's static-init (for arms 5, 8 static-init path)
@@ -2633,6 +2651,7 @@ the §11 acceptance criteria.
 | `MigrationStepMissing` | A registry whose chain for an FQN at version 4 starts at step `(2 → 3)`; deserialize a `v1` payload and assert `step_from == 1`, `step_to == 2`. |
 | `MigrationCycle` | A test-only `Foryc` invocation against a synthetic chain `[(1→2), (2→1)]`; assertion on the codegen exit code and the `(step_from = 2, step_to = 1)` payload. |
 | `EnvelopeTruncated` | An `eastl::span<const std::byte>` smaller than `sizeof(EnvelopeHeader)`; assertion on `at.offset == src.size()`. |
+| `SourceHashMismatch` | A barrier diff against a candidate middleman carrying the same `(FQN, version)` as the live registry but with a byte-different `SchemaSourceHash` (simulate by patching one byte of the source-hash literal in a test-only `_registry.cpp`); assertions: (a) the loader returns `core::Error::PluginAbiHashMismatch`, (b) the `data::Error` detail has `tag == SourceHashMismatch`, `step_schema == drifted_fqn`, `host_hash != plugin_hash`, `step_from == step_to == 0`. Location: `tests/data/errors/schema_registry_arms_test.cpp` (aligns with §11.4 of `schema-registry-design.md`). |
 
 Each fixture asserts both (a) the correct arm fires and (b) the
 payload fields it claims to populate are non-default. Arms whose

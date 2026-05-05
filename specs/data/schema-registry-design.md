@@ -731,6 +731,70 @@ trampolines (`reviews/decisions/fory-codegen.md` §"middleman dylib
 exposes"; `specs/data/SPEC.md` §4.3 inv. 4). The registry's
 mutators are not on that list.
 
+#### 4.3-bis Batch-mutation API (Mode-A hot-reload seam)
+
+The hot-reload barrier (§6.3) uses a narrow batch-mutation seam on
+top of the static-init helpers above. This seam is also internal-linkage
+only and never exported as `extern "C"`:
+
+```cpp
+namespace glibre::types::detail {
+
+// Opaque token identifying one in-flight Mode-A append batch.
+// Allocated by begin_batch; consumed by commit_batch or rollback_batch.
+// Non-copyable; move-only. Lives on the loader thread's stack.
+struct BatchToken {
+    eastl::uint32_t id{};  // monotonically-increasing batch serial
+    eastl::uint32_t start_size{};  // entries_.size() at begin_batch
+};
+
+// Begin a new Mode-A append batch. Must be called from the barrier's
+// loader-thread, at phase-8 entry only (§6.1 inv. 1). Returns the
+// token the caller must pass to commit_batch or rollback_batch.
+// Pre-condition: no batch currently open on this registry instance.
+[[nodiscard]]
+BatchToken begin_batch(SchemaRegistry&) noexcept;
+
+// Commit an in-flight batch: atomically publishes all entries appended
+// since begin_batch (i.e. entries_[token.start_size..size_)) by
+// advancing the registry's published-size atomic with release semantics
+// (§6.2 inv. 2). Invalidates the token.
+// Returns: unexpected(core::Error::OutOfBudget) if the reserve was
+// exhausted during the batch (the entries past the ceiling are
+// rolled back before returning). On success returns void.
+// noexcept: yes — the append path is pre-checked at begin_batch.
+[[nodiscard]]
+std::expected<void, core::Error> commit_batch(SchemaRegistry&, BatchToken&) noexcept;
+
+// Roll back an in-flight batch: truncates entries_ back to
+// token.start_size and tombstones any chain-pool slices added during
+// the batch. Leaves the registry byte-identical to its state at
+// begin_batch. Always noexcept; the rollback path must not fail.
+void rollback_batch(SchemaRegistry&, BatchToken&) noexcept;
+
+}  // namespace glibre::types::detail
+```
+
+**Contracts:**
+
+- `begin_batch` / `commit_batch` / `rollback_batch` must be called on
+  the same loader thread that holds the barrier's exclusive lock (§6.1
+  inv. 1). No inter-thread transfer of `BatchToken` is permitted.
+- `size_` (the publicly-visible entry count, acquired by readers via
+  acquire semantics, §6.2) is **not advanced** until `commit_batch`
+  returns successfully. Readers racing the append see the pre-batch
+  snapshot; the release fence in `commit_batch` ensures they see the
+  full committed set after the fence.
+- If `rollback_batch` is called without a preceding `begin_batch`, the
+  behaviour is undefined (debug builds assert).
+- After `commit_batch` or `rollback_batch`, the `BatchToken` is
+  invalidated; reuse is undefined.
+- `core::Error::OutOfBudget` from `commit_batch` implies the entries
+  appended during the batch that exceeded the reserve ceiling have been
+  rolled back; the caller must treat the batch as failed and call
+  `rollback_batch` to complete the cleanup of any partial
+  chain-pool state.
+
 ### 4.4 No reflective surface
 
 The registry exposes **no** reflective API: no
@@ -802,8 +866,10 @@ auto resolve_entry_for() noexcept -> const RegistryEntry* {
    count plus the §3.7 reserve at `_registry.cpp` static-init;
    subsequent appends in Mode-A reload (§8 below) consume from the
    reserve without reallocation. Exhausting the reserve refuses
-   with `data::Error::OutOfBudget` (registered through `core` per
-   `reviews/decisions/error-model.md`).
+   with `core::Error::OutOfBudget` (a resource-allocation failure
+   in the core error enum, not a schema-semantic failure and therefore
+   not a `data::ErrorTag` arm — per `reviews/decisions/error-model.md`
+   §"Type Sketch" and §"Composition Rules" #2).
 2. **`RegistryEntry*` handed out by `lookup` remains valid for the
    live registry instance's lifetime.** Cached pointers in
    compiled serdes thunks survive across frame boundaries and
@@ -1342,21 +1408,24 @@ detect:
 These arms surface elsewhere in the data context; the registry's
 public surface stays narrow.
 
-### 10.3 SPEC §10.1 amendment required
+### 10.3 SPEC §10.1 amendment (addressed in follow-up)
 
-Adopting `SourceHashMismatch = 10` requires an in-place amendment
+Adopting `SourceHashMismatch = 10` required an in-place amendment
 to `specs/data/SPEC.md` §10.1's `ErrorTag` enumerator and §10.2's
-per-arm table. The amendment ships in **the same PR that lands
-this design** — SPEC §10's closed-enumeration discipline mandates
-co-shipping. The amendment is one new row in the table, four new
-lines in the enumerator, and one bullet under §10.4 logging
-discipline (the new arm is `warn`-severity, identical to existing
-hot-reload-refusal arms; no new spdlog level mapping).
+per-arm table. The amendment was not included in the PR that
+originally landed this design (PR #833) — SPEC §10's
+closed-enumeration discipline mandates co-shipping, and the split
+created a 9-arm SPEC enum vs. a 10-arm design. This was identified
+in the round-1 review (finding HIGH-1) and addressed by adding:
 
-(Implementation note: this design's PR carries the amendment
-inline, alongside the new `specs/data/schema-registry-design.md`
-file. The §3.8 sketch above is the authoritative per-arm
-specification; SPEC §10 is updated to reference it.)
+- `SourceHashMismatch = 10` to the `ErrorTag` enum (§10.1).
+- The full trigger/recovery/severity/mapping row to §10.2.
+- The `core::Error::PluginAbiHashMismatch` wrapping row to §10.3.
+- Arm 10 to the loader-handler bullet in §10.4.
+- The `SourceHashMismatch` fixture row to §10.5.
+
+The §3.8 sketch above remains the authoritative per-arm specification.
+SPEC §10.1–§10.5 now reflects it in full.
 
 ## 11. Test plan
 
