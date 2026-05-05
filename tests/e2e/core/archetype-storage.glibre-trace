@@ -1,0 +1,534 @@
+# glibre-trace — author-spec format
+#
+# Story:           #322 [STORY] archetype-soa-chunked-storage
+# Context:         core
+# Spec refs:       specs/core/SPEC.md §4.2 invariants 1–5 (archetype +
+#                  SoA chunk invariants), §3.2 collapse #3 (codegen-driven
+#                  archetype layout owned end-to-end by core), §4.11
+#                  cross-aggregate inv 1 (entity → row map consistency);
+#                  specs/e2e/SPEC.md §4.1.4 (TraceOp sealed sum), §5.4
+#                  (TraceOp variants), §7.1.1 (TraceFile bytes), §7.1.5
+#                  (TraceOp Fory), §10.1 (Error closed sum).
+# Persona:         engine developer (per #322).
+# Fixture:         tests/e2e/core/fixtures/archetype-storage-components.md
+#                  (component types A, B, C; chunk-capacity override = 4).
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Format notes
+# ─────────────────────────────────────────────────────────────────────────────
+# This file is the **authored source** for the binary `.glibre-trace` artefact
+# at the same path. Until `tools::TraceWriter` (specs/tools/SPEC.md §3.3) and
+# `glibre-trace record` (specs/e2e/SPEC.md §6.5) exist, the canonical bytes
+# cannot be produced — every recorded `.glibre-trace` is the byte-equal output
+# of an editor record-mode session against a *running* engine, and no engine
+# binary is wired yet (CMakeLists.txt subdirs are still commented out).
+#
+# Per specs/e2e/SPEC.md §7.1.1 invariant 2, "Re-recording is the only path
+# forward; migration of trace files across schema bumps is by replaying the
+# user-story under the new build, never by codegen migration." The authoring
+# discipline therefore is: write the intent here (reviewable in PR), wire CI
+# to fail-loudly until the runner exists, and re-record as binary in place
+# once `tools::TraceWriter` lands.
+#
+# Lowering rule (forward): `tools::TraceWriter` lowers each `op:` line below
+# to one `glibre.e2e.TraceOp` record, in declared order, framed by the
+# preceding `frame:` line. The terminating `End` op is implicit at the final
+# `frame:` boundary marked `op: End`.
+#
+# Manifest fields (specs/e2e/SPEC.md §5.5, §7.1.2) are recorded by the
+# editor at record-time — they are not authored here. The `# manifest:`
+# comments below are *advisory only* (record-mode hints); the live
+# `EnvHash` (§4.1.3 inv 1) is computed at record-time and gates replay
+# (§4.1.7 inv 1).
+#
+# Authoring discipline (per dispatch prompt): this trace privileges
+# **clarity over stress**. The Manual Test Script in #322 spawns 100,000
+# entities; this trace spawns ≤ 6 entities total. Chunk-spillover is
+# proved by overriding `Chunk::CAPACITY` for the {A,B} archetype to 4
+# rows via the debug-overlay hook (see fixtures/archetype-storage-
+# components.md). The production capacity (cache-line tuned) is
+# exercised by the manual test, not by the replay trace.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Manifest hints (record-time advisory; not part of the op stream)
+# ─────────────────────────────────────────────────────────────────────────────
+# manifest:
+#   target_driver:      CiHeadless
+#   window_size:        1280x720
+#   dpi_scale:          1.0
+#   rng_seed:           0x0000_0000_0000_0001
+#   frame_budget:       max_frames=64                # 26 authored × ~2.5× safety
+#   golden_refs:        []                           # AssertEcsSnapshot/Screenshot not used
+#   fixture_layout:     tests/e2e/core/fixtures/archetype-storage-components.md
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Debug-overlay input bindings used by this trace
+# ─────────────────────────────────────────────────────────────────────────────
+# These keystrokes are implemented by the editor's debug-overlay (specs/tools/
+# SPEC.md §"editor debug actions"; sub-epic for that scope is referenced by
+# #322 manual test step 3 "Open the Archetype Inspector"). The trace presses
+# the bindings via `InputOp` carrying a `platform::InputEvent::KeyDown` (specs/
+# platform/SPEC.md §4.2 sealed sum; specs/e2e/SPEC.md §4.1.5 inv 1 — re-emit
+# byte-equal). Input ordering within a frame is preserved (§4.1.5 inv 3).
+#
+#   F1 → debug-overlay: register fixture component types {A, B, C} via the
+#                       middleman dylib's codegen-emitted descriptors and
+#                       set `Chunk::CAPACITY = 4` for the {A,B} archetype
+#                       via `core::testing::set_chunk_capacity_override`
+#                       (cfg(debug_overlay) only; reset on world drop).
+#   F2 → debug-overlay: World::spawn() into world A with component set
+#                       {A, B}. Repeat-press: each press spawns one
+#                       additional {A,B} entity. The overlay snapshots the
+#                       returned Entity into a typed buffer
+#                       `world.A.spawned_AB[]` (debug resource).
+#   F3 → debug-overlay: World::spawn() into world A with component set
+#                       {A, B, C}. Stores into `world.A.spawned_ABC[]`.
+#   F4 → debug-overlay: publish archetype-table summary into world A's
+#                       debug-resource namespace. For each archetype the
+#                       overlay walks the codegen column descriptors and
+#                       writes:
+#                         world.A.archetype_count                : u64
+#                         world.A.archetype[k].component_set     : eastl::array<TypeId, N>
+#                         world.A.archetype[k].column_count      : u32
+#                         world.A.archetype[k].columns_aligned   : bool
+#                         world.A.archetype[k].columns_contiguous: bool
+#                         world.A.archetype[k].chunk_count       : u32
+#                         world.A.archetype[k].chunk_capacity    : u32
+#                         world.A.archetype[k].entity_count      : u64
+#                         world.A.archetype[k].row_chunk_continuity : bool
+#                         world.A.archetype[k].chunk_holes       : u32
+#                         world.A.archetype[k].forward_reverse_maps_consistent : bool
+#                       The two archetype indices `k=0` and `k=1` are
+#                       deterministic by component-set hash (PHILOSOPHY §7).
+#                       For this trace, k=0 ↔ {A,B}, k=1 ↔ {A,B,C} (the
+#                       overlay sorts by sorted-TypeId-tuple).
+#   F5 → debug-overlay: World::despawn() — pops the *front* entry of
+#                       `world.A.spawned_AB[]` and despawns it. This forces
+#                       the swap-remove path to run on a row that is *not*
+#                       at the chunk's tail (specs/core/SPEC.md §4.2 inv 4).
+#                       After despawn, the overlay re-publishes the table
+#                       summary so post-removal AssertStates see fresh
+#                       values.
+#
+# All five debug actions exist behind the `cfg(debug_overlay)` feature
+# gate. They are non-shipping (PHILOSOPHY §6 — no runtime reflection in
+# shipping builds; the codegen column descriptors *themselves* live in
+# the middleman dylib regardless).
+#
+# AssertState component-path conventions used below match specs/e2e/
+# SPEC.md §7.1.5 AssertStatePayload.component_path: dotted, world-scoped,
+# resolves through the codegen-emitted reflection table (debug-only).
+#
+# Expected-blob notation: `expected = <type> { <fields> }` is the
+# human-readable form the recorder lowers to canonical Fory bytes per
+# `glibre.e2e.AssertStatePayload.expected_fory_blob`. Concrete types:
+#   * `u32`, `u64`, `bool` are primitive Fory scalars.
+#   * `TypeId` is `core::TypeId { hash: u64 }` (specs/core/SPEC.md §4.9
+#     `TypeRegistry`); the codegen-emitted Fory schema is the wire.
+
+# ============================================================================
+# Setup — register types, override chunk capacity
+# ============================================================================
+#
+# Frame 0 establishes the test world before any assertions run. The
+# AssertState at frame 0 is a guard: if F1 (registration + capacity
+# override) does not run before the world is constructed, the
+# subsequent archetype assertions are meaningless. The overlay's F1
+# action is idempotent within a single trace — repeating it is a no-op.
+
+frame: 0
+op: InputOp
+  event:          KeyDown { key = F1, modifiers = {} }
+  semantics:      debug-overlay → register {A,B,C} via middleman dylib
+                  + Chunk::CAPACITY override for {A,B} archetype = 4
+
+frame: 1
+op: AssertState
+  id:             1
+  world:          A
+  path:           world.A.archetype_count
+  expected:       u64 { value = 0 }
+  evidence:       fresh-World post-create has zero archetypes — the
+                  TypeRegistry is populated (via F1) but no archetype
+                  has yet been instantiated (a `Archetype` is created
+                  lazily at first spawn into its set, specs/core/SPEC.md
+                  §4.2 inv 1 "fixed at creation"). Guards against the
+                  registry-vs-archetype confusion.
+
+# ============================================================================
+# Block 1 — archetype creation (Gherkin block 1 of #322)
+# Given a World with components A, B, C registered via the middleman dylib
+# When  entities are spawned with component sets {A,B} and {A,B,C}
+# Then  exactly two Archetypes exist
+# And   each Archetype's columns are alignof(T)-aligned and contiguous
+# ============================================================================
+
+frame: 2
+op: InputOp
+  event:          KeyDown { key = F2, modifiers = {} }
+  semantics:      debug-overlay → World::spawn() with set {A,B}; result
+                  appended to world.A.spawned_AB[].
+
+frame: 3
+op: InputOp
+  event:          KeyDown { key = F2, modifiers = {} }
+  semantics:      debug-overlay → World::spawn() with set {A,B}; result
+                  appended to world.A.spawned_AB[]. Two {A,B} rows now
+                  share one Archetype (set membership equality, §4.2
+                  inv 1).
+
+frame: 4
+op: InputOp
+  event:          KeyDown { key = F3, modifiers = {} }
+  semantics:      debug-overlay → World::spawn() with set {A,B,C};
+                  result appended to world.A.spawned_ABC[]. The
+                  component set {A,B,C} ≠ {A,B}, so a *second*
+                  Archetype is allocated (§4.2 inv 1).
+
+frame: 5
+op: InputOp
+  event:          KeyDown { key = F4, modifiers = {} }
+  semantics:      debug-overlay → publish archetype-table summary into
+                  world.A.archetype[*].* debug resources.
+
+frame: 6
+op: AssertState
+  id:             2
+  world:          A
+  path:           world.A.archetype_count
+  expected:       u64 { value = 2 }
+  evidence:       exactly two Archetypes exist — one per distinct
+                  component set (specs/core/SPEC.md §4.2 inv 1
+                  "An Archetype's component set is fixed at creation;
+                  adding or removing a component on an entity moves the
+                  row to a different Archetype"). Encodes the Gherkin
+                  `assert_eq(world.A.archetype_count, 2)`.
+
+op: AssertState
+  id:             3
+  world:          A
+  path:           world.A.archetype[0].column_count
+  expected:       u32 { value = 3 }
+  evidence:       the {A,B} archetype has two component columns plus
+                  one entity-id column per §4.2 (Archetype "Composes a
+                  list of Chunks holding cache-aligned, fixed-size SoA
+                  columns (one column per component type in the set,
+                  plus an entity-id column)").
+
+op: AssertState
+  id:             4
+  world:          A
+  path:           world.A.archetype[0].columns_aligned
+  expected:       bool { value = true }
+  evidence:       per-column alignment check — the overlay walks each
+                  column ptr and asserts `(uintptr_t(col) % alignof(T))
+                  == 0` for every component type T in the set, plus the
+                  entity-id column. Encodes the Gherkin `assert_eq(
+                  column.alignment % alignof(T), 0)` over all columns
+                  of archetype[0] = {A,B}. (specs/core/SPEC.md §4.2
+                  inv 3 "Each column is alignof(T)-aligned and
+                  contiguous.")
+
+op: AssertState
+  id:             5
+  world:          A
+  path:           world.A.archetype[0].columns_contiguous
+  expected:       bool { value = true }
+  evidence:       per-column contiguity check — the overlay walks each
+                  column and asserts that for every adjacent pair of
+                  rows i, i+1 within a chunk, &col[i+1] == &col[i] + 1
+                  (i.e. no padding between rows; rows are
+                  back-to-back). Encodes the Gherkin
+                  `assert(column.contiguous)` over archetype[0]'s
+                  columns. (§4.2 inv 3.)
+
+op: AssertState
+  id:             6
+  world:          A
+  path:           world.A.archetype[1].column_count
+  expected:       u32 { value = 4 }
+  evidence:       the {A,B,C} archetype has three component columns
+                  plus one entity-id column. Distinguishes archetype[1]
+                  from archetype[0] structurally (column-count
+                  difference).
+
+op: AssertState
+  id:             7
+  world:          A
+  path:           world.A.archetype[1].columns_aligned
+  expected:       bool { value = true }
+  evidence:       same alignment rule applied to archetype[1] = {A,B,C}.
+                  Necessary because §4.2 inv 3 holds *per column per
+                  archetype*; an alignment regression in only the
+                  {A,B,C} layout would be missed by id=4 alone.
+
+op: AssertState
+  id:             8
+  world:          A
+  path:           world.A.archetype[1].columns_contiguous
+  expected:       bool { value = true }
+  evidence:       same contiguity rule applied to archetype[1].
+
+# ============================================================================
+# Block 2 — chunk capacity (Gherkin block 2 of #322)
+# Given an Archetype whose chunk capacity is N
+# When  N+1 entities are inserted with that component set
+# Then  a second chunk is allocated
+# And   no row is split across chunks
+# ============================================================================
+#
+# `Chunk::CAPACITY` is overridden to 4 for the {A,B} archetype by F1.
+# We have already inserted 2 {A,B} entities (frames 2, 3). To exceed
+# capacity by one we need 5 total. Frames 7–9 add 3 more.
+
+frame: 7
+op: InputOp
+  event:          KeyDown { key = F2, modifiers = {} }
+  semantics:      debug-overlay → World::spawn() with set {A,B}
+                  (3rd row).
+
+frame: 8
+op: InputOp
+  event:          KeyDown { key = F2, modifiers = {} }
+  semantics:      debug-overlay → World::spawn() with set {A,B}
+                  (4th row — fills first chunk to capacity).
+
+frame: 9
+op: InputOp
+  event:          KeyDown { key = F2, modifiers = {} }
+  semantics:      debug-overlay → World::spawn() with set {A,B}
+                  (5th row — N+1; must allocate a 2nd chunk per §4.2
+                  inv 2).
+
+frame: 10
+op: InputOp
+  event:          KeyDown { key = F4, modifiers = {} }
+  semantics:      debug-overlay → republish archetype-table summary so
+                  the freshly-allocated 2nd chunk is reflected in
+                  world.A.archetype[0].chunk_count etc.
+
+frame: 11
+op: AssertState
+  id:             9
+  world:          A
+  path:           world.A.archetype[0].chunk_capacity
+  expected:       u32 { value = 4 }
+  evidence:       sanity gate — the override applied. If F1's
+                  set_chunk_capacity_override silently failed, every
+                  subsequent assertion in this block would still pass
+                  (entity_count=5 < production capacity → only one
+                  chunk → no spillover to detect). This assertion
+                  fails-loud on that drift.
+
+op: AssertState
+  id:             10
+  world:          A
+  path:           world.A.archetype[0].entity_count
+  expected:       u64 { value = 5 }
+  evidence:       five {A,B} rows have been spawned across frames 2–9
+                  (F2 pressed 5 times). Establishes N+1 = 5 with N = 4.
+
+op: AssertState
+  id:             11
+  world:          A
+  path:           world.A.archetype[0].chunk_count
+  expected:       u32 { value = 2 }
+  evidence:       inserting the (N+1)=5th row into a full chunk
+                  allocates a second chunk. Encodes the Gherkin
+                  `assert_eq(archetype.chunk_count, 2)`.
+                  (specs/core/SPEC.md §4.2 inv 2 "Inserting into a full
+                  chunk allocates a new chunk".)
+
+op: AssertState
+  id:             12
+  world:          A
+  path:           world.A.archetype[0].row_chunk_continuity
+  expected:       bool { value = true }
+  evidence:       the overlay computes `row_chunk_continuity` as the
+                  conjunction over all rows r ∈ archetype[0] of
+                  `chunk(r) is well-defined and r occupies a single
+                  contiguous span inside one chunk` — equivalently,
+                  no row's columns are split across two chunks.
+                  Encodes the Gherkin `assert(no_row_split_across_
+                  chunks)`. (§4.2 inv 2 "rows are never split across
+                  chunks".)
+
+# ============================================================================
+# Block 3 — swap-remove integrity (Gherkin block 3 of #322)
+# Given a row removal from an Archetype's chunk
+# When  the swap-remove completes
+# Then  the entity-row reverse map and forward map are both updated
+#       atomically
+# And   no chunk holes remain
+# ============================================================================
+#
+# F5 despawns the *front* entry of spawned_AB[] — the entity whose row
+# is row 0 of chunk 0. This is the load-bearing case: row 0 is *not*
+# the last row in the chunk, so the swap-remove path must move the
+# tail row into slot 0 *and* update the entity→row reverse map for
+# that moved entity (specs/core/SPEC.md §4.2 inv 4 + inv 5).
+# Despawning a tail-of-tail-chunk row would not exercise the
+# update-on-swap path.
+
+frame: 12
+op: InputOp
+  event:          KeyDown { key = F5, modifiers = {} }
+  semantics:      debug-overlay → World::despawn(spawned_AB[0]) — pops
+                  front. The overlay then republishes the archetype-
+                  table summary (so post-removal AssertStates see
+                  fresh values; F5's semantics include the publish).
+
+frame: 13
+op: AssertState
+  id:             13
+  world:          A
+  path:           world.A.archetype[0].entity_count
+  expected:       u64 { value = 4 }
+  evidence:       one {A,B} row was removed; 5 - 1 = 4. Sanity gate
+                  for the removal having actually run.
+
+op: AssertState
+  id:             14
+  world:          A
+  path:           world.A.archetype[0].forward_reverse_maps_consistent
+  expected:       bool { value = true }
+  evidence:       the overlay walks both maps end-to-end:
+                    forward[entity] → (Archetype, Chunk, Row)
+                    reverse[(Archetype, Chunk, Row)] → entity
+                  and asserts each is the inverse of the other for
+                  every live row. After a swap-remove, the moved
+                  entity's forward entry must point to its new row
+                  and the new (Chunk, Row) must reverse-map back to
+                  that entity — *both* updates atomic per §4.2 inv 5
+                  "swap-removes update both maps atomically within the
+                  same critical section". Encodes the Gherkin
+                  `assert(forward_and_reverse_maps_consistent)`. Cross-
+                  references §4.11 cross-aggregate inv 1.
+
+op: AssertState
+  id:             15
+  world:          A
+  path:           world.A.archetype[0].chunk_holes
+  expected:       u32 { value = 0 }
+  evidence:       chunks must contain no holes after swap-remove.
+                  The overlay computes `chunk_holes` as the count of
+                  occupied-slot-followed-by-unoccupied-slot transitions
+                  across all chunks of the archetype; the swap-remove
+                  discipline maintains zero holes by construction
+                  (§4.2 inv 4 "When a row is removed, the last row in
+                  its chunk swaps into the freed slot (swap-remove);
+                  chunks contain no holes."). Encodes the Gherkin
+                  `assert_eq(archetype.chunk_holes, 0)`. The manual
+                  test (#322 step 4) covers the same invariant at 50k
+                  deletions; this assertion covers it at 1 deletion.
+
+op: AssertState
+  id:             16
+  world:          A
+  path:           world.A.archetype[0].chunk_count
+  expected:       u32 { value = 2 }
+  evidence:       chunk count is unchanged by the single removal:
+                  4 remaining rows still need 2 chunks (chunk 0 has
+                  4 rows = capacity, chunk 1 had 1 row before; after
+                  swap-remove, the moved row went into chunk 0 slot 0
+                  and chunk 1's only row moved into chunk 0 slot 3 —
+                  or equivalent reorganisation). The point is that we
+                  do *not* assert `chunk_count == 1` here: chunks are
+                  not deallocated on row removal in MVP (a separate
+                  decision; deferred chunk reclamation is post-MVP).
+                  This assertion guards against a regression that
+                  silently merged chunks and broke iteration ordering
+                  (§4.2 inv 4 "iteration order across all chunks of
+                  an Archetype is deterministic by chunk insertion
+                  order").
+
+op: AssertLogContains
+  id:             17
+  is_regex:       false
+  needle:         "swap-remove"
+  evidence:       the overlay's debug log emits a structured event
+                  `archetype.swap_remove { archetype, src_chunk,
+                  src_row, dst_chunk, dst_row, moved_entity }` at
+                  every swap-remove (debug-build only; specs/core/
+                  SPEC.md §10 "logging at handler" rule). The presence
+                  of "swap-remove" in the log slice proves the
+                  swap-remove path *executed* — not just that the
+                  post-state happens to be consistent (which a buggy
+                  no-op-on-front-removal could fake).
+
+# ============================================================================
+# Termination
+# ============================================================================
+
+frame: 14
+op: End
+  evidence:       specs/e2e/SPEC.md §4.1.1 inv 5 — exactly one End op,
+                  emitted last; specs/e2e/SPEC.md §7.1.5 EndPayload.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Coverage map — Gherkin Then-clause → assertion op
+# ─────────────────────────────────────────────────────────────────────────────
+# Block 1 — archetype creation
+#   "exactly two Archetypes exist"
+#       ↦ AssertState id=2  (archetype_count = 2)
+#   "each Archetype's columns are alignof(T)-aligned and contiguous"
+#       ↦ AssertState id=4  ({A,B}    columns_aligned    = true)
+#       ↦ AssertState id=5  ({A,B}    columns_contiguous = true)
+#       ↦ AssertState id=7  ({A,B,C}  columns_aligned    = true)
+#       ↦ AssertState id=8  ({A,B,C}  columns_contiguous = true)
+#   (id=3, id=6 are structural sanity gates: column counts differ by
+#    exactly the C component, distinguishing the two archetypes.)
+#
+# Block 2 — chunk capacity
+#   "a second chunk is allocated"
+#       ↦ AssertState id=11 (chunk_count = 2)
+#   "no row is split across chunks"
+#       ↦ AssertState id=12 (row_chunk_continuity = true)
+#   (id=9 is a sanity gate that the chunk-capacity override applied;
+#    id=10 establishes N+1.)
+#
+# Block 3 — swap-remove integrity
+#   "the entity-row reverse map and forward map are both updated
+#    atomically"
+#       ↦ AssertState     id=14 (forward_reverse_maps_consistent = true)
+#       ↦ AssertLogContains id=17 ("swap-remove" — proves the path
+#                                  executed, not that both maps merely
+#                                  appear consistent)
+#   "no chunk holes remain"
+#       ↦ AssertState id=15 (chunk_holes = 0)
+#   (id=13 is a sanity gate that the removal ran; id=16 guards against
+#    a chunk-merge regression that would silently violate iteration
+#    ordering.)
+#
+# Every Then clause maps to ≥ 1 AssertOp. The swap-remove block is
+# reinforced by an AssertLogContains so the test fails loud on a
+# silent no-op-on-front-removal regression — both maps appearing
+# consistent post-removal could be faked by failing to remove
+# anything; the log assertion proves the swap-remove path executed.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# CI status (until implementation lands)
+# ─────────────────────────────────────────────────────────────────────────────
+# Per specs/e2e/SPEC.md §5 / §6.5, replay requires:
+#   * A runnable engine binary (CMakeLists.txt subdirs uncommented).
+#   * `World::spawn(set)`, `World::despawn(Entity)`, codegen-emitted
+#     archetype storage with `Chunk::CAPACITY` (specs/core/SPEC.md §4.2)
+#     and per-archetype debug-overlay introspection.
+#   * The middleman dylib registration path for fixture types A, B, C
+#     (per `reviews/decisions/fory-codegen.md`).
+#   * The debug-overlay key bindings F1…F5 plus the
+#     `core::testing::set_chunk_capacity_override` hook
+#     (cfg(debug_overlay) only).
+#   * `tools::TraceWriter` to lower this author-spec to canonical Fory
+#     bytes, OR a future `glibre-trace replay --from-author-spec`
+#     ingester.
+#   * `glibre-trace replay` CLI (specs/e2e/SPEC.md §6.5 cmd_replay.cpp).
+#
+# Until all six exist, CI fails loudly per the testing-stage closure
+# rule (.claude/skills/go/references/sdlc.md §5: "CI runs the trace; it
+# should fail loudly until implementation plans land — this is correct
+# red"). The CI hook in `.github/workflows/ci.yml` `e2e-core` job
+# already enumerates `tests/e2e/core/*.glibre-trace` and replays each
+# one; this trace is picked up automatically by that glob — no CI edit
+# is required (PR #857 established the job, this PR adds a second
+# trace under the same job).
