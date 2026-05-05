@@ -39,14 +39,20 @@
 # 1:1 onto the §5 sealed sum as follows:
 #   assert_eq(k.to_bytes().size(), 6)
 #                                         → AssertState  op_id=1
-#   assert_eq(from_bytes(to_bytes(k)), k) → AssertState  op_id=2,3
+#   assert_eq(k.is_well_formed(), true)   → AssertState  op_id=2
+#   assert_eq(from_bytes(to_bytes(k)), k) → AssertState  op_id=3
+#   assert_eq(k.to_bytes(), canonical)    → AssertState  op_id=4
+#                                            (cross-host bit-equality
+#                                             for k1 — see scenario 1
+#                                             packed-bytes note below)
 #   assert_eq(host_a_table_hash, host_b_table_hash)
-#                                         → AssertState  op_id=10
+#                                         → AssertState  op_id=11
 #                                            (byte-equal expected_fory
 #                                             blob — see scenario 3
 #                                             determinism note below)
 #   assert_eq(walk_order, expected_ascending_order)
 #                                         → AssertState  op_id=5,6,7,8,9
+#   uniqueness + density in [0, 12288)    → AssertState  op_id=10
 # Every Gherkin "Then" clause across the three scenarios in the issue
 # body has at least one op.
 
@@ -76,13 +82,14 @@ manifest:
 #           which builds the in-process inspector projection of the
 #           4-axis cross-product (and a single sample key k1) under
 #           `world/shader_codegen/...`.
-# Frame 1:  pin the per-key `PackedBytes` codec contract for k1
-#           (length, well-formedness, round-trip).
+# Frame 1:  verify the structured log line emitted by the frame-0 command
+#           (AssertLogContains op_id=12), then pin the per-key
+#           `PackedBytes` codec contract for k1 (length, well-formedness,
+#           round-trip, cross-host byte equality).
 # Frame 2:  pin the cross-product walk: cardinality, ordering at the
 #           endpoints + an interior boundary, and density of the
 #           emitted PermutationIndex set.
-# Frame 3:  pin host-determinism — bit-equal table hash + structured
-#           log line emitted by the codegen tool.
+# Frame 3:  pin host-determinism — bit-equal table hash (BLAKE3).
 # Frame 4:  End.
 # -----------------------------------------------------------------------------
 stream:
@@ -141,6 +148,22 @@ stream:
   # (specs/e2e/SPEC.md §6.4 assert/state.cpp): each expected payload
   # below is the canonical Fory encoding of the named projection
   # value at parse time.
+
+  # --- Codegen tool emitted the structured "table emitted" log line --------
+  # The `emit_permutation_table` command in frame 0 emits
+  # `shader::codegen::permutation_table_emitted count=12288` synchronously
+  # before returning. AssertLogContains window is "between the previous
+  # assert and this frame" (specs/e2e/SPEC.md §2 AssertLogContains); this
+  # is the first assert in the stream so the window opens at run start and
+  # closes at frame 1 — covering frame 0's log output. Placing this assert
+  # at frame 1 before the first AssertState is the canonical position for
+  # verifying a log line emitted by the frame-0 InputOp.
+  # Mirrors manual test step 1 ("Run the codegen tool …").
+  - frame: 1
+    op: AssertLogContains
+    id: 12
+    is_regex: false
+    needle: "shader::codegen::permutation_table_emitted count=12288"
 
   # --- Then the result is exactly 6 bytes -----------------------------------
   - frame: 1
@@ -349,13 +372,13 @@ stream:
   #   When each host computes k1.to_bytes()
   #   Then the byte arrays are bit-equal
   # …extended to the whole table per the manual test step 4 ("confirm
-  # both arm64 and x86_64 runners report identical SHA-256 of the
+  # both arm64 and x86_64 runners report identical BLAKE3 hash of the
   # encoded table").
   #
   # The runner's AssertState evaluator (specs/e2e/SPEC.md §6.4) is a
-  # byte-equal Fory-blob compare. Pinning a single canonical SHA-256
-  # of the concatenated `to_bytes()` outputs (in tuple-ascending walk
-  # order) therefore enforces: every host that passes this op
+  # byte-equal Fory-blob compare. Pinning a single canonical BLAKE3
+  # hash of the concatenated `to_bytes()` outputs (in tuple-ascending
+  # walk order) therefore enforces: every host that passes this op
   # produced byte-identical encodings for every key. If the arm64
   # runner and the x86_64 runner BOTH pass this assertion, they have
   # by construction produced bit-equal `to_bytes()` for every key in
@@ -363,24 +386,17 @@ stream:
   # bit-equal" property strengthened from "for k1" to "for the whole
   # table". The runner_host_hint=CiHeadless in the manifest scopes
   # this to the headless CI tier (§7.1.7).
+  #
+  # BLAKE3 is the project-wide hash for all stable content identifiers
+  # (specs/shader/SPEC.md §2, include-closure.glibre-trace precedent).
   - frame: 3
     op: AssertState
     id: 11
     world: editor
     component_path: "world/shader_codegen/permutation_table/canonical_table_hash"
     expected:
-      tag: "Sha256Hash"
+      tag: "Blake3Hash"
       bytes_hex: "stable@table"     # placeholder bound at record time
-
-  # --- And the codegen tool emitted the structured "table emitted" line ----
-  # Mirrors manual test step 1 ("Run the codegen tool …"); scopes to
-  # the entries written between the previous assert (id=11) and this
-  # frame (specs/e2e/SPEC.md §6.4 assert/log_contains.cpp).
-  - frame: 3
-    op: AssertLogContains
-    id: 12
-    is_regex: false
-    needle: "shader::codegen::permutation_table_emitted count=12288"
 
   # --- Terminator. Exactly one End, last (specs/e2e/SPEC.md §4.1.1 inv 5). --
   - frame: 4
