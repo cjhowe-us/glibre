@@ -24,7 +24,7 @@ denoise step inside `shadow_rt`, swapping the deferred-lighting body
 to read a different cluster buffer layout, replacing the AA chain
 inside `aa_upscale`, etc.
 
-The catalog is fixed at MVP to the eleven pass classes locked in
+The catalog is fixed at MVP to the **twelve** pass classes locked in
 `specs/render/SPEC.md` §6.2.2 step 1 (the GraphBuilder's per-`View`
 registration sequence): **`blas_refit`, `tlas_build`, `cluster_cull`,
 `gbuffer`, `hzb_build`, `shadow_rt`, `ao_rt`, `lighting`,
@@ -36,7 +36,7 @@ MRT + visID + velocity + depth are written by **one** mesh-shader
 dispatch as a single atomic `Pass`); the GBuffer fill is `gbuffer`;
 lighting is `cluster_cull` + `shadow_rt` + `ao_rt` + `lighting` +
 `transparent_forward`; post is `post` + `aa_upscale`; present is
-`present`. The catalog is closed: adding a twelfth pass class is a
+`present`. The catalog is closed: adding a thirteenth pass class is a
 SPEC §6.2.2 amendment, not an in-place edit.
 
 What this aggregate explicitly **refuses** to own:
@@ -111,7 +111,7 @@ SPEC §3).
 | Per-effect post-FX passes (bloom, DOF, motion-blur, exposure histogram, tonemap, grade, film-grain, vignette, panini, cavity, Dolby Vision) (`requirements/rendering/post-processing.md` R-2.9.1..R-2.9.14) | **Covered — collapsed.** | One `post` pass body executes the per-effect chain ordered by `RenderSettings`; per-effect kernels are dispatch sub-steps inside the pass, not separate `Pass` nodes (SPEC §3.2 collapse #6). §3.10 below. |
 | TAA / FXAA / SMAA / TSR / DLSS / FSR / XeSS / vendor-upscaler permutations (`requirements/rendering/anti-aliasing-upscaling.md` R-2.6.1..R-2.6.9) | **Covered — collapsed.** | One `aa_upscale` pass class; the body is selected at graph-build time from `RenderSettings.aa_mode` + `RenderSettings.upscaler`. Selection is graph-topology, not in-shader branching (SPEC §3.2 collapse #5). §3.11 below. |
 | `BLASBuildPass` per dynamic mesh + central `TLASBuildPass` (`requirements/rendering/advanced-rendering.md` R-2.5.1..R-2.5.10) | **Covered.** | Two pass classes — `blas_refit` (Compute) and `tlas_build` (Compute) — wired with explicit read-after-write per SPEC §4.2 invariant 4. §3.7 + §3.8 below. |
-| Capture-to-texture / minimap / probe-render passes as a separate render-graph fork | **Covered — multi-view.** | The same eleven pass classes instantiate per `View` (SPEC §3.2 collapse #7); no extra pass class. The `present` pass is no-op for offscreen views — `View::is_offscreen() ⇒ blit-to-imported-texture`. §3.13 below. |
+| Capture-to-texture / minimap / probe-render passes as a separate render-graph fork | **Covered — multi-view.** | The same twelve pass classes instantiate per `View` (SPEC §3.2 collapse #7); no extra pass class. The `present` pass is no-op for offscreen views — `View::is_offscreen() ⇒ blit-to-imported-texture`. §3.13 below. |
 | Diagnostic / debug overlay as its own pass (`requirements/rendering/scene-rendering-pipeline.md`) | **Refused — debug-only.** | `DiagnosticOverlay` (SPEC §3.2 collapse #10) is build-time-gated and registers a debug-only pass slot adjacent to `present`. Out of MVP shipping link (SPEC §6.5 mirrors shader's exclusion pattern); detail in §8.4. |
 | 2D / UI as a separate raster engine (`design/rendering/2d.md`) | **Covered — multi-view.** | The same catalog instantiates with a different `RenderSettings` (no shadows, no RT, simplified post). Sprite/UI authoring is `tools` + `content`. No new pass class. |
 | Stylised / NPR / character outline as a separate post chain | **Refused — execution-only.** | Style execution slots into `post` as additional kernels selected by `RenderSettings`; style **authoring** is `material` + `tools` (SPEC §3.3). |
@@ -147,7 +147,7 @@ Glibre-native requirements added beyond harmonius:
 
 ### 3.1 Catalog roster
 
-The aggregate exposes exactly eleven pass classes inside the render
+The aggregate exposes exactly **twelve** pass classes inside the render
 plugin. Each is a separate translation unit under
 `render/src/passes/<name>.{hpp,cpp}` (SPEC §6.1 module layout). The
 catalog roster, in graph-build order (SPEC §6.2.2 step 1):
@@ -193,7 +193,7 @@ struct PassRecord {
 };
 ```
 
-The eleven entries in §3.1 each hand-author one PassRecord factory
+The twelve entries in §3.1 each hand-author one PassRecord factory
 under `passes/<name>.cpp`:
 
 ```cpp
@@ -494,7 +494,7 @@ drawable acquire, no fence signal. The factory selects the body from
 
 ### 3.13 Multi-view fan-out
 
-Per SPEC §3.2 collapse #7 the same eleven-pass catalog instantiates
+Per SPEC §3.2 collapse #7 the same twelve-pass catalog instantiates
 once per `View`. The graph builder (SPEC §4.1.2) calls each pass
 factory once per `(View, FrameCounter)` pair. Pass-class identity is
 shared across views; the PassRecord values are not. Cross-view
@@ -558,7 +558,7 @@ header (SPEC §5) already publishes `Pass`, `PassDesc`, `PassPriority`,
 `CapabilitySet`, `RenderSettings`, `MaterialHandle`, `MeshHandle`,
 `ViewHandle`, `BLASHandle`, `TLASHandle`, `HZBHandle`,
 `ClusterCullStateHandle`, and the `GraphBuilder::add_raster_pass`,
-`add_compute_pass`, `add_rt_pass` entry points. The eleven pass
+`add_compute_pass`, `add_rt_pass` entry points. The twelve pass
 classes consume that surface verbatim.
 
 The pass-class **factories** (`make_<name>_pass`) are private to the
@@ -592,8 +592,11 @@ concept RenderPassFactory = requires(
     { f.declare(b, rf, v, rs, caps) } noexcept
         -> std::same_as<Result<void>>;
 
-    // (Optional) name() is a debug-only string view; required for
-    // diagnostic overlay registration. Stable per pass class.
+    // name() is a required debug-only string view used for diagnostic
+    // overlay registration and GPU timestamp labelling. Stable per pass
+    // class. All expressions inside a requires-clause are mandatory in
+    // C++23; the prior "(Optional)" annotation was incorrect and has
+    // been removed.
     { f.name() } noexcept -> std::same_as<eastl::string_view>;
 };
 
@@ -714,7 +717,7 @@ The aggregate's hot/cold split is unambiguous:
   `RenderSettings` snapshot).
 - Calls `add_*_pass` once.
 
-Cost: 11 pass classes × 1 View (S1) ≈ 11 `add_*_pass` calls per frame.
+Cost: 12 pass classes × 1 View (S1) ≈ 12 `add_*_pass` calls per frame.
 Combined cold-path cost is the §9.3 row "register per-`View` passes"
 = 0.10 ms; this is render's whole-graph build CPU cost.
 
@@ -760,7 +763,7 @@ fan-out reuses the same thread sequentially per `View` (SPEC §6.3 +
 
 Once the `ExecutionPlan` exists, per-pass execute lambdas are
 recorded in parallel into per-queue `MetalCommandBuffer`s. The plan's
-queue assignment partitions the eleven pass classes into independent
+queue assignment partitions the twelve pass classes into independent
 record streams (SPEC §6.3); per the §3.1 catalog, the partition is:
 
 | Worker (queue) | Passes recorded                                                                                |
@@ -836,17 +839,17 @@ dylib; it does not cross the plugin ABI seam
 ### 7.3 Pass-list ABI surface (private)
 
 `graph/builder.cpp`'s `register_mvp_passes` (§4.3) is a private
-function inside the render dylib. The eleven factory `declare`
+function inside the render dylib. The twelve factory `declare`
 methods are also private. The only public ABI surface this
 aggregate touches is the existing SPEC §5 `GraphBuilder::add_*_pass`
 + `PassExecuteFn` declarations.
 
-The pass-class catalog (§3.1 the eleven names) is therefore not part
+The pass-class catalog (§3.1 the twelve names) is therefore not part
 of the plugin manifest's `passes:` list (`reviews/decisions/plugin-abi.md`
 §"Plugin Manifest Schema" `PassDecl`); that list is reserved for
 **plugin-registered** passes from non-render plugins (e.g. a future
 `vfx` plugin registering a particle-draw pass) and is empty for the
-render plugin itself. Render's eleven passes are baked into
+render plugin itself. Render's twelve passes are baked into
 `graph/builder.cpp`.
 
 ### 7.4 No serialised render-graph files
@@ -874,18 +877,19 @@ aggregate:
 
 | State                                       | Survival | Reason                                                                     |
 |---------------------------------------------|----------|----------------------------------------------------------------------------|
-| The eleven pass-class factories             | rebuilt  | C++ symbols inside the render dylib; the new dylib redefines them.         |
+| The twelve pass-class factories             | rebuilt  | C++ symbols inside the render dylib; the new dylib redefines them.         |
 | `PassRecord` instances                      | rebuilt  | Per-frame arena values; never persist anyway.                              |
 | Execute lambdas                             | rebuilt  | Captured in `PassRecord`s; per-frame.                                      |
 | `RenderGraph` + `ExecutionPlan` + cache     | rebuilt  | Per-frame; cache is in-memory structural hash (SPEC §4.1.5).               |
 | Transient `Resource`s                       | rebuilt  | Per-frame by definition (SPEC §4.1.4 invariant 1).                         |
 | Persistent `Resource`s with `.fory` schemas | survive  | E.g. `RenderSettings` (SPEC §7.1.1), `PSOCacheRecord` (SPEC §7.1.2). The new plugin re-imports them through the plugin loader's drain → swap → migrate → resume sequence. |
-| GPU resources (HZB, ShadowAtlas, history color, ring buffers, TransientPool heaps) | rebuilt | The outgoing plugin's `glibre_plugin_drain` releases all GPU handles; the incoming plugin re-acquires equivalents in `glibre_plugin_register` (`hot-reload-protocol.md` §"Step 1 — Drain"). |
+| `HZB` pyramid and `ClusterCullState` scratch GPU allocations | survive | Persistent `Resource`s sized from `RenderSettings` / `QualityTier` (SPEC §8.2). Their backing GPU allocations and dispatch parameters survive the swap; no in-flight read or write straddles the reload boundary (SPEC §8.1). The new plugin imports the same handles; the next frame's two-phase symmetry (SPEC §4.1.9 invariant 1) is preserved. |
+| `ShadowAtlas`, history color, ring buffers, `TransientPool` heaps | survive | Per SPEC §8.2 table: `ShadowAtlas` and ring buffers are persistent `Resource`s (in-process, no `.fory` schema — survive without migration); history color is transient — the first post-reload frame falls back to the first-frame TAA body (§8.3). `TransientPool` placement heaps survive the swap (loader holds exclusive ownership during phase 8). |
 | `PSOCache` resident pipelines               | rebuilt  | The new plugin re-warms from the shader plugin's manifest at register; in-flight shipping use is bounded by `PSOCache::invalidate_by_shader_hash` per SPEC §4.1.7 invariant 4. |
 | Capability set                              | rebuilt  | Re-probed at register against the host (SPEC §10.3 row `RtCapabilityMissing` recovery — fresh probe). |
 
 The new render plugin's `glibre_plugin_register` walks the same
-eleven-pass catalog and produces the same eleven factories. The
+twelve-pass catalog and produces the same twelve factories. The
 graph builder's `register_mvp_passes` order is fixed in the **new**
 dylib's `graph/builder.cpp` (PHILOSOPHY: "Render graph is C++ code");
 it does not depend on any pre-reload state.
@@ -943,10 +947,11 @@ hot-reload refusal is indirect:
   (SPEC §4.1.7 invariant 2); recovery is `lower-tier`. No loader-layer
   refusal.
 - **Shader-module load failure.** Surfaces as
-  `render::Error::ShaderModuleLoadFailed` (SPEC §10.3 row); during
-  hot-reload register the recovery is `lower-tier` (SPEC §10.3 row
-  Recovery column). The pass aggregate does not handle this — the
-  Metal-backend aggregate does, before any pass factory runs.
+  `render::Error::ShaderModuleLoadFailed` (**ABI add — not yet in
+  SPEC §5 enum; see SPEC §10.1 table**); during hot-reload register
+  the recovery is `lower-tier` (SPEC §10.3 row Recovery column). The
+  pass aggregate does not handle this — the Metal-backend aggregate
+  does, before any pass factory runs.
 
 ### 8.5 Test hooks
 
@@ -960,7 +965,7 @@ hot-reload"); E2E plan:
 2. Wait for `HotReloadCompleted` event.
 3. Assert frame counter advances by 1 between request and completion.
 4. Assert the next compiled `ExecutionPlan` from the new dylib
-   declares the same eleven pass classes in the same order
+   declares the same twelve pass classes in the same order
    (§3.1 / §4.3 catalog + order).
 5. Assert per-pass GPU timing returns to within § 9.4 ceilings within
    3 frames after reload.
@@ -983,19 +988,19 @@ typical S1):
 | Compose `reads`/`writes` spans       | ≤ 1 µs   | ≤ 16 entries each; `eastl::array`-backed, allocated in per-frame arena.           |
 | Build execute lambda (capture POD)   | ≤ 2 µs   | Captures ≤ 8 `eastl::span` slices + ≤ 4 PODs.                                     |
 | `GraphBuilder::add_*_pass` call      | ≤ 5 µs   | Validation (declared-set closure, queue purity) + node insertion.                |
-| **Per-factory call**                 | **≤ 8 µs**| Bound for all eleven classes uniformly.                                          |
-| 11 calls × 1 View (S1)               | **≤ 0.09 ms** | Sums into SPEC §9.3 row "register per-`View` passes" (0.10 ms ceiling).      |
+| **Per-factory call**                 | **≤ 8 µs**| Bound for all twelve classes uniformly.                                          |
+| 12 calls × 1 View (S1)               | **≤ 0.09 ms** | Sums into SPEC §9.3 row "register per-`View` passes" (0.10 ms ceiling).      |
 
 The 0.09 ms is the catalog's worst-case CPU cost on the graph
-builder thread per frame for the S1 fixture. The 0.10 ms cell ceiling
-in SPEC §9.3 covers up to 4 views (MVP ceiling) — `4 × 0.09 = 0.36`,
-which exceeds the 0.10 ms cell. The cell ceiling is dominated by
-single-view S1 because multi-view fan-out occurs only in editor /
-capture frames; the steady-state production case is one view, and
-the ceiling is set against that. The reserve in SPEC §9.3 absorbs
-multi-view spikes (cache-miss compile is 0.10 ms reserve; multi-view
-register is part of the same reserve allocation by the spike that
-amends it).
+builder thread per frame for the S1 fixture. The S1 fixture is the
+**single-view** case; SPEC §9.3 defines S1 as the gate fixture (one
+`View`, no editor fan-out). The 0.10 ms SPEC §9.3 ceiling is therefore
+a single-view ceiling. Multi-view fan-out (≤4 views per the MVP
+architecture ceiling) is an editor / capture-frame scenario;
+multi-view perf compliance requires a formal SPEC §9.3 amendment spike
+to establish a separate multi-view budget row. MVP CI gates run S1 only.
+This design makes no multi-view budget claim; the single-view bound of
+0.09 ms satisfies the 0.10 ms S1 ceiling with 0.01 ms headroom.
 
 ### 9.2 Per-pass GPU cost (hot path)
 
@@ -1092,21 +1097,24 @@ trigger and recovery.
 | `BarrierConflict`          | Indirect — a pass-class factory declares an access set that the alias planner cannot satisfy together with another pass's set. Surfaces from `RenderGraph::compile()`.     | `abort-engine`        |
 | `RenderGraphCycle`         | Indirect — a factory's declared edges form a cycle with another pass's edges. Surfaces from `RenderGraph::compile()`.                                                       | `abort-engine`        |
 | `PipelineCompileFailed`    | An execute lambda calls `PSOCache::get(key)` and the cache cannot resolve the `(shader_hash, state_hash)` pair. The pass body returns the error through `Result<void>`.   | `lower-tier`          |
-| `PassExecuteFailed` (NEW — `PassExecuteFailed`) | An execute lambda returns `Result<void>` failure for a reason not covered above (e.g. mid-record `MTLCommandBufferError`, indirect-arg buffer overflow). **Note**: this variant does not yet exist in the SPEC §10.1 closed sum; **adding it is an ABI bump**. The MVP solution uses `MeshletCullDispatchFailed` for cluster-cull-specific failures and `QueueSubmitFailed` for general encoder failures, leaving `PassExecuteFailed` as an [OPEN] question (§12). | `abort-frame` (typical) |
-| `MeshletCullDispatchFailed`| `cluster_cull` execute body catches an indirect-arg buffer overflow (SPEC §10.3 row).                                                                                       | `disable-feature` (drops `MeshShaders` capability for the process) |
-| `BlasUnavailable` / `BlasBuildFailed` | `blas_refit` execute body catches a Metal RT-encoder error.                                                                                                    | `disable-feature`     |
+| `MeshletCullDispatchFailed` (**ABI add — not yet in SPEC §5 enum; see SPEC §10.1**) | `cluster_cull` execute body catches an indirect-arg buffer overflow (SPEC §10.3 row). | `disable-feature` (drops `MeshShaders` capability for the process) |
+| `BlasUnavailable` / `BlasBuildFailed` (**`BlasBuildFailed` is ABI add — not yet in SPEC §5 enum; see SPEC §10.1**) | `blas_refit` execute body catches a Metal RT-encoder error. | `disable-feature`     |
 | `TlasBuildFailed`          | `tlas_build` execute body catches a Metal RT-encoder error.                                                                                                                | `disable-feature`     |
 | `SwapchainAcquireFailed`   | `present` execute body's drawable acquire returns `nil` past timeout.                                                                                                       | `abort-frame`         |
 | `QueueSubmitFailed`        | Indirect — pass body records succeed but `[MTLCommandQueue commit]` fails. Not a pass-body failure; included here so reviewers see the seam.                               | `abort-frame`         |
 | `CapabilityNotSupported`   | A factory's `requires_caps` exceeds the live `CapabilitySet`. Surfaces from `add_*_pass` at declare time.                                                                  | `lower-tier` (init) / `disable-feature` (post-reload register)  |
 
-The `PassExecuteFailed` row above is the one ABI-add this aggregate
-proposes: **leave it as an [OPEN] question** (§12) until the first
-real-world pass body needs an arm not already covered by
-`MeshletCullDispatchFailed`, `BlasBuildFailed`, `TlasBuildFailed`,
-`QueueSubmitFailed`, or `PipelineCompileFailed`. For MVP the existing
-arms suffice; if the spike that lands the per-pass error mapping
-discovers a gap, the closed sum bumps then.
+The `MeshletCullDispatchFailed` and `BlasBuildFailed` variants above
+carry "(ABI add)" because they are not yet present in the SPEC §5
+`render::Error` enum; they land as a single ABI bump when the
+implementation headers ship (per SPEC §10.1 note). Implementors
+writing pass bodies before that bump must use `QueueSubmitFailed`
+or `PipelineCompileFailed` as the closest existing arm. `GpuFault`
+is also an ABI add (SPEC §10.1); the `present` pass does not surface
+it directly — `platform`'s phase-9 fence wait does; it appears in
+§10.2 for completeness. `ShaderModuleLoadFailed` is similarly ABI add
+(noted in §8.4). A `PassExecuteFailed` generic arm has been proposed
+but is not in the closed sum yet — see §12 open question.
 
 ### 10.2 Refusal vs frame-skip seam
 
@@ -1130,10 +1138,11 @@ Per SPEC §10.2 the recovery ladder for pass-body failures is:
   `disable-feature` (RT/MeshShader path) or `lower-tier` (PSO
   miss). The frame is dropped; the prior frame is re-presented;
   next frame proceeds.
-- **GPU fault** (`GpuFault`) → `hot-reload-restart` per SPEC §10.4.
-  Pass bodies do not detect the fault directly; `platform`'s
-  phase-9 fence wait does. The pass aggregate is rebuilt by the
-  reload mechanism (§8 above).
+- **GPU fault** (`GpuFault` — **ABI add, not yet in SPEC §5 enum;
+  see SPEC §10.1**) → `hot-reload-restart` per SPEC §10.4. Pass
+  bodies do not detect the fault directly; `platform`'s phase-9
+  fence wait does. The pass aggregate is rebuilt by the reload
+  mechanism (§8 above).
 
 ### 10.3 Logging discipline
 
@@ -1192,12 +1201,12 @@ This isolates each pass body from the rest of the render plugin.
 | `present_pass_acquires_drawable_and_signals_fence`           | `present`            | One blit, one `presentDrawable:`, one `PresentFence` signal; main view path.                           |
 | `present_pass_offscreen_skips_drawable`                      | `present`            | Offscreen view → blit-to-imported-texture; no drawable acquire; no fence signal.                        |
 | `present_pass_returns_swapchain_acquire_failed_on_nil`       | `present`            | Mock `next_drawable_handle()` returns invalid handle ⇒ `Result<void>` carries `SwapchainAcquireFailed`.|
-| `pass_concept_satisfied_by_every_factory`                    | (all 11)             | Compile-time `static_assert(passes::RenderPassFactory<T>)` for every factory struct.                   |
-| `pass_execute_does_not_allocate`                             | (all 11)             | Strict-mode trace: zero `ContextTag::render` allocations between execute entry and exit.               |
-| `pass_capability_predicate_evaluated_at_build`               | (all 11)             | Mock `CapabilitySet` with bits cleared causes guarded passes to be absent from the node list.          |
-| `pass_timestamps_paired_at_encoder_boundary`                 | (all 11)             | Every execute opens `PassTimingGuard`; mock `MTLCounterSampleBuffer` observes paired writes.           |
+| `pass_concept_satisfied_by_every_factory`                    | (all 12)             | Compile-time `static_assert(passes::RenderPassFactory<T>)` for every factory struct.                   |
+| `pass_execute_does_not_allocate`                             | (all 12)             | Strict-mode trace: zero `ContextTag::render` allocations between execute entry and exit.               |
+| `pass_capability_predicate_evaluated_at_build`               | (all 12)             | Mock `CapabilitySet` with bits cleared causes guarded passes to be absent from the node list.          |
+| `pass_timestamps_paired_at_encoder_boundary`                 | (all 12)             | Every execute opens `PassTimingGuard`; mock `MTLCounterSampleBuffer` observes paired writes.           |
 | `pass_factory_returns_capability_not_supported_when_required`| `shadow_rt`, `ao_rt` | `HardwareRayTrace` absent + factory declares it required ⇒ `add_rt_pass` returns `CapabilityNotSupported`. |
-| `pass_undeclared_access_caught_in_debug`                     | (all 11)             | Mock encoder records access to a handle not in declared set ⇒ `PassUndeclaredAccess`.                  |
+| `pass_undeclared_access_caught_in_debug`                     | (all 12)             | Mock encoder records access to a handle not in declared set ⇒ `PassUndeclaredAccess`.                  |
 
 ### 11.2 Integration tests (real device, `tests/render/integration/`)
 
@@ -1208,7 +1217,7 @@ having a Metal 4 device.
 
 | Test name                                                       | Scope                    | Asserts                                                                                                |
 |-----------------------------------------------------------------|--------------------------|--------------------------------------------------------------------------------------------------------|
-| `mvp_frame_records_eleven_passes_in_order`                      | end-to-end S1 fixture    | One frame compiles a graph with all eleven pass classes for the main view in §3.1 catalog order.       |
+| `mvp_frame_records_twelve_passes_in_order`                      | end-to-end S1 fixture    | One frame compiles a graph with all twelve pass classes for the main view in §3.1 catalog order.       |
 | `gbuffer_pass_writes_atomic_set_real_device`                    | `gbuffer` real           | Mesh-shader dispatch produces non-zero output in all five MRT attachments; visibility ID matches index.|
 | `gbuffer_fallback_real_device`                                  | `gbuffer` fallback       | Vertex+amplification path produces equivalent outputs on a host without `MeshShaders` (capability mock).|
 | `lighting_pass_combines_gbuffer_and_clusters`                   | `lighting` real          | Output HDR scene color is non-zero when 8 lights illuminate the S1 scene; `LightCluster` consumed.     |
@@ -1224,8 +1233,8 @@ having a Metal 4 device.
 | `pass_aggregate_acceptance_user_story_391`                      | SPEC §11 #391            | BLAS refit precedes TLAS build every frame.                                                            |
 | `pass_aggregate_acceptance_user_story_393`                      | SPEC §11 #393            | `PsoCompileFailed` triggers `lower-tier` recovery; next frame's lighting body reads a coarser PSO.     |
 | `pass_aggregate_acceptance_user_story_396`                      | SPEC §11 #396            | Present pass acquires drawable and signals fence within budget.                                        |
-| `multi_view_fan_out_two_views`                                  | multi-view               | Editor + main view both compile the eleven-pass catalog; per-view resources distinct.                  |
-| `pass_aggregate_hot_reload_catalog_stable`                      | hot-reload               | After `enqueue_hot_reload("glibre.render", ...)`, the next frame's plan declares the same eleven passes.|
+| `multi_view_fan_out_two_views`                                  | multi-view               | Editor + main view both compile the twelve-pass catalog; per-view resources distinct.                  |
+| `pass_aggregate_hot_reload_catalog_stable`                      | hot-reload               | After `enqueue_hot_reload("glibre.render", ...)`, the next frame's plan declares the same twelve passes.|
 
 ### 11.3 Performance microbenchmarks (`tests/render/perf/`)
 
@@ -1233,8 +1242,8 @@ Per SPEC §9.6.2; this aggregate's contribution to the gate.
 
 | Benchmark name                                                       | Asserts                                                                                                |
 |----------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------|
-| `BENCHMARK("pass-factory declare under 8us, S1, p99")`               | Each of the eleven `Factory::declare` calls completes ≤ 8 µs on M1.                                    |
-| `BENCHMARK("eleven-pass register total under 0.09ms, S1, p99")`      | Sum of the eleven calls ≤ 0.09 ms; sums into SPEC §9.3 ceiling (0.10 ms).                              |
+| `BENCHMARK("pass-factory declare under 8us, S1, p99")`               | Each of the twelve `Factory::declare` calls completes ≤ 8 µs on M1.                                    |
+| `BENCHMARK("twelve-pass register total under 0.09ms, S1, p99")`      | Sum of the twelve calls ≤ 0.09 ms; sums into SPEC §9.3 S1 ceiling (0.10 ms).                           |
 | `BENCHMARK("per-pass GPU within slice, S1, p99")`                    | Each pass's `MTLCounterSampleBuffer`-measured GPU slice ≤ its §9.4 ceiling.                             |
 | `BENCHMARK("pass execute zero allocations, strict")`                 | `GLIBRE_ALLOC_STRICT=1`; 600 frames; zero `ContextTag::render` allocations between execute entry/exit. |
 | `BENCHMARK("post chain min/max kernel-count, S1, p99")`              | Empty `RenderSettings` (no post effects) ⇒ post pass has zero dispatches and ≤ 5 µs CPU; full settings ⇒ ten dispatches and ≤ 100 µs CPU. |
@@ -1270,7 +1279,7 @@ user-story leaves run, their E2E `.glibre-trace` files under
   unavailable. Owner: tools / editor design. Resolution gate: when
   the editor's perf HUD lands on a non-MVP host.
 
-- [OPEN] **Catalog extensibility seam.** §3.1 + §7.3 fix the eleven
+- [OPEN] **Catalog extensibility seam.** §3.1 + §7.3 fix the twelve
   pass classes inside `graph/builder.cpp` and assert that
   non-render plugins (vfx, material) cannot register new pass
   classes via `plugin-abi.md`'s `PassDecl` list. The first
@@ -1303,7 +1312,7 @@ user-story leaves run, their E2E `.glibre-trace` files under
 
 - [OPEN] **Compute-queue worker scaling.** §6.2 limits the encoder
   worker pool to one worker per queue (three total). On M1 the
-  compute queue records seven of the eleven pass classes; the
+  compute queue records seven of the twelve pass classes; the
   driver's wait-on-slowest-worker path (SPEC §9.3 row "Per-pass
   `execute()` recording") could become a tail-latency bottleneck if
   per-pass record cost grows post-MVP. Whether to split the compute

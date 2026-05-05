@@ -1588,8 +1588,12 @@ phase 9). Steps in order:
    5. `passes/hzb_build.cpp` — depth-pyramid build from the
       gbuffer's depth output, written to next frame's HZB
       (§4.1.9 invariant 1). Compute queue.
-   6. `passes/shadow_rt.cpp` + `passes/ao_rt.cpp` — RT shadow /
-      AO compute traces consuming the TLAS. Compute queue.
+   6a. `passes/shadow_rt.cpp` — hybrid-RT shadow compute trace
+       consuming the TLAS; outputs per-view denoised shadow-mask.
+       Capability-gated: `HardwareRayTrace` + `RayQuery`. Compute queue.
+   6b. `passes/ao_rt.cpp` — RT-AO compute trace consuming the TLAS;
+       outputs per-view AO buffer. Capability-gated: `HardwareRayTrace`
+       + `RayQuery`. Compute queue.
    7. `passes/lighting.cpp` — deferred lighting compute reading
       gbuffer + `LightCluster` + RT shadow / AO outputs; ray
       query inline for hybrid-RT shadow primary-ray fallback
