@@ -1,6 +1,6 @@
 # Software Development Lifecycle (glibre)
 
-This document defines the SDLC stages used by the `advance-plan`
+This document defines the SDLC stages used by the `go`
 skill. Each stage has: **input**, **what to do**, **deliverable**,
 **closure rule**, and **next stage gate**.
 
@@ -241,11 +241,21 @@ follow-up spike issue closes when its specific concern lands on
 
 1. The user (human reviewer) executes the manual test script from the
    issue body against the editor/runtime.
-2. PASS recorded as a comment on the issue with this exact format:
-   `manual-test status:PASS reviewer:<name> commit:<sha> notes:<…>`.
+2. PASS recorded as a comment on the issue with the schema below.
 3. FAIL recorded analogously triggers an iteration spike.
 
-**Deliverable:** Manual PASS comment.
+**Manual-test comment schema (exact format — single line):**
+
+```
+manual-test status:<PASS|FAIL> reviewer:<name> commit:<sha> notes:<observations or step <N> — observed:<…> expected:<…>>
+```
+
+Field order is fixed. `reviewer:` is the short agent name (e.g.
+`go-qa`) or human handle. `commit:` is the SHA the test
+ran against (`git rev-parse origin/main` after `git fetch`). For
+FAIL, `notes:` MUST start with `step <N> —` then observed-vs-expected.
+
+**Deliverable:** Manual PASS or FAIL comment matching the schema above.
 
 **Closure rule:** user-story issue closes only after the manual PASS
 comment is posted (per the closure checklist in

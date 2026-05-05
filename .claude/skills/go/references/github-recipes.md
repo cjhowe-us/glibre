@@ -1,11 +1,11 @@
 # GitHub Recipes
 
-Operational recipes for the `advance-plan` skill. All commands assume
+Operational recipes for the `go` skill. All commands assume
 `gh auth status` shows logged-in and `cwd = /Users/cjhowe/Code/glibre`.
 
 ---
 
-## Topology — Up to 5 Unblocked Leaves
+## Topology — Up to 2 Unblocked Leaves
 
 GraphQL query for open issues whose `blockedBy` count of OPEN issues
 is 0, filtered to leaf types:
@@ -27,10 +27,10 @@ query($endCursor: String) {
   | select([.blockedBy.nodes[] | select(.state=="OPEN")] | length == 0)
   | select(any(.labels.nodes[].name; . == "type:spike" or . == "type:plan" or . == "type:user-story"))
   | "\(.number)\t\(([.labels.nodes[].name | select(startswith("type:"))][0]))\t\(.title)"' \
-  | head -5
+  | head -2
 ```
 
-Returns up to 5 work-ready leaves, one per line:
+Returns up to 2 work-ready leaves, one per line:
 `<number>\t<type>\t<title>`.
 
 ---
@@ -58,7 +58,7 @@ gh api graphql --paginate -f query='...' \
       $2 == "type:user-story"                { p=13 }
       $2 == "type:plan"                      { p=14 }
       { print p"\t"$0 }' \
-  | sort -n | head -5 | cut -f2-
+  | sort -n | head -2 | cut -f2-
 ```
 
 ---
@@ -99,17 +99,24 @@ gh api -X POST "repos/cjhowe-us/glibre/issues/<TARGET>/dependencies/blocked_by" 
 
 ## Status Comment (full schema)
 
+The double-quoted heredoc body forces bash to expand `$BRANCH`, `$WT`,
+and the `$( … )` substitutions to their resolved values before the
+comment is posted. Never let a literal `$WT` reach GitHub.
+
 ```bash
-gh issue comment <N> --body "agent:<short-name>
+gh issue comment <N> --body "$(cat <<EOF
+agent:<short-name>
 status:done
 issue:#<N>
-branch:<branch>
-worktree:/Users/cjhowe/Code/glibre
+branch:$BRANCH
+worktree:$WT
 host:$(hostname -s)
 cloud:none
-commit:$(git rev-parse HEAD)
+commit:$(git -C "$WT" rev-parse HEAD)
 pr:#<PR_NUM>
-notes:<one-paragraph English summary>"
+notes:<one-paragraph English summary>
+EOF
+)"
 ```
 
 ---

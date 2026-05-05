@@ -39,19 +39,45 @@ INVARIANTS:
 - Conventional Commit PR title.
 - Open PR with `gh pr create`, then `gh pr merge <n> --auto --squash`.
 - Issue stays OPEN. Do not close. Closure happens when PR merges.
-- Status-comment schema:
+- Status-comment schema (post comments via `gh issue comment <N> --body
+  "$(cat <<EOF ... EOF)"` so bash double-quoted heredoc expands $BRANCH
+  and $WT to their resolved absolute values — never post the literal
+  tokens):
     agent:<short-name>
     status:<started|progress|blocked|done>
     issue:#{{ISSUE_NUMBER}}
-    branch:<git-branch>
-    worktree:/Users/cjhowe/Code/glibre
-    host:<run `hostname -s`>
+    branch:$BRANCH                         # resolved: feat/<scope>-<slug> etc.
+    worktree:$WT                           # resolved: absolute path under .claude/worktrees/
+    host:$(hostname -s)
     cloud:none
-    commit:<sha-or-pending>
+    commit:$(git -C "$WT" rev-parse HEAD)  # or "pending" before first commit
     pr:#<n>-or-pending
     notes:<one-paragraph English summary>
 
-WORKING DIRECTORY: /Users/cjhowe/Code/glibre
+WORKING DIRECTORY (per-dispatch git worktree — required for parallel safety):
+Before any code/spec edits, derive the branch name and create an
+isolated worktree so two top-level dispatches running in parallel
+do not collide on the shared /Users/cjhowe/Code/glibre tree:
+
+    # 1. Derive branch name from the issue type + title slug.
+    #    Conventional types: feat / fix / chore / docs / refactor / test / perf.
+    #    Pick the verb that matches the deliverable (per .github/SETUP.md).
+    BRANCH="<verb>/<scope>-<short-slug>"          # e.g. feat/render-hzb-cull
+    #    Slug rule: lowercase, hyphens, ≤ 40 chars, no leading verb noise.
+
+    # 2. Create the worktree off main.
+    WT="/Users/cjhowe/Code/glibre/.claude/worktrees/$(date +%s)-issue-{{ISSUE_NUMBER}}"
+    git -C /Users/cjhowe/Code/glibre fetch origin main
+    git -C /Users/cjhowe/Code/glibre worktree add "$WT" -b "$BRANCH" origin/main
+    cd "$WT"
+
+All work, commits, and `gh pr create` happen from $WT. Do NOT modify
+the main /Users/cjhowe/Code/glibre tree directly. After the PR
+merges, the harness reaps the worktree.
+
+Both $BRANCH and $WT must reach the status comment as their resolved
+values, not as literal `$BRANCH`/`$WT` strings — the schema example
+above uses heredoc bash expansion to enforce this.
 ```
 
 ---
@@ -345,6 +371,67 @@ PROCESS:
 The CI run will fail until implementation lands — that is correct
 red. Do NOT close the story issue. QA stage closes it after manual
 PASS.
+```
+
+---
+
+## QA — type:user-story (manual execution)
+
+```
+{{COMMON_HEADER}}
+
+EXTRA READS:
+- The story issue body (Manual Test Script section, Gherkin, persona)
+- /Users/cjhowe/Code/glibre/.claude/skills/go/references/sdlc.md
+  (§ QA stage definition + closure rule)
+
+PRE-FLIGHT (do this BEFORE loading any browser MCP tool):
+- Confirm the story's E2E `.glibre-trace` is green on main:
+    gh issue view {{ISSUE_NUMBER}} --json body --jq '.body' \
+      | grep -oE 'tests/[^[:space:]`)>]*\.glibre-trace' | head -1
+    # The regex strips backticks/parens/brackets that markdown formatting
+    # may wrap around the path. If multiple traces are listed, use head -1
+    # (the first one is canonical per user-story.yml convention).
+    gh pr list --search "<trace-path> is:merged" --state merged \
+      --json mergedAt --jq 'length'
+- If the trace is not yet merged or its CI run is not green, post
+  status:blocked with the failing check name and stop. Do NOT
+  proceed to manual execution.
+
+MCP LOADING (REQUIRED before any Chrome MCP tool call):
+ToolSearch select:mcp__claude-in-chrome__tabs_context_mcp,
+  mcp__claude-in-chrome__navigate,
+  mcp__claude-in-chrome__get_page_text,
+  mcp__claude-in-chrome__javascript_tool,
+  mcp__claude-in-chrome__computer,
+  mcp__claude-in-chrome__form_input,
+  mcp__claude-in-chrome__read_page
+
+(Use Playwright MCP equivalents instead if the story explicitly
+calls for headless automation rather than human-driven Chrome.)
+
+GOAL: execute the Manual Test Script in the issue body verbatim
+against the running editor / runtime, then record PASS or FAIL.
+
+PROCESS:
+1. Launch the editor / runtime fresh.
+2. Walk every numbered step in the issue body's "Manual Test Script".
+   Do not skip steps. Capture screenshots on any unexpected behavior.
+3. Post TWO comments on issue #{{ISSUE_NUMBER}}:
+   (a) Status comment per AGENTS.md schema, with
+       agent:go-qa
+   (b) The closure-blocker line per references/sdlc.md § QA:
+         manual-test status:PASS reviewer:go-qa commit:<sha> notes:<observations>
+       or
+         manual-test status:FAIL reviewer:go-qa commit:<sha> notes:step <N> — observed:<…> expected:<…>
+
+ON FAIL: open a `[SPIKE] iterate-{{CONTEXT_NAME}}-<topic>` issue via
+`gh issue create --body-file …` using `.github/ISSUE_TEMPLATE/spike.yml`
+structure, parented to the user-story's epic. Body captures: failing
+step number, observed-vs-expected, screenshots, suspected component.
+
+DO NOT close the user-story issue. Closure waits for the human
+review checklist sign-off.
 ```
 
 ---

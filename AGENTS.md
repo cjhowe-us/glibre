@@ -47,7 +47,9 @@ disabled by `.github/ISSUE_TEMPLATE/config.yml`.
 
 ## Concurrency
 
-- **≤ 5 concurrent top-level plan-executor subagents** at any time.
+- **≤ 2 concurrent top-level plan-executor subagents** at any time.
+  (Lowered from 5 to 2 so each top-level slot has headroom for
+  high-effort opus runs without thrashing the harness.)
 - Each top-level executor MAY spawn its own child subagents in parallel
   (no cap on the second tier; budget governed by sensible saturation).
 - Top-level executors are launched in a single message with multiple
