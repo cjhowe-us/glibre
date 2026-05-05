@@ -127,7 +127,7 @@ glibre-types.dylib  (one per process; SONAME = libglibre-types.<MAJ>.dylib)
 │   ├── kReflectionFields[Σ]                (per-type tag-sorted arrays)
 │   ├── kReflectionBlobs[N]                 (one per type; null in shipping)
 │   ├── kFqnInternTable[N]                  (string_view storage, §3.4 inv. 3)
-│   └── kManifestBlob_<plugin>[K_p]         (per-discovered-plugin §3.8)
+│   └── kManifestBlob_<plugin>[K_p]         (per-discovered-plugin §3.8 + §3.9)
 ├── .bss
 │   └── kPerFqnMigrationTable[N]            (filled at static-init, §3.5)
 └── exports (otool -l output is exactly the list in §4.3)
@@ -148,7 +148,30 @@ order:
 1. **`data/runtime/src/*.cpp`** — hand-written runtime translation
    units (`schema_registry.cpp`, `envelope.cpp`,
    `migration_dispatcher.cpp`, `register_migration.cpp`,
-   `arena.cpp`, `abi_hash.cpp`, `plugin_manifest.cpp`; SPEC §6.1.2).
+   `arena.cpp`, `abi_hash.cpp`, `plugin_manifest.cpp`,
+   `static_init_check.cpp`; SPEC §6.1.2).
+
+   TU-to-aggregate mapping — which SPEC aggregate each TU implements and
+   its single reason to change:
+
+   | TU                          | SPEC aggregate         | Reason to change                                                  | Changes with        |
+   |-----------------------------|------------------------|-------------------------------------------------------------------|---------------------|
+   | `schema_registry.cpp`       | SchemaRegistry (§4.5)  | Per-entry record shape — fields added/removed from `RegistryEntry`| §4.3 / §4.5 / #730 |
+   | `envelope.cpp`              | SchemaRegistry (§4.5)  | `Envelope<T>` call-site protocol — out-pointer layout or error shape | §4.1 / §4.3      |
+   | `migration_dispatcher.cpp`  | Middleman + MigrationChain (§4.3 / §4.7) | Dispatcher consumer — chains applied to `RegistryEntry::migrations`; behavioral rules belong to #736; arena-recycling protocol and chain failure isolation governed by §4.7 | #736 |
+   | `register_migration.cpp`    | Middleman (§4.3)       | `.bss` storage + `glibre_types_register_migration` C-ABI entry point signature | §4.3 / #736 |
+   | `arena.cpp`                 | SchemaRegistry (§4.5)  | Per-call scratch allocator shape used by Envelope<T> during deserialization | §4.5         |
+   | `abi_hash.cpp`              | Middleman (§4.3)       | Dylib binary contract — ABI hash trampoline signature or storage form | §4.4 / §6.4      |
+   | `plugin_manifest.cpp`       | Middleman (§4.3)       | Plugin discovery set — how manifest blobs are placed in the dylib | §6.5 / §3.9        |
+   | `static_init_check.cpp`     | Middleman (§4.3)       | Invariant assertions — Phase C validator rules derived from §4.5  | §3.5 / §4.5 / §4.7 |
+
+   An implementer touching §4.3 changes (dylib binary contract, ABI hash,
+   symbol-export set, manifest placement) edits `abi_hash.cpp`,
+   `register_migration.cpp`, or `plugin_manifest.cpp`. An implementer
+   rotating the SchemaRegistry lookup design (#730) edits
+   `schema_registry.cpp`. An implementer acting on #736's behavioral
+   specification edits `migration_dispatcher.cpp` and possibly
+   `register_migration.cpp`. No TU spans more than one aggregate.
 2. **`data/codegen-output/src/<ctx>/<Type>.cpp`** — per-type
    serializer / deserializer trampolines emitted by `glibre-foryc`
    (SPEC §6.2 stage 4 step 1).
@@ -213,6 +236,7 @@ audited set):
 ```text
 # C-ABI surface (extern "C")
 _glibre_types_abi_hash                      (T)
+_glibre_types_last_register_error           (T)   # TLS getter — §4.1 TLS surface; §4.3
 _glibre_types_register_migration            (T)
 _glibre_types_serialize_<fqn>               (T)   # one per registered FQN
 _glibre_types_deserialize_<fqn>             (T)   # one per registered FQN
@@ -222,6 +246,17 @@ _ZN6glibre5types14SchemaRegistry8instanceEv (T)   # SchemaRegistry::instance
 _ZNK6glibre5types14SchemaRegistry6lookupENS0_8SchemaIdE (T)
 _ZNK6glibre5types14SchemaRegistry7entriesEv (T)
 ```
+
+`_glibre_types_last_register_error` is included in the exported set
+because the `GLIBRE_REGISTER_MIGRATION` macro in generated
+`<Type>_migrations.hpp` headers resolves it at link time across
+different translation units (the macro lives in TUs that belong to
+owning contexts, not to the middleman itself; they must call through
+the dylib boundary). If this symbol were internal-linkage only, the
+macro's failure-path read would fail to link in owning-context TUs.
+The CI test `middleman.exported_symbol_set_audit` (§11.1) must
+include this symbol in `EXPECTED_EXPORTS.txt` so that an
+accidentally-hidden `last_register_error` fails the PR.
 
 The per-FQN serialize / deserialize symbols are an *additive* set:
 adding a new schema appends two new symbols (one for each direction)
@@ -340,19 +375,32 @@ After this phase the registry's `kRegistryCount` entries are
 addressable, FQN-sorted, with all function-pointer slots populated and
 all `migrations` spans empty.
 
-**Phase B — Migration registration.** Each owning context's
-translation unit (e.g.
-`plugins/render/src/transform_migrations.cpp`) includes the
-codegen-emitted `<Type>_migrations.hpp` companion header, which
-expands `GLIBRE_REGISTER_MIGRATION(<Type>, <N>, <N+1>, <fn>)` into a
-call to `glibre_types_register_migration` that runs at the owning
-context's static-init time. The middleman's
-`register_migration.cpp` body collects these calls into the per-FQN
-`kPerFqnMigrationTable[N]` `.bss` storage; once all calls have run
-(end of `__cxx_global_var_init`), the runtime patches each
-`RegistryEntry::migrations` span to point at its FQN's slice of that
-storage. This is the *only* mutation of the registry the middleman
+**Phase B — Migration registration.**
+
+*(a) Middleman's contribution — storage slots and C-ABI entry point.*
+The middleman supplies the `.bss` storage (`kPerFqnMigrationTable[N]`,
+one slot per registered FQN) and the single exported C-ABI entry point
+`glibre_types_register_migration` (§4.3) into which owning contexts
+call at static-init time. The middleman's `register_migration.cpp` body
+collects incoming calls into `kPerFqnMigrationTable[N]`; once all
+calls have run (end of `__cxx_global_var_init`), the runtime patches
+each `RegistryEntry::migrations` span to point at its FQN's slice of
+that storage. This is the *only* mutation of the registry the middleman
 permits, and it terminates before `main()` begins (SPEC §4.3 inv. 5).
+
+*(b) Registration protocol — behavioral rules belong to #736.*
+The behavioral rules that govern what constitutes a valid
+`glibre_types_register_migration` call — validation of `(from, to)`
+version pairs, duplicate-registration detection, ordering constraints,
+partial-chain handling, and the error path via `glibre_types_last_register_error` — are the
+`MigrationDispatcher` design's responsibility and are spec'd separately
+in #736. This document purposely does not enumerate those rules: if
+#736 changes the validation protocol (arena-reset semantics between
+steps, handling of partial chains, or error-payload fields), only §3.5
+(b) and `migration_dispatcher.cpp` / `register_migration.cpp` change,
+not the descriptor-table layout documented in (a). The SRP boundary is
+here: the middleman owns the storage and the entry point; the
+dispatcher design (#736) owns what is and is not a valid call.
 
 **Phase C — Static-init validator.** A single `__attribute__((constructor(65535)))`
 function (`data/runtime/src/static_init_check.cpp`) runs after every
@@ -492,6 +540,59 @@ The middleman's view: one process, one dylib, one descriptor table,
 one FQN keyspace. Partitioning is the loader's concern and lives
 upstream of any descriptor-table consumer.
 
+### 3.9 Manifest-blob placement — two copies and their reconciliation
+
+`kManifestBlob_<plugin>[K_p]` (shown in §3.1) and the identical blob
+in the plugin's own `.rodata` are **two copies of the same byte
+sequence**. This is intentional, not an oversight. The two-copy
+design follows directly from the separate responsibilities of
+`glibre-foryc` and the plugin-abi decision record
+(`reviews/decisions/plugin-abi.md` §"Plugin file shape" step 3 +
+§"Consequences" bullet 1 + SPEC §6.5):
+
+1. **Copy A — the plugin's own `manifest.cpp` (in the plugin's dylib).** 
+   `glibre-foryc` walks `plugins/*/plugin.fory` and emits one
+   `manifest.cpp` per discovered plugin. That TU is compiled into the
+   **plugin's** dylib (not the middleman). It exports
+   `glibre_plugin_manifest` / `glibre_plugin_manifest_size` /
+   `glibre_plugin_abi_hash` — the three C symbols the loader reads
+   *before any plugin C++ code runs*
+   (`reviews/decisions/plugin-abi.md` §"Loader Sequence" step 3).
+   This copy lets the loader deserialize the manifest from the plugin's
+   own address space using only `dlsym` + a raw byte-span read.
+
+2. **Copy B — `kManifestBlob_<plugin>` in the middleman's `.rodata`.**
+   The same `glibre-foryc` invocation also emits
+   `data/codegen-output/src/_manifest_<plugin>.cpp` TUs that compile
+   into the **middleman** (SPEC §6.5; SPEC §6.2 stage 4 step 5). This
+   copy gives the middleman's `Envelope<PluginManifest>` a pre-baked
+   blob it can round-trip as a sanity baseline: the loader can compare
+   the blob it read from the plugin's own `.rodata` (Copy A) against
+   the blob compiled into the middleman (Copy B) to detect a mismatch
+   that would indicate the plugin's `manifest.cpp` was generated by a
+   different `glibre-foryc` invocation than the middleman's. In practice
+   the ABI-hash gate (§3.6) already catches this case, so the middleman's
+   Copy B is primarily a determinism artifact and a cross-check baseline
+   for the codegen pipeline; it is not an authoritative runtime oracle.
+
+**Reconciliation rule (normative):**
+
+- Copy A (plugin's dylib) is the *loader's* authoritative read. The
+  loader calls `dlsym` on Copy A's exports and deserializes from there.
+- Copy B (middleman's `.rodata`) is a *codegen cross-check* only. If
+  the byte sequences disagree, the codegen pipeline is corrupt (the
+  middleman and the plugin were not produced from the same `plugin.fory`
+  input); the `abi_hash` gate catches this before the loader ever reads
+  Copy A.
+- Adding a new plugin appends one new `_manifest_<plugin>.cpp` to the
+  middleman's source list, triggering a middleman relink. This is the
+  expected consequence of the codegen-driven design (SPEC §6.5): the
+  middleman must know every plugin's FQN set at configure time because
+  `glibre-foryc` walks `plugins/*/plugin.fory` at that point. The dylib's
+  compile-time knowledge of the plugin set is not a circular dependency —
+  it is the intended build-graph topology where the codegen tool is the
+  single driver of both the middleman and the per-plugin manifests.
+
 ## 4. Public Surface
 
 ### 4.1 ABI shape — `extern "C"` only
@@ -506,15 +607,18 @@ exported boundary, and lift back into `std::expected` inside thin
 wrapper templates that resolve to those `extern "C"` calls at link
 time (SPEC §4.3 inv. 4 verbatim).
 
-The chosen ABI shape — the *single* shape every exported function uses:
+The chosen ABI shape — two distinct plain-enum types, chosen per the
+number of outcomes each call admits:
 
 ```cpp
 // data/runtime/include/glibre/types/abi_shape.hpp
 
 namespace glibre::types {
 
-// Plain-enum return for every C-ABI export. Tag values match
-// data::ErrorTag (SPEC §10.1) on the failure path.
+// Nine-arm plain-enum return for serialize/deserialize trampolines.
+// Tag values match data::ErrorTag (SPEC §10.1) on the failure path.
+// Used by glibre_types_serialize_<fqn> and
+// glibre_types_deserialize_<fqn> which can surface multiple error arms.
 enum class CStatus : std::uint16_t {
     Ok                       = 0,
     AbiHashMismatch          = 1,   // mirrors data::ErrorTag::AbiHashMismatch
@@ -528,10 +632,31 @@ enum class CStatus : std::uint16_t {
     // (4 / ReservedTagViolation does not cross — codegen-time only.)
 };
 
+// Two-arm plain-enum return for glibre_types_register_migration.
+// SPEC §5 migration.hpp (data::RegisterStatus) specifies exactly two
+// outcomes for registration: success or duplicate FQN conflict.
+// The narrower type is intentional: register_migration cannot surface
+// DeserializeError, MigrationCycle, EnvelopeTruncated, etc. — those
+// arise only in the serialize/deserialize trampolines. Using the
+// full nine-arm CStatus here would mislead implementers about which
+// arms are reachable and would diverge from the normative SPEC §5
+// declaration (data::RegisterStatus). The failure payload (when arm
+// SchemaRegistryConflict fires) is surfaced via TLS
+// rather than an out-pointer: register_migration has no useful
+// per-call out-pointer slot (it registers an entry, it does not
+// produce a value), so the TLS getter glibre_types_last_register_error()
+// is the correct mechanism. This asymmetry between RegisterStatus and
+// CStatus is therefore load-bearing and must not be collapsed.
+enum class RegisterStatus : std::uint16_t {
+    Ok                       = 0,
+    SchemaRegistryConflict   = static_cast<std::uint16_t>(
+        data::ErrorTag::SchemaRegistryConflict),  // 5 — duplicate (from,to) or FQN unknown
+};
+
 }  // namespace glibre::types
 ```
 
-Two consequences:
+Three consequences:
 
 1. **Plain-enum return, payload via out-pointer.** A C-ABI call that
    needs to surface a `data::Error` writes the failure-arm payload
@@ -540,21 +665,35 @@ Two consequences:
    (`Envelope<T>::deserialize` etc.) checks the return code and
    constructs a `std::expected<T, data::Error>` by reading the
    out-pointer on the failure path (SPEC §5 §envelope.hpp).
-2. **TLS-getter for ambient context.** A handful of C-ABI calls
-   (notably `glibre_types_register_migration`) carry no useful
-   per-call out-pointer slot but still need to surface a payload on
-   refusal. Those calls write into a thread-local `data::Error`
+2. **TLS-getter for ambient context.** `glibre_types_register_migration`
+   uses `RegisterStatus` (two-arm) and carries no per-call out-pointer
+   slot. On the failure path it writes into a thread-local `data::Error`
    buffer reachable through `glibre_types_last_register_error()`
    (`extern "C"`, returns a const-pointer into the calling thread's
    TLS). The C++ wrapper macro reads it on the failure path. The
    TLS is reset at every successful call so a stale failure cannot
-   leak.
+   leak. This design follows SPEC §5 `migration.hpp` directly: the
+   normative C++ `data::RegisterStatus` has exactly two enumerators
+   (`Ok = 0`, `SchemaRegistryConflict = 5`), and `glibre_types_RegisterStatus`
+   is its C-ABI projection with the same values.
+3. **Two-arm narrowness is intentional.** `glibre_types_register_migration`
+   is called only at static-init (Phase B, §3.5). The only ways it
+   fails are: the FQN is not in the live registry (`SchemaUnknown`,
+   which the design maps to `SchemaRegistryConflict` at the C-ABI
+   surface — both indicate the call cannot be honored) or the
+   `(from, to)` pair is already registered (`SchemaRegistryConflict`
+   proper). All other error arms (`MigrationCycle`, etc.) are detected
+   by Phase C's validator *after* all registrations complete, not during
+   individual calls. Using a nine-arm `CStatus` here would make the
+   call's contract misleadingly broad.
 
 The §4.1 rule, restated: **`std::expected` does not cross the C-ABI
-boundary**. The middleman's exported set returns plain-enum
-`CStatus`; `std::expected` is reconstructed in headers, on the caller
-side. Two builds that disagree on `std::expected`'s layout still
-agree on the wire because the wire is the plain enum.
+boundary**. `glibre_types_register_migration` returns two-arm
+`RegisterStatus`; `glibre_types_serialize_<fqn>` and
+`glibre_types_deserialize_<fqn>` return nine-arm `CStatus`;
+`std::expected` is reconstructed in headers, on the caller side. Two
+builds that disagree on `std::expected`'s layout still agree on the
+wire because the wire is the plain enum.
 
 ### 4.2 Public C++ surface
 
@@ -609,6 +748,33 @@ no `register_*`, no `add_*`. Migration registration runs through the
 only from `GLIBRE_REGISTER_MIGRATION(...)` macros at static-init
 (§3.5 phase B), never at runtime.
 
+**Normative: `RegistryEntry::serialize` and `::deserialize` are
+internal-only implementation slots.** Although `RegistryEntry` is
+accessible from outside the dylib (via `SchemaRegistry::lookup()` and
+`entries()`), its `serialize` and `deserialize` fields are C++ function
+pointers whose return types contain `std::expected<…, data::Error>` and
+`std::expected<void, data::Error>`. These types do not have a stable
+C-ABI layout across libc++ versions and must never be called directly
+across a dylib boundary (§4.1 rule). These fields are implementation
+slots consumed exclusively within the dylib by:
+
+- the `Envelope<T>` specialization trampolines (codegen-emitted, live
+  inside `glibre-types.dylib`); and
+- the `MigrationDispatcher` (TU-private; resolves them at link time
+  within the same dylib).
+
+**External callers — plugin code and host binaries — MUST use
+`Envelope<T>::serialize` / `Envelope<T>::deserialize` exclusively.**
+Direct invocation of `entry->serialize(…)` or `entry->deserialize(…)`
+from a plugin or host-binary TU is undefined behavior per §4.1 (C++
+function pointer with `std::expected` return crosses the dylib seam).
+Code review and the exported-symbol-set CI test (§3.3, §11.1) guard
+the C-ABI surface; nothing in the public headers exposes a path by
+which an external caller can call these slots without going through the
+`Envelope<T>` wrapper. If a future refactor needs to expose the raw
+function pointers externally, that requires a new C-ABI trampoline pair
+(SPEC §4.3 inv. 4) and a SPEC §4.3 / §4.4 hash change.
+
 ### 4.3 Public ABI surface (extern "C")
 
 The complete exported `extern "C"` set, in alphabetical order. Every
@@ -628,12 +794,16 @@ extern "C" {
 const char* glibre_types_abi_hash(void) noexcept;
 
 // 2. Migration registration. Called by GLIBRE_REGISTER_MIGRATION at
-//    each owning context's static-init time. Returns Ok on success,
-//    SchemaRegistryConflict on duplicate (from, to) for the same FQN,
-//    SchemaUnknown if the FQN is not in the live registry. On the
-//    failure path, write a data::Error payload into the calling
-//    thread's TLS reachable via glibre_types_last_register_error().
-glibre_types_CStatus glibre_types_register_migration(
+//    each owning context's static-init time. Returns Ok on success;
+//    SchemaRegistryConflict on duplicate (from, to) for the same FQN
+//    or if the FQN is not in the live registry. On the failure path,
+//    writes a data::Error payload into the calling thread's TLS
+//    reachable via glibre_types_last_register_error().
+//    Return type is two-arm glibre_types_RegisterStatus (not the
+//    nine-arm CStatus used by serialize/deserialize) — the narrower
+//    type matches SPEC §5 data::RegisterStatus and signals to
+//    implementers that only two outcomes are possible. See §4.1.
+glibre_types_RegisterStatus glibre_types_register_migration(
     glibre_types_SchemaId schema,           // borrowed string_view
     glibre_types_MigrationEntry entry) noexcept;
 
@@ -668,7 +838,7 @@ const glibre_types_data_Error* glibre_types_last_register_error(void) noexcept;
 ```
 
 The header `glibre/types/c_abi.hpp` declares C-shaped projections of
-`SchemaId`, `MigrationEntry`, `data::Error`, and the `CStatus` enum,
+`SchemaId`, `MigrationEntry`, `data::Error`, and the `CStatus` / `RegisterStatus` enums,
 all of which are POD aggregates so the C-ABI boundary stays free of
 non-trivial types. The C++ public surface in §4.2 wraps these with
 typed templates that resolve to the matching `extern "C"` trampoline
@@ -836,10 +1006,27 @@ over the validated `Schema` set per SPEC §6.4 (re-stated in
 §3.7 above). Inputs:
 
 1. For each `Schema s`, `schema_source_hash(s) = blake3(canonicalize(s))`
-   where `canonicalize` is the parsed-form rule of SPEC §7.3.
-2. The 32-byte digests sorted by FQN byte order (SPEC §4.4 inv. 1).
-3. `blake3(concat(sorted_digests))` over the no-separator
-   concatenation (SPEC §4.4 inv. 1).
+   where `canonicalize` is the parsed-form rule of SPEC §7.3. The
+   output is a 32-byte digest.
+2. Form a per-schema entry string:
+   `fqn_utf8(s) || ":" || version_le(s) || ":" || schema_source_hash(s)`
+   where `version_le` is the declared version as 4 bytes little-endian,
+   and `schema_source_hash` is the raw 32-byte Blake3 digest.
+   Sort these entry strings by FQN in canonical Unicode code-point order
+   (SPEC §4.4 inv. 1).
+3. Join the sorted entry strings with a single LF byte (`\n`) between
+   each adjacent pair; no trailing newline. This LF-separated
+   concatenation is the outer blake3 input
+   (`blake3( join("\n", sorted_entries) )` per SPEC §4.4 inv. 1 and
+   `reviews/decisions/plugin-abi.md` §"ABI Hash Function" rule 1).
+   **Rationale:** LF separation is the normative rule established by
+   two independent decision sources (SPEC §4.4 inv. 1 and plugin-abi.md
+   §"ABI Hash Function"). An earlier draft of §6.4 in the SPEC described
+   "no separators"; that description was incorrect and has been corrected
+   in SPEC §6.4 (aligned in this PR). The separator is not needed for
+   fixed-width fields in isolation, but the entry strings are
+   variable-length (FQN is unbounded), making LF separation necessary
+   for unambiguous decoding and required by the normative sources.
 4. Hex-encode lowercase, 64 chars + NUL ⇒ the embedded literal.
 
 Inputs that are **not** in the hash (intentionally): build-host
@@ -1147,6 +1334,7 @@ unit tests:
 | `middleman.static_init_validator_aborts_on_cycle`  | §3.5 Phase C / `MigrationCycle`                 | Death-test: link a fixture middleman with chain `[(1→2),(2→1)]`; assert abort. |
 | `middleman.register_migration_records_failure_in_tls` | §4.1 TLS surface                             | Call `glibre_types_register_migration` with duplicate `(from, to)`; assert `glibre_types_last_register_error()` returns the `SchemaRegistryConflict` payload on the calling thread. |
 | `middleman.register_migration_resets_tls_on_success` | §4.1 TLS surface                              | After a failed call, a successful call resets the TLS to a default `data::Error`. |
+| `middleman.validator_priority_uniqueness`            | §3.5 Phase C / §12 open question 5            | Build-system check (via `nm --just-symbols` or linker map) that asserts only `static_init_check.cpp` contributes a constructor section at priority 65535 in the dylib. Converts the §12 open question from a documentation note into an enforceable invariant: if any other TU in the dylib acquires `__attribute__((constructor(65535)))`, the check fails the PR before the ordering hazard can silently arise. |
 
 ### 11.2 Integration tests (Catch2, `tests/data/integration/`)
 

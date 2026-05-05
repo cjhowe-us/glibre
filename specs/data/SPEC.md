@@ -274,7 +274,8 @@ live in their owning contexts.
 2. Exported C entry points are limited to:
    `glibre_types_abi_hash`, `glibre_types_serialize_<fqn>`,
    `glibre_types_deserialize_<fqn>`,
-   `glibre_types_register_migration_<fqn>`. Their signatures are stable
+   `glibre_types_register_migration`,
+   `glibre_types_last_register_error`. Their signatures are stable
    across patch releases; adding a new `<fqn>` is additive and does not
    bump SONAME.
 3. SONAME bumps only on ABI-breaking schema changes — those that violate
@@ -1050,6 +1051,8 @@ data/runtime/
                              # returns the codegen-embedded constant
     plugin_manifest.cpp      # PluginManifest deserialize helpers
                              # consumed by the core plugin loader
+    static_init_check.cpp    # Phase C invariant assertions (§4.3 inv. 5,
+                             # §4.5, §4.7); constructor priority 65535
   CMakeLists.txt             # contributes to the glibre-types target
   tests/                     # Catch2 unit tests for dispatcher,
                              # registry, envelope, arena
@@ -1259,11 +1262,20 @@ set produced by stage 3 of §6.2 and produces the
    `schema_source_hash(s) = blake3(canonicalize(s))` where
    `canonicalize` is the parsed-form canonicalization defined in
    §7.3 (§4.4 inv. 2). The output is a 32-byte digest.
-2. Sort the resulting digests by the byte order of each `Schema`'s
-   `FQN` (§4.4 inv. 1).
-3. Concatenate the sorted digests with no separators (each digest
-   is fixed-width, so the boundary is unambiguous).
-4. Compute `blake3(concatenation)` — the resulting 32-byte digest is
+2. Form a per-schema entry string: `fqn_utf8(s) || ":" || version_le(s)
+   || ":" || schema_source_hash(s)` where `version_le` is the declared
+   version as 4 bytes little-endian and `schema_source_hash` is the
+   raw 32-byte Blake3 digest from step 1. Sort these entry
+   strings by the byte order of each `Schema`'s `FQN` (§4.4 inv. 1).
+3. Join the sorted entry strings with a single LF byte (`\n`) between
+   each adjacent pair; no trailing newline. This is the normative rule
+   from §4.4 inv. 1 and `reviews/decisions/plugin-abi.md` §"ABI Hash
+   Function" rule 1. (An earlier draft of this section said "no
+   separators"; that was erroneous — the entry strings are
+   variable-length because FQN is unbounded, making LF separation
+   necessary for unambiguous decoding. The invariant in §4.4 and
+   plugin-abi.md is authoritative.)
+4. Compute `blake3(joined_string)` — the resulting 32-byte digest is
    the canonical `AbiHash`.
 5. Hex-encode the digest (lowercase, 64 characters) and embed it as
    a `constexpr` `const char*` string literal in
@@ -1613,7 +1625,10 @@ schema glibre.data.AbiHashManifest {
 
 - `abi_hash_hex` is a 64-character lowercase hex Blake3-256 string
   (§4.4 inv. 1) computed exactly as
-  `blake3( concat( sort_by_fqn( source_hash(s) for s in entries ) ) )`.
+  `blake3( join( "\n", sort_by_fqn( { fqn_utf8(s) || ":" || version_le(s) || ":" || schema_source_hash(s) : s ∈ entries } ) ) )`;
+  the 32-byte digest is then hex-encoded to produce the 64-char string
+  stored in this field. Entry strings use the same LF separator and
+  no trailing newline as §4.4 inv. 1 specifies.
 - `foryc_version` is the `glibre-foryc` SemVer that produced this
   manifest. It exists for diagnostic reproducibility — two builds
   with byte-identical entries but different `foryc_version` must
