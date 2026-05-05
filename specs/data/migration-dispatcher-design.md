@@ -382,29 +382,36 @@ declares.
 #include <glibre/error.hpp>
 #include <glibre/types/identity.hpp>
 #include <glibre/types/migration.hpp>      // MigrationEntry, Arena
-#include <glibre/types/registry.hpp>       // RegistryEntry, SchemaRegistry
 
 namespace glibre::types {
 
-// Walk the per-FQN MigrationChain stored in `entry` from
-// `src_version` up to `entry.version` (the current version), invoking
-// each codegen-emitted single-step MigrationFn against the arena and
-// the caller-supplied destination cell.
+// Walk the per-FQN migration chain from `src_version` up to
+// `current_version`, invoking each codegen-emitted single-step
+// MigrationFn against the arena and the caller-supplied destination
+// cell.
+//
+// Only the fields actually consumed are passed: the registry's
+// recorded current version, the chain span, and the schema identifier
+// for error payload population.  The caller (barrier sweep) extracts
+// these from RegistryEntry before calling; this keeps the internal
+// seam narrow and simplifies unit-test fixture construction (no full
+// RegistryEntry needed).
 //
 // Preconditions (asserted in debug; UB in release if violated — the
 // dispatcher trusts the registry and the barrier):
-//   - `entry` is non-null and points into the live SchemaRegistry.
+//   - `chain` is the validated (§3.5) MigrationEntry slice for
+//     `schema`.
 //   - `src_payload` points to a fully-initialised V<src_version>
-//     value sized per `entry`'s recorded V<src_version>::sizeof.
+//     value sized per the schema's recorded V<src_version>::sizeof.
 //   - `dst_payload` points to a destination cell sized per
 //     `sizeof(V<current_version>)` and aligned per
 //     `alignof(V<current_version>)`.
 //   - `arena` has at least `2 * max_over_chain(sizeof(Vk)) +
 //     max_over_chain(scratch_step_k)` bytes free (caller-sized).
-//   - `src_version >= 1` and `src_version <= entry.version`.
+//   - `src_version >= 1` and `src_version <= current_version`.
 //
 // Postconditions on success:
-//   - `*dst_payload` holds a fully-initialised V<entry.version> value.
+//   - `*dst_payload` holds a fully-initialised V<current_version> value.
 //   - The arena is reset to its pre-call high-water mark.
 //   - `src_payload` is unread after return (caller may free / reuse).
 //
@@ -424,11 +431,13 @@ namespace glibre::types {
 //   - data::Error::MigrationCycle (impossible at runtime; static-init
 //     arm only — see §3.5)
 [[nodiscard]] auto dispatch_migration(
-    const RegistryEntry& entry,
-    SchemaVersion        src_version,
-    const void*          src_payload,
-    void*                dst_payload,
-    Arena&               arena
+    SchemaId                          schema,
+    SchemaVersion                     current_version,
+    eastl::span<const MigrationEntry> chain,
+    SchemaVersion                     src_version,
+    const void*                       src_payload,
+    void*                             dst_payload,
+    Arena&                            arena
 ) noexcept -> std::expected<void, ::glibre::Error>;
 
 // Invoked exactly once per FQN at middleman static-init from inside
