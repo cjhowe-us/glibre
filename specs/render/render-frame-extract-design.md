@@ -778,7 +778,7 @@ at phase 8. For the render-frame-extract aggregate, drain does:
 
 1. Walk the slot pool. For each slot in `READ` role, read
    `pin_count_` atomically (no blocking wait — the driver thread must
-   not spin or sleep; see `reviews/decisions/hot-reload-protocol.md §Drain`). If any slot carries a
+   not spin or sleep; see `reviews/decisions/hot-reload-protocol.md §"Step 1 — Drain"`). If any slot carries a
    non-zero pin count, drain **returns immediately** with
    `core::Error::HotReloadRefused` (the one-frame deferral path
    described in §8.5 below). The loader's `pending_reloads` counter is
