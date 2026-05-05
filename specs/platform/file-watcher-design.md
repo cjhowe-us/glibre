@@ -110,7 +110,7 @@ sections below.
 
 | Harmonius clause                                                                                  | Glibre disposition (MVP)                                                                                                                                                                                                                                                       |
 |---------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **R-14.6.5** monitor for create / modify / delete / rename via platform-native APIs; debounce; recursive | **Covered.** SPEC §4.3 inv #2 (debounce + dedup) + §4.3 inv #3 (atomic rename) + §6.4 (FSEvents-via-C-API on macOS). Recursive subscription per `kFSEventStreamCreateFlagWatchRoot` + `kFSEventStreamEventIdSinceNow`. §3.4, §3.5, §3.6 below.                                |
+| **R-14.6.5** monitor for create / modify / delete / rename via platform-native APIs; debounce; recursive | **Covered.** SPEC §4.3 inv #2 (debounce + dedup) + §4.3 inv #3 (atomic rename) + §6.4 (FSEvents-via-C-API on macOS). Recursive subscription per `kFSEventStreamCreateFlagWatchRoot` + `kFSEventStreamEventIdSinceNow`. §3.4, §3.5, §3.7 below.                                |
 | **R-14.6.6** content-hash dedup with BLAKE3                                                       | **Covered, scoped.** BLAKE3 is *internal* to the watcher's I/O thread; it never crosses the public surface. The hash collapses metadata-only events (`FSEventStreamEventFlagItemModified` without content change) within one debounce window per §4.3 inv #2. §3.7 below.       |
 | **R-14.6.7** canonical absolute paths; macOS case-folding                                         | **Covered, collapsed.** `CanonicalPath` (SPEC §4.3 inv #6) is the only key shape that crosses the watcher's boundary. Canonicalisation happens once on the I/O thread before dedup (§3.5 step 3); the public API never accepts a raw path. §3.8 below.                          |
 | **R-14.6.8** typed `FileEvent` with `FileEventKind` enum                                          | **Covered, collapsed.** `FileEvent` is a closed `eastl::variant<Created, Modified, Deleted, Renamed>` (SPEC §5.8). No `next() async` shape — glibre's frame-driven model uses non-blocking `take_events(token, span)`. §3.9 below.                                              |
@@ -167,7 +167,7 @@ FileWatcher  (aggregate root, owned by platform)
 │                                                    read with memory_order_acquire in FSEvents
 │                                                    callback — see §3.3 and §6.3)
 ├── SnapshotPool             snapshot_pool_          (arena-backed pool: 1 active + 2 quarantined
-│                                                    snapshots, ~1.5 KiB total per §9.2)
+│                                                    snapshots, ~1 KiB total per §9.2)
 ├── eastl::vector<TokenRing> rings_                  (per-token SPSC ring of FileEvent)
 ├── DedupCache               dedup_                  (LRU keyed on CanonicalPath × content_hash)
 ├── RenameReassembler        renames_                (inode-id → pending Created/Deleted pair)
@@ -215,20 +215,42 @@ struct WatchToken { std::uint64_t value{0}; constexpr bool operator==(const Watc
 callback with a stable, lock-free view of the current subscription
 roots without the I/O thread ever taking `cold_mutex_`.
 
+The snapshot holds a proxy type rather than the full `RootEntry` (which
+carries an owning `CanonicalPath` string of up to ~512 B, making a
+direct `RootEntry` copy ~512 B per slot × 14 = ~7 KiB per snapshot —
+too large for a 3-instance pool). The proxy captures only the path
+string_view (a pointer + size into the `CanonicalPath` interner, which
+has lifetime ≥ the quarantine window) and the generation counter needed
+to detect stale entries:
+
 ```cpp
 // Internal to engine/platform/src/watcher/; never crosses the public ABI.
+struct RootProxy {
+    eastl::string_view path;        // 16 B — into the CanonicalPath interner; lifetime ≥ quarantine
+    uint32_t           root_id;     //  4 B — index into roots_ (stable within a snapshot epoch)
+    uint32_t           generation;  //  4 B — monotonic per-root mutation counter; stale-entry guard
+};  // 24 B per proxy
+
 struct roots_snapshot_t {
-    eastl::array<RootEntry, 14> entries;  // 14-root bound matching §9.2 ring count
-    uint8_t                        count;    // number of valid entries (0..14)
+    eastl::array<RootProxy, 14> entries;  // 14-root bound matching §9.2 ring count
+    uint8_t                     count;    // number of valid entries (0..14)
 };
 ```
+
+`RootProxy.path` is a `string_view` into the `CanonicalPath` interner
+(§3.8 / §9.2 `CanonicalPath interner` row). The interner's arena
+outlives any snapshot quarantine window (two I/O-thread runloop
+iterations ≈ <10 ms), so the pointed-to bytes are valid when the
+callback reads them. The callback uses `RootProxy.path` only for
+longest-prefix matching (step 2 of §3.7); it never mutates through the
+view and never stores the view beyond the callback's stack frame.
 
 **Arena backing.** `snapshot_pool_` holds at most 3 live
 `roots_snapshot_t` instances simultaneously (1 active + 2
 quarantined for a 1-frame retire window). Each instance is
-approximately 14 × `RootEntry` size ≈ 14 × ~32 B = 448 B,
-rounded up to 512 B per instance. Pool budget: 3 × 512 B =
-~1.5 KiB — see §9.2 for the table row.
+24 B × 14 proxies + 1 B count + padding ≈ 336 B + 8 B = ~344 B,
+rounded to ~360 B per instance. Pool budget: 3 × ~360 B ≈
+~1 KiB — see §9.2 for the table row.
 
 **Write side (main thread, inside `cold_mutex_`).** After any
 `watch` / `unwatch` that mutates `roots_`:
@@ -349,28 +371,55 @@ applies to `watch` and `unwatch`). Steps:
    `CFRunLoopWakeUp`. The main thread does not block on the result of
    the recreate; the per-token ring is alive immediately so any
    consumer call to `take_events` returns 0 events until FSEvents
-   delivers the first batch. The recreate code:
+   delivers the first batch.
+
+   **Data-race note.** The main thread is already inside `cold_mutex_`
+   (acquired at step 4's `roots_` mutation) when it dispatches the
+   recreate block. The `CFArrayRef` of paths must be built
+   **on the main thread, under `cold_mutex_`, before the block is
+   submitted** — not inside the block. If the block captured `roots_`
+   by pointer and called `make_cfarray_from_roots_` on the I/O thread,
+   a second rapid `watch`/`unwatch` on the main thread could mutate
+   `roots_` between the block's dispatch and its eventual execution,
+   producing a data race. The correct protocol captures the path array
+   by value before the lock is released:
+
    ```text
-   if (stream_) {
-       FSEventStreamStop(stream_);
-       FSEventStreamInvalidate(stream_);
-       FSEventStreamRelease(stream_);
-       stream_ = nullptr;
-   }
-   const CFArrayRef paths = make_cfarray_from_roots_(roots_);
-   const FSEventStreamContext ctx = { 0, this, nullptr, nullptr, nullptr };
-   stream_ = FSEventStreamCreate(
-       /*allocator=*/ kCFAllocatorDefault,
-       /*callback=*/  &watcher::detail::fsevents_callback,
-       /*context=*/   &ctx,
-       /*paths=*/     paths,
-       /*sinceWhen=*/ kFSEventStreamEventIdSinceNow,
-       /*latency=*/   debounce_seconds_,                       // §3.7
-       /*flags=*/     kFSEventStreamCreateFlagFileEvents
-                    | kFSEventStreamCreateFlagWatchRoot);
-   FSEventStreamScheduleWithRunLoop(stream_, runloop_, kCFRunLoopDefaultMode);
-   FSEventStreamStart(stream_);
+   // — main thread, inside cold_mutex_ —
+   CFArrayRef pending_paths = make_cfarray_from_roots_(roots_);  // snapshot under lock
+   CFRetain(pending_paths);  // block owns the retain; released after FSEventStreamCreate
+   CFRunLoopPerformBlock(io_runloop_, kCFRunLoopDefaultMode, ^{
+       // — I/O thread; pending_paths captured by value (retained above) —
+       if (stream_) {
+           FSEventStreamStop(stream_);
+           FSEventStreamInvalidate(stream_);
+           FSEventStreamRelease(stream_);
+           stream_ = nullptr;
+       }
+       const FSEventStreamContext ctx = { 0, this, nullptr, nullptr, nullptr };
+       stream_ = FSEventStreamCreate(
+           /*allocator=*/ kCFAllocatorDefault,
+           /*callback=*/  &watcher::detail::fsevents_callback,
+           /*context=*/   &ctx,
+           /*paths=*/     pending_paths,             // FSEvents copies internally
+           /*sinceWhen=*/ kFSEventStreamEventIdSinceNow,
+           /*latency=*/   debounce_seconds_,         // §3.7
+           /*flags=*/     kFSEventStreamCreateFlagFileEvents
+                        | kFSEventStreamCreateFlagWatchRoot);
+       FSEventStreamScheduleWithRunLoop(stream_, runloop_, kCFRunLoopDefaultMode);
+       FSEventStreamStart(stream_);
+       CFRelease(pending_paths);  // I/O thread releases after FSEventStreamCreate copies paths
+   });
+   CFRunLoopWakeUp(io_runloop_);
+   // cold_mutex_ released here (end of §3.5 scope)
    ```
+
+   `FSEventStreamCreate` copies the path array internally before
+   returning; the block releases `pending_paths` after `FSEventStreamCreate`
+   returns. The I/O thread's block never reads `roots_` directly —
+   it uses only the pre-captured `pending_paths`. This is also
+   documented in §6.3.
+
    Flags: only `kFSEventStreamCreateFlagFileEvents` and
    `kFSEventStreamCreateFlagWatchRoot`. `kFSEventStreamCreateFlagNoDefer`
    is intentionally absent — the 100 ms `latency` argument owns
@@ -627,7 +676,7 @@ boundary this design ships. Recapitulated for self-containment:
 #include <EASTL/variant.h>
 #include <glibre/error.hpp>
 #include <glibre/platform/canonical_path.hpp>
-#include <glibre/platform/clock.hpp>  // Clock& parameter of create(); use clock_fwd.hpp if clock-design §4 uses a forward-decl header
+#include <glibre/platform/platform.hpp>  // Clock& parameter of create(); per clock-design.md §4, normative Clock declarations live in platform.hpp (SPEC §5)
 
 namespace glibre::platform {
 
@@ -682,12 +731,10 @@ Surface invariants this design enforces beyond the SPEC §5.8 stub:
    the rest of Core Services live in the implementation translation
    unit only. The header includes `<EASTL/variant.h>`, `<EASTL/span.h>`,
    `<cstdint>`, `<glibre/error.hpp>`, `<glibre/platform/canonical_path.hpp>`,
-   and `<glibre/platform/clock.hpp>` — that is the closed list.
-   (`Clock&` is a parameter of `create`; the header must pull in its
-   definition. Verify the canonical header name against
-   `specs/platform/clock-design.md §4` — if clock-design uses a
-   forward-decl header `<glibre/platform/clock_fwd.hpp>`, substitute
-   that instead and update the `#include` in the code snippet above.)
+   and `<glibre/platform/platform.hpp>` — that is the closed list.
+   (`Clock&` is a parameter of `create`; per clock-design.md §4,
+   normative `Clock` declarations live in `glibre/platform/platform.hpp`
+   per SPEC §5. There is no `clock.hpp` or `clock_fwd.hpp`.)
 3. **`std::expected<T, glibre::Error>`** is the return type of every
    fallible function (`error-model.md` Decision rule 1). The aliased
    `Result<T>` is defined in `glibre/error.hpp`.
@@ -712,8 +759,8 @@ public method (`_ZN6glibre8platform11FileWatcher6createERNS0_5ClockE`,
 glibre::platform::Clock&)` — updated to reflect the `Clock&`
 parameter added per §12 [BLOCKING]. Exact mangle confirmed against
 the Itanium ABI encoding rules; verify with `c++filt` at codegen
-time. If the clock-design spike determines `Clock` lives in a
-different namespace, the mangle must be updated accordingly.)
+time. The namespace is confirmed as `glibre::platform` per
+clock-design.md §4 (`glibre/platform/platform.hpp`, SPEC §5).)
 None involves `eastl::*` template internals at the symbol level (the
 opaque-pimpl pattern keeps `eastl::vector<…>` / `eastl::variant<…>`
 out of the exported function signatures except as the by-value
@@ -837,6 +884,10 @@ dispatch we're keeping out of the engine).
   always reads from the lock-free snapshot and never waits for
   `cold_mutex_`. `cold_mutex_` protects only the main-thread-side
   `roots_` vector and the `snapshot_pool_` allocations.
+  The recreate block uses a pre-captured `CFArrayRef` (built on the
+  main thread under `cold_mutex_` before dispatch, per §3.5 step 5)
+  — it never reads `roots_` directly on the I/O thread, eliminating
+  a data race with concurrent `watch`/`unwatch` calls.
 - **No spinlocks.** macOS scheduling does not give us reliable
   spinlock semantics outside the kernel; we use `std::mutex` and
   accept the rare cold-path contention.
@@ -1029,12 +1080,14 @@ arena. This design partitions:
 | `CanonicalPath` interner                 | 256 KiB        | Bounded; shared with the roots and with in-flight events. Old entries reclaimed when no live event references them.                            |
 | BLAKE3 dedup LRU                         | 64 KiB         | 1024 `(canonical_path × 32 B hash)` slots; ring-replacement, no growth.                                                                      |
 | Rename-reassembly buffer                 | 16 KiB         | At most ~64 inflight half-renames; bounded by debounce window × event rate.                                                                   |
-| `snapshot_pool_` (`roots_snapshot_t` ×3) | ~2 KiB         | 1 active + 2 quarantined snapshots (§3.3). Each ~512 B (14 × `RootEntry` ≈ 448 B, rounded). Absorbed within existing 256 KiB headroom.        |
+| `snapshot_pool_` (`roots_snapshot_t` ×3) | ~1 KiB         | 1 active + 2 quarantined snapshots (§3.3). Each ~360 B (14 × `RootProxy` ≈ 336 B + padding). Absorbed within existing 256 KiB headroom. |
 
-Arithmetic: 4 + 8 + 3584 + 256 + 64 + 16 + 2 = 3934 KiB ≈ 3.84 MiB,
-leaving ~162 KiB headroom within the 4 MiB sub-arena cell. The
-`snapshot_pool_` addition (~2 KiB) is absorbed well within the
-existing 256 KiB headroom; no arena budget amendment is required.
+Arithmetic: 4 + 8 + 3584 + 256 + 64 + 16 + 1 = 3933 KiB ≈ 3.84 MiB,
+leaving ~163 KiB headroom within the 4 MiB sub-arena cell. The
+`snapshot_pool_` addition (~1 KiB — 3 × `roots_snapshot_t` with
+`RootProxy` entries at ~360 B each, rounded to ~1 KiB total) is
+absorbed well within the existing 256 KiB headroom; no arena budget
+amendment is required.
 The headroom is intentional: it absorbs future overhead growth (e.g. a
 widened dedup LRU, additional per-root metadata) without requiring an
 arena budget amendment. The ring count was reduced from 16 to 14
