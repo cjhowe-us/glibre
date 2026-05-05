@@ -752,7 +752,7 @@ namespace glibre::geometry::cook::pak {
 struct StagedMeshletGroup {
     std::uint32_t                   group_index;     // pak-wide
     std::uint32_t                   page_index;      // owning PakPage
-    LODBand                         band;            // used for LOD0 cross-check (§4.1.3 step 6)
+    LODBand                         band;            // used for LOD0 cross-check (design §4.1.3 step 6)
     eastl::array<std::uint32_t, kAttributeKindCount> draco_decoded_byte_length{};
     // decode-pool-max derivation (design §4.1.3 step 4)
 };
@@ -853,7 +853,7 @@ produce byte-equal output files on every supported host (`SPEC.md`
    in one forward pass; no in-place rewrites of earlier offsets
    except for the header's `header_byte_length`,
    `cluster_dag_offset`, etc. fields, which are computed before
-   the header is written (§4.1.3).
+   the header is written (design §4.1.3).
 5. **Endianness.** Every multi-byte field is `to_le_bytes`-cast
    regardless of host endianness; macOS ARM64 is little-endian, so
    in practice the cast is a no-op, but the writer obeys the rule
