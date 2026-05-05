@@ -157,7 +157,7 @@ order:
    |-----------------------------|------------------------|-------------------------------------------------------------------|---------------------|
    | `schema_registry.cpp`       | SchemaRegistry (§4.5)  | Per-entry record shape — fields added/removed from `RegistryEntry`| §4.3 / §4.5 / #730 |
    | `envelope.cpp`              | SchemaRegistry (§4.5)  | `Envelope<T>` call-site protocol — out-pointer layout or error shape | §4.1 / §4.3      |
-   | `migration_dispatcher.cpp`  | Middleman (§4.3)       | Dispatcher consumer — chains applied to `RegistryEntry::migrations`; behavioral rules belong to #736 | #736 |
+   | `migration_dispatcher.cpp`  | Middleman + MigrationChain (§4.3 / §4.7) | Dispatcher consumer — chains applied to `RegistryEntry::migrations`; behavioral rules belong to #736; arena-recycling protocol and chain failure isolation governed by §4.7 | #736 |
    | `register_migration.cpp`    | Middleman (§4.3)       | `.bss` storage + `glibre_types_register_migration` C-ABI entry point signature | §4.3 / #736 |
    | `arena.cpp`                 | SchemaRegistry (§4.5)  | Per-call scratch allocator shape used by Envelope<T> during deserialization | §4.5         |
    | `abi_hash.cpp`              | Middleman (§4.3)       | Dylib binary contract — ABI hash trampoline signature or storage form | §4.4 / §6.4      |
