@@ -484,6 +484,23 @@ behaviour annotations and pre-/post-conditions.
 ### 4.1 Types (locked from SPEC §5)
 
 ```cpp
+// C++ [class.friend] §11.8.4 requires that a qualified friend name refer
+// to a previously-declared entity in the named namespace.  The forward-
+// declaration block below MUST appear before class ShaderSource.  It is
+// guarded by GLIBRE_E2E so shipping builds see no test symbols (§8.5).
+#if defined(GLIBRE_E2E)
+namespace glibre::shader {
+    class ShaderSource;
+    enum class Error : std::uint16_t;
+    struct SourceId;
+}
+namespace glibre::shader::test {
+std::expected<glibre::shader::ShaderSource, glibre::shader::Error>
+make_shader_source_from_bytes(eastl::span<const std::byte>,
+                               glibre::shader::SourceId);
+} // namespace glibre::shader::test
+#endif
+
 namespace glibre::shader {
 
 struct SourceId {
@@ -524,8 +541,8 @@ private:
 
 #if defined(GLIBRE_E2E)
     // Grants the test-support factory access to the private constructor.
-    // This guard is the only conditional in the aggregate header; the rest
-    // of the class definition is unconditionally clean. §8.5.
+    // The forward declaration above (in glibre::shader::test) must appear
+    // before this class definition — see §8.5 ordering note.
     friend std::expected<ShaderSource, Error>
         glibre::shader::test::make_shader_source_from_bytes(
             eastl::span<const std::byte>, SourceId);
@@ -886,15 +903,18 @@ expectation).
 ### 8.5 Test hooks
 
 `shader::test::inject_source_diff` (SPEC §8.6, `#if defined(GLIBRE_E2E)`)
-admits the same in-process trigger the watcher uses. The production
-`ShaderSource` class definition carries **no test-specific members**;
-keeping test-framework concerns out of the aggregate header is required
-by SRP (two reasons to change: ingestion algorithm changes vs.
+admits the same in-process trigger the watcher uses. The production `ShaderSource` class definition carries **one**
+conditionally-compiled test-specific member: the `GLIBRE_E2E`-guarded
+`friend` declaration that grants the test-support factory access to the
+private constructor (§4.1 snippet). Outside that single guard, the
+aggregate header is unconditionally clean; keeping the bulk of
+test-framework concerns out of the aggregate header is required by SRP
+(two reasons to change: ingestion algorithm changes vs.
 test-double scaffolding changes).
 
-Instead, a dedicated test-support header
+The bulk of the test scaffolding lives in a dedicated test-support header
 `tests/shader/source/shader_source_test_support.hpp` — compiled only
-when `GLIBRE_E2E` is defined — declares:
+when `GLIBRE_E2E` is defined — which declares:
 
 ```cpp
 namespace glibre::shader::test {
@@ -923,10 +943,22 @@ friend std::expected<ShaderSource, Error>
 #endif
 ```
 
+**Forward-declaration ordering (C++ [class.friend] §11.8.4):** A
+qualified friend name must refer to a previously-declared entity in
+the named namespace. Consequently, `shader_source.hpp` must contain a
+`GLIBRE_E2E`-guarded forward-declaration block for
+`make_shader_source_from_bytes` in `namespace glibre::shader::test`
+placed *before* the `ShaderSource` class definition. The §4.1 snippet
+shows this ordering: the forward-declaration block appears immediately
+before `class ShaderSource {`. Implementors must preserve this
+ordering — placing the `class ShaderSource` definition before the
+forward declaration produces ill-formed code under [class.friend]
+§11.8.4.
+
 This is the only test-framework concern in the aggregate header. The
 rest of the `ShaderSource` class definition is unconditionally clean;
-shipping builds see no test-support symbols (the `GLIBRE_E2E` block
-compiles to nothing). The full factory declaration lives in
+shipping builds see no test-support symbols (both `GLIBRE_E2E` blocks
+compile to nothing). The full factory definition lives in
 `tests/shader/source/shader_source_test_support.hpp`, which is
 included only from E2E test translation units. The §8.6
 "inject an Slang diff for `source_id`" bullet calls this factory.
