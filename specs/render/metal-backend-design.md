@@ -193,19 +193,25 @@ tick (SPEC §6.2.2 step 3).
 constructors and assignment operators:
 
 ```cpp
-MetalDevice(const MetalDevice&)            = delete;
-MetalDevice& operator=(const MetalDevice&) = delete;
-MetalDevice(MetalDevice&&)                 = delete;
-MetalDevice& operator=(MetalDevice&&)      = delete;
+MetalDevice(const MetalDevice&)                      = delete;
+MetalDevice& operator=(const MetalDevice&)           = delete;
+MetalDevice(MetalDevice&&)                           = delete;
+MetalDevice& operator=(MetalDevice&&)                = delete;
 
-MetalQueue(const MetalQueue&)              = delete;
-MetalQueue& operator=(const MetalQueue&)   = delete;
-MetalQueue(MetalQueue&&)                   = delete;
-MetalQueue& operator=(MetalQueue&&)        = delete;
+MetalQueue(const MetalQueue&)                        = delete;
+MetalQueue& operator=(const MetalQueue&)             = delete;
+MetalQueue(MetalQueue&&)                             = delete;
+MetalQueue& operator=(MetalQueue&&)                  = delete;
+
+MetalCommandBuffer(const MetalCommandBuffer&)        = delete;
+MetalCommandBuffer& operator=(const MetalCommandBuffer&) = delete;
+MetalCommandBuffer(MetalCommandBuffer&&)             = delete;
+MetalCommandBuffer& operator=(MetalCommandBuffer&&)  = delete;
 ```
 
-`MetalCommandBuffer` is similarly non-copyable, non-movable (owning a
-`MTL::CommandBuffer*` that must not alias). These deletes are the
+`MetalCommandBuffer` owns a `MTL::CommandBuffer*` that must not alias; the
+explicit `= delete` declarations above enforce the same non-copyable,
+non-movable contract as `MetalDevice` and `MetalQueue`. These deletes are the
 enforcement mechanism for the "engine-singleton" and "thread-affine"
 contracts stated in §6.1 and §6.3; any `std::move` or copy attempt on
 these types is a compile error with a clear diagnostic.
@@ -872,7 +878,7 @@ infrastructure that depends on `metal-cpp` headers.
 | `device_lost_path.cpp`                              | A fake CB that resolves to `.error` with `.deviceRemoved` causes `submit_frame` to return `unexpected{DeviceLost}`. |
 | `gpu_fault_capture.cpp`                             | A fake CB that resolves to `.error` with `.faulted` triggers the diag-capture entry; the fault payload is forwarded via `render_report_gpu_fault`. |
 | `present_fence_monotonic.cpp`                       | Across N successful submits, the returned `PresentFence::value` strictly increases by 1 per submit; concurrent reads see a consistent value. |
-| `present_fence_timeout.cpp`                         | A fake where the platform's phase-9 fence-wait callback fires with an elapsed time exceeding 2× the 16.6 ms budget ceiling returns `unexpected{FenceTimeout}` (SPEC §10.1 rows 16/17); distinct from the drawable-nil path (`SwapchainAcquireFailed`) exercised by `submit_frame_drawable_null.cpp`. |
+| `present_fence_timeout.cpp`                         | A fake where the platform's phase-9 fence-wait callback fires with an elapsed time exceeding 2× the 16.6 ms budget ceiling returns `unexpected{FenceTimeout}` (SPEC §10.3 rows 16/17); distinct from the drawable-nil path (`SwapchainAcquireFailed`) exercised by `submit_frame_drawable_null.cpp`. |
 
 ### 11.2 Integration tests (real device under platform fixture)
 
@@ -913,7 +919,7 @@ The metal-backend's contribution to the SPEC §11 user-story matrix:
   the e2e trace inserts a deliberate GPU stall that exhausts the phase-9
   fence-wait deadline. Note: `submit_frame_drawable_null.cpp` tests the
   `SwapchainAcquireFailed` path (nextDrawable nil), which is a distinct
-  failure from `FenceTimeout` (SPEC §10.1 rows 16/17 vs. row 2).
+  failure from `FenceTimeout` (SPEC §10.3 rows 16/17 vs. row 2).
 - #398 (`render: GpuFault triggers hot-reload-restart with diag
   capture`) — `gpu_fault_capture.cpp` covers the unit half; the e2e
   trace runs the full §10.4 protocol.
