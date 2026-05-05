@@ -295,7 +295,7 @@ amends §3.4 here, not the dispatcher's contract elsewhere.
 
 ### 3.5 Static-init chain validator
 
-`validate_chain(span<const MigrationEntry>) -> std::expected<void, data::Error>` runs
+`validate_chain(SchemaId, SchemaVersion, span<const MigrationEntry>) -> std::expected<void, data::Error>` runs
 once per FQN at middleman static-init (§4.3 inv. 5 of
 `specs/data/SPEC.md`), called from the codegen-emitted registry
 construction inside `glibre-types.dylib`. It checks:
