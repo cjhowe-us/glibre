@@ -447,7 +447,12 @@ get(key) :
            return std::unexpected{render::Error::ShaderModuleLoadFailed}
 
     5. // Construct the descriptor matching `state_hash`.
-       desc := state_descriptor_table_.find(key.state_hash)
+       // Acquire descriptor_mutex_ in shared mode (see §6.1 lock ordering).
+       // Released before step 6 so it is never held across the build.
+       {
+         shared_lock(descriptor_mutex_);
+         desc := state_descriptor_table_.find(key.state_hash)
+       } // release shared descriptor_mutex_
        if desc is empty:
            // The caller pinned a state_hash render itself does not
            // know how to descriptor-build. This is a contract breach
@@ -832,11 +837,15 @@ deliverables.
   `detail="state_descriptor_collision"` (this indicates either a
   `state_hash` function bug or a pass authoring error — it is treated as
   a fatal configuration error, not a fallback path). Thread-safety: the
-  method acquires `descriptor_mutex_` exclusively; concurrent
-  `get`/`pin` calls share `table_mutex_` (a separate lock), so
-  registration does not stall the hot path. The method is not callable
-  after the first `get`/`pin` call on a given `state_hash` — callers
-  must register before warming.
+  method acquires `descriptor_mutex_` exclusively. Concurrent `get`,
+  `pin`, and `warm` calls acquire `descriptor_mutex_` in **shared** mode
+  at §3.5 step 5 (descriptor resolution) and release it before entering
+  the Metal build at step 6. This is the complete descriptor-table lock
+  contract; `table_mutex_` is a separate lock governing `live_` / `lru_`
+  and is unrelated to descriptor reads. See §6.1 for the full
+  lock-ordering invariant (`build_mutex_` → `descriptor_mutex_` →
+  `table_mutex_`). The method is not callable after the first `get`/`pin`
+  call on a given `state_hash` — callers must register before warming.
 
 ## 5. Hot / Cold Path Split
 
@@ -879,14 +888,22 @@ phase 8 ownership.
 
 ### 6.1 Locking strategy
 
+- **`std::mutex build_mutex_`** guards the `in_flight_` map. Held
+  only across the per-key barrier insert / wait-handoff; never held
+  across the build itself.
+- **`std::shared_mutex descriptor_mutex_`** guards
+  `state_descriptor_table_`. Acquired in **shared** mode by `get`,
+  `pin`, and `warm` at §3.5 step 5 (descriptor resolution); acquired
+  in **exclusive** mode by `register_state_descriptor` (§4.3).
+  Registration is expected only during `glibre_plugin_register`
+  (single-threaded phase) so the exclusive acquisition does not
+  contend with hot-path shared readers in practice, but the lock is
+  present for correctness in post-MVP editor-hot-reload paths (§8.6).
 - **`std::shared_mutex table_mutex_`** guards the `live_` table and
   `lru_` list. Acquired in shared mode for hot lookups; in exclusive
   mode for inserts, evictions, and `invalidate_by_shader_hash`. The
   exclusive critical section is bounded to a few hashmap operations
   and an LRU re-link; it never spans a Metal pipeline build.
-- **`std::mutex build_mutex_`** guards the `in_flight_` map. Held
-  only across the per-key barrier insert / wait-handoff; never held
-  across the build itself.
 - **Per-key one-shot.** `in_flight_[key]` is a `BuildBarrier` (a
   `std::atomic_flag` plus a `std::condition_variable_any` to wake
   waiters). The first thread to miss `live_` for `key` inserts the
@@ -899,6 +916,15 @@ phase 8 ownership.
   tick_counter_.** All relaxed except where ordering is required:
   `pin_count` increments use `acquire` on read-side, `release` on
   decrement.
+
+**Lock-ordering invariant:** when two or more of these mutexes must be
+held simultaneously, they must be acquired in the order
+`build_mutex_` → `descriptor_mutex_` → `table_mutex_`. The cold build
+path (§3.5) never holds `descriptor_mutex_` and `table_mutex_` at the
+same time — the shared `descriptor_mutex_` is acquired and released at
+step 5, and the exclusive `table_mutex_` is acquired only at step 8 —
+so the ordering is naturally respected by the existing pseudocode.
+Implementations that deviate from this order will deadlock.
 
 ### 6.2 Pin lifetime & eviction safety
 
