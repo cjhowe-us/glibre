@@ -539,12 +539,17 @@ The borrow record fields:
 
 ```
 ImportedBorrow
-├── kind_              : enum { Drawable, BLAS, GeomStream, VfxBuffer }
+├── kind_              : enum { Drawable, BLAS, GeomStream }   // closed MVP set; see note below
 ├── physical_handle_   : PhysicalAllocHandle           (catalog-side)
 ├── mtl_handle_        : metal-cpp pointer (immutable post-record)
 ├── owner_drop_token_  : eastl::function<void()>       (importer-supplied; invoked on borrow rejection only)
 └── write_capability_  : bool                          (default false; opt-in per `SPEC.md` §4.1.4 invariant 3)
 ```
+
+> **Future ABI amendment (post-MVP):** When the `vfx` plugin is introduced, a `VfxBuffer` arm will
+> be added to `kind_` and the corresponding `SPEC.md` §4.1.4 ABI-add row will be filed. This
+> constitutes a minor ABI bump requiring a middleman-dylib hash update. No cross-domain abstraction
+> is introduced here before a concrete second user exists (PHILOSOPHY §5, anti-pattern rule).
 
 Write capability is only set true for the swapchain drawable in
 the `present` pass; every other import is a read-borrow. An attempt
