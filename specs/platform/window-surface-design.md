@@ -156,9 +156,13 @@ snapshots are immutable" — every consumer gets the state at the
 moment of query.
 
 `Surface` is the §4.1 entity that crosses into render. It has no PIMPL
-and no allocation: its body is `(WindowId owner, void* layer)` only.
-Construction is `friend`-restricted to `Window`; consumers receive
-move-only `Surface` values (SPEC §5.5).
+and no allocation: it is a four-field POD — `(WindowId owner_,
+void* layer_, void (*dec_fn_)(void*) noexcept, void* opaque_)`. The
+`dec_fn_` / `opaque_` pair carries the destructor's counter-decrement
+seam without any back-pointer into `Window::Impl` — see §3.8 for the
+mechanism and §8 for hot-reload survival. Construction is
+`friend`-restricted to `Window`; consumers receive move-only `Surface`
+values (SPEC §5.5).
 
 ### 3.2 `WindowDesc` (creation parameters, locked from SPEC §5.6)
 
@@ -744,10 +748,15 @@ snapshot fields**. This section makes the rules precise.
    post-MVP multi-thread build).
 3. **Render-thread access to `Surface`.** The render thread holds a
    `Surface` value across phase 7 (record command buffers) and
-   drops it before phase 8 (hot-reload barrier). `Surface::~Surface`
-   running on the render thread is safe because the destructor
-   only touches the atomic counter on `Window::Impl` (§3.8); the
-   counter is `std::atomic<std::uint32_t>` with relaxed ordering.
+   drops it before phase 8 (hot-reload barrier). `Surface::~Surface()`
+   invokes `dec_fn_(opaque_)`. The function pointer was baked at vend
+   time inside `Window::Impl`'s main-thread context; the dispatch is
+   render-thread-safe because `dec_fn_` is required to be reentrant
+   and not access any `Window::Impl` state directly. The `opaque_`
+   token resolves through `dec_fn_`'s captured logic (typically a
+   counter slot index) without dereferencing `Window::Impl`. §8
+   hot-reload drains all live `Surface`s at Pause and re-vends them at
+   Resume, so `dec_fn_` is never dangling across a reload boundary.
 
 ### 6.2 Pull rules from the render thread
 
@@ -839,8 +848,11 @@ window-surface context. Properties:
   Both must consume the corrected seam before plan PRs land.
 
 This normative paragraph satisfies the §3.7 cross-reference and
-supersedes any implicit treatment; event-pump-design.md §3.5 carries
-a forward reference to this paragraph.
+supersedes any implicit treatment. event-pump-design.md §3.5 does NOT
+yet carry this forward reference; the cross-document amendment is
+pending per §12 [BLOCKING IMPLEMENTATION]. Until the amendment lands,
+plan PR authors must consult both this design's §6.5 AND
+event-pump-design.md §3.5 to understand the full call-site contract.
 
 ## 7. Persistence + ABI
 
@@ -1120,7 +1132,7 @@ case lands in and why.
 | **WindowOutstandingAtDestroy** | `~Window` while `outstanding_surfaces_ > 0` (debug-only; release falls through and leaks)| Debug `assert`; release: logs `error`, no return value. | Programming error in render; `Surface` outlived its `Window`.                                            |
 | **HotReloadMidFrameDrop (P1)** | Platform self-reload drain finds `outstanding_surfaces_ > 0`                            | `Unsupported`, wrapped by core into `core::Error::HotReloadRefused` | Editor's reload UI retries on next frame boundary; SPEC §8.4 P1.                                          |
 | **DisplayQueryAfterUnplug**    | `Window::display()` between display unplug and `DisplayChanged` drain                    | `NotFound`                                   | Caller re-queries after the next pump cycle.                                                              |
-| **ArenaExhausted**             | Window-surface 1 MiB sub-arena cannot fit a new `Window::Impl` + title                  | `IoFailure { OsCode = ENOBUFS }` (mapped to `core::Error::OutOfBudget` in strict-mode builds) | Operator opens fewer windows or extends the sub-arena via a perf-budget amendment.                       |
+| **ArenaExhausted**             | Window-surface 1 MiB sub-arena cannot fit a new `Window::Impl` + title                  | `IoFailure { OsCode { ENOBUFS } }` with TLS prefix `prefix::out_of_budget` per platform-error-design.md §3.3 | Operator opens fewer windows or extends the sub-arena via a perf-budget amendment.                       |
 
 The variant assignments above are **the ones in §4.7 / §5.1 / §10**
 — no new variants are introduced. `SurfaceLost` is intentionally a
@@ -1435,6 +1447,12 @@ The fuzz target catches any regression of the rounding rule (§3.9).
   corrected SPEC before plan PRs land. This design's §3.4 step 5 is
   already corrected; the amendment ensures no downstream plan PR
   copies the stale flag from the original SPEC text.
+  STATUS: SPEC §6.3 amendment NOT yet landed in this PR (preamble
+  forbids in-place SPEC edits in design follow-ups). Orchestrator or
+  first plan PR author must file `[SPIKE] amend-platform-spec-window-
+  creation-flags` parented to #714 to strike `SDL_WINDOW_METAL` from
+  SPEC §6.3, OR land the one-line edit directly in the first plan PR.
+  Plan PRs cannot land until SPEC §6.3 is corrected via either route.
 
 - **[BLOCKING IMPLEMENTATION] SPEC §5.5 amendment — Surface gains
   `void (*dec_fn_)(void*) noexcept` + `void* opaque_` fields.**
