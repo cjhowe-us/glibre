@@ -10,7 +10,7 @@ concurrency:
 
 jobs:
   lint:
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - name: clang-format
@@ -24,13 +24,25 @@ jobs:
           clang-format --dry-run --Werror $files
 
   build:
-    runs-on: macos-14
+    runs-on: macos-26
     needs: lint
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/vendor/vcpkg
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: lukka/get-cmake@latest
-      - uses: lukka/run-vcpkg@v11
+      - name: Install LLVM 21+
+        run: |
+          brew install llvm
+          echo "LLVM_PREFIX=$(brew --prefix llvm)" >> "$GITHUB_ENV"
+      - name: Bootstrap vcpkg
+        run: ./vendor/vcpkg/bootstrap-vcpkg.sh -disableMetrics
       - name: Configure
+        env:
+          CC: ${{ env.LLVM_PREFIX }}/bin/clang
+          CXX: ${{ env.LLVM_PREFIX }}/bin/clang++
         run: cmake --preset macos-debug
       - name: Build
         run: cmake --build --preset macos-debug
