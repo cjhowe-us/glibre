@@ -78,3 +78,10 @@ golden-screenshots/local/
 
 # vcpkg overlays runtime artifacts
 ports/.cache/
+
+# XcodeGen-generated project + Xcode user state
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+xcuserdata/
+*.xcuserstate

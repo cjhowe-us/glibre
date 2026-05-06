@@ -7,20 +7,30 @@
   },
   "configurePresets": [
     {
-      "name": "macos-base",
+      "name": "apple-base",
       "hidden": true,
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/vendor/vcpkg/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_MANIFEST_INSTALL": "OFF",
-        "CMAKE_OSX_DEPLOYMENT_TARGET": "26.4",
         "CMAKE_OSX_ARCHITECTURES": "arm64"
       },
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
         "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "macos-base",
+      "hidden": true,
+      "inherits": "apple-base",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "Darwin",
+        "CMAKE_OSX_SYSROOT": "macosx",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "26.4",
+        "VCPKG_TARGET_TRIPLET": "arm64-osx"
       }
     },
     {
@@ -37,25 +47,65 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo"
       }
+    },
+    {
+      "name": "ios-base",
+      "hidden": true,
+      "inherits": "apple-base",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "iOS",
+        "CMAKE_OSX_SYSROOT": "iphoneos",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "26.0",
+        "VCPKG_TARGET_TRIPLET": "arm64-ios",
+        "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/iOS.toolchain.cmake"
+      }
+    },
+    {
+      "name": "ios-debug",
+      "inherits": "ios-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "ios-release",
+      "inherits": "ios-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+    },
+    {
+      "name": "ios-sim-base",
+      "hidden": true,
+      "inherits": "apple-base",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "iOS",
+        "CMAKE_OSX_SYSROOT": "iphonesimulator",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "26.0",
+        "VCPKG_TARGET_TRIPLET": "arm64-ios-simulator",
+        "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "${sourceDir}/cmake/iOS.toolchain.cmake"
+      }
+    },
+    {
+      "name": "ios-sim-debug",
+      "inherits": "ios-sim-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "ios-sim-release",
+      "inherits": "ios-sim-base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
     }
   ],
   "buildPresets": [
-    {
-      "name": "macos-debug",
-      "configurePreset": "macos-debug"
-    },
-    {
-      "name": "macos-release",
-      "configurePreset": "macos-release"
-    }
+    { "name": "macos-debug",     "configurePreset": "macos-debug" },
+    { "name": "macos-release",   "configurePreset": "macos-release" },
+    { "name": "ios-debug",       "configurePreset": "ios-debug" },
+    { "name": "ios-release",     "configurePreset": "ios-release" },
+    { "name": "ios-sim-debug",   "configurePreset": "ios-sim-debug" },
+    { "name": "ios-sim-release", "configurePreset": "ios-sim-release" }
   ],
   "testPresets": [
     {
       "name": "macos-debug",
       "configurePreset": "macos-debug",
-      "output": {
-        "outputOnFailure": true
-      }
+      "output": { "outputOnFailure": true }
     }
   ]
 }
