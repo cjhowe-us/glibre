@@ -1,5 +1,24 @@
 cmake_minimum_required(VERSION 3.30)
 
+# Apple-clang on macOS 26 is too old for `import std;`. Auto-pick Homebrew
+# LLVM (clang ≥ 21) before `project()` so its CXX-detection step picks it
+# up. User-supplied -DCMAKE_CXX_COMPILER / CC / CXX always wins.
+if(APPLE AND NOT DEFINED CMAKE_CXX_COMPILER AND NOT DEFINED ENV{CXX})
+    find_program(_brew_exe brew)
+    if(_brew_exe)
+        execute_process(
+            COMMAND ${_brew_exe} --prefix llvm
+            OUTPUT_VARIABLE _llvm_prefix
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(_llvm_prefix AND EXISTS "${_llvm_prefix}/bin/clang++")
+            set(CMAKE_C_COMPILER   "${_llvm_prefix}/bin/clang"   CACHE FILEPATH "")
+            set(CMAKE_CXX_COMPILER "${_llvm_prefix}/bin/clang++" CACHE FILEPATH "")
+        endif()
+    endif()
+endif()
+
 project(glibre
     VERSION 0.0.0
     DESCRIPTION "No-code game engine"

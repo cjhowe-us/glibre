@@ -59,7 +59,8 @@ jobs:
           else
             brew link --force llvm || true
           fi
-          echo "LLVM_PREFIX=$(brew --prefix llvm)" >> "$GITHUB_ENV"
+      - name: Install xcodegen
+        run: brew install xcodegen
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
@@ -68,9 +69,6 @@ jobs:
       - name: Bootstrap vcpkg
         run: ./vendor/vcpkg/bootstrap-vcpkg.sh -disableMetrics
       - name: Configure
-        env:
-          CC: ${{ env.LLVM_PREFIX }}/bin/clang
-          CXX: ${{ env.LLVM_PREFIX }}/bin/clang++
         run: |
           cmake --preset macos-debug \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
