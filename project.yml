@@ -52,6 +52,11 @@ targets:
           # - -lglibre_runtime
     dependencies:
       - sdk: Cocoa.framework
+      # CoreAnimation lives in QuartzCore on Apple platforms.
+      - sdk: QuartzCore.framework
+      - sdk: CoreGraphics.framework
+      - sdk: Metal.framework
+      - sdk: MetalKit.framework
 
   GlibreIOS:
     type: application
@@ -76,6 +81,10 @@ targets:
     dependencies:
       - sdk: UIKit.framework
       - sdk: Foundation.framework
+      - sdk: QuartzCore.framework
+      - sdk: CoreGraphics.framework
+      - sdk: Metal.framework
+      - sdk: MetalKit.framework
 
 schemes:
   GlibreMacOS:

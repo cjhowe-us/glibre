@@ -40,3 +40,7 @@ endif()
 # if(GLIBRE_BUILD_TESTS)
 #     add_subdirectory(tests)
 # endif()
+
+# CMake-driven xcodegen + xcodebuild → produces Glibre.xcodeproj plus
+# GlibreMacOS.app / GlibreIOS.app from a single `cmake --build`.
+include(AppleApps)

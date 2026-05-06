@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Builds Glibre for macOS + iOS (device & simulator) via CMake/Ninja, then
-# regenerates the XcodeGen project and (optionally) builds .app bundles.
+# One-shot Apple build: configures + builds the macOS preset, which in
+# turn (via cmake/AppleApps.cmake) recursively builds the iOS device +
+# simulator static libs, regenerates Glibre.xcodeproj, and runs
+# xcodebuild for both schemes — producing GlibreMacOS.app + GlibreIOS.app.
 #
-# Requires: cmake ≥ 4.3, ninja, xcodegen, Homebrew LLVM ≥ 21, Xcode 26+ SDK.
+# Requires: cmake ≥ 4.3, ninja, xcodegen, Xcode 26+ SDK,
+#           Homebrew LLVM ≥ 21.
 
 set -euo pipefail
 
@@ -11,7 +14,6 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT_DIR}"
 
 CONFIG="${CONFIG:-debug}"   # debug | release
-SKIP_XCODEBUILD="${SKIP_XCODEBUILD:-0}"
 
 LLVM_PREFIX="$(brew --prefix llvm 2>/dev/null || true)"
 if [ -n "${LLVM_PREFIX}" ] && [ -x "${LLVM_PREFIX}/bin/clang" ]; then
@@ -19,26 +21,5 @@ if [ -n "${LLVM_PREFIX}" ] && [ -x "${LLVM_PREFIX}/bin/clang" ]; then
     export CXX="${LLVM_PREFIX}/bin/clang++"
 fi
 
-build_preset() {
-    local preset="$1"
-    echo "::group::cmake $preset"
-    cmake --preset "${preset}"
-    cmake --build --preset "${preset}"
-    echo "::endgroup::"
-}
-
-build_preset "macos-${CONFIG}"
-build_preset "ios-${CONFIG}"
-build_preset "ios-sim-${CONFIG}"
-
-command -v xcodegen >/dev/null || { echo "xcodegen not found — brew install xcodegen" >&2; exit 1; }
-xcodegen generate
-
-if [ "${SKIP_XCODEBUILD}" = "0" ]; then
-    XCCONFIG="$(tr '[:lower:]' '[:upper:]' <<< "${CONFIG:0:1}")${CONFIG:1}"
-    xcodebuild -project Glibre.xcodeproj -scheme GlibreMacOS \
-               -configuration "${XCCONFIG}" build
-    xcodebuild -project Glibre.xcodeproj -scheme GlibreIOS \
-               -configuration "${XCCONFIG}" \
-               -destination 'generic/platform=iOS' build
-fi
+cmake --preset "macos-${CONFIG}"
+cmake --build --preset "macos-${CONFIG}"
