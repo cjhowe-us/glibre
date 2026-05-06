@@ -44,23 +44,8 @@ jobs:
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
       - uses: lukka/get-cmake@latest
-      - name: Cache Homebrew LLVM
-        id: cache-llvm
-        uses: actions/cache@v4
-        with:
-          path: |
-            /opt/homebrew/Cellar/llvm
-            /opt/homebrew/opt/llvm
-          key: brew-llvm-${{ runner.os }}-${{ runner.arch }}-v1
-      - name: Install LLVM 21+
-        run: |
-          if [ ! -x "$(brew --prefix llvm 2>/dev/null)/bin/clang" ]; then
-            brew install llvm
-          else
-            brew link --force llvm || true
-          fi
-      - name: Install xcodegen
-        run: brew install xcodegen
+      - name: Install brew tools (LLVM ≥ 21, xcodegen)
+        run: brew install llvm xcodegen
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
