@@ -272,8 +272,12 @@ physics/src/bodies/                                (private headers; not on plug
 
 physics/src/shapes/                                (private headers; not on plugin include path)
 ├── shape_table.{hpp,cpp}                          (§3.9  ─ Content-hash table; ShapeHandle refcount; resolved Jolt Shape*)
-├── shape_blob.{hpp,cpp}                           (§3.8  ─ Decode dispatcher per ShapeKind; produces Jolt Shape*)
-└── broadphase_layer.{hpp,cpp}                     (sibling — owned by `physics-world` LayerFilter; cluster references only)
+└── shape_blob.{hpp,cpp}                           (§3.8  ─ Decode dispatcher per ShapeKind; produces Jolt Shape*)
+
+> **Sibling reference (not owned by this cluster):** `physics/src/world/broadphase_layer.{hpp,cpp}`
+> is owned by the `physics-world` cluster (`physics-world-design.md` §3.1). This cluster
+> consumes `CollisionLayer` values and the `LayerFilter` abstraction exclusively through the
+> §5 public facade; it does not declare or define broadphase-layer logic.
 
 physics/include/glibre/physics/
 └── physics.hpp                                    (§5 facade header; SPEC §5 — locked surface)
@@ -707,8 +711,8 @@ For body in RigidBody archetype, sorted ascending by BodyId:
   JoltMiddleman::get_linear_velocity(BodyId)  -> Velocity.v
   JoltMiddleman::get_angular_velocity(BodyId) -> AngularVelocity.w
   if body.motion_type == Dynamic:
-    JoltMiddleman::get_position(BodyId)         -> RigidBody.position  # via cache
-    JoltMiddleman::get_rotation(BodyId)         -> RigidBody.rotation
+    JoltMiddleman::get_position(BodyId)         -> scratch[body_id].cached_position
+    JoltMiddleman::get_rotation(BodyId)         -> scratch[body_id].cached_rotation
   is_active <- JoltMiddleman::is_sleeping(BodyId)
   body.sleeping <- !is_active
   if !is_active and not Sleeping marker present:
@@ -1952,7 +1956,7 @@ Lives under `tests/physics/bodies/` and `tests/physics/shapes/`.
 | `physics/bodies: remove_body_refuses_with_live_joint`                    | `remove_body` with a live joint endpoint → `BodyStillReferencedByJoint`; body remains in Jolt.                                            | §3.5, §10.1, §4.1.7 inv 1 | #431 |
 | `physics/bodies: motion_type_is_immutable`                               | Mutating `RigidBody.motion_type` post-create → `BodyMotionTypeImmutable` at next substep entry; type unchanged.                            | §3.2, §10.1   | (no story; CI invariant) |
 | `physics/bodies: static_body_carries_zero_velocity`                      | Reading `Velocity` / `AngularVelocity` on a `MotionType::Static` body returns zero across ten substeps even when `ExternalForce` is set. | §3.2 invariant 3 | (CI) |
-| `physics/bodies: kinematic_body_position_authored_by_ecs`                | Kinematic body whose ECS-side script writes `RigidBody.position` per frame → Jolt's body position matches at every exit barrier.        | §3.2 invariant 4 | (CI) |
+| `physics/bodies: kinematic_body_position_authored_by_ecs`                | Kinematic body whose ECS-side script writes `GlobalTransform` per frame → entry barrier forwards it to Jolt; exit-barrier-written `scratch[body_id].cached_position` matches at every substep. | §3.2 invariant 4, §3.6.1 | (CI) |
 | `physics/bodies: auto_inertia_derives_at_create`                         | `RigidBody.auto_inertia = true` + `Collider` referencing a `Sphere` → `inertia_diagonal` post-create equals `(2/5) m r²` per axis.       | §3.2 invariant 5 | (CI) |
 | `physics/bodies: body_id_allocation_order_is_ecs_materialisation_order`  | Spawn entities A, B, C in that order; assert `BodyId(A).raw() < BodyId(B).raw() < BodyId(C).raw()` regardless of host.                    | §3.3 invariant 2 | #434 |
 | `physics/bodies: body_id_free_list_pop_is_ascending`                     | Spawn IDs 1..10; release 5 then 3 then 7; next allocate returns 3 (smallest in free list).                                                | §3.3.2        | #434  |
@@ -1991,9 +1995,11 @@ multi-frame sequences via the `core` `FrameLoop` test harness.
 | `physics/bodies: hot_reload_round_trip_byte_equal_for_50_bodies`         | 50 bodies with mixed motion types; reload at frame 8; assert post-resume body positions / velocities / sleep state byte-equal pre-drain. | §8.2, SPEC §8.6 | #449  |
 | `physics/bodies: hot_reload_refuses_missing_shape_blob`                  | Reload with one `ShapeBlobRecord` removed from the asset bundle; `HotReloadRefused { PluginInitFailed { ShapeBlobMissing } }`.            | §8.3, SPEC §8.6 | #449  |
 | `physics/bodies: hot_reload_refuses_corrupt_shape_blob`                  | Reload with one `ShapeBlobRecord` whose content_hash is corrupted; `HotReloadRefused { PluginInitFailed { ShapeBlobMalformed } }`.        | §8.3          | #449   |
-| `physics/bodies: bench_ecs_jolt_mirror_two_substep`                      | The §9.6 `BENCHMARK_CELL` perf assert (0.30 ms ceiling).                                                                                | §9.6          | (CI)   |
-| `physics/shapes: bench_intern_shape_cache_hit`                           | The cluster `BENCHMARK_CELL` perf assert (0.005 ms ceiling).                                                                            | §9.6          | (CI)   |
-| `physics/shapes: bench_intern_shape_cold_box`                            | The cluster `BENCHMARK_CELL` perf assert (0.020 ms ceiling).                                                                            | §9.6          | (CI)   |
+| `physics/bodies: ecs_jolt_mirror_two_substep`                            | The §9.6 `BENCHMARK_CELL` perf assert (0.30 ms ceiling).                                                                                | §9.6          | (CI)   |
+| `physics/bodies: body_id_allocator_alloc_release_round_trip`             | The cluster `BENCHMARK_CELL` perf assert (0.001 ms ceiling).                                                                            | §9.6          | (CI)   |
+| `physics/shapes: shape_table_intern_cache_hit`                           | The cluster `BENCHMARK_CELL` perf assert (0.005 ms ceiling).                                                                            | §9.6          | (CI)   |
+| `physics/shapes: shape_table_intern_cold_box_kind_3`                     | The cluster `BENCHMARK_CELL` perf assert (0.020 ms ceiling).                                                                            | §9.6          | (CI)   |
+| `physics/bodies: archetype_scratch_rebuild_60_bodies`                    | The cluster `BENCHMARK_CELL` perf assert (0.010 ms ceiling).                                                                            | §9.6          | (CI)   |
 
 ### 11.3 Property-based tests
 
@@ -2094,6 +2100,22 @@ PHILOSOPHY §3 + workflow rule, no `[OPEN]` is discharged silently.
   uses one material from the `Collider`; voxel-terrain (R-4.2.10
   refused) would benefit from per-cell. Tracked by §3.8.6 +
   §7.2.1.
+
+- **[OPEN — SPEC AMENDMENT REQUIRED]** `BodyStillReferencedByJoint`
+  (SPEC §5 body/collider section, this design §10.1) and
+  `JointDanglingEndpoint` (SPEC §4.1.7 invariant 1 prose, SPEC §5 joints
+  section) both describe the "body removed while a joint references it"
+  scenario. The current design uses `BodyStillReferencedByJoint`
+  consistently (bodies-cluster perspective: the body is the refused
+  actor). `JointDanglingEndpoint` is listed in §10.5 as a routed
+  sibling arm (joints-cluster detection path). The SPEC §4.1.7
+  invariant 1 prose must be amended to name `BodyStillReferencedByJoint`
+  at the `remove_body` call site, with a note that
+  `JointDanglingEndpoint` is reserved for the symmetric stale-`BodyId`-
+  on-a-live-joint check (joints aggregate, not bodies aggregate). Tracked
+  by `[SPIKE] iterate-physics-error-arm-joint-body-reconciliation` (see
+  §12 spike reference). This is a blocker for the sibling `joints/`
+  design spike to produce a consistent §10 table.
 
 Resolution of any `[OPEN]` lands the decision into
 `reviews/decisions/` (when cross-aggregate) or amends SPEC §3 / §4 /
