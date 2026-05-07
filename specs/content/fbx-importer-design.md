@@ -665,8 +665,10 @@ load per node).
 
 **Stage 6 — Precursor emit**. Write the precursor bytes into the
 arena via a generated emitter
-(`glibre/content/mesh_artifact_precursor.hpp`, the Fory codegen
-output's pre-Fory CPU-side struct). The emitter is a straight-line
+(`glibre/types/content/mesh_artifact_precursor.hpp`, the Fory codegen
+output's pre-Fory CPU-side struct — generated header path per
+`fory-codegen.md` §Pipeline into
+`${CMAKE_BINARY_DIR}/generated/glibre-types/include/glibre/types/<ctx>/`). The emitter is a straight-line
 walk over the canonicalized arrays from stage 5; no allocation outside
 the arena. The precursor's CPU-side layout is **distinct** from the
 Fory envelope shape (which the cook step's stage-4 produces — SPEC
@@ -1110,6 +1112,24 @@ Per `perf-budget.md` Allocator Rule #1 + SPEC §9.3.1:
   `malloc` is the third-party-wrap exemption (§4.1.2 inv #3), routed
   through the `FbxMemoryAllocator` hook; this is the only third-party
   allocator carve-out in the engine.
+- **`FbxMemoryAllocator` null-return protocol (`GLIBRE_ALLOC_STRICT=1`)**. The
+  `FbxMemoryAllocator` callback has a C-style `void*`-returning signature; it
+  cannot propagate a `Result<T>`. When `PerContextAllocator` refuses an
+  allocation in strict mode (`OutOfBudget`), the hook records the refusal in an
+  atomic error flag on the `FbxImporterImpl` and returns `nullptr` to the SDK.
+  The SDK will then either crash (undefined) or invoke its own null-pointer error
+  path — neither is acceptable. To prevent this, **before any SDK call that may
+  trigger the hook**, `import_one` must check the atomic flag and return
+  `ImporterError::MalformedPayload` with
+  `error.detail = "fbx-alloc-exhausted"` immediately. The §10.2 translation
+  table rows 1-4 (return-value checks) already occur at the two SDK entry points
+  (`Initialize`, `Import`); the alloc-exhausted check is inserted at the same
+  sites. In practice, the 64 MiB soft sub-ceiling (§9.3.1) is sized well above
+  the observed S3 peak (~30–50 MiB), so the null path is a defect guard rather
+  than a routine production path. The `GLIBRE_ALLOC_STRICT=1` CI gate
+  (`perf-budget.md` CI Gate §3) validates the ceiling is never breached by the
+  S3 fixture; if it were breached, the test would catch the refusal before any
+  null dereference occurs.
 
 ### 6.4 Cancellation propagation
 
@@ -1506,6 +1526,20 @@ restates the importer-specific arms with implementation-grain
 detail and pins the SDK-exception → arm mapping at the carve-out
 (SPEC §10.3).
 
+**Cross-boundary wrapping chain** (per `error-model.md` §Composition
+Rules 1–2): `ImporterError` values are leaves of the content context's
+error sum. At the `content` plugin's public boundary, the
+`Result<eastl::span<const std::byte>>` returned by `import_one` carries
+a `glibre::Error` whose variant holds a `glibre::content::Error`
+(the `eastl::variant<ImporterError, ResidencyError>` declared in SPEC
+§5.3). The `Result<T>` alias in §5.4 is
+`std::expected<T, glibre::Error>` per `error-model.md`; the wrapping
+happens at the cook session's boundary (SPEC §6.2), not inside
+`import_one` itself — the importer returns the inner arm value and the
+cook session wraps it for callers outside the content context. This
+means `ImporterError` is internal to `content`; external callers see
+only the `glibre::Error` union arm.
+
 ### 10.1 Importer-emitted arms (subset of `ImporterError`)
 
 The fbx-importer aggregate emits exactly the six `ImporterError`
@@ -1538,19 +1572,25 @@ The structured-log fields the importer attaches (per SPEC §10.5):
   `error.vertex_index` / `error.mesh_node_name`: the offending
   vertex's location.
 
-### 10.2 SDK-exception translation table
+### 10.2 SDK error-code and exception translation table
 
-Pinned at the §3.7 stage-6 `try` / `catch` boundary; matches SPEC
-§10.3's classification table verbatim with one-cause-per-row precision:
+Rows 1-4 cover `FbxStatus` **return-value error codes** — read by
+inspecting `fbx_importer_->GetStatus().GetCode()` after each SDK call
+that returns `false` (e.g. `FbxImporter::Initialize()`,
+`FbxImporter::Import(scene_)`). `FbxStatus` is **not** a thrown
+exception class; no catch arm for it exists in the carve-out sketch.
+Rows 5-7 cover thrown exceptions inside the `try` block.
 
-| SDK exception class                                                       | Translated arm                              | `error.detail` prefix      | Notes                                                                                  |
+Matches SPEC §10.3's classification table verbatim with one-cause-per-row precision:
+
+| SDK error source                                                          | Translated arm                              | `error.detail` prefix      | Notes                                                                                  |
 |---------------------------------------------------------------------------|---------------------------------------------|----------------------------|----------------------------------------------------------------------------------------|
-| FBX SDK `FbxStatus::eInvalidFile`                                         | `ImporterError::MagicMismatch`              | `"fbx-magic"`              | SDK's `Initialize` returns false with this status; the carve-out wraps via `FbxStatus`. |
-| FBX SDK `FbxStatus::eInvalidFileVersion`                                  | `ImporterError::UnsupportedVersion`         | `"fbx-version"`            | `error.fbx_file_version` field captured.                                                |
-| FBX SDK `FbxStatus::eFileCorrupted`                                       | `ImporterError::MalformedPayload`           | `"fbx-corruption"`         | Either `Initialize`-time or `Import`-time corruption; same arm.                         |
-| FBX SDK `FbxStatus::eFileNotFound`                                        | `ImporterError::SourceNotFound`             | `"fbx-not-found"`          | Race carve-out (file deleted between watch fan-out and SDK open).                       |
-| `std::bad_alloc` from any SDK call                                        | terminate (§10.3 `std::bad_alloc` row; SPEC §10.7 OQ-2 resolved → terminate) | n/a              | The per-cook arena is sized to fit the §9.3.1 ceiling; bad_alloc inside it is a defect. |
-| Any other `std::exception` derivative                                     | `ImporterError::MalformedPayload`           | `"fbx-unclassified"`       | The catch-all arm. The exception's `what()` is logged at `warn` level for triage.       |
+| FBX SDK `FbxStatus::eInvalidFile` (return-value check)                   | `ImporterError::MagicMismatch`              | `"fbx-magic"`              | `Initialize()` returns false; status checked via `GetStatus().GetCode()`.              |
+| FBX SDK `FbxStatus::eInvalidFileVersion` (return-value check)            | `ImporterError::UnsupportedVersion`         | `"fbx-version"`            | `error.fbx_file_version` field captured.                                                |
+| FBX SDK `FbxStatus::eFileCorrupted` (return-value check)                 | `ImporterError::MalformedPayload`           | `"fbx-corruption"`         | Either `Initialize`-time or `Import`-time corruption; same arm.                         |
+| FBX SDK `FbxStatus::eFileNotFound` (return-value check)                  | `ImporterError::SourceNotFound`             | `"fbx-not-found"`          | Race carve-out (file deleted between watch fan-out and SDK open).                       |
+| `std::bad_alloc` thrown from any SDK call                                | terminate (§10.3 `std::bad_alloc` row; SPEC §10.7 OQ-2 resolved → terminate) | n/a              | The per-cook arena is sized to fit the §9.3.1 ceiling; bad_alloc inside it is a defect. |
+| Any other `std::exception` derivative thrown from SDK code               | `ImporterError::MalformedPayload`           | `"fbx-unclassified"`       | The catch-all arm. The exception's `what()` is logged at `warn` level for triage.       |
 | Any non-`std::exception` thrown object                                    | terminate                                    | n/a                        | Non-`std::exception` cannot be classified; the carve-out's `catch(...)` terminates.    |
 
 The catch-all `MalformedPayload(fbx-unclassified)` arm exists because
@@ -1588,12 +1628,17 @@ auto FbxImporter::import_one(const SourceAsset& src,
                              const CancellationToken& cancel) noexcept
     -> Result<eastl::span<const std::byte>>
 {
+    // FbxStatus is a RETURN-VALUE struct, not a thrown exception.
+    // SDK error codes (eInvalidFile, eFileNotFound, eFileCorrupted,
+    // eInvalidFileVersion) are read from FbxImporter::GetStatus() after
+    // SDK calls return false (e.g. Initialize(), Import(scene_)).
+    // Stages 1..2 inline-check the SDK return value and call
+    // classify_fbx_status(fbx_importer_->GetStatus()) to translate the
+    // status code into the §10.2 ImporterError arm immediately.
+    // No catch arm for FbxStatus exists — it would be dead code.
     try {
-        // Stages 1..6 inline.
+        // Stages 1..6 inline; SDK return values checked per §10.2.
         return emit_precursor(...);
-    }
-    catch (const ::fbxsdk::FbxStatus& st) {
-        return classify_fbx_status(st);  // §10.2 table
     }
     catch (std::bad_alloc&) {
         std::terminate();                 // §10.2 row 5
@@ -1611,11 +1656,30 @@ auto FbxImporter::import_one(const SourceAsset& src,
 }
 ```
 
-The RAII guard uses the `eastl::scoped_exit` pattern (or a
-hand-written equivalent) to avoid C++23's `std::scope_exit` (not yet
-in the engine's libc++ baseline). The guard body invokes
-`fbx_importer_->Destroy(true)` and `scene_->Destroy(true)` per §3.7
-stage 7.
+The RAII guard uses the `GLIBRE_DEFER` macro to be authored in
+`core/include/glibre/defer.hpp`. `EASTL` does not provide a
+`scoped_exit` or `finally` utility. `std::scope_exit` (C++23 Library
+Fundamentals TS v3) is not yet available on the engine's libc++
+baseline. The chosen approach is a zero-capture template guard:
+
+```cpp
+// core/include/glibre/defer.hpp (to be authored)
+template <typename F>
+struct ScopeExit {
+    F fn;
+    ~ScopeExit() { fn(); }
+};
+#define GLIBRE_DEFER(expr) \
+    ScopeExit GLIBRE_DEFER_ANON(__LINE__){[&]() noexcept { expr; }}
+```
+
+`GLIBRE_DEFER` is preferred over a `std::function`-based guard
+(PHILOSOPHY §11 bans `std::function` outside of EASTL; the lambda +
+template parameter approach has zero overhead at the call site). The
+guard body invokes `fbx_importer_->Destroy(true)` and
+`scene_->Destroy(true)` per §3.7 stage 7. Authoring `defer.hpp` is a
+prerequisite task for the implementation plan produced by the
+task-breakdown spike.
 
 ### 10.4 Recovery posture
 
@@ -1789,12 +1853,23 @@ active. Exercises SPEC §4.1.9 inv #1 + §10.4 + §10.1
 
 ### 11.4 Determinism gates (PHILOSOPHY §7)
 
-**`content/import/fbx: byte_equal_across_macos_and_linux_ci`**.
+**`content/import/fbx: byte_equal_across_macos_and_linux_ci`**
+*(deferred — conditional on two prerequisites)*.
 Same FBX cooked on macOS and Linux CI; asserts byte-equal precursor
 bytes (Linux CI uses the SDK linked against the same vcpkg-pinned
 versions). Exercises §3.7 stage 5 + the FBX SDK's deterministic
 codegen claim. The Linux side is for cross-host validation only;
-the runtime is macOS-first.
+the runtime is macOS-first (CLAUDE.md; macOS 26 / Apple Silicon
+baseline).
+
+This gate is **not mandatory** until both prerequisites are satisfied:
+(1) a Linux CI runner is provisioned for this repo, and (2) the FBX
+SDK vcpkg overlay port (`vcpkg-overlay-ports/fbx-sdk/`) is authored and
+validated on Linux. The prerequisite task is to be named in the
+`task-breakdown-content-fbx-importer-detailed` planning spike (follow-up
+to this design document). Until both prerequisites land, this test is
+skipped in CI and replaced by `byte_equal_across_two_runs_same_host`
+(§11.4 below) as the mandatory determinism gate.
 
 **`content/import/fbx: byte_equal_across_two_runs_same_host`**.
 Same as the unit case `produces_byte_equal_precursor_across_runs`,
