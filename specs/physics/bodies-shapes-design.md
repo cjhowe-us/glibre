@@ -2122,6 +2122,21 @@ PHILOSOPHY §3 + workflow rule, no `[OPEN]` is discharged silently.
   §12 spike reference). This is a blocker for the sibling `joints/`
   design spike to produce a consistent §10 table.
 
+- **[OPEN — SPEC AMENDMENT REQUIRED]** SPEC §6.1 module layout (line
+  1904) lists `bodies/ccd.{hpp,cpp}` as a separate TU under the
+  `bodies/` tree. The R2 SRP analysis (§3.1 prose) folds `CCD` into
+  `rigid_body.cpp` on the grounds that the only reason-to-change for
+  the CCD opt-in (`apply_motion_quality`) is identical to the reason-
+  to-change for the body-creation path — introducing a separate TU for
+  a one-line branch would violate PHILOSOPHY §1 by creating a seam
+  without a second reason-to-change. SPEC §6.1 must be amended to
+  remove `ccd.{hpp,cpp}` from the `bodies/` listing (collapsing it
+  into the `rigid_body.{hpp,cpp}` row's comment) before implementers
+  begin the bodies-shapes plans. This amendment is tracked against the
+  `[SPIKE] task-breakdown-physics-bodies-shapes-detailed` spike that
+  unblocks on this PR's merge; it must be resolved before any plan
+  issues reference `ccd.{hpp,cpp}` as a deliverable TU.
+
 Resolution of any `[OPEN]` lands the decision into
 `reviews/decisions/` (when cross-aggregate) or amends SPEC §3 / §4 /
 §9 in place (when local to this cluster); per the workflow no
