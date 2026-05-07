@@ -124,7 +124,7 @@ This cluster **refuses to own**:
   machine** — owned by `core` (`reviews/decisions/frame-phases.md`,
   `reviews/decisions/hot-reload-protocol.md`,
   `reviews/decisions/plugin-abi.md`). The cluster registers no
-  systems into other phases (SPEC §9.1) and exposes exactly one
+  systems into other phases (SPEC §4.1.1 invariant 1; frame-phases.md phase table) and exposes exactly one
   reload-time entry point (`PhysicsWorld::on_plugin_reload`, §5) that
   the loader calls during phase 8.
 - **GPU work, asset bytes, scripting intents** — refused per SPEC §1
@@ -1127,7 +1127,7 @@ loader's owned barrier).
   phase-and-thread admissibility internally (the sibling `bodies/`,
   `joints/`, `shapes/` designs own the per-call guard).
 - `PhysicsWorld::snapshot` / `restore` — read-only phase-3 (snapshot
-  during phase 3 is refused; see §4.2 rule 3) and write-only at
+  during phase 3 is refused; see §4.2 invariant 1 — phase-3 ownership is total; snapshot walking during step observes partial state) and write-only at
   phase-8 restore (the loader's hot-reload pathway). The exception
   is `snapshot()` during phase 8 drain (cluster captures at
   `glibre_plugin_drain`; SPEC §8.3.1) — permitted because the
@@ -1715,7 +1715,7 @@ even in shipping (SPEC §10.3 row).
 
 | Arm                              | Trigger (in this cluster)                                                                      | Recovery        | Severity (default) | SPEC ref      |
 |----------------------------------|------------------------------------------------------------------------------------------------|-----------------|--------------------|---------------|
-| `SnapshotCalledDuringStep`       | `snapshot()` invoked while phase 3 is in flight (§4.2 rule 3 — no snapshot mid-step); or `restore()` invoked outside the permitted phase-8 window (i.e. not during the loader's exclusive phase-8 barrier). Distinct from `StepCalledOutsidePhase3` which guards `advance` only. Implementation note: this arm is not yet present in the SPEC §5 enum; the implementation plan that introduces `snapshot`/`restore` must amend the enum and SPEC §10.1 row simultaneously. | Refuse — caller defers snapshot to phase 5+ / restore to phase 8 | `error` | (pending SPEC §10.1 amendment) |
+| `SnapshotCalledDuringStep`       | `snapshot()` invoked while phase 3 is in flight (§4.2 invariant 1 — phase-3 ownership is total; snapshot walking during step observes partial state); or `restore()` invoked outside the permitted phase-8 window (i.e. not during the loader's exclusive phase-8 barrier). Distinct from `StepCalledOutsidePhase3` which guards `advance` only. Implementation note: this arm is not yet present in the SPEC §5 enum; the implementation plan that introduces `snapshot`/`restore` must amend the enum and SPEC §10.1 row simultaneously. | Refuse — caller defers snapshot to phase 5+ / restore to phase 8 | `error` | (pending SPEC §10.1 amendment) |
 | `SnapshotSchemaMismatch`         | `restore` (or `on_resume` step 4) found `snapshot.physics_config_hash != config_view.content_hash`. | Refuse restore — caller restores compatible snapshot | `warn` (hot-reload) / `error` (CI determinism gate) | SPEC §10.1 |
 | `SnapshotDeserialiseFailed`      | `PhysicsSnapshot::from_bytes` returned unexpected from inside `restore`. | Refuse restore — caller treats as unrecoverable | `error` | SPEC §10.1 |
 | `HotReloadStateUnmigratable`     | `PhysicsConfig::from_record` (hot-reload resume) found the surviving record's `since` exceeds the build's reader-side support. | Refuse swap — operator authors migration body | `warn` | SPEC §10.1 |
