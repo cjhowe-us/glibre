@@ -255,6 +255,10 @@ Impl  (private; lives in fbx_importer.cpp)
 ├── io_settings_       FbxIOSettings*                    (configured at create())
 ├── memory_allocator_  FbxMemoryAllocator                (routes SDK allocs to per-cook arena)
 ├── progress_callback_ FbxProgress                       (cancellation-polling shim, §3.7 step 4)
+├── alloc_exhausted_   std::atomic<bool>                 (set by FbxMemoryAllocator hook on null-return;
+│                                                         checked before every SDK entry point per §6.3;
+│                                                         std::atomic is a retained std:: utility per
+│                                                         PHILOSOPHY §11)
 └── version_string_    eastl::string_view                (e.g. "FBX SDK 2025.0/normalize-v1/post-v1";
                                                           the source from which version_ is BLAKE3'd)
 ```
@@ -498,13 +502,50 @@ respected by the `FbxManager::Create()` factory pattern; no
 SDK side). The importer installs a process-wide allocator at first
 `create()` call that routes every SDK allocation through
 `glibre::PerContextAllocator` tagged `ContextTag::content`. The
-allocator records the requesting `FbxManager` pointer so the soft
-sub-ceiling (SPEC §9.3.1, 64 MiB) can be enforced per-importer-cook.
-The hook is set exactly once per process; subsequent `create()` calls
+hook is set exactly once per process; subsequent `create()` calls
 verify the existing hook is the engine's and skip re-installation.
 This collapse pattern matches `fory-codegen.md`'s middleman: one
 shared SDK allocator per process, scoped per cook by the arena's
 tagging.
+
+**Per-cook arena dispatch — `thread_local` pinning.** Because
+`FbxSetMemoryAllocator` is process-wide but the cook worker pool
+runs four independent workers simultaneously (each with its own
+`FbxImporter` instance and `ImporterArena`), the process-wide
+allocator struct must resolve *which* arena to charge on each
+call. The mechanism is a pair of `thread_local` pointers that each
+worker writes immediately before calling any SDK entry point and
+clears immediately after stage 7 teardown:
+
+```cpp
+// fbx_importer.cpp (translation-unit-local; no external linkage)
+thread_local ImporterArena*    tl_active_arena  = nullptr;
+thread_local FbxImporterImpl*  tl_active_impl   = nullptr;
+```
+
+Before the first SDK call in `import_one` (stage 1, SDK importer
+creation), the worker sets both:
+
+```cpp
+tl_active_arena = &arena;
+tl_active_impl  = impl_.get();
+```
+
+The process-wide `FbxMemoryAllocator` callback reads
+`tl_active_arena` to dispatch the allocation and
+`tl_active_impl->alloc_exhausted_` to record a null-return.
+Stage 7 teardown (always, via the `GLIBRE_DEFER` guard) clears
+both pointers back to `nullptr`. A null `tl_active_arena` in the
+callback indicates a spurious SDK call outside of an active cook;
+the callback returns `nullptr` immediately (treated as a defect,
+not a budget refusal — no flag is set).
+
+This design is safe under the four-worker parallel topology because
+each worker thread has its own TLS slot; no synchronization between
+workers is needed for the dispatch path. The `alloc_exhausted_`
+flag on the `Impl` (§3.1) is written by the process-wide callback
+through `tl_active_impl` and read by the same worker thread's
+`import_one`; no cross-thread access to the flag occurs.
 
 **Why per-thread `FbxManager`.** Autodesk's FBX SDK programmer's guide
 explicitly states that `FbxManager` must not be shared across threads
@@ -1660,7 +1701,9 @@ The RAII guard uses the `GLIBRE_DEFER` macro to be authored in
 `core/include/glibre/defer.hpp`. `EASTL` does not provide a
 `scoped_exit` or `finally` utility. `std::scope_exit` (C++23 Library
 Fundamentals TS v3) is not yet available on the engine's libc++
-baseline. The chosen approach is a zero-capture template guard:
+baseline. The chosen approach is an explicit-capture template guard
+(captures the SDK pointers by value so the guard is independent of
+the enclosing scope lifetime):
 
 ```cpp
 // core/include/glibre/defer.hpp (to be authored)
@@ -1669,17 +1712,39 @@ struct ScopeExit {
     F fn;
     ~ScopeExit() { fn(); }
 };
+
+// Two-level token-paste helper required for __LINE__-based unique names:
+#define GLIBRE_DEFER_CAT2(x, y)  x##y
+#define GLIBRE_DEFER_CAT(x, y)   GLIBRE_DEFER_CAT2(x, y)
+#define GLIBRE_DEFER_ANON(n)     GLIBRE_DEFER_CAT(defer_guard_, n)
+
+// Usage: GLIBRE_DEFER([ptr = ptr]() noexcept { ptr->Destroy(true); });
+// Explicit capture by value makes the guard independent of enclosing
+// scope lifetime. Capture-by-reference ([&]) is intentionally avoided:
+// if the scope were to exit before the destructor fires, reference
+// dangling would be silent UB.
 #define GLIBRE_DEFER(expr) \
-    ScopeExit GLIBRE_DEFER_ANON(__LINE__){[&]() noexcept { expr; }}
+    ScopeExit GLIBRE_DEFER_ANON(__LINE__){expr}
 ```
 
 `GLIBRE_DEFER` is preferred over a `std::function`-based guard
 (PHILOSOPHY §11 bans `std::function` outside of EASTL; the lambda +
 template parameter approach has zero overhead at the call site). The
 guard body invokes `fbx_importer_->Destroy(true)` and
-`scene_->Destroy(true)` per §3.7 stage 7. Authoring `defer.hpp` is a
-prerequisite task for the implementation plan produced by the
-task-breakdown spike.
+`scene_->Destroy(true)` per §3.7 stage 7. Example usage in
+`import_one` (capturing SDK pointers by value for scope independence):
+
+```cpp
+auto _sdk_cleanup = GLIBRE_DEFER(
+    [fbx_importer_ = fbx_importer_, scene_ = scene_]() noexcept {
+        if (fbx_importer_) fbx_importer_->Destroy(true);
+        if (scene_)        scene_->Destroy(true);
+    }
+);
+```
+
+Authoring `defer.hpp` is a prerequisite task for the implementation
+plan produced by the task-breakdown spike.
 
 ### 10.4 Recovery posture
 
