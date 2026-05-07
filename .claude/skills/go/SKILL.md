@@ -222,8 +222,8 @@ for ROUND in 1 2 3:
 After round 3 converges:
 
 - For an OPEN PR (still on its head branch): enable auto-merge with
-  `gh pr merge <N> --auto --squash`. The CI gates + critical-path
-  human-review gates still apply on top of the three-round review.
+  `gh pr merge <N> --auto --squash`. The CI gates still apply on top
+  of the three-round review.
 - For an already-MERGED PR with no impl-respond changes: nothing more
   to do. Post a final round-3 summary comment on the PR.
 - For an already-MERGED PR whose impl-respond produced a follow-up

@@ -199,12 +199,7 @@ test now finds something concrete to assert against.
 1. The `review.yml` workflow runs automatically: Conventional Commit
    PR title, markdown lint, YAML lint, SPEC.md 12-section integrity,
    commit-subject issue-ref advisory.
-2. `detect-critical-paths` flags PRs touching architecture / plans /
-   specs / build / CI / engine core / philosophy / agents / glossary
-   / claude / readme / .claude.
-3. Critical-path PRs require ≥ 1 human approving review before
-   `manual-review-required` succeeds. Non-critical PRs auto-merge on
-   green.
+2. All PRs auto-merge on green once the three-round review converges.
 
 **Deliverable:** PR merged.
 
