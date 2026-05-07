@@ -18,7 +18,6 @@ You will receive an issue-specific dispatch prompt. Treat it as authoritative fo
 - Run `cmake --preset macos-debug && ctest --preset macos-debug` locally before opening PR. Address clang-tidy regressions.
 - PR title is a Conventional Commit subject. Body references the plan issue and the user-story issue(s) it advances.
 - **Open the PR with `gh pr create` and STOP.** Do NOT call `gh pr merge --auto --squash`. The parent /go skill runs three sequential rounds of review (`go-review` + `go-impl-respond`) against your PR before flipping auto-merge on. Never push directly to `main`.
-- Critical-path PRs (architecture / specs / build / CI / engine core / philosophy / agents / glossary / claude / readme / .claude) additionally require a human reviewer; the workflow gates merge automatically — do not try to bypass.
 - Issue stays OPEN until the PR merges.
 
 ## Required outputs
