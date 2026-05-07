@@ -1232,12 +1232,15 @@ no SDL type, header, or macro escapes either module's public surface.
 `window/` wraps `SDL_Window` and the SDL3 display query API:
 
 - `Window::open(WindowDesc)` → `SDL_CreateWindow` with the
-  `SDL_WINDOW_METAL | SDL_WINDOW_HIGH_PIXEL_DENSITY` flags on macOS,
+  `SDL_WINDOW_HIGH_PIXEL_DENSITY` flag on macOS (plus optional
+  `SDL_WINDOW_RESIZABLE` / `SDL_WINDOW_FULLSCREEN` per `WindowDesc`),
   followed by `surface::detail::create_metal_view` to attach the
-  `CAMetalLayer`. The handle pair `(SDL_Window*, surface::detail::LayerHandle)`
-  is stored in the pimpl `Window::Impl` along with a cached
-  `LogicalSize` / `DpiScale` snapshot kept in sync by the §6.5
-  pump.
+  `CAMetalLayer`. Metal capability is implicit in SDL3 on macOS via
+  the Cocoa driver — no per-window `SDL_WINDOW_METAL` flag exists in
+  SDL3; `SDL_Metal_CreateView` attaches the layer post-creation. The
+  handle pair `(SDL_Window*, surface::detail::LayerHandle)` is stored
+  in the pimpl `Window::Impl` along with a cached `LogicalSize` /
+  `DpiScale` snapshot kept in sync by the §6.5 pump.
 - `Window::request_resize` → `SDL_SetWindowSize`; the actual resize
   arrives back as a `WindowEvent::Resized` from the pump.
 - `Window::request_close` → `SDL_PushEvent` with a synthesized

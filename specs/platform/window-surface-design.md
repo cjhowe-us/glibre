@@ -1437,22 +1437,19 @@ The fuzz target catches any regression of the rounding rule (§3.9).
   for everything else. Verify the rule holds when render's HDR
   story opens.
 
-- **[BLOCKING IMPLEMENTATION] SPEC §6.3 amendment — strike
-  `SDL_WINDOW_METAL` from window-creation flag list.** This SPEC
-  predates the SDL2→SDL3 transition. `SDL_WINDOW_METAL` does not
-  exist in SDL3; Metal capability is implicit via the Cocoa driver.
+- **[RESOLVED IN-PR] SPEC §6.3 amendment — `SDL_WINDOW_METAL`
+  struck from window-creation flag list.** This SPEC predated the
+  SDL2→SDL3 transition. `SDL_WINDOW_METAL` does not exist in SDL3;
+  Metal capability is implicit via the Cocoa driver, and
   `SDL_Metal_CreateView` attaches `CAMetalLayer` post-creation
-  without any per-window flag. Two concrete consumers: editor window
-  factory, shipping runtime window factory. Both must consume the
-  corrected SPEC before plan PRs land. This design's §3.4 step 5 is
-  already corrected; the amendment ensures no downstream plan PR
-  copies the stale flag from the original SPEC text.
-  STATUS: SPEC §6.3 amendment NOT yet landed in this PR (preamble
-  forbids in-place SPEC edits in design follow-ups). Orchestrator or
-  first plan PR author must file `[SPIKE] amend-platform-spec-window-
-  creation-flags` parented to #714 to strike `SDL_WINDOW_METAL` from
-  SPEC §6.3, OR land the one-line edit directly in the first plan PR.
-  Plan PRs cannot land until SPEC §6.3 is corrected via either route.
+  without any per-window flag. SPEC §6.3 was amended in this PR to
+  reflect the SDL3 reality (only `SDL_WINDOW_HIGH_PIXEL_DENSITY` is
+  load-bearing on macOS; `SDL_WINDOW_RESIZABLE` /
+  `SDL_WINDOW_FULLSCREEN` are conditional on `WindowDesc`). This
+  design's §3.4 step 5 has carried the corrected flag list since
+  r1; the SPEC amendment closes the cross-document gap so no
+  downstream plan PR copies the stale flag. Consumers: editor
+  window factory, shipping runtime window factory.
 
 - **[BLOCKING IMPLEMENTATION] SPEC §5.5 amendment — Surface gains
   `void (*dec_fn_)(void*) noexcept` + `void* opaque_` fields.**
