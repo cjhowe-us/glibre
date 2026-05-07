@@ -57,9 +57,12 @@ The aggregate **refuses to own**:
   dereferences it. Ownership of `Window` / `Display` / `Surface`
   belongs to the sibling design `specs/platform/window-display-design.md`
   (spike #715).
-- **File watching.** `EventQueue<FileEvent>` is fed by the
-  `FileWatcher` I/O thread on a separate ring; the pump never
-  touches that queue. Routed to the sibling design (spike #719).
+- **File watching.** The pump does not own or write to
+  `FileWatcher::EventQueue<FileEvent>`. `SDL_EVENT_DROP_FILE` values
+  are forwarded to `FileWatcher::ingest_drop` (see §3.6 + responsibility
+  6 in §1), which is the file-watcher's own enqueue path — the pump
+  produces a single function call, not a ring write. Routed to the
+  sibling design (spike #719).
 - **Per-device polling.** Gamepad / sensor state polling
   (`SDL_GetGamepadAxis`) is *not* the pump's responsibility; SDL3
   delivers gamepad axis / button changes as events through
@@ -85,10 +88,19 @@ The aggregate **refuses to own**:
 
 The SRP boundary is sharp: if the **SDL3 event vocabulary**, the
 **SDL3 → typed-variant translation table**, the **per-device
-ordering rule**, the **bounded SPSC ring protocol**, or the
-**per-frame drain trigger** change, this design changes. Anything
-else — input action mapping, window aggregate state, file watching,
-display pacing — is out of scope.
+ordering rule**, the **bounded SPSC ring protocol**, the
+**per-frame drain trigger**, or the **drop-event routing policy**
+change, this design changes. Anything else — input action mapping,
+window aggregate state, display pacing — is out of scope.
+
+Responsibility 6 (owned, in-scope): the *policy* of drop-event
+routing — that the pump forwards `SDL_EVENT_DROP_FILE` to the
+file-watcher aggregate. This policy stays owned regardless of which
+*mechanism* implements it (current: `FileWatcher::ingest_drop` direct
+call; future option: `WindowEvent::FileDropped` via the queue, gated
+on §12 [NON-BLOCKING] one-caller audit). The SRP boundary tracks the
+policy, not the mechanism — switching mechanisms does NOT trigger an
+SRP-list edit, but adding or removing the policy itself would.
 
 ## 2. Requirements coverage
 
@@ -110,9 +122,9 @@ design below or explicitly refused with rationale. Inputs:
 | **R-6.1.1** key press/release/repeat with scancode + keycode + modifiers                                                             | **Covered.** §5.4 emits `input::KeyDown { KeyCode, ScanCode, ModifierMask, repeat }` and `input::KeyUp { KeyCode, ScanCode, ModifierMask }`. The translation table maps `SDL_EVENT_KEY_DOWN`/`UP` and `SDL_KeyboardEvent::repeat` directly into the typed payload (§3.3 below).                                                                            |
 | **R-6.1.2** scancode normalisation to USB HID                                                                                        | **Covered (delegated to SDL3).** SDL3's `SDL_Scancode` *is* the USB-HID-aligned namespace; the translation step is identity-by-cast into `glibre::platform::ScanCode`, sealed at compile time so a future SDL3 enum extension is a deliberate central edit, not a silent expansion (§3.3).                                                                |
 | **R-6.1.3** mouse button events (L / R / M / X1 / X2)                                                                                | **Covered.** `input::MouseButtonEv { MouseButton, pressed, x, y, click_count }`. SDL3's button index 1..5 maps to the closed enum `MouseButton::Left/Right/Middle/X1/X2`. Scroll lives in `Wheel` (§5.4 / §3.3).                                                                                                                                            |
-| **R-6.1.4** mouse delta / position in high-DPI                                                                                       | **Covered.** `MouseMove { x, y, dx, dy }` carries SDL3's already-DPI-corrected coordinates (`SDL_WINDOW_HIGH_PIXEL_DENSITY` set at window creation per SPEC §6.3). Delta comes from SDL3's relative-mouse-mode events; absolute `x, y` is in logical pixels per the §4.1 inv #4 rule.                                                                       |
+| **R-6.1.4** mouse delta / position in high-DPI                                                                                       | **Covered.** `MouseMove { x, y, dx, dy }` reports all four fields in logical points. Absolute `x/y` from `SDL_MouseMotionEvent` are already in logical points (matching `LogicalSize` when `SDL_WINDOW_HIGH_PIXEL_DENSITY` is set). Relative `dx/dy` from `SDL_SetRelativeMouseMode` are in physical pixels and must be divided by `Pump::Impl`-cached `DpiScale` (initialised `1.0f`, refreshed in §3.5 on `SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED`) before being placed in the payload. The cached copy is passed by value to `translate_mouse` — no cross-aggregate call on the hot translation path. See §3.3 mouse-coord rule. Invariant: every `MouseMove` payload reports x, y, dx, dy in logical points (see §3.3 for the rescale and unit test).                                          |
 | **R-6.1.5** trackpad continuous scroll vs discrete wheel                                                                             | **Covered.** `Wheel { dx, dy, flipped }`. SDL3's `SDL_MouseWheelEvent::direction` produces `flipped`; floating-point `dx/dy` carries the precise trackpad delta. Discrete vs continuous distinction is not exposed as a separate field — consumers that need it inspect the magnitude (≥ 1.0 ⇒ likely discrete) per the input-plugin's interpretation rule. |
-| **R-6.1.6** unified gamepad abstraction (buttons, axes, triggers)                                                                    | **Covered.** `input::GamepadButtonEv { device, GamepadBtn, pressed }`, `input::GamepadAxisEv { device, GamepadAxis, value }`. Trigger is an axis (`LeftTrigger`, `RightTrigger`) per the `GamepadAxis` enum; its value range is `[-1, 1]` even though SDL3 reports `[0, 32767]` for triggers — the translation step rescales to the sum's invariant.        |
+| **R-6.1.6** unified gamepad abstraction (buttons, axes, triggers)                                                                    | **Covered.** `input::GamepadButtonEv { device, GamepadBtn, pressed }`, `input::GamepadAxisEv { device, GamepadAxis, value }`. Trigger is an axis (`LeftTrigger`, `RightTrigger`) per the `GamepadAxis` enum. Sticks rescale `[-32768, 32767]` to `[-1, 1]`; triggers rescale `[0, 32767]` to `[-1, 1]` using formula `axis = (raw / 32767.0f) * 2.0f - 1.0f`. Consequently a fully-released trigger (raw=0) reports `axis=-1.0f`; gameplay code wanting released-as-zero must remap: `(axis + 1.0f) / 2.0f`. See §3.3 for the formula and unit tests.        |
 | **R-6.1.7** gyroscope / accelerometer as ECS events                                                                                  | **Refused for MVP, deferred.** Sensor events would require new variants in the closed `InputEvent` sum (§4.2 inv #5: sealed at compile time). VR / motion-controller scope is out of MVP per `specs/platform/SPEC.md` §3 refusals; reopening the sum is a deliberate amendment spike when a controller-with-IMU lands as a target device.                  |
 | **R-6.1.8** per-device capability flags                                                                                              | **Refused at the pump.** Capability queries are state on the device handle, not events on the stream. Routed to a future `InputDevice` aggregate (sibling, post-MVP). The pump does not synthesise capability events.                                                                                                                                       |
 | **R-6.1.9** 10-finger touch tracking                                                                                                 | **Refused for MVP.** No touch hardware on the macOS-first baseline (`PHILOSOPHY` §macOS-first). Reopening the `InputEvent` sum for touch is gated on the second-target-platform spike.                                                                                                                                                                       |
@@ -246,7 +258,7 @@ namespace glibre::platform::event::detail {
 // Returns nullopt for unknown / consumed-internally tags.
 [[nodiscard]] auto translate_keyboard(const SDL_Event&) noexcept
     -> eastl::optional<InputEvent>;
-[[nodiscard]] auto translate_mouse(const SDL_Event&) noexcept
+[[nodiscard]] auto translate_mouse(const SDL_Event&, DpiScale) noexcept
     -> eastl::optional<InputEvent>;
 [[nodiscard]] auto translate_wheel(const SDL_Event&) noexcept
     -> eastl::optional<InputEvent>;
@@ -277,24 +289,45 @@ Key normalisation rules realised in the table:
   `platform.hpp` § 5.4 and frozen across MVP; consumers (input
   plugin) decode by AND-mask against named bit constants exposed
   alongside `ModifierMask`.
-- **Mouse coordinates come from SDL3's logical (window-relative)
-  pixels in `SDL_MouseMotionEvent::x/y`.** Window-relative is
-  required so coordinate (0, 0) is consistently top-left of the
-  window's client area regardless of compositor placement.
+- **Mouse coordinates: all four fields in logical points.**
+  Absolute `x/y` from `SDL_MouseMotionEvent` are already logical
+  points (matching `LogicalSize`) when `SDL_WINDOW_HIGH_PIXEL_DENSITY`
+  is set — window-relative so coordinate (0, 0) is top-left of the
+  client area regardless of compositor placement. Relative `dx/dy`
+  from `SDL_SetRelativeMouseMode` are physical pixel deltas on macOS
+  and must be divided by the current `DpiScale` before being placed
+  in `MouseMove::dx/dy`. `Pump::Impl` caches the current `DpiScale`
+  (initialised `1.0f` at construction; updated in §3.5 on
+  `SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED`). Each `translate_mouse`
+  call passes the cached `DpiScale` by value as its second argument.
+  Documented invariant: every `MouseMove` payload reports x, y, dx, dy
+  in logical points. A unit test at `DpiScale != 1.0` asserts the
+  divide-by-scale path (§11.1 test #3b).
 - **Wheel deltas use `SDL_MouseWheelEvent::x/y` (floating-point on
   modern SDL3).** `flipped` reflects the user's "natural scrolling"
   preference per `SDL_MouseWheelEvent::direction`.
-- **Text input UTF-8.** SDL3 delivers UTF-8 already. The pump copies
-  up to 32 bytes into `input::TextInput::utf8` and sets
-  `length`. If SDL3 delivers > 32 bytes, the pump emits N successive
-  `TextInput` events covering complete UTF-8 codepoints (split is
-  always on a codepoint boundary, never mid-byte; the codepoint
-  scanner is a four-byte look-ahead).
+- **Text input UTF-8.** SDL3 delivers UTF-8 already via
+  `SDL_TextInputEvent::text[32]` — a fixed 32-byte null-terminated
+  buffer. SDL3 truncates at that boundary before the event reaches
+  the pump, so no single `SDL_EVENT_TEXT_INPUT` will ever carry more
+  than 32 bytes. The pump copies up to 32 bytes into
+  `input::TextInput::utf8` and sets `length`. The four-byte
+  look-ahead codepoint scanner described in earlier drafts is
+  therefore dead code for the SDL3 path and is **not implemented**
+  in the production translator. If the test harness's `InputDriver`
+  needs to inject an overlong synthetic string (more than 32 bytes)
+  in test-only paths, it is responsible for splitting at codepoint
+  boundaries before enqueueing multiple `TextInput` events directly.
 - **Gamepad axis range rescale.** SDL3's `Gamepad` axis range is
-  `[-32768, 32767]` for sticks and `[0, 32767]` for triggers; the
-  table rescales both to `[-1, 1]` before emitting. This is the
-  only arithmetic in the translate path; everything else is
-  cast-and-pack.
+  `[-32768, 32767]` for sticks and `[0, 32767]` for triggers.
+  Sticks: `axis = raw / 32767.0f` (clamped to `[-1, 1]`).
+  Triggers: `axis = (raw / 32767.0f) * 2.0f - 1.0f` (range `[-1, 1]`).
+  Consequently a fully-released trigger (SDL3 raw = 0) maps to
+  `axis = -1.0f`. Gameplay code that wants released-as-zero must
+  remap at the consumer: `(axis + 1.0f) / 2.0f`. This is documented
+  as an invariant; §11.1 test #6b asserts `translate_gamepad(raw=0,
+  axis=LeftTrigger).value == -1.0f`. This is the only arithmetic in
+  the translate path; everything else is cast-and-pack.
 
 ### 3.4 Bounded SPSC ring (`event/queue_impl.hpp`)
 
@@ -308,8 +341,13 @@ template <class T>
 struct RingImpl {
     std::size_t        capacity{0};       // power of two (mask-and-wrap).
     std::size_t        mask{0};           // capacity - 1.
-    std::atomic<std::size_t> head{0};     // producer-only (release on publish).
-    std::atomic<std::size_t> tail{0};     // consumer-only (release on consume).
+    // alignas(128) padding mandatory for SPSC discipline on Apple Silicon
+    // (128B cache line). Without padding, every producer push invalidates
+    // the consumer's cache line on the other core via false sharing,
+    // defeating the lock-free benefit. The 256-byte struct overhead is
+    // negligible against the 1 MiB slot array.
+    alignas(128) std::atomic<std::size_t> head{0};     // producer-only (release on publish).
+    alignas(128) std::atomic<std::size_t> tail{0};     // consumer-only (release on consume).
     T*                 slots{nullptr};    // capacity slots, allocated from
                                           // platform sub-arena (§9.2 SPEC).
 
@@ -332,16 +370,30 @@ Ordering pairs:
   full-ring condition.
 
 Capacity is fixed at construction (§4.2 inv #6) and a power of two
-(mask-and-wrap is one `&` instead of one `%`). Sizes are §9.2:
+(mask-and-wrap is one `&` instead of one `%`). `with_capacity(N)`
+silently rounds `N` up to the next power of two so callers need not
+know about the power-of-two sizing constraint (§11.1 test #8b:
+`with_capacity(100).capacity() == 128`). Sizes are §9.2:
 ~32k slots for `EventQueue<InputEvent>`, ~16k slots for
 `EventQueue<WindowEvent>`. Slot storage is a single contiguous
 allocation from the platform sub-arena tagged
 `platform::ContextTag` (§9.2 SPEC).
 
-Full-on-`try_push` returns `false`; the pump translates that to the
-fatal `Error::IoFailure { OsCode{0} }` with prefix `"queue-full"`
-per §10.3.2 SPEC. **No coalescing, no drop, no grow** — §4.2 inv
-#3 / inv #6 is structural.
+Full-on-`try_push` returns `false`; the pump:
+1. Stamps the TLS prefix slot via
+   `detail::error::set_prefix(prefix::queue_full)`.
+2. Emits an `error`-severity log with the prefix `"queue-full"` and
+   the queue family name. The stamp must precede this log call so
+   `log_error` reads the stamped prefix (not `prefix::none`).
+3. Returns `unexpected(IoFailure { OsCode{0} })`.
+
+The TLS prefix stamp is mandatory before any `IoFailure{OsCode{0}}`
+construction where the prefix is the only discriminator; without the
+stamp a caller testing `current_prefix() == prefix::queue_full` will
+see `prefix::none` and silently misroute the fatal error. The stamp
+is cold-path-only — never executed on the success path.
+
+**No coalescing, no drop, no grow** — §4.2 inv #3 / inv #6 is structural.
 
 ### 3.5 Internally-consumed SDL3 events
 
@@ -353,7 +405,7 @@ the event itself triggers a side effect inside the pump:
 |-------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------|
 | `SDL_EVENT_GAMEPAD_ADDED` / `_REMOVED`                                  | Update SDL3's internal gamepad table by calling `SDL_OpenGamepad` / `SDL_CloseGamepad` so subsequent axis/button events resolve a valid `device` index. No glibre `InputEvent` emitted; consumers query gamepad presence at use time. | None (R-6.1.11 partial).                     |
 | `SDL_EVENT_DISPLAY_ADDED` / `_REMOVED` / `_ORIENTATION_CHANGED`         | Cause the next `Window::display()` call to re-query SDL3's display list (`Display` is a snapshot per SPEC §4.1 inv #5, not cached). Emitted as `WindowEvent::DisplayChanged { window, display }` for the focused window.              | `WindowEvent::DisplayChanged`.                |
-| `SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED`                                | Update the owning `Window::Impl`'s cached `(LogicalSize, PhysicalSize, DpiScale)` snapshot via `surface::detail::query_layer_metrics` *before* the event becomes visible to the engine (§6.3 cross-module note in SPEC).            | `WindowEvent::DpiChanged`.                    |
+| `SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED`                                | Update the owning `Window::Impl`'s cached `(LogicalSize, PhysicalSize, DpiScale)` snapshot via `surface::detail::query_layer_metrics` *before* the event becomes visible to the engine (§6.3 cross-module note in SPEC). Also updates the Pump::Impl-cached DpiScale value from the new `Window::Impl` value; the updated scale is passed to `translate_mouse` on the next `SDL_EVENT_MOUSE_MOTION` in this frame (consumed by the divide-by-scale path per §3.3). | `WindowEvent::DpiChanged`.                    |
 | `SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED` / `_RESIZED`                      | Update the owning `Window::Impl`'s cached `LogicalSize` / `PhysicalSize`.                                                                                                                                                            | `WindowEvent::Resized`.                       |
 | `SDL_EVENT_WINDOW_FOCUS_GAINED` / `_LOST`                               | None at the pump (the window aggregate's focus state is the queue contents themselves).                                                                                                                                              | `WindowEvent::FocusGained` / `FocusLost`.     |
 | `SDL_EVENT_WINDOW_MINIMIZED` / `_RESTORED`                              | None.                                                                                                                                                                                                                                | `WindowEvent::Minimized` / `Restored`.        |
@@ -395,6 +447,13 @@ rather than promoted to a `WindowEvent::FileDropped` variant: the
 file queue for editor-managed assets; routing drop through a
 separate `WindowEvent` would force every importer to drain two
 queues. Single-consumer ⇒ single channel.
+
+`ingest_drop` has one concrete caller at MVP (this branch — the
+`SDL_EVENT_DROP_FILE` handler above). Per PHILOSOPHY §Anti-patterns,
+promotion to a stable cross-aggregate internal contract is gated on
+a second caller materialising. Until then, `ingest_drop` is
+event-pump's private extension to file-watcher and may be removed if
+the second caller never appears. See §12 [NON-BLOCKING] open question.
 
 `SDL_EVENT_DROP_TEXT` (clipboard-style drop of plain text) is
 dropped at `info` level in MVP; a `WindowEvent::TextDropped` variant
@@ -650,8 +709,8 @@ is a contract violation. Detection in MVP:
   abort in shipping builds because a misbehaving plugin should
   surface as an error, not crash the engine.
 
-This is the canonical detection pattern from `error-model.md`
-§"Severity Conventions" — assert in debug, demote in shipping.
+This is the canonical detection pattern consistent with SPEC §4.1
+inv #2 and §4.2 inv #1 — assert in debug, demote in shipping.
 
 ### 6.5 Hot-reload barrier interaction
 
@@ -930,7 +989,7 @@ failure is a `glibre::Error` arm (with the platform-private
 
 | Entry point                     | Returnable arms                                  | Trigger                                         |
 |---------------------------------|--------------------------------------------------|-------------------------------------------------|
-| `EventQueue<T>::with_capacity`  | `Unsupported`                                    | zero / non-power-of-two beyond cap / wildly oversized capacity (> 2^24 — SPEC sub-arena cap) |
+| `EventQueue<T>::with_capacity`  | `Unsupported`                                    | zero capacity / capacity overflow beyond u32::max (the sub-arena ceiling); non-power-of-two is silently rounded up (not an error) |
 | `EventQueue<T>::drain`          | total — never returns `unexpected`               | drain is infallible by design (SPSC pop)        |
 | `Pump::create`                  | `IoFailure { OsCode }`                           | `SDL_InitSubSystem(SDL_INIT_VIDEO \| SDL_INIT_GAMEPAD)` failure |
 | `Pump::drain`                   | `IoFailure { OsCode { 0 } }` with prefix `"queue-full"` (fatal); `Unsupported` (off-main-thread) | Queue full at `try_push` site (§4.2 inv #3 fatal); drain called from non-main thread (§6.4) |
@@ -941,6 +1000,15 @@ constructs `Error::IoFailure { OsCode { 0 } }` on queue-full because
 the failure is *not* an SDL3 error — it is a glibre invariant
 violation. The `"queue-full"` prefix is stamped into the thread-local
 diagnostic buffer at the same site.
+
+Note: `specs/platform/SPEC.md` §10.3.2 predates this design refinement
+and still reads "zero / wildly oversized capacity" as the sole trigger
+for `Unsupported` from `EventQueue<T>::with_capacity`. This design
+canonicalises silent round-up to the next power-of-two (§3.4) — a
+non-power-of-two capacity is not an error. SPEC §10.3.2 must be amended
+to replace the trigger description with "capacity overflow beyond
+`u32::max`" before the first plan PR consuming this design lands.
+Tracked in §12 [BLOCKING IMPLEMENTATION].
 
 ### 10.2 `SDLPollFailed` recovery shape
 
@@ -965,11 +1033,20 @@ This is the same recovery contract as SPEC §10.3.2's
 
 When `EventQueue<T>::try_push` returns false during `Pump::drain`:
 
-1. The pump emits a `error`-severity log with the prefix
-   `"queue-full"` and the queue family name.
-2. The pump returns `unexpected(IoFailure { OsCode { 0 } })`
-   from the current `Pump::drain` call.
-3. The engine frame loop catches the failure, logs at `error`,
+1. The pump calls `detail::error::set_prefix(prefix::queue_full)`.
+   The stamp must precede the log so `log_error` reads the stamped
+   prefix. Reorder is cold-path-only — no impact on hot-path performance.
+2. The pump emits an `error`-severity log with the prefix
+   `"queue-full"` and the queue family name (reads the stamped
+   prefix set in step 1).
+3. The pump returns `unexpected(IoFailure { OsCode { 0 } })`
+   from the current `Pump::drain` call. The TLS prefix stamp is the
+   load-bearing discriminator: callers that receive `IoFailure` from
+   `Pump::drain` read `current_prefix()` to confirm the queue-full
+   case. Without the stamp a caller testing
+   `current_prefix() == prefix::queue_full` would see `prefix::none`
+   and silently misroute the error.
+4. The engine frame loop catches the failure, logs at `error`,
    sets the exit code, and tears down. There is no graceful
    recovery — a queue-full at sustained load is a misconfiguration
    (sub-arena sized too small for the workload); the only real
@@ -1043,6 +1120,12 @@ the platform user-story issues).
    `(LogicalSize, PhysicalSize, DpiScale)` snapshot on
    `Window::Impl` is updated *before* the typed event is enqueued
    (§3.5 / §6.3 SPEC cross-module note).
+3b. **`event_pump_mouse_relative_motion_divided_by_dpi_scale`** — call
+    `translate_mouse(ev, DpiScale{2.0f})` with a `SDL_MouseMotionEvent`
+    whose relative `dx/dy` is 200 physical pixels; assert the emitted
+    `MouseMove::dx/dy` is `100.0f` (logical points). Confirms the
+    divide-by-dpi_scale invariant documented in §3.3 and that the
+    `DpiScale` parameter is the operative divisor. (R-6.1.4)
 4. **`event_pump_drops_unknown_sdl_tag`** — feed an
    `SDL_EVENT_USER` and an out-of-MVP-range tag; assert the
    queues remain empty and a `debug`-level log line was emitted.
@@ -1054,16 +1137,26 @@ the platform user-story issues).
    `SDL_GamepadAxisEvent` with raw value 32767 (left stick)
    and 32767 (left trigger); assert the emitted
    `input::GamepadAxisEv::value` is `1.0f` for both.
-7. **`event_pump_text_input_splits_on_codepoint_boundary`** —
-   feed a single `SDL_EVENT_TEXT_INPUT` with a 64-byte UTF-8
-   string containing 16 four-byte codepoints; assert two emitted
-   `input::TextInput` events, each carrying ≤ 32 bytes and a
-   complete codepoint sequence (no codepoint split across events).
+6b. **`event_pump_trigger_released_state_is_negative_one`** — feed a
+    `SDL_GamepadAxisEvent` with raw value 0 for `LeftTrigger`; assert
+    the emitted `input::GamepadAxisEv::value` is `-1.0f`. Documents
+    the invariant: released trigger = -1.0; consumer remap is
+    `(axis + 1.0f) / 2.0f` for released-as-zero semantics. (§3.3.)
+7. **`event_pump_text_input_copies_sdl_buffer`** —
+   feed a single `SDL_EVENT_TEXT_INPUT` with a 28-byte UTF-8
+   string (within SDL3's 32-byte `text[]` buffer); assert one emitted
+   `input::TextInput` event carrying the exact bytes. Also assert that
+   the production translator does NOT contain a multi-event splitting
+   path (SDL3 truncates at 32 bytes; splitting is test-harness-only).
 8. **`event_queue_overflow_returns_io_failure`** — fill the
    `EventQueue<InputEvent>` to capacity, then attempt one more
    push via the pump; assert `Pump::drain()` returns
    `unexpected(IoFailure { OsCode { 0 } })` whose stamped
    diagnostic prefix is `"queue-full"`. (§10.3 SPEC.)
+8b. **`event_pump_with_capacity_rounds_up_to_power_of_two`** — assert
+    `EventQueue<InputEvent>::with_capacity(100).capacity() == 128`.
+    Confirms the silent round-up contract; non-power-of-two is never
+    an error. (§3.4, §10.1.)
 9. **`event_queue_overflow_refuses_coalesce`** — same setup as
    #8 but with all events being `WindowEvent::DpiChanged` (one
    of the §4.2 inv #4 never-coalesce events); assert the failure
@@ -1134,9 +1227,20 @@ the platform user-story issues).
 The platform user-story for "engine consumes OS events" lives in
 `specs/e2e/SPEC.md`'s S1 trace: a 600-frame replay drives synthetic
 input events through the pump and asserts the resulting ECS
-component snapshots are byte-equal across runs. The pump-specific
-coverage is implicit in S1; no platform-specific E2E trace is owed
-beyond what S1 already exercises.
+component snapshots are byte-equal across runs.
+
+**Drag-drop and quit-synthesis E2E coverage status:**
+- Drag-drop (`SDL_EVENT_DROP_FILE`) is asserted in the S1 trace at
+  step 7 (file-drop-into-window-surface), which exercises the
+  `§3.6` routing path through `FileWatcher::ingest_drop`. Integration
+  test #5 (`event_pump_drop_file_routes_to_filewatcher`) covers the
+  direct routing assertion.
+- Quit-synthesis (`SDL_EVENT_QUIT` → `WindowEvent::CloseRequested`)
+  is integration-test-only at MVP per §12 [NON-BLOCKING]: no E2E
+  trace covers menu-driven quit. The S1 trace exits via window close,
+  not Cmd-Q. Integration test #6
+  (`event_pump_quit_synthesises_close_requested`) is the acceptance
+  gate. The gap is tracked in §12 [NON-BLOCKING].
 
 The "reload mid-replay" e2e variant (§8.7 SPEC) covers the
 hot-reload survival path; runs against the same S1 trace with a
@@ -1146,7 +1250,10 @@ hot-reload survival path; runs against the same S1 trace with a
 
 | Concern                                    | Test                                                                                  |
 |--------------------------------------------|---------------------------------------------------------------------------------------|
-| SDL3 → typed translation correctness       | unit #1, #2, #3, #6, #7                                                               |
+| SDL3 → typed translation correctness       | unit #1, #2, #3, #3b, #6, #7                                                          |
+| Mouse dx/dy DPI divide (§3.3, R-6.1.4)    | unit #3b                                                                              |
+| Trigger released-state formula (§3.3)      | unit #6b                                                                              |
+| with_capacity round-up (§3.4, §10.1)      | unit #8b                                                                              |
 | Sealed-variant boundary (unknown drop)     | unit #4, #5                                                                           |
 | Per-device monotone ordering (§4.2 inv #2) | unit #10; integration #4                                                              |
 | Bounded-channel never-drop (§4.2 inv #3)   | unit #8, #9                                                                           |
@@ -1155,8 +1262,8 @@ hot-reload survival path; runs against the same S1 trace with a
 | Zero-alloc hot path (§9.3)                 | unit #13                                                                              |
 | p50 / p99 wall-time (§9.4)                 | unit #12; integration #3                                                              |
 | Hot-reload survival (§8.1, §8.2 SPEC)      | integration #2; e2e reload-mid-replay variant                                         |
-| Drop-file routing (§3.6, R-14.2.4)         | integration #5                                                                        |
-| Quit synthesis (§3.5)                      | integration #6                                                                        |
+| Drop-file routing (§3.6, R-14.2.4)         | integration #5; S1 trace step 7                                                       |
+| Quit synthesis (§3.5)                      | integration #6 (no E2E; gap tracked §12 [NON-BLOCKING])                               |
 | Phase-1 quiescence at phase 8 (§8.2 SPEC)  | integration #2 covers it incidentally; explicit assertion in `tests/core/integration/hot_reload/` |
 
 ## 12. Open questions
@@ -1197,3 +1304,36 @@ hot-reload survival path; runs against the same S1 trace with a
   hard (matching debug behaviour) is a question that should land
   with the first real bug report. Trigger: a plugin author files a
   ticket about silent failure. Owner: error-model amendment spike.
+- [NON-BLOCKING] **`ingest_drop` two-concrete-users gate.** Currently
+  has one caller: the event-pump §3.6 `SDL_EVENT_DROP_FILE` branch.
+  Promotion to a stable cross-aggregate internal contract is gated on
+  a second caller materialising. Until then, `ingest_drop` is
+  event-pump's private extension to file-watcher and may be removed if
+  the second caller never appears. Per PHILOSOPHY §Anti-patterns.
+- [NON-BLOCKING] **Quit-synthesis E2E coverage gap.** `SDL_EVENT_QUIT`
+  → `WindowEvent::CloseRequested` (§3.5) is not exercised by any E2E
+  trace at MVP. The S1 trace exits via window close, not Cmd-Q.
+  Integration test #6 (`event_pump_quit_synthesises_close_requested`)
+  is the acceptance gate; no E2E trace covers menu-driven quit.
+  Trigger to close: the user-story for Cmd-Q app quit lands in scope.
+- [BLOCKING IMPLEMENTATION] **SPEC §10.3.2 `EventQueue::with_capacity`
+  trigger column amendment.** The current SPEC §10.3.2 entry describes
+  the `Unsupported` trigger as "zero / wildly oversized capacity". This
+  design (§10.1 + §3.4) establishes silent round-up to the next
+  power-of-two — a non-power-of-two capacity is not an error, and
+  `Unsupported` is only emitted when the requested capacity overflows
+  `u32::max` (the sub-arena ceiling). SPEC §10.3.2 must be amended to
+  replace the trigger description with "capacity overflow beyond
+  `u32::max`" before the first plan PR consuming this design lands.
+  Two concrete consumers: shipping runtime input pump, editor input pump.
+  Owner: platform-SPEC amendment — must land before plan PRs open.
+  STATUS: The amendment is a one-line edit to replace "zero / wildly
+  oversized capacity" with "capacity overflow beyond `u32::max`" in the
+  SPEC §10.3.2 trigger column. The orchestrator (or first plan PR
+  author) must either (a) file
+  `[SPIKE] amend-platform-spec-event-pump-with-capacity-trigger`
+  parented to #714 and backfill the issue number into this entry, OR
+  (b) land the one-line SPEC edit directly in the first plan PR
+  consuming this design. Plan PRs cannot land until SPEC §10.3.2 is
+  corrected via either route. Issue: #TBD (to be filed at plan-PR
+  authoring time).
