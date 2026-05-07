@@ -1100,10 +1100,15 @@ loader's owned barrier).
 - `PhysicsWorld::add_body` / `remove_body` / `add_joint` /
   `remove_joint` / `intern_shape` / `release_shape` /
   `intern_material` — write paths against the sibling tables.
-  **Permitted in phase 1 (input), phase 2 (logic), phase 3 (the
-  cluster's own substep entry), and phase 8 (hot-reload restore)**;
-  forbidden in phases 4–7, 9 because those phases' read paths would
-  observe partial state.
+  **Permitted in phase 2 (logic), phase 3 (the cluster's own substep
+  entry), and phase 8 (hot-reload restore)**; forbidden in phases 1,
+  4–7, 9. Phase 1 is excluded because `frame-phases.md` phase-1
+  "Allowed writes" covers only `Input` / `ActionEvent` components and
+  window-state; extending it to physics body writes requires a
+  `frame-phases.md` amendment spike. Phase 2 (logic) is the correct
+  pre-step window — gameplay systems that spawn or destroy bodies run
+  there, ahead of phase 3's entry barrier. Phases 4–7, 9 are excluded
+  because those phases' read paths would observe partial state.
   The cluster brokers via the facade; sibling tables enforce the
   phase-and-thread admissibility internally (the sibling `bodies/`,
   `joints/`, `shapes/` designs own the per-call guard).
@@ -1672,7 +1677,7 @@ surface through `PhysicsWorld::advance`'s arms.
 
 | Arm                              | Trigger (in this cluster)                                                                      | Recovery        | Severity (default) | SPEC ref      |
 |----------------------------------|------------------------------------------------------------------------------------------------|-----------------|--------------------|---------------|
-| `StepCalledOutsidePhase3`        | `advance` phase guard observed `current_phase != PhysicsFixed` (also fires for `snapshot` / `restore` outside phase 5+). | Refuse — caller routes through `FrameLoop` | `error` | SPEC §10.1 |
+| `StepCalledOutsidePhase3`        | `advance` phase guard observed `current_phase != PhysicsFixed`. Fires only on the `advance` entry point; snapshot/restore phase violations use a dedicated arm (§10.4). | Refuse — caller routes through `FrameLoop` | `error` | SPEC §10.1 |
 | `AccumulatorClampExceeded`       | `advance` substep loop reached `report.substeps_dropped > 0` **and** `config.determinism_gate == Hard`. | Clamp under `SoftWarn`; CI promotes to error under `Hard` | `warn` (default) / `error` (Hard) | SPEC §10.1 |
 
 Under `SoftWarn` (default in shipping), the clamp is a `Warning::
@@ -1696,6 +1701,7 @@ even in shipping (SPEC §10.3 row).
 
 | Arm                              | Trigger (in this cluster)                                                                      | Recovery        | Severity (default) | SPEC ref      |
 |----------------------------------|------------------------------------------------------------------------------------------------|-----------------|--------------------|---------------|
+| `SnapshotCalledDuringStep`       | `snapshot()` invoked while phase 3 is in flight (§4.2 rule 3 — no snapshot mid-step); or `restore()` invoked outside the permitted phase-8 window (i.e. not during the loader's exclusive phase-8 barrier). Distinct from `StepCalledOutsidePhase3` which guards `advance` only. Implementation note: this arm is not yet present in the SPEC §5 enum; the implementation plan that introduces `snapshot`/`restore` must amend the enum and SPEC §10.1 row simultaneously. | Refuse — caller defers snapshot to phase 5+ / restore to phase 8 | `error` | (pending SPEC §10.1 amendment) |
 | `SnapshotSchemaMismatch`         | `restore` (or `on_resume` step 4) found `snapshot.physics_config_hash != config_view.content_hash`. | Refuse restore — caller restores compatible snapshot | `warn` (hot-reload) / `error` (CI determinism gate) | SPEC §10.1 |
 | `SnapshotDeserialiseFailed`      | `PhysicsSnapshot::from_bytes` returned unexpected from inside `restore`. | Refuse restore — caller treats as unrecoverable | `error` | SPEC §10.1 |
 | `HotReloadStateUnmigratable`     | `PhysicsConfig::from_record` (hot-reload resume) found the surviving record's `since` exceeds the build's reader-side support. | Refuse swap — operator authors migration body | `warn` | SPEC §10.1 |
@@ -1879,7 +1885,7 @@ PHILOSOPHY §3 + workflow rule, no `[OPEN]` is discharged silently.
   test-only NaN-injection fixture uses `1.0f / 0.0f` (positive Inf)
   to guarantee the gate catches both. Tracked by §3.4.4 step 3.
 - **[OPEN]** Should `step_one` step-5 iteration-hash compute use
-  BLAKE3-128 (28 bytes hash) or BLAKE3-64 (8 bytes)? BLAKE3-128 has
+  BLAKE3-128 (16-byte hash) or BLAKE3-64 (8 bytes)? BLAKE3-128 has
   more collision-resistance margin but costs ~30 ns more per
   substep on the M1 baseline. Frozen at BLAKE3-128 (the §9.2 0.030
   ms slice budgets it); re-evaluate if the determinism-gate fixture
