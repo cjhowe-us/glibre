@@ -265,11 +265,16 @@ The four TUs decompose by SRP (PHILOSOPHY §1):
   knob set + the `content_hash` compute (BLAKE3 over canonicalised
   bytes; SPEC §7.1.1, §3.2 invariant "Init-time-immutable").
 - **`accumulator.cpp`** — one reason to change: how wall-clock dt
-  becomes a deterministic substep count (SPEC §4.1.3).
+  becomes a deterministic substep count (SPEC §4.1.3). Owns the carry
+  loop end-to-end: `AccumulatorImpl::advance` accepts a `step_fn`
+  callable and invokes it once per substep slot; callers (`phase3_driver`)
+  never touch `carry_` / `tick_count_` directly. If carry arithmetic
+  changes (e.g. f64 migration from §12 open question), only this TU
+  changes.
 - **`phase3_driver.cpp`** — one reason to change: how substeps are
   ordered + dispatched inside phase 3 (SPEC §6.2). Drives the
-  accumulator and brokers each substep's barrier work; never authors
-  per-substep math.
+  accumulator by passing `step_one` as the `step_fn` callable; brokers
+  each substep's barrier work; never owns carry arithmetic.
 - **`physics_world.cpp`** — one reason to change: the facade's
   composition + lifecycle (`create`, destructor, hot-reload entry
   point, sibling-aggregate accessor wiring).
@@ -399,8 +404,12 @@ public:
         : fixed_dt_{fixed_dt}, carry_{0.0f}, tick_count_{0u} {}
 
     // Drive: returns AdvanceReport { substeps_run, substeps_dropped, carry_seconds }.
+    // step_fn is called once per substep slot; must return std::expected<void, Error>.
+    // AccumulatorImpl owns the carry loop; callers never touch carry_ / tick_count_ directly.
+    template <typename StepFn>
     [[nodiscard]] AdvanceReport advance(float real_dt,
-                                        std::uint8_t max_substeps) noexcept;
+                                        std::uint8_t max_substeps,
+                                        StepFn&& step_fn) noexcept;
 
     [[nodiscard]] float          carry()      const noexcept { return carry_; }
     [[nodiscard]] std::uint64_t  tick_count() const noexcept { return tick_count_; }
@@ -420,21 +429,26 @@ private:
 }  // namespace
 ```
 
-The `advance` body — the **only** loop that calls
-`JoltMiddleman::step` (§3.4 step 4):
+The `advance` body — the **sole owner of carry arithmetic**, calling
+the provided `step_fn` once per substep slot.  `PhysicsWorldImpl`
+passes `step_one` as the callable and never touches `carry_` /
+`tick_count_` directly (§3.1 SRP rationale — one reason to change
+carry arithmetic → one TU, `accumulator.cpp`):
 
 ```text
-AccumulatorImpl::advance(real_dt, max_substeps):
+AccumulatorImpl::advance(real_dt, max_substeps, step_fn):
   carry_ += real_dt
   AdvanceReport r{ .substeps_run = 0, .substeps_dropped = 0 }
   while carry_ >= fixed_dt_ AND r.substeps_run < max_substeps:
-    // Each iteration: §3.4 step 4 dispatches one substep.
-    // The driver, NOT the accumulator, calls JoltMiddleman::step.
-    yield substep slot                      // §3.4 step 4 hooks here
+    // Invoke the caller's substep body; §3.4.3 passes step_one here.
+    step_result <- step_fn()               // entry barrier + middleman.step + exit barrier
+    if step_result is unexpected:
+      // Abort substep before commit — carry / tick stay unchanged.
+      return std::unexpected{ step_result.error() }
     carry_  -= fixed_dt_
     tick_count_ += 1
     r.substeps_run += 1
-  if carry_ >= fixed_dt_:                   // residual past the cap
+  if carry_ >= fixed_dt_:                 // residual past the cap
     // Bounded catch-up: drop residual carry, log Warning::AccumulatorClamped.
     r.substeps_dropped = floor(carry_ / fixed_dt_)
     carry_ = 0.0f
@@ -445,11 +459,14 @@ AccumulatorImpl::advance(real_dt, max_substeps):
 Public-boundary invariants (SPEC §4.1.3; restated for the implementer):
 
 1. **Single owner of phase-3 advancement** — only `AccumulatorImpl::
-   advance` advances the simulation clock. No plugin, gameplay
-   system, or test harness may call into Jolt's `Step` outside this
-   loop (SPEC §3.2 collapse #2). The `JoltMiddleman::step` function
-   is package-private (CMake visibility) so that even a buggy sibling
-   TU cannot call it directly.
+   advance` owns the carry loop and determines when each substep slot
+   fires. The caller provides the per-substep body as a `step_fn`
+   callable (§3.4.3 passes `step_one`); `AccumulatorImpl` never
+   reaches outside to call `JoltMiddleman::step` directly. No plugin,
+   gameplay system, or test harness may call into Jolt's `Step` outside
+   this loop (SPEC §3.2 collapse #2). The `JoltMiddleman::step`
+   function is package-private (CMake visibility) so that even a
+   buggy sibling TU cannot call it directly.
 2. **Bounded catch-up** — the substep loop is hard-capped at four
    substeps per frame (`max_substeps = 4` from `PhysicsConfig`).
    Residual carry above that is **dropped** (`carry_ = 0.0f`), and a
@@ -687,27 +704,20 @@ PhysicsWorldImpl::advance(real_dt):
   if not in phase 3:                        // §4.1.1 inv 1; §10.1 row
     return std::unexpected{ Error::StepCalledOutsidePhase3 }
 
-  // Substep loop — see §3.4.4 driver for the per-substep body.
-  report <- AdvanceReport{ substeps_run = 0, substeps_dropped = 0, carry_seconds = 0 }
-  accumulator_.carry_ += real_dt
-  while accumulator_.carry_ >= config_.fixed_dt
-    AND report.substeps_run < config_.max_substeps:
-      // step_one is the §3.4.4 driver body — never another caller.
-      step_result <- step_one()             // = entry barrier + middleman.step + exit barrier
-      if step_result is unexpected:
-        // Determinism / numerical-instability arms abort the substep before commit.
-        // Carry is NOT decremented; tick is NOT advanced.
-        return std::unexpected{ step_result.error() }   // §10.1 NumericalInstabilityDetected etc.
-      accumulator_.carry_       -= config_.fixed_dt
-      accumulator_.tick_count_  += 1
-      report.substeps_run       += 1
-  if accumulator_.carry_ >= config_.fixed_dt:
-    report.substeps_dropped = floor(accumulator_.carry_ / config_.fixed_dt)
-    accumulator_.carry_     = 0.0f
-    log Warning::AccumulatorClamped { real_dt, dropped = report.substeps_dropped }
-    if PhysicsConfig.determinism_gate == DeterminismGate::Hard:
+  // Delegate the carry loop entirely to AccumulatorImpl::advance.
+  // PhysicsWorldImpl never touches accumulator_.carry_ / tick_count_ directly (§3.1 SRP).
+  report <- accumulator_.advance(real_dt, config_.max_substeps,
+                                 [this]() -> std::expected<void, Error> {
+                                   return step_one()   // §3.4.4 driver body
+                                 })
+  if report is unexpected:
+    return std::unexpected{ report.error() }   // §10.1 arms (NumericalInstabilityDetected etc.)
+
+  if report->substeps_dropped > 0:
+    log Warning::AccumulatorClamped { real_dt, dropped = report->substeps_dropped }
+    if config_.determinism_gate == DeterminismGate::Hard:
       return std::unexpected{ Error::AccumulatorClampExceeded }   // §10.1; CI promotes
-  report.carry_seconds = accumulator_.carry_
+
   return report
 ```
 
@@ -987,11 +997,9 @@ spike, not an in-place edit.
    walking during phase 3 would observe partially-updated state and
    the §6.4 rule 2 sort is not in flight. The cluster's phase guard
    (the same flag `step_one` consults) refuses snapshot calls during
-   phase 3 with `Error::StepCalledOutsidePhase3` — SPEC §10.1 names
-   this arm for `step`, but the same guard catches `snapshot` /
-   `restore` from inside the same phase. (Snapshot during phase 8 —
-   the hot-reload drain — is permitted; the loader holds exclusive
-   ownership and the per-substep mirror is settled.)
+   phase 3 with `Error::SnapshotCalledDuringStep` (§10.4). (Snapshot
+   during phase 8 — the hot-reload drain — is permitted; the loader
+   holds exclusive ownership and the per-substep mirror is settled.)
 
 ## 5. Hot/cold path split
 
@@ -1067,7 +1075,7 @@ cluster's concurrency surface is exhaustively small.
 | Phase | Cluster ops admitted in MVP                                                                                                       |
 |-------|------------------------------------------------------------------------------------------------------------------------------------|
 | 1 Input        | `accumulator().carry()` read-only (rare; render's interpolation alpha is read here when render registers a phase-1 prefetch). `queries().raycast(...)` etc. read-only against the previous frame's terminal state (§4.1.10 invariant 1). |
-| 2 Logic        | Reserved slot; deferred body in MVP. Future gameplay-plugin systems will write `ExternalForce` / `ExternalTorque` / kinematic transform overrides into ECS storages here, ahead of phase 3's entry barrier. |
+| 2 Logic        | Reserved slot; deferred body in MVP. Future gameplay-plugin systems will write `ExternalForce` / `ExternalTorque` / kinematic transform overrides into ECS storages here, ahead of phase 3's entry barrier. Body-lifecycle writes (`add_body` / `remove_body` / `add_joint` / `remove_joint` / `intern_shape` / `release_shape` / `intern_material`) are also admitted in this phase — phase 2 is the correct pre-step window for spawning and despawning physics participation (§6.3). |
 | 3 PhysicsFixed | **`PhysicsWorld::advance`** is the body. Sole writer of physics state for the frame. The driver runs the §3.4.4 substep loop end to end; no other system in phase 3 touches `PhysicsWorld` (the cluster registers exactly one system into phase 3 via the manifest, and the manifest's `reads` / `writes` access set is the union of the §3.6 mirror barriers). |
 | 4 Animation    | Reserved slot; deferred body in MVP.                                                                                                |
 | 5 Transform    | `accumulator().carry()` read-only (interpolation alpha for `core`'s transform propagation; rarely consumed). No `PhysicsWorld` writes.|
@@ -1107,8 +1115,14 @@ loader's owned barrier).
   window-state; extending it to physics body writes requires a
   `frame-phases.md` amendment spike. Phase 2 (logic) is the correct
   pre-step window — gameplay systems that spawn or destroy bodies run
-  there, ahead of phase 3's entry barrier. Phases 4–7, 9 are excluded
-  because those phases' read paths would observe partial state.
+  there, ahead of phase 3's entry barrier. `frame-phases.md` phase-2
+  "Allowed writes" lists "Gameplay intent components, transient script
+  state"; body-lifecycle writes (spawning / despawning physics
+  participation) are treated as gameplay-intent writes in this design.
+  If a future spike determines that `add_body` requires an explicit
+  `frame-phases.md` amendment, the phase-2 admission must be demoted
+  to phases 3 and 8 only. Phases 4–7, 9 are excluded because those
+  phases' read paths would observe partial state.
   The cluster brokers via the facade; sibling tables enforce the
   phase-and-thread admissibility internally (the sibling `bodies/`,
   `joints/`, `shapes/` designs own the per-call guard).
