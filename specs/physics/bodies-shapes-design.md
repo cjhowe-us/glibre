@@ -255,20 +255,20 @@ owner.
 
 The model below is the implementer's authority for the
 `bodies/rigid_body.{hpp,cpp}`, `bodies/body_id_allocator.{hpp,cpp}`,
-`bodies/sleeping.{hpp,cpp}`, `bodies/ccd.{hpp,cpp}`,
+`bodies/sleeping.{hpp,cpp}`,
 `shapes/shape_table.{hpp,cpp}`, and `shapes/shape_blob.{hpp,cpp}` TUs
-(SPEC §6.1). Each subsection owns one of the six primitives the
+(SPEC §6.1). Each subsection owns one of the five primitives the
 cluster composes; the SPEC §4.1.* invariants the primitive enforces
-are cited per subsection.
+are cited per subsection. The CCD opt-in (§3.4) is a static helper
+inside `rigid_body.cpp`, not a separate TU (§3.1 SRP rationale).
 
 ### 3.1 Composition and module boundary
 
 ```text
 physics/src/bodies/                                (private headers; not on plugin include path)
-├── rigid_body.{hpp,cpp}                           (§3.2  ─ RigidBody mirror; entry/exit barrier walks)
+├── rigid_body.{hpp,cpp}                           (§3.2 + §3.4 ─ RigidBody mirror; entry/exit barrier walks; CCD bit forwarded as static helper at create-time)
 ├── body_id_allocator.{hpp,cpp}                    (§3.3  ─ Deterministic 32-bit BodyId allocator)
-├── sleeping.{hpp,cpp}                             (§3.7  ─ Sleeping marker mirror + sleep-frame counter)
-└── ccd.{hpp,cpp}                                  (§3.4  ─ Per-body CCD opt-in wired at create-time)
+└── sleeping.{hpp,cpp}                             (§3.7  ─ Sleeping marker mirror + sleep-frame counter)
 
 physics/src/shapes/                                (private headers; not on plugin include path)
 ├── shape_table.{hpp,cpp}                          (§3.9  ─ Content-hash table; ShapeHandle refcount; resolved Jolt Shape*)
@@ -293,20 +293,23 @@ this: a sibling module's `.cpp` may include its own `.hpp`s and the
 §5 facade only — cross-module reach-throughs are forbidden, and the
 seam is `world/physics_world.hpp`.
 
-The six TUs decompose by SRP (PHILOSOPHY §1):
+The five TUs decompose by SRP (PHILOSOPHY §1):
 
 - **`rigid_body.cpp`** — one reason to change: how ECS RigidBody +
   companion-component bytes mirror to / from Jolt at substep
-  barriers (§4.1.5 + §4.2 invariant 2).
+  barriers, including the per-body CCD opt-in forwarded as a static
+  helper `apply_motion_quality` at create-time (§4.1.5 + §4.1.15 +
+  §4.2 invariant 2). The CCD bit's reason-to-change ("how
+  `RigidBody.ccd` feeds into `BodyCreationSettings::mMotionQuality`")
+  is the same reason the body-creation path would change; a separate
+  TU for a one-line branch would violate PHILOSOPHY §1 by introducing
+  a seam without a second reason-to-change.
 - **`body_id_allocator.cpp`** — one reason to change: how a stable
   32-bit handle is issued per ECS materialisation order (§4.1.5b
   invariant 1).
 - **`sleeping.cpp`** — one reason to change: how Jolt's
   `Body::IsActive()` mirrors into the `Sleeping` ECS marker and
   how the per-body `sleep_frames` counter advances (§4.1.14).
-- **`ccd.cpp`** — one reason to change: how the per-body CCD bit
-  feeds into `BodyCreationSettings::mMotionQuality` at create-time
-  (§4.1.15).
 - **`shape_table.cpp`** — one reason to change: how content-hashed
   `ShapeBlobRecord`s share a Jolt `Shape*` pointer across multiple
   `Collider`s (§4.1.6 invariant 1 + §7.1.2 invariant 5).
@@ -318,7 +321,9 @@ A second TU per primitive is forbidden; one reason to change → one
 TU. The `Collider` component is a POD aggregate (§5) whose mirror
 work is part of `rigid_body.cpp` (mirror of `RigidBody` includes
 mirror of its `Collider`); it does not have its own TU because its
-"reason to change" is the same as the body's mirror.
+"reason to change" is the same as the body's mirror. The CCD flag
+(§3.4) follows the same reasoning: `apply_motion_quality` is a
+static file-scope helper inside `rigid_body.cpp`, not a separate TU.
 
 ### 3.2 `RigidBody` (§4.1.5; covers harmonius RigidBody + Velocity + AngularVelocity + ExternalForce + ExternalTorque)
 
@@ -510,7 +515,7 @@ Result<BodyId> BodyIdAllocator::allocate(ecs::Entity owner) noexcept {
     if (!free_list_.empty()) {
         // Sort once-per-call to keep determinism; cost amortises over
         // the per-substep walk (§9.2 mirror row 0.30 ms cell).
-        std::ranges::sort(free_list_);
+        eastl::sort(free_list_.begin(), free_list_.end());
         raw = free_list_.front();
         free_list_.erase(free_list_.begin());
     } else {
@@ -572,10 +577,10 @@ the bit at body-create time, not authoring the swept math (which
 lives in Jolt's narrowphase, behind the §4.1.13 seam).
 
 ```cpp
-// physics/src/bodies/ccd.cpp — pseudocode
-void on_body_create_apply_ccd(BodyId body_id,
-                              const RigidBody& row,
-                              JoltMiddleman& mm) noexcept {
+// physics/src/bodies/rigid_body.cpp — static helper (§3.1 folded into rigid_body.cpp)
+static void apply_motion_quality(BodyId body_id,
+                                 const RigidBody& row,
+                                 JoltMiddleman& mm) noexcept {
     const auto quality =
         row.ccd ? MotionQuality::LinearCast
                 : MotionQuality::Discrete;
@@ -1102,16 +1107,16 @@ edit.
 | `struct Sleeping`                                              | §3.7 `Sleeping` mirror                                     | Marker-tag component; presence is the public sleep signal.                                                  |
 | `using BodyId = Handle<tags::body, std::uint32_t>`             | §3.3 `BodyIdAllocator`                                     | 32-bit handle; `BodyId{0}` is the invalid sentinel (§3.3 invariant 1).                                      |
 | `using ShapeHandle = Handle<tags::shape, std::uint32_t>`       | §3.9 `ShapeTable`                                          | 32-bit handle; `ShapeHandle{0}` is invalid; refcount-zero handle reuse is `ShapeHandleStale`.                |
-| `using MaterialId = Handle<tags::material, std::uint32_t>`     | sibling `bodies/material_table.cpp` (this cluster)         | Material-asset references on `Collider`; the table itself is per-world (covered briefly in §7.4).            |
+| `using MaterialId = Handle<tags::material, std::uint32_t>`     | sibling `physics-world` cluster (`PhysicsConfig` + material-table TU) | Material-asset references on `Collider`; the table is per-world alongside `PhysicsConfig`; this cluster carries only the 32-bit ordinal on `Collider`. |
 | `using CollisionLayer = Handle<tags::collision_layer, ...>`    | sibling `physics-world` `LayerFilter`                      | The cluster carries the layer ordinal on `Collider`; the matrix lives on `PhysicsConfig`.                   |
 | `enum class MotionType`                                        | §3.2                                                       | Sealed three-value sum; pinned at create.                                                                   |
 | `struct ShapeBlob`                                             | §3.8 dispatcher                                            | The public POD; the bytes are decoded into the §3.9 table.                                                  |
-| `struct PhysicsMaterial`                                       | sibling `bodies/material_table.cpp`                        | Asset-side; the cluster only carries the `MaterialId` reference on `Collider`.                              |
+| `struct PhysicsMaterial`                                       | sibling `physics-world` cluster                            | Asset-side type; decoded and interned by the `physics-world` material-table TU. This cluster carries only the `MaterialId` reference on `Collider`. |
 | `PhysicsWorld::add_body(Entity, const RigidBody&, const Collider&)` | §3.3 `allocate` + §3.9 `intern` (lazy via Collider.shape) | Forwards through the `physics-world` facade; the cluster authors the bytes inside.                          |
 | `PhysicsWorld::remove_body(BodyId)`                            | §3.3 `release` + §3.6 mirror cleanup                       | Refuses if a joint endpoint is live (sibling joint registry's check; arm `BodyStillReferencedByJoint`).      |
 | `PhysicsWorld::intern_shape(const ShapeBlob&)`                 | §3.9 `intern`                                              | The shape-table entry; refcount-incremented on duplicate hashes.                                            |
 | `PhysicsWorld::release_shape(ShapeHandle)`                     | §3.9 `release`                                             | Refcount-decremented; row freed when refcount → 0.                                                          |
-| `PhysicsWorld::intern_material(const PhysicsMaterial&)`        | sibling `bodies/material_table.cpp`                        | Material-table entry (parallel to the shape table).                                                         |
+| `PhysicsWorld::intern_material(const PhysicsMaterial&)`        | sibling `physics-world` cluster                            | Material-table entry owned by the `physics-world` cluster alongside `PhysicsConfig`; not authored by this cluster. |
 
 ### 4.2 Three cluster-specific usage rules
 
@@ -1362,8 +1367,8 @@ columns to the schema:
 |------------------------------------|-----------------------------------------------------------------------|----------------------------------------------------------------------|
 | `body_ids` (tag 6)                 | `BodyIdAllocator::in_use_ids()` walked ascending                       | The capture order; restore replays in the same order.                |
 | `body_motion_types` (tag 7)        | `RigidBody.motion_type` per body                                      | `u8` ordinal of the §5 sealed sum.                                   |
-| `body_positions` (tag 8)           | `RigidBody.position` per body (cached at exit barrier)                 | `vec3f`; `std::bit_cast<u32>` per coordinate (SPEC §6.4 R4).          |
-| `body_rotations` (tag 9)           | `RigidBody.rotation` per body                                         | `quatf`; bit-exact same way.                                          |
+| `body_positions` (tag 8)           | per-archetype scratch `cached_position` per body (written by exit barrier, §3.6.2) | `vec3f`; `std::bit_cast<u32>` per coordinate (SPEC §6.4 R4).          |
+| `body_rotations` (tag 9)           | per-archetype scratch `cached_rotation` per body                      | `quatf`; bit-exact same way.                                          |
 | `body_linear_velocities` (tag 10)  | `Velocity.v` per body                                                 | Same.                                                                 |
 | `body_angular_velocities` (tag 11) | `AngularVelocity.w` per body                                          | Same.                                                                 |
 | `body_sleep_frames` (tag 12)       | `sleep_frames` from per-archetype scratch (§3.7)                      | `u16`; reset on wake.                                                 |
@@ -1736,7 +1741,7 @@ contribution per primitive is bounded as follows; the numbers fit
 
 | Cluster slice                                        | Per substep | Per frame (2 substeps × 2 barriers) | Dominant operation                                                                                       |
 |------------------------------------------------------|-------------|--------------------------------------|-----------------------------------------------------------------------------------------------------------|
-| `BodyId`-ascending sort over scratch span            | < 0.005 ms  | < 0.020 ms                           | `std::ranges::sort` over ~30 `u32`; `O(n log n)` with `n ≤ 30`.                                          |
+| `BodyId`-ascending sort over scratch span            | < 0.005 ms  | < 0.020 ms                           | `eastl::sort` over ~30 `u32`; `O(n log n)` with `n ≤ 30`.                                                |
 | Entry barrier — `ExternalForce` / `Torque` drain     | < 0.010 ms  | < 0.020 ms                           | `Vec3` add into Jolt's body-force accumulator + zeroing; one cache line per body.                       |
 | Entry barrier — Kinematic position / rotation set    | < 0.005 ms  | < 0.010 ms                           | One `Mat4` worth of writes per Kinematic body; few in S1 (~1 character).                                  |
 | Exit barrier — velocity / position / sleep mirror    | < 0.020 ms  | < 0.040 ms                           | `Vec3 × 2` reads + `Vec3 × 2` writes per body + sleep-bit branch.                                          |
