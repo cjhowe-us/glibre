@@ -146,7 +146,7 @@ This aggregate **refuses to own**:
   branch; SPEC §4.1.2 inv #1).
 - **Texture / image / font ingest** — those are the
   `FreeImageImporter` and `FreeTypeImporter` siblings (SPEC §4.1.2,
-  detailed designs are sibling spikes #810 / #816). The FBX path
+  detailed designs are sibling spikes #809 / #811). The FBX path
   may reference embedded texture sub-assets (§3.6 below) but
   delegates their decode to `FreeImageImporter` rather than
   inlining the decode here.
@@ -184,7 +184,7 @@ of `specs/content/SPEC.md` and to the design sections below.
 | Harmonius clause                                                                              | Glibre disposition (MVP)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 |-----------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **R-12.1.1** native binary format ingestion with magic / version / hash validation            | **Refused for the FBX importer; collapsed.** R-12.1.1 names a glibre-native pre-cooked binary format (DCC plugin export → engine ingest). Glibre §3.2 collapse #1 explicitly removes that intermediate format: the FBX SDK ingests `.fbx` directly. The validation contract R-12.1.1 names — magic / version / hash — is preserved on the **`SourceAsset → CookedAsset`** seam: SPEC §4.1.1 inv #3 (`source_hash = BLAKE3(bytes)`), §4.1.4 inv #1 (`content_hash = BLAKE3(payload)`), and SPEC §4.1.2 inv #2 (SDK reports `MagicMismatch` / `UnsupportedVersion` at first ingress; §3.7 step 1 below). The "DCC plugin native export" surface re-enters post-MVP behind the same `Importer` seam if needed; the FBX importer covers MVP. |
-| **R-12.1.2** texture source import (PNG / JPEG / EXR / HDR / TIFF) with sRGB / linear decode | **Out of scope (sibling).** Texture decode is the `FreeImageImporter` aggregate (sibling spike #810). The FBX importer **does not** decode embedded texture sub-assets; it emits the texture's source-tree path (resolved per §3.6 below) into the `MeshArtifact` precursor's `material_refs` field, and the cook-session orchestrator schedules the texture cook as a separate `RecookRequest` driven by the `DependencyEdge` graph (SPEC §4.1.10 inv #4).                                                                                                                                          |
+| **R-12.1.2** texture source import (PNG / JPEG / EXR / HDR / TIFF) with sRGB / linear decode | **Out of scope (sibling).** Texture decode is the `FreeImageImporter` aggregate (sibling spike #809). The FBX importer **does not** decode embedded texture sub-assets; it emits the texture's source-tree path (resolved per §3.6 below) into the `MeshArtifact` precursor's `material_refs` field, and the cook-session orchestrator schedules the texture cook as a separate `RecookRequest` driven by the `DependencyEdge` graph (SPEC §4.1.10 inv #4).                                                                                                                                          |
 | **R-12.1.3** audio source import (WAV / FLAC / Ogg Vorbis)                                    | **Refused (out of context).** SPEC §3.3 routes audio source decode to the `audio` plugin. The FBX importer's `SourceKind` is closed-sum on `Mesh`; the dispatch table (SPEC §6.1 `importers/dispatch.cpp`) compile-time-rejects any other kind.                                                                                                                                                                                                                                                                |
 | **R-12.1.4** schema validation; errors include source path + byte offset + fix suggestion     | **Covered, scoped.** Path is the structured-log field `source_path` (SPEC §10.5); byte offset is recovered from the FBX SDK's `FbxStatus` line/column when available and embedded in `error.detail` (§3.7 step 2 below); fix-suggestion is the per-arm "Operator action" column from SPEC §10.1 (Class B refusal) — re-export at supported version, restore source under `assets/source/`, break dependency cycle, etc. The structured-log handler formats these uniformly (§3.7 step 5 below).             |
 | **R-12.1.5** parallel batch import with progress + cancellation + rollback                    | **Covered, partitioned.** Parallelism and progress tracking are the `CookSession` aggregate's concerns (SPEC §4.1.9, §6.2): the worker pool runs one `FbxImporter::import_one` invocation per scheduling slot; `CookSession::commit()` returns a `CookReport { cooks_executed, cache_hits }` (SPEC §5.12). Cancellation is observed at every `FbxNode` traversal boundary in the importer (§3.7 step 4 below) per SPEC §4.1.2 inv #5; rollback semantics live with the session (SPEC §4.1.9 inv #1).      |
@@ -573,7 +573,7 @@ sub-asset:
 | `FbxAnimStack` / `FbxAnimLayer` / `FbxAnimCurve`  | **Refused (MVP).** §3.4 `import_animations=false`. Reserved field; post-MVP behind a separate Fory schema authored under a future spike (§12 OQ-2). The SDK's animation tree is left un-traversed; the importer asserts no curves leak into the precursor.   |
 | `FbxBlendShape` (morph targets)                   | **Refused (MVP).** §3.4 `import_morph_targets=false`. Same path as animations.                                                                                                                                                                                 |
 | `FbxCamera` / `FbxLight`                          | **Refused.** Out of context (rendering / scene composition concerns). Path: emit a once-per-cook `info`-level log entry naming the unhandled sub-asset for tooling visibility; do not error.                                                                  |
-| `FbxMaterial` / `FbxSurfaceMaterial`              | **Indirected (no decode).** The importer captures the material's name and any referenced texture file paths into the precursor's `material_refs` field. Texture decode is the `FreeImageImporter`'s job (sibling spike #810); the cook session schedules it as a sibling `RecookRequest` driven by the resulting `DependencyEdge`. Material parameter values (PBR factors, etc.) are deferred to the future `material` plugin (§12 OQ-3). |
+| `FbxMaterial` / `FbxSurfaceMaterial`              | **Indirected (no decode).** The importer captures the material's name and any referenced texture file paths into the precursor's `material_refs` field. Texture decode is the `FreeImageImporter`'s job (sibling spike #809); the cook session schedules it as a sibling `RecookRequest` driven by the resulting `DependencyEdge`. Material parameter values (PBR factors, etc.) are deferred to the future `material` plugin (§12 OQ-3). |
 | Embedded textures (`FbxFileTexture` with embedded media) | **Refused.** MVP requires textures to live as external files under `assets/source/` so the watcher seam (SPEC §4.1.10) can drive their hot-reload. Embedded media in FBX is rejected with `ImporterError::UnsupportedVersion` and `error.detail = "fbx-embedded-media"`. Operator action: re-export the source FBX with `FbxFileTexture::SetUseEmbedded(false)`, ship the texture as a sibling file. |
 | External texture references (`FbxFileTexture` with disk path) | **Indirected.** The path is canonicalized against `assets/source/` (the source-tree root, SPEC §4.1.1 inv #1); paths outside the root are `ImporterError::SourceNotFound`. The canonical path is recorded in the precursor's `material_refs[i].texture_path` field; the cook session emits a `DependencyEdge` so a later texture change re-cooks the parent mesh's material binding. |
 | `FbxLayerElementVertexColor`                      | **Imported, optional.** If present, the per-vertex color channel is emitted as a fourth vertex stream; `255`-default if absent.                                                                                                                                |
@@ -766,8 +766,8 @@ is off-thread per SPEC §9.3.1.
 The precursor (the bytes `import_one` returns) is the input to
 the cook step's Fory-encode stage. Its in-memory layout is **not**
 the Fory envelope shape; it is a packed CPU-side struct emitted by
-the codegen rule under `data/codegen-output/include/glibre/types/
-content/mesh_artifact_precursor.hpp` (per `fory-codegen.md` rule —
+the codegen rule under `${CMAKE_BINARY_DIR}/generated/glibre-types/include/glibre/types/
+content/mesh_artifact_precursor.hpp` (per `fory-codegen.md` §Pipeline —
 the codegen tool emits a pre-Fory CPU struct alongside the Fory
 struct for any persistent type the engine wants a non-Fory in-memory
 form of). The shape:
@@ -969,9 +969,9 @@ follow-up §12 OQ-1):
   defines the typed schema the bytes carry. A future amendment may
   add a typed `NormalizeParamsView` adaptor that decodes the bytes
   into the §3.4 fields, exported through the same header. The body
-  of the typed view lives inside `data/codegen-output/include/
-  glibre/types/content/fbx_normalize_params.hpp` (Fory-codegenerated)
-  per `fory-codegen.md`; this design pins the vocabulary contract
+  of the typed view lives inside `${CMAKE_BINARY_DIR}/generated/glibre-types/include/
+  glibre/types/content/fbx_normalize_params.hpp` (Fory-codegenerated,
+  per `fory-codegen.md` §Pipeline); this design pins the vocabulary contract
   without importing the typed view into the §5.4 header (which would
   pull a Fory-codegen dependency into a header consumed by the
   runtime that does not need it).
@@ -1233,8 +1233,8 @@ The importer emits an in-memory `MeshArtifactPrecursor` (§3.9). The
 cook step's stage 4 (`fory-serialize`, SPEC §6.2) consumes the
 precursor and produces the on-disk `glibre.content.MeshArtifact`
 Fory payload. The precursor → Fory transform is **owned by `data`**,
-authored under `data/codegen-output/include/glibre/types/content/`
-per `fory-codegen.md`. The importer does not author the schema, the
+authored under `${CMAKE_BINARY_DIR}/generated/glibre-types/include/glibre/types/content/`
+per `fory-codegen.md` §Pipeline. The importer does not author the schema, the
 encoder, or the migration table.
 
 The Fory-encoded bytes → `ContentHash` mapping is `seal_cooked_asset`
@@ -1648,8 +1648,8 @@ files in the engine that compile with `-fexceptions`:
 
 ```
 plugins/content/cook/import/fbx_importer.cpp     # this design
-plugins/content/cook/import/freeimage_importer.cpp # sibling spike #810
-plugins/content/cook/import/freetype_importer.cpp  # sibling spike #816
+plugins/content/cook/import/freeimage_importer.cpp # sibling spike #809
+plugins/content/cook/import/freetype_importer.cpp  # sibling spike #811
 ```
 
 The header `fbx_importer.hpp` and **every other TU in the engine**
