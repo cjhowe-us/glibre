@@ -762,16 +762,22 @@ void error_callback_dispatch(FREE_IMAGE_FORMAT fif, const char* message) {
     // giving an arena-independent, callback-scoped lifetime.
     //
     // NOTE: tl_active_error.detail_storage must be sized to cover realistic
-    // codec messages.  libpng's longest message is under 256 bytes; 512 is
-    // the chosen bound with truncation (suffix "…") if exceeded.
+    // codec messages.  libpng's longest message is under 256 bytes; 511
+    // usable chars (fixed_string<char,512>) is the chosen bound with
+    // truncation (suffix "…") if exceeded; the copy cap is 510 to leave
+    // one slot for the ellipsis byte — see inline comment below.
     {
+        // fixed_string<char,512>: nodeCount=512 → capacity=511 usable chars + null.
+        // Reserve one slot for the ellipsis byte so the assign+append path
+        // stays within the inline buffer (assign(510) + '\x85' = 511 chars + null
+        // = exactly 512 bytes — no overflow, no bEnableOverflow heap spill).
         eastl::fixed_string<char, 512> tmp;
         if (message) {
             const auto len = eastl::CharStrlen(message);
-            if (len <= 511) {
+            if (len <= 510) {
                 tmp.assign(message, len);
             } else {
-                tmp.assign(message, 511);
+                tmp.assign(message, 510);
                 tmp += '\x85'; // ELLIPSIS (0x85 single-byte stand-in; detail is debug text)
             }
         }
@@ -2430,7 +2436,7 @@ Exercises §10.2 row 7.
 **`content/import/texture: terminates_on_bad_alloc_inside_arena`**.
 Forces a `bad_alloc` by setting the arena ceiling to 1 KiB and
 cooking the 4K PNG fixture; asserts process termination via
-`std::terminate`. Exercises §10.2 row 8 + SPEC §10.7 OQ-2.
+`std::terminate`. Exercises §10.2 row 8 + SPEC §10.7 'bad_alloc from importer SDKs' resolved → terminate.
 
 **`content/import/texture: catches_unclassified_std_exception`**.
 Throws a custom `std::runtime_error` from a fixture-injected
