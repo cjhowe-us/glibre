@@ -156,9 +156,13 @@ snapshots are immutable" — every consumer gets the state at the
 moment of query.
 
 `Surface` is the §4.1 entity that crosses into render. It has no PIMPL
-and no allocation: its body is `(WindowId owner, void* layer)` only.
-Construction is `friend`-restricted to `Window`; consumers receive
-move-only `Surface` values (SPEC §5.5).
+and no allocation: it is a four-field POD — `(WindowId owner_,
+void* layer_, void (*dec_fn_)(void*) noexcept, void* opaque_)`. The
+`dec_fn_` / `opaque_` pair carries the destructor's counter-decrement
+seam without any back-pointer into `Window::Impl` — see §3.8 for the
+mechanism and §8 for hot-reload survival. Construction is
+`friend`-restricted to `Window`; consumers receive move-only `Surface`
+values (SPEC §5.5).
 
 ### 3.2 `WindowDesc` (creation parameters, locked from SPEC §5.6)
 
@@ -201,12 +205,12 @@ struct LayerHandle {
 };
 
 [[nodiscard]] auto create_metal_view(void* sdl_window) noexcept
-    -> Result<LayerHandle>;
+    -> glibre::platform::Result<LayerHandle>;
 
 auto destroy_metal_view(LayerHandle) noexcept -> void;
 
 [[nodiscard]] auto query_layer_metrics(void* layer) noexcept
-    -> Result<eastl::pair<PhysicalSize, DpiScale>>;
+    -> glibre::platform::Result<eastl::pair<PhysicalSize, DpiScale>>;
 
 }  // namespace glibre::platform::surface::detail
 ```
@@ -227,7 +231,10 @@ Notes:
 - **`query_layer_metrics`** reads `layer.drawableSize` and
   `layer.contentsScale` after a DPI / display change so the
   aggregate's cached snapshot stays SPEC §4.1 inv #4 consistent.
-- All three functions return `Result<T>` — errors are
+- All three functions return `glibre::platform::Result<T>` — the
+  `Result<T>` alias lives in `glibre::platform`; callers inside
+  `glibre::platform::surface::detail` must use the fully-qualified
+  form to avoid unqualified-lookup failure. Errors are
   `Error::IoFailure { OsCode }` for `NSException`-converted failures
   (SPEC §10 OS-side translation), `Error::Unsupported` for
   pre-condition violations (null window).
@@ -250,23 +257,30 @@ Executed on the main thread (SPEC §4.1 inv #2). Steps:
 3. **Copy `title` into the window-surface sub-arena.** The arena
    (§9, SPEC §9.2 1 MiB cell) provides a stable backing buffer; the
    `eastl::string_view` stored on the SDL3 window-state singleton
-   points into it. Failure (sub-arena exhausted) →
-   `IoFailure { OsCode { ENOBUFS } }` mapped to
-   `core::Error::OutOfBudget` per perf-budget.md (§9 below).
+   points into it. Failure (sub-arena exhausted) → budget saturation
+   surfaces as `IoFailure { OsCode { ENOBUFS } }` with TLS prefix
+   `prefix::out_of_budget` per platform-error-design.md §3.3 —
+   `core::Error::OutOfBudget` is not a `platform::Error` arm. The
+   translator stamps the prefix before constructing `IoFailure`
+   (cold-path-only stamp). Consistent with file-io-design.md and
+   event-pump-design.md saturation contracts.
 4. **Query the primary `Display`** via SDL3 to obtain initial
    `DpiScale` (`SDL_GetDisplayContentScale`). This precedes
    `SDL_CreateWindow` so the initial physical size is correct on the
    first frame; without this step a HiDPI display would create the
    window at half the requested logical size and immediately resize.
 5. **`SDL_CreateWindow`** with flags
-   `SDL_WINDOW_METAL | SDL_WINDOW_HIGH_PIXEL_DENSITY |
+   `SDL_WINDOW_HIGH_PIXEL_DENSITY |
    (desc.resizable ? SDL_WINDOW_RESIZABLE : 0) |
-   (desc.fullscreen ? SDL_WINDOW_FULLSCREEN : 0)`. Width / height
-   are passed as `LogicalSize` values; SDL3 uses logical units when
-   the high-pixel-density flag is set. Failure → translate
-   `SDL_GetError()` through the §10 mapping seam (sibling #727); most
-   common arms are `Unsupported` (no display) or `IoFailure`.
-   `dlclose`-equivalent: `nullptr` requires no cleanup.
+   (desc.fullscreen ? SDL_WINDOW_FULLSCREEN : 0)`.
+   // Metal capability is implicit in SDL3 on macOS (Cocoa driver);
+   // SDL_Metal_CreateView attaches CAMetalLayer post-creation,
+   // no per-window flag is needed or available in SDL3.
+   Width / height are passed as `LogicalSize` values; SDL3 uses
+   logical units when the high-pixel-density flag is set. Failure →
+   translate `SDL_GetError()` through the §10 mapping seam (sibling
+   #727); most common arms are `Unsupported` (no display) or
+   `IoFailure`. `dlclose`-equivalent: `nullptr` requires no cleanup.
 6. **Attach `CAMetalLayer`** via
    `surface::detail::create_metal_view(sdl_window)`. Failure →
    `IoFailure`; clean up the SDL window with `SDL_DestroyWindow`
@@ -290,11 +304,13 @@ Executed on the main thread (SPEC §4.1 inv #2). Steps:
 Step 1–4 are pre-OS-touch and refusal there is cheap. Step 5 is the
 single SDL3 boundary; step 6 is the single bridge boundary; step 7
 makes the cached snapshot consistent with reality before the public
-`Window` becomes observable. The flag combination in step 5 is the
-load-bearing collapse: requesting both `METAL` and
-`HIGH_PIXEL_DENSITY` together is what makes the
-`SDL_Metal_CreateView` call in step 6 produce a `CAMetalLayer` that
-already has the right `contentsScale`.
+`Window` becomes observable. `SDL_WINDOW_HIGH_PIXEL_DENSITY` in
+step 5 is the load-bearing flag: it signals to SDL3's Cocoa backend
+that the window should be DPI-aware, which in turn makes
+`SDL_Metal_CreateView` in step 6 produce a `CAMetalLayer` with
+the right `contentsScale`. Metal capability itself is implicit in
+SDL3 on macOS — the Cocoa driver enables it unconditionally; no
+per-window `SDL_WINDOW_METAL` flag exists in SDL3.
 
 ### 3.5 Destruction sequence — `~Window`
 
@@ -329,8 +345,13 @@ moved-from `Window` is UB; debug builds assert.
 
 Returns a `Display` snapshot (SPEC §5.6 struct). Each call:
 
-1. Read `cached_display_id_` (atomic; updated by Pump on
-   `WindowEvent::DisplayChanged` per §3.7 step 4 below).
+1. Read `cached_display_id_` (main-thread-only plain read; updated
+   by Pump-driven `WindowEvent::DisplayChanged` dispatch per §3.7
+   step 4 below). `cached_display_id_` is updated on the main thread
+   only; `Window::display()` is main-thread-only per SPEC §6.1 (not
+   in the any-thread-reads list). The render thread snapshots
+   `DisplayId` via the `WindowEvent` payload at frame-extract time,
+   not via `Window::display()` call.
 2. Call `SDL_GetDisplayBounds` /
    `SDL_GetDisplayContentScale` /
    `SDL_GetDisplayPrimaryRefreshRate` /
@@ -416,13 +437,38 @@ Returns `Result<Surface>`. Implementation:
    (SPEC §5.5).
 
 `Surface` destruction (move-from or end-of-scope) decrements the
-`Window`'s `outstanding_surfaces_` counter (relaxed
-`fetch_sub`). The decrement is wired through the `Surface`
-destructor; the `Surface` carries a back-pointer to its owning
-`Window::Impl` (one extra `void*` in the value type — still no
-heap allocation). The back-pointer is *non-owning* and is invalid
-after `~Window`; calling `~Surface` after `~Window` is UB and
-debug builds assert through a poisoned-pointer pattern.
+`Window`'s `outstanding_surfaces_` counter (relaxed `fetch_sub`).
+The decrement seam is implemented as a **function-pointer + opaque
+pair** baked into the `Surface` value at vend time:
+
+```cpp
+struct Surface {
+    WindowId owner_;
+    void*    layer_;
+    // Decrement seam: function pointer baked at vend time.
+    // dec_fn_(opaque_) is called from ~Surface(); no plugin ABI risk.
+    void (*dec_fn_)(void*) noexcept;
+    void*    opaque_;  // Opaque token consumed only by dec_fn_;
+                       // opaque to all other readers.
+};
+```
+
+The function-pointer + opaque pair preserves POD layout. `dec_fn_`
+is set by `Window::surface()` to a platform-internal thunk that
+resolves the opaque token and performs the `fetch_sub`. This design
+satisfies SPEC §2's declaration "Surface is a pure value type. No
+virtual methods, no PIMPL." and plugin-abi.md's requirement for
+POD-like layout across plugin ABIs — a raw `Window::Impl*`
+back-pointer would be a dangling-pointer hazard at platform
+self-reload.
+
+At platform self-reload, `dec_fn_` is re-baked when `Surface` is
+re-vended; existing `Surface` instances keep their original
+`dec_fn_` pointer (which still resolves into the now-dlclose'd
+dylib). Mitigation: drain all `Surface` values at
+`platform::Pause`; re-vend at `platform::Resume`. See §8 hot-reload
+for the protocol. Calling `~Surface` after `~Window` remains UB;
+debug builds assert via a poisoned-opaque pattern.
 
 The `Surface` is not a singleton: a `Window` may vend more than
 one `Surface` value across its lifetime (e.g. one per frame, or
@@ -532,6 +578,11 @@ public:
     Surface(Surface&&) noexcept              = default;
     Surface& operator=(Surface&&) noexcept   = default;
     ~Surface();  // decrements Window's outstanding_surfaces_.
+               // Implementation note: Surface carries a platform-private
+               // function-pointer + opaque pair (dec_fn_, opaque_)
+               // populated at vend time; ~Surface() invokes
+               // dec_fn_(opaque_). See §3.8 for the mechanism and §8
+               // for hot-reload survival.
 
     [[nodiscard]] auto raw_layer() const noexcept -> void*;     // CAMetalLayer*
     [[nodiscard]] auto window()    const noexcept -> WindowId;
@@ -575,10 +626,8 @@ public:
   syscall. Safe from the render thread (the value is immutable after
   construction).
 - **`Window::surface()`** — runs §3.8's four steps. Cost is one
-  atomic `fetch_add` plus a value construction. Main-thread-only
-  in debug; release allows render-thread access *only* if render
-  has explicitly opted in via a future post-MVP API (§12 [OPEN]).
-  In MVP: main thread only.
+  atomic `fetch_add` plus a value construction. In MVP: main thread
+  only. Post-MVP relaxation is tracked in §12 [OPEN].
 - **`Window::request_resize(LogicalSize)`** — calls
   `SDL_SetWindowSize(sdl_window_, size.width, size.height)`. The
   actual resize arrives as `WindowEvent::Resized` from the Pump
@@ -604,10 +653,11 @@ public:
   from any thread.
 - **`Surface::valid()`** — `layer != nullptr`. Safe from any thread.
 - **`Surface::~Surface`** — decrements `outstanding_surfaces_` on
-  the owning `Window::Impl` (relaxed `fetch_sub`). Safe from the
-  render thread *only because* the back-pointer is non-owning and
-  the SPEC contract says the `Surface` may not outlive its
-  `Window`.
+  the owning `Window::Impl` via `dec_fn_(opaque_)` (relaxed
+  `fetch_sub` inside the thunk). Safe from the render thread because
+  the function-pointer + opaque pair is baked at vend time and the
+  SPEC contract says the `Surface` may not outlive its `Window`.
+  See §3.8 for the POD-layout mechanism.
 
 ### 4.3 Public ABI surface (cross-plugin)
 
@@ -618,11 +668,13 @@ boundary as POD spans / handles only") and `plugin-abi.md`:
 - `WindowId`, `DisplayId`, `LogicalSize`, `PhysicalSize`,
   `DpiScale`, `Display` — all POD-like aggregates of scalars.
   Stable layout; can cross plugin ABIs as values.
-- `Surface` — a non-owning pair of `WindowId` + `void*` plus a
-  back-pointer for the destructor. The back-pointer is platform-
+- `Surface` — a POD-layout value type carrying `WindowId owner_`,
+  `void* layer_`, `void (*dec_fn_)(void*) noexcept`, and
+  `void* opaque_`. The `dec_fn_` + `opaque_` pair is platform-
   internal; render reads `raw_layer()` and `window()` only. The
   type is move-only and is *not* serialized — it never crosses
-  Fory (§7).
+  Fory (§7). See §3.8 for the full layout rationale and plugin-ABI
+  safety analysis.
 - `Window` is a pimpl class; its `Impl*` is platform-internal and
   never crosses any boundary. Cross-plugin code holds a
   `WindowId` and dereferences through the platform API.
@@ -696,10 +748,15 @@ snapshot fields**. This section makes the rules precise.
    post-MVP multi-thread build).
 3. **Render-thread access to `Surface`.** The render thread holds a
    `Surface` value across phase 7 (record command buffers) and
-   drops it before phase 8 (hot-reload barrier). `Surface::~Surface`
-   running on the render thread is safe because the destructor
-   only touches the atomic counter on `Window::Impl` (§3.8); the
-   counter is `std::atomic<std::uint32_t>` with relaxed ordering.
+   drops it before phase 8 (hot-reload barrier). `Surface::~Surface()`
+   invokes `dec_fn_(opaque_)`. The function pointer was baked at vend
+   time inside `Window::Impl`'s main-thread context; the dispatch is
+   render-thread-safe because `dec_fn_` is required to be reentrant
+   and not access any `Window::Impl` state directly. The `opaque_`
+   token resolves through `dec_fn_`'s captured logic (typically a
+   counter slot index) without dereferencing `Window::Impl`. §8
+   hot-reload drains all live `Surface`s at Pause and re-vends them at
+   Resume, so `dec_fn_` is never dangling across a reload boundary.
 
 ### 6.2 Pull rules from the render thread
 
@@ -768,6 +825,34 @@ The phase mapping is consistent with `frame-phases.md`'s row for
 `platform`: this aggregate participates in phase 1 (Pump-driven
 ingest, indirect) and phase 9 (present, indirect — the `Surface`
 held by render is the platform-side input to phase 9).
+
+### 6.5 Pump→Window internal call seam
+
+`Window::Impl::ingest(WindowEvent)` is the **one permitted internal
+cross-module call** from the event-pump context into the
+window-surface context. Properties:
+
+- **Main-thread-only, synchronous.** Called by `Pump::drain` during
+  native SDL3 event dispatch, between `SDL_PollEvent` returning the
+  event and the typed `WindowEvent` being enqueued in the
+  `EventQueue<WindowEvent>` (SPEC §6.3 last paragraph: "the snapshot
+  is updated before the event is visible to the engine").
+- **Direction is Pump→Window only.** The window-surface aggregate
+  never calls back into the event-pump aggregate; this is a one-way
+  dependency.
+- **Internal only.** `ingest` is not exposed via the SPEC §5 public
+  surface. It is a `friend`-scoped or `detail`-namespaced entry
+  point visible only within the platform plugin DSO.
+- **Concrete consumers:** editor pump→window dispatch (editor
+  plugin), shipping runtime pump→window dispatch (runtime entry).
+  Both must consume the corrected seam before plan PRs land.
+
+This normative paragraph satisfies the §3.7 cross-reference and
+supersedes any implicit treatment. event-pump-design.md §3.5 does NOT
+yet carry this forward reference; the cross-document amendment is
+pending per §12 [BLOCKING IMPLEMENTATION]. Until the amendment lands,
+plan PR authors must consult both this design's §6.5 AND
+event-pump-design.md §3.5 to understand the full call-site contract.
 
 ## 7. Persistence + ABI
 
@@ -993,11 +1078,15 @@ holding:
 | Reserved                               | ~1 MiB - sum          | Headroom for additional windows; never grows.           |
 
 The aggregate **never grows the sub-arena at runtime**; allocation
-is exclusively at `Window::open` time. Exhaustion → `IoFailure`
-mapped through `core::Error::OutOfBudget` (perf-budget.md
-"Allocator Rules" #2). The 1 MiB ceiling is comfortable for MVP's
-≤8 windows; the editor's "many docked panels" scenario is a tools
-concern, not a platform-window concern.
+is exclusively at `Window::open` time. Exhaustion → budget
+saturation surfaces as `IoFailure { OsCode { ENOBUFS } }` with TLS
+prefix `prefix::out_of_budget` per platform-error-design.md §3.3 —
+`core::Error::OutOfBudget` is not a `platform::Error` arm. The
+translator stamps the prefix before constructing `IoFailure`
+(cold-path-only stamp). Consistent with file-io-design.md and
+event-pump-design.md saturation contracts. The 1 MiB ceiling is
+comfortable for MVP's ≤8 windows; the editor's "many docked panels"
+scenario is a tools concern, not a platform-window concern.
 
 ### 9.4 Wall-time budget for `surface()` query
 
@@ -1035,7 +1124,7 @@ case lands in and why.
 | **SDLInitFailed**              | SDL3 video subsystem not initialized when `Window::open` runs                            | `Unsupported`                                | Caller (init plugin) initializes SDL3 before opening windows; refused before any OS handle is allocated. |
 | **WindowCreateFailed**         | `SDL_CreateWindow` returned null (out of resources, display server crash, refused flags) | `IoFailure { OsCode = SDL_GetError() }`      | Caller may retry on a different display config; resources released in step 5 before return.             |
 | **MetalLayerAttachFailed**     | `surface::detail::create_metal_view` failed (NSException-converted or null layer)        | `IoFailure { OsCode }`                       | Aggregate calls `SDL_DestroyWindow` to clean up; caller may retry. Most commonly missing Metal entitlement on non-Metal-capable hardware. |
-| **SurfaceLost**                | `CAMetalLayer*` reports layer-lost from the OS (post-sleep recovery, GPU reset)          | `IoFailure { OsCode }` with `surface-lost` detail | Caller drops the `Window` and re-opens; render reseat re-derives GPU resources. (See §10.3.) |
+| **SurfaceLost**                | `CAMetalLayer*` reports layer-lost from the OS (post-sleep recovery, GPU reset)          | `IoFailure { OsCode }` with TLS prefix `surface_lost` per platform-error-design.md §3.3 | Caller drops the `Window` and re-opens; render reseat re-derives GPU resources. (See §10.3.) |
 | **ResizeRefused**              | `Window::request_resize` rejected by SDL3 (fullscreen window, zero dim, system policy)   | Either `Unsupported` (zero dim) or `IoFailure { OsCode }` (SDL3 refusal) | Caller does not retry blindly; either honours fullscreen state or fixes the dim.                |
 | **MainThreadViolation**        | Any window-surface method called from a non-main thread (debug: assert; release: refuse) | `Unsupported`                                | Programming error; debug builds catch immediately.                                                       |
 | **DpiInvalid**                 | `DpiScale::make(v <= 0)`                                                                | `Unsupported`                                | Programming error.                                                                                       |
@@ -1043,7 +1132,7 @@ case lands in and why.
 | **WindowOutstandingAtDestroy** | `~Window` while `outstanding_surfaces_ > 0` (debug-only; release falls through and leaks)| Debug `assert`; release: logs `error`, no return value. | Programming error in render; `Surface` outlived its `Window`.                                            |
 | **HotReloadMidFrameDrop (P1)** | Platform self-reload drain finds `outstanding_surfaces_ > 0`                            | `Unsupported`, wrapped by core into `core::Error::HotReloadRefused` | Editor's reload UI retries on next frame boundary; SPEC §8.4 P1.                                          |
 | **DisplayQueryAfterUnplug**    | `Window::display()` between display unplug and `DisplayChanged` drain                    | `NotFound`                                   | Caller re-queries after the next pump cycle.                                                              |
-| **ArenaExhausted**             | Window-surface 1 MiB sub-arena cannot fit a new `Window::Impl` + title                  | `IoFailure { OsCode = ENOBUFS }` (mapped to `core::Error::OutOfBudget` in strict-mode builds) | Operator opens fewer windows or extends the sub-arena via a perf-budget amendment.                       |
+| **ArenaExhausted**             | Window-surface 1 MiB sub-arena cannot fit a new `Window::Impl` + title                  | `IoFailure { OsCode { ENOBUFS } }` with TLS prefix `prefix::out_of_budget` per platform-error-design.md §3.3 | Operator opens fewer windows or extends the sub-arena via a perf-budget amendment.                       |
 
 The variant assignments above are **the ones in §4.7 / §5.1 / §10**
 — no new variants are introduced. `SurfaceLost` is intentionally a
@@ -1312,10 +1401,11 @@ The fuzz target catches any regression of the rounding rule (§3.9).
 
 - **[OPEN] `SurfaceLost` as a first-class arm.** SPEC §10.8 names
   the second-consumer trigger that would promote `SurfaceLost`
-  from `IoFailure { detail: "surface-lost" }` to its own variant.
-  The first consumer is render's reseat path; the second would
-  be the editor's "surface-lost diagnostic" UI. Until then,
-  `IoFailure` with the detail prefix is sufficient.
+  from `IoFailure { OsCode }` with TLS prefix `surface_lost`
+  (platform-error-design.md §3.3) to its own variant. The first
+  consumer is render's reseat path; the second would be the editor's
+  "surface-lost diagnostic" UI. Until then, `IoFailure` with the
+  TLS prefix is sufficient.
 
 - **[OPEN] Multi-window event-fan-out load.** SPEC §4.1 invariant
   #6 ("`Surface` is opaque to engine code") is preserved by
@@ -1346,3 +1436,44 @@ The fuzz target catches any regression of the rounding rule (§3.9).
   and let render include `<Metal/MTLDevice.hpp>` via metal-cpp
   for everything else. Verify the rule holds when render's HDR
   story opens.
+
+- **[RESOLVED IN-PR] SPEC §6.3 amendment — `SDL_WINDOW_METAL`
+  struck from window-creation flag list.** This SPEC predated the
+  SDL2→SDL3 transition. `SDL_WINDOW_METAL` does not exist in SDL3;
+  Metal capability is implicit via the Cocoa driver, and
+  `SDL_Metal_CreateView` attaches `CAMetalLayer` post-creation
+  without any per-window flag. SPEC §6.3 was amended in this PR to
+  reflect the SDL3 reality (only `SDL_WINDOW_HIGH_PIXEL_DENSITY` is
+  load-bearing on macOS; `SDL_WINDOW_RESIZABLE` /
+  `SDL_WINDOW_FULLSCREEN` are conditional on `WindowDesc`). This
+  design's §3.4 step 5 has carried the corrected flag list since
+  r1; the SPEC amendment closes the cross-document gap so no
+  downstream plan PR copies the stale flag. Consumers: editor
+  window factory, shipping runtime window factory.
+
+- **[BLOCKING IMPLEMENTATION] SPEC §5.5 amendment — Surface gains
+  `void (*dec_fn_)(void*) noexcept` + `void* opaque_` fields.**
+  Current SPEC §5.5 stub shows only `WindowId owner_` + `void*
+  layer_`. This design's §3.8 specifies the full four-field layout
+  required to preserve POD-layout across plugin ABIs (per
+  plugin-abi.md) without a `Window::Impl*` back-pointer. Two
+  concrete consumers: render swapchain consumer (reads
+  `raw_layer()`), editor preview-pane `Surface`. SPEC §5.5 must be
+  amended before plan PRs land.
+
+- **[BLOCKING IMPLEMENTATION] SPEC §6.2 amendment — fully-qualify
+  `Result<T>` in `bridge.hpp`.** All bridge return types inside
+  `namespace glibre::platform::surface::detail` must use
+  `glibre::platform::Result<T>` (full qualification). Unqualified
+  `Result<T>` lookup fails inside the `surface::detail` sub-
+  namespace. This design's §3.3 is already corrected; SPEC §6.2
+  table must be updated before plan PRs land.
+
+- **[BLOCKING IMPLEMENTATION] SPEC §6 cross-module call seam —
+  `Window::Impl::ingest(WindowEvent)`.** This is the one permitted
+  internal cross-module call from event-pump into window-surface:
+  synchronous, main-thread, called during `DpiChanged` / `Resized` /
+  `DisplayChanged` dispatch. Named in this design's §6.5. Must be
+  named in SPEC §6.3 OR in event-pump-design.md §3.5 with a forward
+  reference before plan PRs land. Two concrete consumers: editor
+  pump→window dispatch, shipping runtime pump→window dispatch.
