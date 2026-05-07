@@ -329,11 +329,21 @@ FreeImageImporter  (final, SPEC §4.1.2; cook-time-only entity)
 
 Impl  (private; lives in freeimage_importer.cpp)
 ├── version_string_    eastl::string_view                  (e.g. "FreeImage 3.19.0/libpng-1.6.40/libjpeg-turbo-3.0.1/...";
-│                                                          the source from which version_ is BLAKE3'd)
-└── alloc_exhausted_   std::atomic<bool>                   (set by per-strip arena allocation refusal in
-                                                            GLIBRE_ALLOC_STRICT=1; checked before every
-                                                            FreeImage entry point per §6.3; std::atomic
-                                                            is a retained std:: utility per PHILOSOPHY §11)
+│                                                          the source from which version_ is BLAKE3'd.
+│                                                          Borrows from a `static constexpr char[]` literal
+│                                                          in freeimage_importer.cpp (static storage duration =
+│                                                          process lifetime); MUST NOT borrow from stack or
+│                                                          arena allocation — implementer note: the backing
+│                                                          must be a string literal or a `static const`
+│                                                          variable with file scope)
+└── alloc_exhausted_   std::atomic<bool>                   (set ONLY during an active FreeImage_LoadFromHandle
+                                                            call (stage 2) when a PerContextAllocator refusal
+                                                            occurs mid-decode; read_proc checks this flag and
+                                                            short-reads to abort the in-flight decode per §6.3.
+                                                            Has no role for stage-1 (pre-LoadFromHandle early
+                                                            return) or stage-5/6 (post-decode direct Result<T>
+                                                            return).  std::atomic is a retained std:: utility
+                                                            per PHILOSOPHY §11)
 ```
 
 The `Impl` is deliberately small. Unlike the FBX SDK's
@@ -717,8 +727,13 @@ record:
 ```cpp
 // freeimage_importer.cpp (translation-unit-local; no external linkage)
 struct PerCookError {
-    eastl::string_view detail{};      // empty == no error
-    FREE_IMAGE_FORMAT  fif{FIF_UNKNOWN};
+    // detail_storage owns the copied-out message bytes (see error_callback_dispatch below).
+    // detail is a view into detail_storage; they are always kept in sync.
+    // Lifetime invariant: storage is reset to empty at the top of every import_one call
+    // (before any FreeImage entry point) so no cross-cook residue survives.
+    eastl::fixed_string<char, 512> detail_storage{};
+    eastl::string_view             detail{};      // view into detail_storage; empty == no error
+    FREE_IMAGE_FORMAT              fif{FIF_UNKNOWN};
 };
 
 thread_local PerCookError tl_active_error{};
@@ -731,17 +746,40 @@ void error_callback_dispatch(FREE_IMAGE_FORMAT fif, const char* message) {
         // Best-effort: log at debug, do nothing.
         return;
     }
-    // Best-effort capture of the message; pinned to the call's TLS slot, so
-    // the parent import_one's classify_freeimage_status() reads it after the
-    // FreeImage call returns. message is borrowed (FreeImage owns it for the
-    // duration of the callback) so we copy the pointer + length into the
-    // PerCookError; if the message survives the callback (FreeImage's
-    // documentation is silent — empirically it does, until the next plugin
-    // error), the view stays valid; if not, the structured-log handler will
-    // get an empty detail and fall back to the FIF name.
-    tl_active_error.fif    = fif;
-    tl_active_error.detail = eastl::string_view{message,
-                                                message ? eastl::CharStrlen(message) : 0};
+    // Pin the lifetime invariant: this callback fires *within* a single
+    // FreeImage entry point (FreeImage_LoadFromHandle, FreeImage_GetFileType*,
+    // etc.) on the current worker thread.  The per-thread single-call contract
+    // guarantees exactly one entry point is active per thread at any time; a
+    // second codec callback cannot fire until the first entry point returns
+    // (libpng emits chunk-level callbacks sequentially, not concurrently).
+    // Therefore the LAST callback before classify_freeimage_status() is called
+    // is the authoritative error; any earlier callback on the same call is a
+    // warning that the final-error overwrites — the "last-error-wins" semantic.
+    // To make this safe even if FreeImage's message buffer were ever aliased
+    // across callbacks, we copy the message bytes into a stack-local
+    // fixed_string before storing.  The fixed_string is then moved into
+    // tl_active_error.detail_storage and the view points into that storage,
+    // giving an arena-independent, callback-scoped lifetime.
+    //
+    // NOTE: tl_active_error.detail_storage must be sized to cover realistic
+    // codec messages.  libpng's longest message is under 256 bytes; 512 is
+    // the chosen bound with truncation (suffix "…") if exceeded.
+    {
+        eastl::fixed_string<char, 512> tmp;
+        if (message) {
+            const auto len = eastl::CharStrlen(message);
+            if (len <= 511) {
+                tmp.assign(message, len);
+            } else {
+                tmp.assign(message, 511);
+                tmp += '\x85'; // ELLIPSIS (0x85 single-byte stand-in; detail is debug text)
+            }
+        }
+        tl_active_error.fif            = fif;
+        tl_active_error.detail_storage = eastl::move(tmp);
+        tl_active_error.detail         = eastl::string_view{tl_active_error.detail_storage.data(),
+                                                             tl_active_error.detail_storage.size()};
+    }
 }
 ```
 
@@ -774,10 +812,10 @@ bits-per-pixel, color-space)` to the chosen canonical output:
 | Source format | FIBITMAP type           | bpp source | `Auto` chooses        | Notes                                                                            |
 |---------------|-------------------------|------------|-----------------------|----------------------------------------------------------------------------------|
 | PNG (8-bit)   | `FIT_BITMAP`            | 24 / 32    | `RGBA8_sRGB`          | sRGB always (color_space_hint Auto → ForceSRGB-equivalent); alpha if 32 bpp.     |
-| PNG (16-bit)  | `FIT_RGBA16`            | 64         | `RGBA16F_Linear`      | 16-bit-per-channel PNG is rare, used in normal-map authoring; promote to half-f. |
+| PNG (16-bit)  | `FIT_RGBA16`            | 64         | `RGBA16F_Linear`      | **Precision note**: FreeImage `FIT_RGBA16` stores each channel as a uint16 [0, 65535]; `RGBA16F` is IEEE-754 half-float (~10.9 bits effective mantissa). Values above 2048/channel are rounded on promotion — up to ~0.024% relative error at the top of range. Accepted for MVP: the output-layout set is the canonical GPU-upload path and f16 is the smallest layout that supports HDR ranges. If lossless 16-bit integer round-trip is required (e.g. 16-bit normal-map synthesis), force `output_layout = RGBA32F` in `NormalizeParams`; this is an explicit caller override, not an Auto-path concern. Escalated to OQ-1 for post-MVP reconsideration of an `RGBA16_unorm` layout variant. |
 | JPEG          | `FIT_BITMAP`            | 24         | `RGBA8_sRGB`          | sRGB; alpha forced to 255 (JPEG has no alpha channel).                           |
 | TIFF (8-bit)  | `FIT_BITMAP`            | 24 / 32    | `RGBA8_Linear`        | Linear by default per §3.4 rule; alpha if 32 bpp; `color_space_hint` overrides.  |
-| TIFF (16-bit) | `FIT_RGBA16`            | 64         | `RGBA16F_Linear`      | Promoted to half-float.                                                          |
+| TIFF (16-bit) | `FIT_RGBA16`            | 64         | `RGBA16F_Linear`      | Promoted to half-float (same precision-loss caveat as 16-bit PNG above: u16→f16 rounds values above 2048/channel; force `output_layout = RGBA32F` for lossless round-trip). |
 | TIFF (32-bit f32) | `FIT_RGBAF`         | 128        | `RGBA32F_Linear`      | Preserved precision.                                                              |
 | EXR (half)    | `FIT_RGBAF` (half-tag)  | 64         | `RGBA16F_Linear`      | Half-float passes through bit-for-bit (modulo `ban_nan`).                        |
 | EXR (full)    | `FIT_RGBAF`             | 128        | `RGBA32F_Linear`      | Full-float passes through.                                                       |
@@ -969,12 +1007,32 @@ pure-arena memcpy.
    gate for the §9.3.1 64 MiB soft sub-ceiling.
 2. **Per-row copy-out from `fi_bitmap_` to `canonical_pixels_`.**
    FreeImage's `FreeImage_GetBits` returns a pointer to the
-   FIBITMAP's pixel buffer; `FreeImage_GetPitch` gives the row
-   stride. The copy walks rows top-to-bottom (or bottom-to-top
-   depending on FreeImage's storage convention — FreeImage 3.x
-   stores PNG / JPEG / TIFF bottom-up internally, EXR top-down;
-   the copy-out fixes orientation to engine-canonical
-   top-down).
+   **bottom-left** pixel of the FIBITMAP under FreeImage's internal
+   bottom-up storage convention (used for PNG, JPEG, TIFF); EXR is
+   stored top-down and requires no reversal. `FreeImage_GetPitch`
+   gives the row stride in bytes.
+
+   Row-orientation correction to engine-canonical top-down:
+
+   ```
+   // bottom_up_formats: PNG, JPEG, TIFF (FreeImage 3.x internal convention)
+   // top_down_formats:  EXR (inherits OpenEXR's scanline order)
+   const bool needs_flip = is_bottom_up(fi_image_type_);   // true for PNG/JPEG/TIFF
+   const uint8_t* src_base = FreeImage_GetBits(fi_bitmap_);
+   const uint32_t pitch    = FreeImage_GetPitch(fi_bitmap_);
+   uint8_t*       dst_row  = canonical_pixels_.data();
+
+   for (uint32_t row = 0; row < height_; ++row) {
+       const uint32_t src_row_index = needs_flip ? (height_ - 1 - row) : row;
+       const uint8_t* src_row = src_base + src_row_index * pitch;
+       eastl::copy_n(src_row, row_bytes, dst_row);
+       dst_row += row_bytes;
+   }
+   ```
+
+   Using an **asymmetric test fixture** (e.g. a gradient that is visibly
+   different when flipped) is mandatory to catch orientation bugs; see
+   `png_8bit_rgba_canonical_layout_row_order` in §11.3 below.
 3. **Layout conversion when `output_layout != Auto`.** If the
    forced layout differs from the §3.5-selected layout, run the
    per-pixel conversion (`f32 → f16` rounds under `FE_TONEAREST`;
@@ -1463,17 +1521,46 @@ Per `perf-budget.md` Allocator Rule #1 + SPEC §9.3.1:
   internal allocations during a `LoadFromHandle` call" — the
   exemption is documented in this design.
 - **Arena-allocation null-return protocol (`GLIBRE_ALLOC_STRICT=1`)**.
-  When `PerContextAllocator` refuses a stage-1 / stage-5 / stage-6
-  arena allocation in strict mode (`OutOfBudget`), the importer's
-  call site captures the failure via the `Result<T>` return and
-  records it in the atomic `alloc_exhausted_` flag on `Impl`. The
-  FreeImageIO's `read_proc` checks the flag and returns short-read
-  to abort the in-flight FreeImage decode (§3.5); the carve-out's
-  catch-all then translates to `ImporterError::MalformedPayload`
-  with `error.detail = "freeimage-alloc-exhausted"`. In practice,
-  the 64 MiB soft sub-ceiling (§9.3.1) is sized for typical 4K
-  textures (~50 MiB peak); the null path is a defect guard rather
-  than a routine production path. The `GLIBRE_ALLOC_STRICT=1` CI
+  Allocation failures are caught at three distinct points, each with a
+  different propagation path:
+
+  - **Stage 1 (source-buffer load) — pre-FreeImage early return.**
+    If the `source_buffer_` arena allocation fails before
+    `FreeImage_LoadFromHandle` is called, `import_one` returns an
+    `ImporterError::MalformedPayload` with
+    `error.detail = "freeimage-alloc-exhausted"` immediately.
+    No `FreeImage_LoadFromHandle` is ever called; the `alloc_exhausted_`
+    flag is irrelevant for this path.
+
+  - **Stage 2 (in-flight FreeImage decode via `FreeImage_LoadFromHandle`)
+    — `alloc_exhausted_` + `read_proc` short-read.**
+    This is the only stage in which an arena allocation failure can
+    occur *while* a `FreeImage_LoadFromHandle` call is in progress
+    (e.g. if a codec's internal strip-allocation triggers a
+    `PerContextAllocator` refusal before the decode finishes).
+    The importer sets `alloc_exhausted_` to `true`; the `read_proc`
+    callback checks the flag on every invocation and returns a
+    short-read (0 bytes) to abort the in-flight decode.
+    `classify_freeimage_status()` translates the resulting decode failure
+    to `ImporterError::MalformedPayload` with
+    `error.detail = "freeimage-alloc-exhausted"`.
+    **This short-read trick is scoped to stage 2 only** — it cannot fire
+    after `FreeImage_LoadFromHandle` returns because `read_proc` is only
+    invoked during an active `LoadFromHandle` call.
+
+  - **Stage 5 (`canonical_pixels_` allocation) and stage 6 (precursor
+    emit) — direct `Result<T>` early return.**
+    By stages 5 and 6 the `FIBITMAP` has already been fully decoded and
+    `FreeImage_LoadFromHandle` has returned.  There is no in-flight
+    FreeImage entry point whose `read_proc` could fire.  Failures here
+    are caught at the `Result<T>` allocation-check call site and returned
+    directly as `ImporterError::MalformedPayload` with
+    `error.detail = "freeimage-alloc-exhausted"`.  The
+    `alloc_exhausted_` flag plays no role for stage 5 or stage 6.
+
+  In practice, the 64 MiB soft sub-ceiling (§9.3.1) is sized for
+  typical 4K textures (~50 MiB peak); the null path is a defect guard
+  rather than a routine production path.  The `GLIBRE_ALLOC_STRICT=1` CI
   gate (`perf-budget.md` CI Gate §3) validates the ceiling on the
   reference fixtures.
 
@@ -2037,7 +2124,7 @@ one-cause-per-row precision:
 | libtiff error callback (corruption, multi-page rejection)                      | `ImporterError::MalformedPayload` / `UnsupportedVersion` | `"freeimage-tiff-corruption"` / `"freeimage-tiff-multipage"` | Multi-page detection via probe of `TIFFNumberOfDirectories` post-load (defensive). |
 | OpenEXR exception or callback (corruption, multipart, DWA-codec absent)        | `ImporterError::MalformedPayload` / `UnsupportedVersion` | `"freeimage-exr-corruption"` / `"freeimage-exr-multipart"` / `"freeimage-exr-dwa-codec"` | Caught both via `tl_active_error` and exception path — OpenEXR is C++ internally and may throw. |
 | HDR / Radiance loader error                                                    | `ImporterError::MalformedPayload`             | `"freeimage-hdr-malformed"`          | The Radiance HDR plugin uses simple text-header parsing; truncated headers fire the callback. |
-| `std::bad_alloc` thrown from any FreeImage codec                               | terminate (§10.3 `std::bad_alloc` row; SPEC §10.7 OQ-2 resolved → terminate) | n/a                  | The per-cook arena is sized to fit the §9.3.1 ceiling; bad_alloc inside it is a defect.     |
+| `std::bad_alloc` thrown from any FreeImage codec                               | terminate (§10.3 `std::bad_alloc` row; SPEC §10.7 'bad_alloc from importer SDKs' resolved → terminate) | n/a                  | The per-cook arena is sized to fit the §9.3.1 ceiling; bad_alloc inside it is a defect.     |
 | Any other `std::exception` derivative thrown from FreeImage / codec code       | `ImporterError::MalformedPayload`             | `"freeimage-unclassified"`           | The catch-all arm. The exception's `what()` is logged at `warn` level for triage.            |
 | Any non-`std::exception` thrown object                                          | terminate                                      | n/a                                  | Non-`std::exception` cannot be classified; the carve-out's `catch(...)` terminates.        |
 
@@ -2309,6 +2396,17 @@ Hand-corrupts a PNG IDAT chunk's CRC; asserts arm +
 `error.detail = "freeimage-png-corruption"` plus `error.codec =
 "libpng"`. Exercises §10.2 row 3.
 
+**`content/import/texture: two_consecutive_callbacks_last_error_wins`**.
+Uses a fixture-injected FreeImage error-output function to fire
+two callbacks in sequence on the same thread within a single
+`FreeImage_LoadFromHandle` call (simulating libpng emitting a
+chunk-level warning followed by a fatal CRC error). Asserts that
+`tl_active_error.detail` after `classify_freeimage_status()` contains
+the *second* (last) callback's message, not the first. Verifies the
+last-error-wins semantic documented in `error_callback_dispatch` and
+that no use-after-free or dangling-view occurs (run under ASAN).
+Exercises §3.5 error-dispatch + PerCookError lifetime invariant.
+
 **`content/import/texture: translates_libjpeg_truncation_to_malformed`**.
 Truncates a JPEG mid-scan; asserts arm + `error.detail =
 "freeimage-jpeg-truncation"` plus `error.codec = "libjpeg-turbo"`.
@@ -2354,8 +2452,20 @@ once on a reference machine, checked into the test fixtures).
 **`content/import/texture: png_8bit_rgba_canonical_layout`**.
 Layout = `RGBA8_sRGB`; metadata.color_space = `sRGB`. §3.5 row 1.
 
+**`content/import/texture: png_8bit_rgba_canonical_layout_row_order`**.
+Uses an asymmetric test fixture: a 4×2 PNG where the top row is solid
+red and the bottom row is solid blue (visually distinct when flipped).
+Asserts that after cook the first canonical row is red (RGBA = [255, 0, 0, 255])
+and the second is blue ([0, 0, 255, 255]), confirming the bottom-up
+FreeImage convention is correctly inverted to engine-canonical top-down.
+Run under ASAN. Exercises §3.7 stage 5 row-orientation reversal.
+
 **`content/import/texture: png_16bit_rgba_canonical_layout`**.
-Layout = `RGBA16F_Linear`. §3.5 row 2.
+Layout = `RGBA16F_Linear`. §3.5 row 2. Includes an assertion that
+a known channel value above 2048 (e.g. raw uint16 = 4096) is
+rounded to the nearest f16 representable value under `FE_TONEAREST`,
+confirming the documented u16→f16 precision-loss behavior rather
+than silently producing a wrong bit pattern.
 
 **`content/import/texture: jpeg_canonical_layout`**.
 Layout = `RGBA8_sRGB`; alpha forced to 255. §3.5 row 3.
