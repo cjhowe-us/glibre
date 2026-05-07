@@ -243,7 +243,7 @@ of `specs/content/SPEC.md` and to the design sections below.
 Glibre-native requirements added beyond harmonius:
 
 - **Per-cook arena allocation discipline** (PHILOSOPHY §11; SPEC
-  §9.3.1; `perf-budget.md` Allocator Rule #1). Every byte the
+  §9.3.1; `perf-budget.md` Allocator Rule 1). Every byte the
   importer **declares as its own** — the canonical-pixel buffer
   emitted at stage 6, the metadata record, the per-strip
   intermediate decode buffers (§3.5 below) — comes from the
@@ -1487,7 +1487,7 @@ row "In-flight RecookRequest queues / CookSession worker pools"
 
 ### 6.3 Allocators
 
-Per `perf-budget.md` Allocator Rule #1 + SPEC §9.3.1:
+Per `perf-budget.md` Allocator Rule 1 + SPEC §9.3.1:
 
 - **Per-context tag**. Every importer-declared allocation is
   stamped with `ContextTag::content`. The arena (`source_buffer_`,
