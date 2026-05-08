@@ -507,7 +507,7 @@ REFERENCED_ISSUES: {{REFERENCED_ISSUES}} # space-list, e.g. #319 #320
 PRIOR_ROUND_REVIEW_IDS: {{PRIOR_REVIEW_IDS}} # empty for round 1
 
 EXTRA READS:
-- gh pr view {{PR_NUMBER}} --json title,body,headRefName,state,merged,mergedAt,baseRefName,commits
+- gh pr view {{PR_NUMBER}} --json title,body,headRefName,state,mergedAt,baseRefName,commits
 - gh pr diff {{PR_NUMBER}}
 - For each ctx in TOUCHED_CONTEXTS:
     /Users/cjhowe/Code/glibre/specs/<ctx>/SPEC.md

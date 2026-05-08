@@ -38,7 +38,7 @@ Each list entry is an object with a single key. Supported keys:
 
 | Key | Argument | Meaning |
 |---|---|---|
-| `pr_merged_closes_self` | `true` | At least one merged PR into `main` whose body or commit messages contain `closes #<this-issue>` (or `fixes` / `resolves`). |
+| `pr_merged_closes_self` | `true` | At least one merged PR into `main` whose body or commit messages contain a GitHub closing keyword followed by `#<this-issue>`. Accepted keywords (case-insensitive): `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, `resolved`. |
 | `file_exists` | path (string) | Path is a regular file at `main` HEAD. |
 | `file_contains` | `{ path, regex }` | File exists AND a POSIX-extended regex matches at least one line. |
 | `glob_nonempty` | glob (string) | At least one path matches the glob (uses `git ls-files` so it sees only tracked files). |

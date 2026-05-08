@@ -178,7 +178,7 @@ close yet — closure waits for QA stage.
    any clang-tidy regressions.
 5. Open a PR. Title = Conventional Commit subject. Body references
    the plan issue and the user-story issues it advances.
-6. Enable auto-merge on the PR (`gh pr merge <n> --auto --squash`).
+6. Open the PR with `gh pr create` and STOP — the parent /go skill's three-round review pipeline enables auto-merge after round 3 converges (see SKILL.md Step 5).
 
 **Deliverable:** PR merged. Code, tests, possibly docs.
 
