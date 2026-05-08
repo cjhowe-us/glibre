@@ -682,7 +682,7 @@ emitted. Holds no state across runs.
    permitted because the log assert *is* the diagnostic
    in that case (see
    `tests/e2e/shader/permutation-key-codec.glibre-trace`,
-   frame 1, op id 12). The obligation is symmetric: the
+   frame 1, op id 12). The obligation generalizes: the
    diagnostic-providing assert must run independently of
    the state-validating assert it explains.
 5. **Always emits a report.** Pass, fail, parse error, env
