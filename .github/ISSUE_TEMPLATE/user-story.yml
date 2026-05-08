@@ -89,6 +89,24 @@ body:
         - label: "Manual test script reviewed by a second human"
         - label: "Manual test executed; PASS recorded as a comment"
     validations: { required: true }
+  - type: textarea
+    id: definition-of-done
+    attributes:
+      label: Definition of Done
+      description: |
+        Machine-checkable assertions that must all hold against `main` before
+        the story may be closed. Parsed by the `dod-verify` GitHub Action.
+        See `.github/DOD-DSL.md` for the supported assertion grammar.
+        Stories typically assert: trace file present, trace passing in CI,
+        manual PASS comment posted.
+      value: |
+        ```yaml
+        - pr_merged_closes_self: true
+        - file_exists: tests/e2e/<context>/<topic>.glibre-trace
+        - workflow_passed: ci.yml
+        - issue_comment_matches: "^manual-test:PASS"
+        ```
+    validations: { required: true }
   - type: input
     id: harmonius
     attributes:

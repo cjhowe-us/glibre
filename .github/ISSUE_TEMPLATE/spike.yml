@@ -45,6 +45,24 @@ body:
       label: Deliverable
       description: Doc path, decision record, or prototype branch.
     validations: { required: true }
+  - type: textarea
+    id: definition-of-done
+    attributes:
+      label: Definition of Done
+      description: |
+        Machine-checkable assertions that must all hold against `main` before
+        the issue may be closed. Parsed by the `dod-verify` GitHub Action.
+        See `.github/DOD-DSL.md` for the supported assertion grammar.
+      value: |
+        ```yaml
+        - pr_merged_closes_self: true
+        # Spike deliverable usually a doc — assert its presence on main:
+        # - file_exists: specs/<context>/<topic>-design.md
+        # - file_contains:
+        #     path: specs/<context>/<topic>-design.md
+        #     regex: "^## 1\\. Purpose"
+        ```
+    validations: { required: true }
   - type: input
     id: parent
     attributes:

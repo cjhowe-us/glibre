@@ -23,6 +23,8 @@ You will receive an issue-specific dispatch prompt. Treat it as authoritative fo
 ## Required outputs
 
 - One PR (open, no auto-merge) with code, named Catch2 unit tests passing, optional doc updates.
+- **PR body MUST include `Closes #<issue>`** so the `dod-verify` workflow fires on merge.
+- **Definition of Done block.** Read `.github/DOD-DSL.md`. Confirm the plan issue carries a `## Definition of Done` section with a fenced ```yaml list of assertions. If absent, author it in this PR (via `gh issue edit`); if stale, refresh it to match the new test names. Each Catch2 test in the plan's Unit Test Plan SHOULD appear as a `unit_test_named:` entry, plus `pr_merged_closes_self: true`, plus `workflow_passed: ci.yml`.
 - Final status comment with the AGENTS.md schema (with the real PR number once `gh pr create` returns), `agent:go-coding`. The `notes:` line MUST cite the PR number so the orchestrator can pick it up for review.
 
 ## Reasoning posture
