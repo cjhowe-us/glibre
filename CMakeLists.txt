@@ -49,8 +49,16 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
 include(GNUInstallDirs)
 
+# Enforce -fno-exceptions / -fno-rtti contract on all engine targets.
+# Provides glibre::compile_contract, glibre_target_exceptions(), and a
+# deferred configure-time check that glibre-core's link closure contains no
+# exception-enabled targets.  See reviews/decisions/error-model.md Decision #3.
+include(Compile)
+
 if(GLIBRE_BUILD_TESTS)
     enable_testing()
+    # CMake-driven fixture tests (no compiled binaries required).
+    include(cmake/tests/CMakeLists_exceptions_test.cmake)
 endif()
 
 add_subdirectory(core)
