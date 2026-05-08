@@ -941,9 +941,9 @@ shell do not.
 sink: it shares this aggregate's non-perturbing-capture discipline
 (invariant 1 above) but writes typed pre/post records into the
 `OverlayCaptureTable` rather than `TraceOp` entries into a
-`.glibre-trace` file. AssertState evaluations lowered by
-`TraceRecorder` against `OverlayCapture` paths read the table per
-§4.11 invariants 1, 3, and 6.
+`.glibre-trace` file. AssertState evaluations performed by the
+`TraceRunner` (specs/e2e/SPEC.md §4.1.7) against `OverlayCapture`
+paths read the table per §4.11 invariants 1, 3, and 6.
 
 ### 4.10 Cross-aggregate invariants
 
@@ -1266,10 +1266,11 @@ authoring AssertState payloads against `OverlayCapture` paths:
   `World::remove_component` are the only ABI calls handlers may
   invoke against `GameWorld` (§4.11 invariant 4); archetype
   migration / observer / atomicity rules are inherited unchanged.
-- `specs/e2e/SPEC.md` §4.1.5 / §7.1.5 — `AssertState` evaluations
-  read `OverlayCapture` paths through the codegen-emitted
-  reflection table; the `OverlayCaptureValue` shape is the same
-  closed sum `AssertStatePayload.expected_fory_blob` lowers to.
+- `specs/e2e/SPEC.md` §4.1.4 / §6.4 — `AssertState`'s predicate
+  `(component_path, expected_fory_blob)` is defined in the `TraceOp`
+  sealed sum (§4.1.4); the evaluator that reads `OverlayCapture`
+  paths through the codegen-emitted reflection table is
+  `assert/state.cpp` (§6.4 steps 1–3).
 - `specs/platform/SPEC.md` §4.2 — the input-phase ordering rule
   serialises multi-binding presses within one frame; §4.11
   invariant 2 inherits this ordering for cross-binding atomicity.
