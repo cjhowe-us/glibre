@@ -113,6 +113,54 @@ jobs:
             echo "::endgroup::"
           done <<< "${{ steps.list.outputs.traces }}"
 
+  fory-overlay-check:
+    # Verify that the vcpkg overlay port for Apache Fory resolves correctly
+    # and exports both fory::fory and Fory::fory (refs #218).
+    # This is a configure-only cmake step — no compilation needed.
+    runs-on: macos-26
+    needs: lint
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/vendor/vcpkg
+      VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Export GitHub Actions cache env for vcpkg
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - uses: lukka/get-cmake@latest
+      - name: Install brew tools (LLVM ≥ 21)
+        run: brew install llvm
+      - name: Bootstrap vcpkg
+        run: ./vendor/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+      - name: Install fory via vcpkg overlay (classic mode)
+        run: |
+          # Use --classic so vcpkg ignores the root vcpkg.json manifest and
+          # installs only the named port.  The workspace contains a manifest
+          # file that lists ALL project deps; classic mode avoids pulling them.
+          ./vendor/vcpkg/vcpkg install fory:arm64-osx \
+            --overlay-ports=./vcpkg-overlay-ports \
+            --classic
+      - name: Configure fory_overlay cmake fixture
+        run: |
+          set -euo pipefail
+          LLVM_PREFIX="$(brew --prefix llvm)"
+          cmake -S tests/cmake/fory_overlay \
+            -B build/fory-overlay-check \
+            -DCMAKE_TOOLCHAIN_FILE="./vendor/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_OVERLAY_PORTS="./vcpkg-overlay-ports" \
+            -DVCPKG_TARGET_TRIPLET=arm64-osx \
+            "-DCMAKE_C_COMPILER=${LLVM_PREFIX}/bin/clang" \
+            "-DCMAKE_CXX_COMPILER=${LLVM_PREFIX}/bin/clang++" \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=26.4 \
+            -DCMAKE_BUILD_TYPE=Debug
+          echo "fory-overlay-check: PASSED — Fory::fory target found"
+
   dep-check:
     runs-on: ubuntu-latest
     steps:

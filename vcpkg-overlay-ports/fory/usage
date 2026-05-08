@@ -1,0 +1,11 @@
+fory provides CMake targets.  After find_package(fory CONFIG REQUIRED):
+
+  # Upstream target (all components bundled):
+  target_link_libraries(<target> PRIVATE fory::fory)
+
+  # glibre canonical alias (see reviews/decisions/fory-codegen.md):
+  target_link_libraries(<target> PRIVATE Fory::fory)
+
+Both names refer to the same imported library.  Only tools/foryc and
+data/glibre-types.dylib link Fory directly; all other glibre targets
+depend on glibre-types rather than on Fory itself.
