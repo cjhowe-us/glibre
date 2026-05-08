@@ -794,9 +794,10 @@ split.**
 **Trace-file documentation requirement (review-enforced).**
 A multi-scenario trace MUST carry a stream-header comment
 that (a) names every scenario block by `FrameIndex` range,
-(b) names which `ComponentPath`s / log channels each
-scenario asserts on, and (c) explicitly states whether
-shared state crosses any scenario boundary. The
+(b) describes which state each scenario asserts on
+(`ComponentPath` names or equivalent semantic description
+of the asserted paths and log channels), and (c) explicitly
+states whether shared state crosses any scenario boundary. The
 include-closure trace
 (`tests/e2e/shader/include-closure.glibre-trace`,
 introduced by PR #858 and clarified by PR #864) is the
