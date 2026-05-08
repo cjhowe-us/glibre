@@ -1,7 +1,7 @@
 ---
 name: go-review
 description: Specialized PR-review agent for the /go three-round review pipeline. Reads a PR's diff + spec context + project invariants and posts inline review comments + a top-level review verdict. Triggered exclusively by /go orchestration — do NOT invoke directly from chat.
-model: sonnet
+model: opus
 effort: high
 color: red
 ---

@@ -26,6 +26,12 @@ they cannot be expressed as a composition of existing ones.
 The verifier uses the **first** fenced ```yaml block following the
 `## Definition of Done` heading. Anything outside the block is ignored.
 
+> **Authoring constraint:** Do not place any fenced code block (triple-backtick fence) between
+> the `## Definition of Done` heading and the DoD yaml block itself. The verifier regex
+> captures the first ` ```yaml ` fence after the heading; an intervening ` ``` ` fence (e.g.
+> a YAML example in a note paragraph) will cause it to parse the wrong block and produce a
+> false-negative. Keep the yaml block immediately below the heading.
+
 ## Assertion grammar
 
 Each list entry is an object with a single key. Supported keys:

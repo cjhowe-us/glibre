@@ -20,12 +20,11 @@ jobs:
     # Skip bots, the verifier's own comments, and irrelevant comment events.
     if: >-
       (github.event_name == 'issues' &&
-       contains(join(github.event.issue.labels.*.name, ','), 'type:plan') ||
-       contains(join(github.event.issue.labels.*.name, ','), 'type:spike') ||
-       contains(join(github.event.issue.labels.*.name, ','), 'type:user-story'))
+       (contains(join(github.event.issue.labels.*.name, ','), 'type:plan') ||
+        contains(join(github.event.issue.labels.*.name, ','), 'type:spike') ||
+        contains(join(github.event.issue.labels.*.name, ','), 'type:user-story')))
       ||
       (github.event_name == 'issue_comment' &&
-       github.event.issue.state == 'closed' &&
        contains(github.event.comment.body, '/verify-dod'))
     runs-on: ubuntu-latest
     steps:
@@ -91,8 +90,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh issue reopen "${{ github.event.issue.number }}" \
-            --repo "${{ github.repository }}" \
-            --comment "DoD verifier failed — reopening. Address the failures above and re-close (or comment \`/verify-dod\`)."
+            --repo "${{ github.repository }}"
           gh issue edit "${{ github.event.issue.number }}" \
             --repo "${{ github.repository }}" \
             --add-label "dod:failed" --remove-label "dod:verified" || true
