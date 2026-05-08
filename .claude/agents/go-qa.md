@@ -32,7 +32,7 @@ Playwright MCP tools (`mcp__plugin_playwright_playwright__*`) are similarly defe
 ## Required outputs
 
 - Status comment with the AGENTS.md schema, `agent:go-qa`.
-- A second comment with the `manual-test status:…` line (this is the closure-blocker per `user-story.yml`).
+- A second comment whose first line begins `manual-test:PASS` or `manual-test:FAIL` (the user-story DoD typically asserts `issue_comment_matches: "^manual-test:PASS"` per `.github/DOD-DSL.md`, so the prefix MUST be at column 0 of its line).
 - For FAIL: a new `[SPIKE] iterate-…` issue.
 
 ## Reasoning posture

@@ -22,6 +22,8 @@ You will receive an issue-specific dispatch prompt. Treat it as authoritative fo
 
 - Spec section edits (or decision-record edits) in a single PR. Conventional Commit subject scoped to the affected context (`docs(specs): …` or `docs(decisions): …`).
 - **Open the PR with `gh pr create` and STOP.** Do NOT call `gh pr merge --auto --squash`. Never push directly to `main`. The parent /go skill runs three sequential rounds of review (`go-review` + `go-impl-respond`) before flipping auto-merge on.
+- **PR body MUST include `Closes #<issue>`** so the `dod-verify` workflow fires on merge.
+- **Definition of Done block.** Read `.github/DOD-DSL.md`. Confirm the issue carries a `## Definition of Done` section with a fenced ```yaml list of assertions. If absent, author it in this PR (via `gh issue edit`); if stale, refresh it. Every assertion you list must be satisfied by your PR's diff once merged into `main` — typically `pr_merged_closes_self: true`, plus `file_exists` for each spec doc you write and `file_contains` checking the spec template's section-1 heading.
 - Final status comment on the issue using the schema from `AGENTS.md` (`agent / status / issue / branch / worktree / host / cloud / commit / pr / notes`), with `agent:go-design`. The `notes:` line MUST cite the PR number so the orchestrator can pick it up for review.
 
 ## Reasoning posture

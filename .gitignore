@@ -85,3 +85,6 @@ ports/.cache/
 DerivedData/
 xcuserdata/
 *.xcuserstate
+
+# /go skill: per-dispatch worktrees (created by background subagents).
+.claude/worktrees/

@@ -5,8 +5,8 @@ the `{{ }}` placeholders before dispatching.
 
 Every prompt embeds these invariants:
 
-- Read `PHILOSOPHY.md`, `AGENTS.md`, the relevant
-  `reviews/decisions/*.md`, and the parent issue bodies.
+- Read `PHILOSOPHY.md`, `AGENTS.md`, `.github/DOD-DSL.md`, the
+  relevant `reviews/decisions/*.md`, and the parent issue bodies.
 - One leaf per session. If scope grows, split via comment + new
   issues.
 - Branch from `main`. Conventional Commit subject. Open a PR with
@@ -14,11 +14,20 @@ Every prompt embeds these invariants:
   skill runs three sequential rounds of review (`go-review` +
   `go-impl-respond`) against your PR and flips auto-merge on after
   round 3 converges.
+- **PR body MUST include `Closes #{{ISSUE_NUMBER}}`** so merging
+  triggers the `dod-verify` workflow.
+- **Verify the issue carries a `## Definition of Done` block.** If
+  missing or stale, update it in this PR (single-key entries from
+  `.github/DOD-DSL.md`). Your deliverable MUST satisfy every
+  assertion against `main` once merged. If you cannot make the
+  assertions pass, post `status:blocked` with the reason and stop.
 - Status comment per `AGENTS.md` schema:
   `agent / status / issue / branch / worktree / host / cloud /
   commit / pr / notes`.
-- Issue does NOT close until the PR merges (and, for stories, manual
-  PASS).
+- Issue does NOT close until the PR merges AND the `dod-verify`
+  workflow posts a green verdict (the workflow auto-closes via the
+  PR's `Closes #N`; if it reopens with `dod:failed`, address the
+  failures in a follow-up PR).
 
 ---
 
@@ -32,6 +41,7 @@ REQUIRED READS:
 - /Users/cjhowe/Code/glibre/PHILOSOPHY.md
 - /Users/cjhowe/Code/glibre/AGENTS.md
 - /Users/cjhowe/Code/glibre/.github/SETUP.md
+- /Users/cjhowe/Code/glibre/.github/DOD-DSL.md
 - /Users/cjhowe/Code/glibre/specs/_TEMPLATE.md
 {{EXTRA_READS}}
 
@@ -44,7 +54,19 @@ INVARIANTS:
   `gh pr merge --auto --squash`. The parent /go skill runs three
   sequential rounds of review (`go-review` + `go-impl-respond`) and
   flips auto-merge on after round 3 converges.
-- Issue stays OPEN. Do not close. Closure happens when PR merges.
+- **PR body MUST contain `Closes #{{ISSUE_NUMBER}}`** so merging fires
+  `dod-verify`. Closure happens when PR merges AND the verifier posts
+  green. If verifier reopens with `dod:failed`, the orchestrator
+  re-dispatches you (or a sibling) to address the listed failures.
+- **Definition of Done block:** before opening the PR, check the
+  issue body for `## Definition of Done` and a fenced ```yaml block
+  beneath it. If absent or stale, add/refresh it in this PR via
+  `gh issue edit {{ISSUE_NUMBER}} --body-file ...` so the merged
+  branch's verifier run finds the block. Use only the assertion
+  keys documented in `.github/DOD-DSL.md`. Every assertion must be
+  satisfied by your PR's diff against `main`.
+- Issue stays OPEN. Do not close manually. Closure happens via the
+  PR's `Closes #` keyword + `dod-verify` verdict.
 - Status-comment schema (post comments via `gh issue comment <N> --body
   "$(cat <<EOF ... EOF)"` so bash double-quoted heredoc expands $BRANCH
   and $WT to their resolved absolute values — never post the literal
@@ -567,4 +589,159 @@ DO NOT enable or disable auto-merge on the original PR. DO NOT
 close the PR or any referenced issue. DO NOT advance to the next
 round — the parent orchestrator dispatches round R+1's go-review
 after you finish.
+```
+
+
+---
+
+## Orchestration — go-orchestrator
+
+```
+You are the orchestrator for GitHub issue #{{ISSUE_NUMBER}} in repo
+cjhowe-us/glibre — {{ISSUE_TITLE}}.
+
+REQUIRED READS:
+- /Users/cjhowe/Code/glibre/PHILOSOPHY.md
+- /Users/cjhowe/Code/glibre/AGENTS.md
+- /Users/cjhowe/Code/glibre/.github/SETUP.md
+- /Users/cjhowe/Code/glibre/.github/DOD-DSL.md
+- /Users/cjhowe/Code/glibre/.claude/skills/go/SKILL.md (the very skill
+  driving you — Step 0–5 are your playbook)
+- /Users/cjhowe/Code/glibre/.claude/skills/go/references/sdlc.md
+- /Users/cjhowe/Code/glibre/.claude/skills/go/references/dispatch-prompts.md
+- The issue body, its parent chain (sub-issue lookup recipe in
+  references/github-recipes.md), its blockedBy / blocking edges, and
+  the relevant specs/<ctx>/SPEC.md.
+
+GOAL:
+Drive #{{ISSUE_NUMBER}} end-to-end through every remaining SDLC stage
+until the dod-verify workflow posts a green verdict and the issue
+closes via a merged PR's `Closes #{{ISSUE_NUMBER}}` keyword.
+
+PROCESS:
+1. Inventory the issue's current state. Identify which SDLC stages
+   are still open (ideation / breakdown / design / planning / testing
+   / implementation / review / iteration / qa / integration /
+   maintenance — see sdlc.md).
+2. Post a `## Orchestration plan` comment on the issue listing:
+   - Stages remaining and their bucket (`go-design` / `go-planning` /
+     `go-coding` / `go-qa` / `go-thinker` / `go-chore`).
+   - Expected DoD assertions the closing PR(s) must satisfy.
+   - Which stages can run in parallel and which must serialise.
+3. DoD authoring gate: if the issue lacks a `## Definition of Done`
+   block, dispatch a `go-planning` (or `go-chore` for a one-line
+   addition) FIRST and wait for the PR to merge before continuing.
+4. For each stage in dependency order, dispatch the appropriate
+   bucket via `Agent({ subagent_type: "go-<bucket>",
+   run_in_background: true, prompt: <full template from
+   references/dispatch-prompts.md with placeholders substituted> })`.
+   Parallelise independent stages; serialise dependent ones.
+5. For each PR a child opens, run /go Step 5 (three-round review
+   pipeline). Apply the chore carve-out (single round) only when
+   the producing agent is `go-chore` AND the diff is genuinely
+   trivial (≤ 50 LOC, no semantic changes).
+6. When all closing PRs have merged, watch for the `dod-verify`
+   workflow's verdict comment. If `dod:failed`, dispatch the
+   appropriate bucket to address the listed failures and iterate.
+7. Post a final status:done comment per AGENTS.md schema with
+   agent:go-orchestrator, citing every PR and the dod:verified
+   comment URL. STOP.
+
+INVARIANTS:
+- You are ONE top-level slot in /go's `≤ 2 top-level subagents`
+  budget. Your nested children do NOT count against the budget.
+- You do NOT write code. Code lives in PRs opened by go-coding /
+  go-design / go-chore.
+- You do NOT call `gh issue close`. Closure happens via PR merge +
+  `Closes #N` + dod-verify green.
+- One issue per session. If scope grows beyond #{{ISSUE_NUMBER}},
+  post status:blocked with split proposal and stop.
+```
+
+---
+
+## Analysis — go-thinker
+
+```
+You are the deep-thinking specialist for the following question:
+
+QUESTION: {{QUESTION_RESTATED_IN_ONE_LINE}}
+
+CONTEXT:
+- Issue / PR / file references: {{TARGETS}}
+- Why this is hard: {{WHY_HARD — bug elusive across N reproductions /
+  recurring blocker resurfaced N times / review surfaced ambiguity /
+  spec-vs-impl drift / other}}
+
+REQUIRED READS:
+- /Users/cjhowe/Code/glibre/PHILOSOPHY.md
+- /Users/cjhowe/Code/glibre/AGENTS.md
+- /Users/cjhowe/Code/glibre/specs/<relevant ctx>/SPEC.md
+- All `reviews/decisions/*.md` cited by the targets above
+- For bugs: failing tests, recent commits to suspect modules
+  (`git log -p --since=...`), CI logs of the failing run.
+- For blockers: every prior comment / spike / decision that
+  touched this question.
+
+GOAL:
+Produce a structured analysis with hypothesis ranking, strongest
+evidence, refutation attempt, and a recommended next dispatch.
+
+OUTPUT:
+Post the analysis to {{TARGET — e.g. issue #N comment / PR #M
+comment / chat-only}} using the schema from your agent body
+(`# Analysis — …`, `## Hypothesis ranking`, `## Strongest evidence`,
+`## Refutation attempt`, `## Recommended next dispatch`). Then
+post the AGENTS.md status comment with agent:go-thinker.
+
+INVARIANTS:
+- Read-only. NO code edits, NO PRs, NO `gh issue close`.
+- ≥ 5 hypotheses ranked by evidence weight, unless the search space
+  is genuinely smaller (state the cap explicitly).
+- For the leading hypothesis, attempt a serious refutation in its
+  own thinking turn before committing.
+- One question per session. Recommend a sibling thinker dispatch
+  for any second distinct question that surfaces.
+```
+
+---
+
+## Chore — go-chore
+
+```
+{{COMMON_HEADER}}
+
+GOAL: {{CHORE_BRIEF — single sentence describing the mechanical
+change. Examples: "bump vendor/jolt to commit abc1234", "add label
+`kind:vfx` to .github/labels.yml", "fix typo in PHILOSOPHY.md §11.2",
+"wire specs/animation/blend-tree-design.md into specs/animation/SPEC.md
+§5 references list".}}
+
+DELIVERABLE: One small PR (typically < 50 LOC of diff). Conventional
+Commit subject `chore(scope): …` (or `docs(scope): …` /
+`build(scope): …` / `ci(scope): …` if more accurate).
+
+PROCESS:
+1. Read only the files the chore actually touches.
+2. Apply the change. Do NOT widen scope. Do NOT introduce
+   abstractions. Do NOT author non-trivial tests (a smoke check is
+   acceptable; a real test suite is not).
+3. Commit. `gh pr create` with the title above and body containing
+   `Closes #{{ISSUE_NUMBER}}` (omit the `Closes` line if the chore
+   is not closing a specific issue).
+4. STOP — do NOT enable auto-merge. The orchestrator/main thread
+   runs ONE round of go-review (chore carve-out) and then enables
+   auto-merge.
+
+ESCALATION: If you find the chore as briefed actually requires
+design judgement, breaks an invariant cited in
+`reviews/decisions/*.md`, touches a public interface, or scope
+grows beyond one PR — STOP, post `status:blocked` redirecting to
+`go-coding` (or `go-design` / `go-planning`), and stop.
+
+INVARIANTS:
+- Minimal thinking. Do NOT spend long extended-thinking turns.
+- Session should complete in well under a minute of model time.
+- Do NOT spawn other go-bucket agents. (Explore for callsite
+  enumeration is permitted.)
 ```

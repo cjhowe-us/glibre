@@ -31,9 +31,26 @@ Every dispatch must respect these (also enforced by `AGENTS.md`):
 - **Issues stay open until deliverables are merged into `main`.**
   Closing a leaf requires the linked PR(s) merged + (for stories)
   manual PASS recorded as a comment.
+- **Definition of Done is authoritative.** Every leaf carries a
+  machine-checkable `## Definition of Done` block (DSL in
+  `.github/DOD-DSL.md`). The `dod-verify` GitHub Action evaluates the
+  block against `main` whenever the issue is closed (or on
+  `/verify-dod` comment). Failure → action reopens the issue and tags
+  `dod:failed`. Success → tags `dod:verified`. Closure is the
+  verifier's verdict, not human discretion. Authoring agents
+  (planning bucket) populate the DoD block; executor agents must
+  satisfy it before requesting closure; the orchestrator only closes
+  a leaf after Step 4's verifier-check passes.
 
 ## Required Step Order
 
+0. **Manual orchestrator hook (optional, before the leaf picker).**
+   If the user said "orchestrate #N" / "drive #N end-to-end", or an
+   open issue carries the `orchestration:multi-stage` label, dispatch
+   a single `go-orchestrator` against that issue and stop the leaf
+   picker for this turn. Orchestrator counts as one top-level slot;
+   its nested children do not. If neither trigger applies, fall
+   through to Step 1.
 1. **Query** GitHub for unblocked leaves; collect up to 2.
 2. **Filter** by SDLC stage: pick items in earliest open stage first
    (ideation → maintenance — see `references/sdlc.md`).
@@ -82,10 +99,13 @@ Map issue title and labels to a stage. The mapping is:
 | `[SPIKE] task-breakdown-*-implementation`  | planning       | `go-planning` | New `type:plan` issues parented to epic    |
 | `[USER-STORY] *` (E2E trace authoring)     | testing        | `go-planning` | `.glibre-trace` + CI hook                   |
 | `[USER-STORY] *` (manual execution)        | qa             | `go-qa`       | Manual test PASS/FAIL comment + screenshots |
-| `[PLAN] *`                                 | implementation | `go-coding`   | Code + unit tests + PR                      |
-| `[PLAN] *` with `kind:bug`                 | maintenance    | `go-coding`   | Fix + tests + PR                            |
-| (PR review chore — manual dispatch only)   | review         | `go-coding`   | Review comments / merge approval            |
-| (epic-closure / cross-context — manual)    | integration    | `go-coding`   | Aggregator body updates + PR                |
+| `[PLAN] *`                                 | implementation | `go-coding`        | Code + unit tests + PR                      |
+| `[PLAN] *` with `kind:bug`                 | maintenance    | `go-coding`        | Fix + tests + PR                            |
+| `[CHORE] *` or `[PLAN] *` with `kind:chore` | maintenance   | `go-chore`         | Tiny PR (single-round review carve-out)     |
+| (manual: `orchestration:multi-stage` / chat) | orchestration | `go-orchestrator`  | Plan comment + nested dispatches + closure  |
+| (manual: "think about #N" / nested call)   | analysis       | `go-thinker`       | Read-only analysis comment / chat reply     |
+| (PR review chore — manual dispatch only)   | review         | `go-coding`        | Review comments / merge approval            |
+| (epic-closure / cross-context — manual)    | integration    | `go-coding`        | Aggregator body updates + PR                |
 
 **Step-1 reachability note.** The Step-1 GraphQL filter selects only
 `type ∈ {user-story, plan, spike}`. Rows tagged `(PR review chore — manual
@@ -138,10 +158,23 @@ at dispatch time — the agent file is the source of truth.
 
 Bucket → model + effort (resolved by the agent's own frontmatter):
 
-- `go-design`   → `model: opus`,   `effort: xhigh`
-- `go-planning` → `model: opus`,   `effort: high`
-- `go-coding`   → `model: sonnet`, `effort: high`
-- `go-qa`       → `model: sonnet`, `effort: medium`
+- `go-orchestrator` → `model: opus`,   `effort: high`
+- `go-design`       → `model: opus`,   `effort: xhigh`
+- `go-thinker`      → `model: opus`,   `effort: xhigh`
+- `go-planning`     → `model: opus`,   `effort: high`
+- `go-coding`       → `model: sonnet`, `effort: high`
+- `go-review`       → `model: opus`,   `effort: high`
+- `go-impl-respond` → `model: sonnet`, `effort: high`
+- `go-qa`           → `model: sonnet`, `effort: medium`
+- `go-chore`        → `model: haiku`,  `effort: low`
+
+**Concurrency accounting.** Each top-level dispatch counts as one
+slot against the `≤ 2 top-level subagents` budget — including
+`go-orchestrator` and `go-chore`. An orchestrator's nested children
+do NOT count against the budget; fan them out as the dependency
+graph allows. `go-thinker` invoked as a nested child of another
+agent likewise does not consume a top-level slot; only direct
+chat-summoned thinker dispatches do.
 
 **Effort caveat (active fallback in agent body).** As of Claude Code
 2.1.x, `effort:` frontmatter is officially honored for plugin-shipped
@@ -187,10 +220,30 @@ When a leaf-bucket agent's completion notification arrives:
 4. Run `git -C /Users/cjhowe/Code/glibre fetch origin main && git -C ...
    pull --ff-only origin main` to keep local main in sync with any
    sibling /go agent's already-merged PRs.
-5. Hand the PR to **Step 5** (three-round review pipeline). Review
+5. **Verify the issue carries a `## Definition of Done` block.** If
+   missing, dispatch a `go-planning` follow-up to author it before
+   advancing — never close a leaf without a DoD.
+6. Hand the PR to **Step 5** (three-round review pipeline). Review
    runs sequentially per PR; across PRs you may parallelise up to the
    ≤ 2 top-level concurrency budget.
-6. Optionally pick the next unblocked leaf if a slot is free.
+7. Optionally pick the next unblocked leaf if a slot is free.
+
+### Step 4b — DoD-gated closure
+
+After all PRs that close a leaf have merged into `main`:
+
+1. The `dod-verify` workflow fires automatically on close events. To
+   trigger it manually, comment `/verify-dod` on the issue.
+2. If the verifier posts `passed`-of-`total` with all green ticks and
+   tags `dod:verified`, the leaf is done.
+3. If the verifier reopens the issue with `dod:failed`, treat it as a
+   live leaf again: pick the next agent (typically the same bucket
+   that produced the original deliverable) to address the failures
+   in a follow-up PR. Do not bypass the verifier or hand-close.
+
+The orchestrator MUST NOT close a leaf via `gh issue close` directly;
+closure happens by merging a PR whose body uses `closes #<N>`, which
+triggers the verifier on the resulting `issues: closed` event.
 
 Stop dispatching new leaves when one of:
 
@@ -254,6 +307,17 @@ on the merged PR number, skipping Steps 1–4. Use it when (a) a PR
 was merged before the three-round pipeline existed, (b) the user
 explicitly asks for a retroactive review, (c) a follow-up PR cycle
 needs to start from a merged baseline.
+
+**Chore PR carve-out (single-round review).** PRs opened by
+`go-chore` (or by another agent for a clearly-mechanical change —
+typo fix, label sync, vendor pin bump, deterministic regen) get a
+single `go-review` round only, then the orchestrator/main thread
+enables auto-merge. The chore agent body forbids non-trivial scope,
+so additional rounds add cycles without adding signal. If round 1
+returns blocking findings, address them (one `go-impl-respond`
+round) and merge — do NOT escalate to three rounds unless the diff
+turns out to be non-trivial after all (in which case treat the PR
+as a `go-coding` deliverable and run the full Step-5 pipeline).
 
 ## Reference Files
 

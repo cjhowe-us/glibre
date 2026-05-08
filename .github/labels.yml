@@ -42,3 +42,7 @@
 - { name: "domain:networking", color: "1d76db" }
 - { name: "domain:simulation", color: "1d76db" }
 - { name: "domain:infra",      color: "1d76db" }
+
+# DoD verifier outcome labels (set by .github/workflows/dod-verify.yml).
+- { name: "dod:verified",      color: "0e8a16" }
+- { name: "dod:failed",        color: "b60205" }

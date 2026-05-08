@@ -316,3 +316,58 @@ ideation → breakdown → design ↔ iteration
 ```
 
 The double-headed arrows mean stages cycle until their gate holds.
+
+---
+
+## Cross-Stage Roles
+
+The eleven stages above describe leaf execution paths. Three roles
+operate orthogonally to those stages:
+
+### Orchestration (`go-orchestrator`)
+
+Drives one issue end-to-end across multiple stages. Does NOT replace
+the leaf executors — it dispatches them. Use when:
+
+- An issue spans more than one stage (e.g. an epic fragment that
+  needs both design + planning + implementation under one driver).
+- The user explicitly requests "orchestrate #N" / "drive #N
+  end-to-end".
+- An open issue carries the `orchestration:multi-stage` label.
+
+The orchestrator counts as one /go top-level slot; its nested
+children are unbounded. Lifecycle: inventory → orchestration-plan
+comment → DoD authoring gate → stage dispatches → review pipeline
+per PR → DoD verifier loop → final status:done. Closure happens
+via merged PR + green dod-verify, never by `gh issue close`.
+
+### Analysis (`go-thinker`)
+
+Read-only deep-thinking specialist. Fires inside any stage when the
+blocker is reasoning depth, not artifact production. Examples:
+
+- During **maintenance**: hard-to-reproduce bug → thinker enumerates
+  hypotheses before coding fix.
+- During **iteration**: a recurring open question → thinker before
+  the next `close-*-open-questions` spike.
+- During **review** (round 2/3): an ambiguous design call surfaced
+  by a comment → impl-respond delegates to thinker for the
+  reasoning, then writes the response.
+
+Output is a structured analysis (≥ 5 ranked hypotheses + refutation
++ recommended next dispatch). Thinker never writes code or opens
+PRs. Manually summoned from chat or as a nested child.
+
+### Chore (`go-chore`)
+
+Low-effort mechanical worker. Fires for:
+
+- **Maintenance** issues labelled `kind:chore` or titled `[CHORE]`.
+- Any tiny mechanical sub-task spawned by another agent (e.g. a
+  go-design agent delegates "add the new doc to specs/<ctx>/SPEC.md
+  §5 references" to a chore child rather than burning opus
+  thinking on the formatting).
+
+Chore PRs go through the single-round review carve-out (one
+`go-review` round, optional one `go-impl-respond` round, then
+auto-merge) — see /go SKILL.md Step 5.

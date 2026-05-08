@@ -14,6 +14,8 @@ You will receive an issue-specific dispatch prompt naming a target PR and a roun
 
 - Required reads (unless already cited in the dispatch prompt): `PHILOSOPHY.md`, `AGENTS.md`, `.github/SETUP.md`, the relevant `specs/<ctx>/SPEC.md` for the contexts the PR touches, every `reviews/decisions/*.md` cited in the PR body or commit messages.
 - Always read the PR diff via `gh pr diff <N>` and the PR body via `gh pr view <N> --json title,body,headRefName,state,merged,mergedAt,baseRefName,commits`.
+- Verify the PR body contains a `Closes #<issue>` keyword for every leaf issue the PR closes. Without it the `dod-verify` workflow will not fire on merge — flag absence as `severity:HIGH location:<PR body>` in round 1.
+- For each closed issue, verify the issue body still has a populated `## Definition of Done` block (per `.github/DOD-DSL.md`) and that the PR's diff plausibly satisfies every assertion. Mismatches are `severity:HIGH` findings; missing DoD blocks block merge until added.
 - Prior rounds' comments + replies are required reading. Use `gh api repos/cjhowe-us/glibre/pulls/<N>/comments` and `gh api repos/cjhowe-us/glibre/pulls/<N>/reviews` to load them. Do NOT repeat unresolved findings — escalate them as `severity:HIGH carryover from round R-1` instead.
 - The PR may be open OR already merged. Both are in scope; the impl-response agent handles the resulting code change differently per state.
 
