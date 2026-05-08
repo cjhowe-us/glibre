@@ -699,8 +699,8 @@ state.
 **Invariant — assert-only-on-just-mutated state.** Each
 `AssertOp` in the stream MUST target a `(WorldId,
 ComponentPath)`, log substring, screenshot region, or ECS
-sub-aggregate that the *immediately preceding* `InputOp`s
-in the same scenario block established or mutated. An
+sub-aggregate that any `InputOp`s in the same scenario block
+established or mutated. An
 assertion MUST NOT depend on state set by an earlier
 scenario block unless the current scenario block re-asserts
 that state via its own `InputOp`s before the dependent
@@ -796,8 +796,11 @@ A multi-scenario trace MUST carry a stream-header comment
 that (a) names every scenario block by `FrameIndex` range,
 (b) describes which state each scenario asserts on
 (`ComponentPath` names or equivalent semantic description
-of the asserted paths and log channels), and (c) explicitly
-states whether shared state crosses any scenario boundary. The
+of the asserted paths and log channels, sufficient for a
+reviewer to identify which assertion ops in the stream each
+scenario block owns without reading past the header), and
+(c) explicitly states whether shared state crosses any
+scenario boundary. The
 include-closure trace
 (`tests/e2e/shader/include-closure.glibre-trace`,
 introduced by PR #858 and clarified by PR #864) is the
@@ -805,16 +808,6 @@ reference shape; future multi-scenario traces follow the
 same documentation pattern. Reviewers reject multi-
 scenario traces that lack the header comment or whose
 assertions visibly violate the invariant above.
-
-**No spec / interface change required.** §4.1.4 sealed
-sum (no `ScenarioReset` arm), §4.1.3 manifest schema (no
-`isolation:` field), §5 public interface (no
-snapshot/restore symbol), §7.1.5 `TraceOp` Fory schema (no
-new variant tag), §7.2 migration rules (nothing to
-migrate) and §10 closed sum of typed failures (no new
-arm) are all unchanged by this decision. The
-include-closure trace and other multi-scenario traces in
-`tests/e2e/` stand as authored.
 
 #### 4.1.8 `InjectionLayer` — sealed sum of input-delivery mechanisms (value object)
 
