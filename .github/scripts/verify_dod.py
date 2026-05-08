@@ -91,7 +91,7 @@ def check_pr_merged_closes_self(_arg: object) -> tuple[bool, str]:
         "pr", "list",
         "--repo", REPO,
         "--state", "merged",
-        "--search", f"is:merged base:main #{ISSUE_NUMBER} in:body",
+        "--search", f"is:merged base:main closes:#{ISSUE_NUMBER}",
         "--json", "number,body,title",
         "--limit", "50",
     )

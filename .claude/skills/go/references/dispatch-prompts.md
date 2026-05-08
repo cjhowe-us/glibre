@@ -130,9 +130,9 @@ PROCESS:
    surface.
 3. Update {{SPEC_PATH}} sections §1 and §2.
 4. Open PR titled `docs(specs): fill {{CONTEXT_NAME}} §1 §2 (refs
-   #{{ISSUE_NUMBER}})`.
-5. Auto-merge: `gh pr merge <n> --auto --squash`.
-6. Post status:done comment.
+   #{{ISSUE_NUMBER}})` with `gh pr create` and STOP — Common Header
+   closure rule applies.
+5. Post status:done comment.
 
 DO NOT widen scope to other sections.
 ```
@@ -156,7 +156,8 @@ PROCESS:
    {{CONTEXT_NAME}}. Cite paths or US-IDs.
 2. Note any Occam collapses (multiple harmonius concepts → one glibre
    primitive). Justify each collapse.
-3. Update §3 of {{SPEC_PATH}}; PR + auto-merge.
+3. Update §3 of {{SPEC_PATH}}. Open PR with `gh pr create` and STOP —
+   Common Header closure rule applies.
 
 DO NOT touch other sections.
 ```
@@ -181,7 +182,8 @@ PROCESS:
 2. State invariants that must hold at every public API boundary.
 3. Justify each aggregate against SRP — note the single reason it
    would change.
-4. PR + auto-merge.
+4. Open PR with `gh pr create` and STOP — Common Header closure rule
+   applies.
 ```
 
 ---
@@ -205,7 +207,8 @@ PROCESS:
 2. No runtime reflection.
 3. List event types and serialized schemas (Fory) inline.
 4. List error variants this context emits.
-5. PR + auto-merge.
+5. Open PR with `gh pr create` and STOP — Common Header closure rule
+   applies.
 
 VERIFY the stub compiles standalone (e.g. paste into a temp .cpp and
 run clang -fsyntax-only with -std=c++23).
@@ -231,7 +234,8 @@ PROCESS:
 2. Sketch one schema in the canonical .fory format from the codegen
    decision record.
 3. State migration rules (per-version function).
-4. PR + auto-merge.
+4. Open PR with `gh pr create` and STOP — Common Header closure rule
+   applies.
 
 IF the data context's persistence sub-epic is still open and its
 decisions are not yet committed, post status:blocked and stop.
@@ -257,7 +261,8 @@ PROCESS:
 2. State what migrate(...) must do for this context's components.
 3. List refusal cases (ABI hash mismatch, schema migration failure,
    plugin init error) — context-specific surfaces.
-4. PR + auto-merge.
+4. Open PR with `gh pr create` and STOP — Common Header closure rule
+   applies.
 ```
 
 ---
@@ -275,7 +280,8 @@ For perf-budget (§9): cite global allocation from
 For failure-modes (§10): enumerate `core::Error` variants emitted
 from this context's public surfaces.
 
-PR + auto-merge.
+Open PR with `gh pr create` and STOP — Common Header closure rule
+applies.
 ```
 
 ---
@@ -302,7 +308,8 @@ PROCESS:
    plan. Open the issue with `gh issue create --body-file …`. Use
    the section structure from the user-story template.
 5. Update {{SPEC_PATH}} §11 with the new issue numbers.
-6. PR + auto-merge.
+6. Open PR with `gh pr create` and STOP — Common Header closure rule
+   applies.
 
 DO NOT close the spike issue.
 ```
@@ -321,7 +328,8 @@ PROCESS:
    resolution into the appropriate section) or convert to a
    `[SPIKE]` issue parented to the same sub-epic.
 2. Empty §12 (or replace each item with a spike issue link).
-3. PR + auto-merge.
+3. Open PR with `gh pr create` and STOP — Common Header closure rule
+   applies.
 ```
 
 ---
@@ -370,7 +378,8 @@ PROCESS:
 2. Implement only the declared scope. No widening.
 3. Add the unit tests named in Unit Test Plan. They MUST pass.
 4. `cmake --preset macos-debug && ctest --preset macos-debug`.
-5. PR + auto-merge.
+5. Open PR with `gh pr create` and STOP — Common Header closure rule
+   applies.
 
 If a planned test cannot be added without widening scope, post
 status:blocked with the reason.
@@ -394,7 +403,8 @@ PROCESS:
 2. Encode input ops + assertion ops that prove every Gherkin Then
    clause.
 3. Add CI invocation hook so the trace runs on PR.
-4. PR + auto-merge.
+4. Open PR with `gh pr create` and STOP — Common Header closure rule
+   applies.
 
 The CI run will fail until implementation lands — that is correct
 red. Do NOT close the story issue. QA stage closes it after manual
