@@ -207,15 +207,18 @@ them up; they are independent SRP questions that would not fit one
 session.
 
 1. **§11.1 unit test "slot table — capacity overflow returns
-   `ResourceResidencyExceeded`."** `render-resources-design.md`
-   §11.1 names `ResourceResidencyExceeded` as the slot-table
-   overflow return value. The §10.1 construction-site list does
-   *not* include a slot-table site for this variant, so either the
-   §11.1 test has the wrong return value (it should be a different
-   variant — likely `HeapOutOfMemory` or a new slot-table-specific
-   variant) or §10.1 is missing a row. Tracked as follow-up spike
-   #904 (`[SPIKE] iterate-render-spec-§11.1-slot-table-overflow-test-naming`)
-   parented to epic #83. Not blocking this PR.
+   `ResourceResidencyExceeded`."** **Resolved by spike #904**
+   (`reviews/decisions/slot-table-overflow-error.md`). The §11.1
+   test name was wrong; the correct variant is a new §5 enumerator
+   `render::Error::SlotTableExhausted` riding the same ABI bump
+   cluster as `SamplerCapExceeded`. Re-folding slot-table overflow
+   into `ResourceResidencyExceeded` (or into `HeapOutOfMemory`)
+   would re-violate the §10.1 single-construction-site SRP rule
+   this spike installed; instead, slot-table overflow gets its own
+   variant with one construction site at
+   `resources/handle_table.cpp::SlotTable::alloc` and recovery
+   `lower-tier`. See `reviews/decisions/slot-table-overflow-error.md`
+   for the full alternatives walk and refutation.
 2. **`core::Error::OutOfBudget` translation under
    `GLIBRE_ALLOC_STRICT=1`.** SPEC §6 ("Strict-mode enforcement"
    line 2629) and `render-resources-design.md` §11.6 ("strict-mode
