@@ -668,6 +668,152 @@ emitted. Holds no state across runs.
    `reviews/decisions/error-model.md`, the runner returns
    `glibre::Result<TraceReport, glibre::Error>`; the
    `e2e::Error` arm carries `E2eError` (§4.1.13).
+8. **Scenario boundaries are author fiction, not runtime
+   state.** A `.glibre-trace` may carry multiple Gherkin
+   scenarios in its stream as an authoring convenience
+   (block-comments delimiting `(FrameIndex, TraceOp)` ranges).
+   The runner does NOT observe these boundaries; it sees one
+   monotonically advancing `FrameIndex` axis (§4.1.1 inv 1)
+   over which the live process state evolves continuously.
+   No `ScenarioReset` op exists (§4.1.4 sealed sum), no
+   manifest `isolation:` flag exists (§4.1.3 fields), and the
+   runner exposes no per-scenario snapshot/restore primitive.
+   Authors who need per-scenario isolation MUST split the
+   trace into one `.glibre-trace` file per scenario; CI will
+   replay them as independent `TraceRunner` invocations with
+   independent process lifetimes (§4.1.7 inv 3 — "single
+   binary under test per run") and independent
+   `TraceReport`s. The author invariant when multiple
+   scenarios share a single trace is pinned in §4.1.7.1
+   below.
+
+##### 4.1.7.1 Trace-author scenario-coupling invariant
+
+When a single `.glibre-trace` carries more than one Gherkin
+scenario, the trace author satisfies the following invariant
+at authoring time. The runner does not enforce it (the
+runner has no scenario concept); it is enforced by review
+and is the load-bearing reason the spec accepts shared
+state.
+
+**Invariant — assert-only-on-just-mutated state.** Each
+`AssertOp` in the stream MUST target a `(WorldId,
+ComponentPath)`, log substring, screenshot region, or ECS
+sub-aggregate that the *immediately preceding* `InputOp`s
+in the same scenario block established or mutated. An
+assertion MUST NOT depend on state set by an earlier
+scenario block unless the current scenario block re-asserts
+that state via its own `InputOp`s before the dependent
+`AssertOp` fires. Equivalent restatements:
+
+- A scenario block is self-establishing: every assertion in
+  it has a same-block input op as its causal predecessor.
+- Assertion paths owned by one scenario block must not be
+  shared with another scenario block in the same trace
+  unless every block re-establishes the value before
+  asserting on it.
+- Cross-scenario state may carry forward (it is not
+  required to be reset), but it must be either irrelevant
+  to subsequent scenarios' assertions or explicitly
+  re-mutated by them.
+
+**Why this is not enforced by a runtime primitive.**
+Re-derived against PHILOSOPHY §1 (SRP) and §10 (Occam):
+
+1. `TraceRunner`'s reason to change is orchestration —
+   gate, install driver, advance frames, dispatch asserts,
+   emit a report (§4.1.7 reason-to-change). Snapshot /
+   restore of the live process is a state-management
+   responsibility; folding it into the runner gives the
+   aggregate two reasons to change. Two reasons → split.
+2. `TraceOp` (§4.1.4) carries data only — "no code in the
+   op" (inv 4). A `ScenarioReset` arm would smuggle
+   imperative state-management semantics into the data
+   stream and shift the runner from dispatcher to executor
+   of arbitrary cleanup logic; the variant set is sealed
+   (inv 1) precisely so this drift cannot happen.
+3. "Reset" has no canonical referent. The live process
+   spans editor project tree, ECS world(s), filesystem
+   side-effects on `tests/e2e/.../fixtures/`, plugin-side
+   caches, asset-pack residency, and renderer state. There
+   is no single "snapshot" the runner can take and restore
+   without reaching across every domain — exactly the
+   cross-domain abstraction PHILOSOPHY §"Anti-patterns we
+   reject" rules out.
+4. The "scenarios" naming is Gherkin authoring vocabulary
+   for a `type:user-story`'s Given/When/Then blocks; e2e's
+   ubiquitous-language entries (§2) deliberately do not
+   include "Scenario" because the trace is a flat stream
+   of `(FrameIndex, TraceOp)` pairs, not a tree of named
+   scopes. Adding `ScenarioReset` would reify the Gherkin
+   tree into the trace ABI and force every recorder /
+   parser / runner / golden-store path to participate.
+5. The Occam collapse: "isolated scenarios" already has a
+   first-class glibre primitive — it is "one trace per
+   scenario", with the file system as the boundary and
+   `TraceRunner` invariant 3 (single binary under test per
+   run) as the enforcer. Adding a second isolation
+   primitive duplicates the collapse `EnvHash` made in
+   §3.2 #3 (one hash, one refusal site, one diagnosis).
+
+**Escape hatch — split the trace.** If a candidate
+multi-scenario trace cannot satisfy the invariant above
+(e.g. a later scenario must observe the *absence* of state
+a previous scenario established, or asserts depend on a
+clean RNG sequence the previous scenario consumed), the
+author splits the trace into one `.glibre-trace` file per
+scenario. Each split file:
+
+- Carries its own `TraceManifest` (engine version,
+  plugin-ABI hash, asset-pack hash, locale, window size,
+  DPI, RNG seed, target driver tier — §4.1.3
+  composition); these may be byte-identical across the
+  splits, in which case `EnvHash` is identical and the
+  splits replay against the same gate.
+- Is replayed under a fresh `TraceRunner` invocation with
+  a fresh binary-under-test process (§4.1.7 inv 3), which
+  is the only true isolation primitive e2e recognises.
+- Receives its own `TraceReport`; `ClosureGate` (§4.1.14
+  inv 1) requires green from each split independently, so
+  story closure is unchanged.
+
+**Authoring guidance — when to keep one trace, when to
+split.**
+
+| Pattern                                                                              | Keep one trace | Split per scenario |
+|--------------------------------------------------------------------------------------|:--------------:|:------------------:|
+| Scenarios assert on disjoint `ComponentPath`s                                        | yes            | optional           |
+| Each scenario re-mutates before asserting                                            | yes            | optional           |
+| Earlier scenario's state is irrelevant to later                                      | yes            | optional           |
+| Later scenario must observe a clean RNG stream                                       | no             | yes                |
+| Later scenario must observe absence of a file the previous scenario established      | no             | yes                |
+| Scenarios assert on the same path with different expected values without re-mutation | no             | yes                |
+| Per-scenario screenshot golden against the same swapchain region                     | no             | yes                |
+| Per-scenario hot-reload (`TraceOp::ExpectReload`)                                    | no             | yes                |
+
+**Trace-file documentation requirement (review-enforced).**
+A multi-scenario trace MUST carry a stream-header comment
+that (a) names every scenario block by `FrameIndex` range,
+(b) names which `ComponentPath`s / log channels each
+scenario asserts on, and (c) explicitly states whether
+shared state crosses any scenario boundary. The
+include-closure trace
+(`tests/e2e/shader/include-closure.glibre-trace`,
+introduced by PR #858 and clarified by PR #864) is the
+reference shape; future multi-scenario traces follow the
+same documentation pattern. Reviewers reject multi-
+scenario traces that lack the header comment or whose
+assertions visibly violate the invariant above.
+
+**No spec / interface change required.** §4.1.4 sealed
+sum (no `ScenarioReset` arm), §4.1.3 manifest schema (no
+`isolation:` field), §5 public interface (no
+snapshot/restore symbol), §7.1.5 `TraceOp` Fory schema (no
+new variant tag), §7.2 migration rules (nothing to
+migrate) and §10 closed sum of typed failures (no new
+arm) are all unchanged by this decision. The
+include-closure trace and other multi-scenario traces in
+`tests/e2e/` stand as authored.
 
 #### 4.1.8 `InjectionLayer` — sealed sum of input-delivery mechanisms (value object)
 
