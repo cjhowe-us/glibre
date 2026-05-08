@@ -79,24 +79,35 @@ manifest:
 # Frames 8..11: swap to the *cycle* fixture pair, assert IncludeCycle.
 # Frame  12:    End.
 #
-# Cross-scenario project-state sharing (INTENTIONAL).
-# The three Gherkin scenarios in this trace share one mutable live
-# project: Scenario 2 (frames 4..7) replaces `shaders/main.slang` in
-# the project left behind by Scenario 1 (frames 0..3); Scenario 3
-# (frames 8..11) imports `shaders/a.slang` and `shaders/b.slangi` into
-# the same live project now containing the escape `main.slang`.  There
-# is no explicit per-scenario isolation reset because `TraceRunner`
-# §4.1.7 in `specs/e2e/SPEC.md` does not yet define a reset primitive.
-# This coupling is deliberate within this trace's scope: the three
-# scenarios test orthogonal error paths on the same project instance,
-# so the shared state does not invalidate any assertion.
+# Cross-scenario project-state sharing — satisfies §4.1.7.1
+# (trace-author scenario-coupling invariant, resolved by PR #914).
 #
-# Once the TraceRunner isolation primitive design is resolved (see spike
-# [SPIKE] iterate-e2e-trace-runner-isolation-design (#865), filed to inform
-# specs/e2e/SPEC.md §4.1.7), authors should decide whether each
-# scenario should receive a clean project snapshot.  Until that spike
-# lands, shared mutable state across scenario boundaries is the accepted
-# pattern for single-file multi-scenario traces.
+# Scenario 1 (frames 0..3): asserts on
+#   world/shader_inspector/main/source/state (Loaded tag, op_id=1),
+#   world/shader_inspector/main/source/preprocessed/include_closure (op_id=2),
+#   world/shader_inspector/main/source/preprocessed/include_closure[0]/content_hash (op_ids=3,5),
+#   world/shader_inspector/main/source/preprocessed/include_closure[1]/content_hash (op_ids=4,6).
+#   No shared state dependency — this is the first scenario block.
+#
+# Scenario 2 (frames 4..7): re-mutates shaders/main.slang via
+#   project.replace_file (InputOp, frame 4) and re-runs shader.validate_source
+#   (InputOp, frame 5) before asserting
+#   world/shader_inspector/main/source/state (Failed/IncludeEscape, op_id=7) and
+#   the shader::Error::IncludeEscape log channel (AssertLogContains op_id=8).
+#   The shared path world/shader_inspector/main/source/state is re-established
+#   by this block's own InputOps before assertion — §4.1.7.1 invariant satisfied.
+#
+# Scenario 3 (frames 8..11): imports shaders/a.slang + shaders/b.slangi
+#   (InputOps, frame 8) and asserts on
+#   world/shader_inspector/a/source/state (Failed/IncludeCycle, op_id=9) and
+#   the shader::Error::IncludeCycle log channel (AssertLogContains op_id=10).
+#   Uses inspector key world/shader_inspector/a/... (distinct from prior
+#   world/shader_inspector/main/...) so earlier state is irrelevant to
+#   these assertions — §4.1.7.1 invariant satisfied.
+#
+# No ScenarioReset op exists and none is required: the shared mutable project
+# state carries forward intentionally and does not invalidate any assertion
+# per the invariant defined in specs/e2e/SPEC.md §4.1.7.1.
 # -----------------------------------------------------------------------------
 stream:
 
