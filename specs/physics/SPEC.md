@@ -624,8 +624,15 @@ and a `JointBroken` event is emitted (§4.1.8).
 1. **Joint = ECS entity, not a body component.** Despawning a joint
    despawns its entity; a body holds no list of joints, only Jolt
    resolves connectivity. Removing a body that is still referenced
-   by a joint returns `physics::Error::JointDanglingEndpoint` and
-   refuses the body removal until the joint is despawned first.
+   by a joint returns `physics::Error::BodyStillReferencedByJoint`
+   (bodies-aggregate refusal at `remove_body`; canonical per
+   `reviews/decisions/physics-error-arm-joint-body-reconciliation.md`)
+   and refuses the body removal until the joint is despawned first.
+   The symmetric joints-aggregate arm
+   `physics::Error::JointDanglingEndpoint` covers a distinct
+   scenario — `add_joint` invoked with an endpoint `BodyId` that was
+   once valid but became stale before commit (timing race) — and is
+   not returnable from `remove_body`.
 2. **Companion components are optional.** Absence of `JointLimits`
    means unbounded; absence of `JointMotor` means passive; absence
    of `JointBreakThreshold` means unbreakable. Adding a companion
@@ -1184,7 +1191,10 @@ enum class Error : std::uint16_t {
     // Body / collider mirror (§4.1.5, §4.1.6)
     BodyNotFound,                   // BodyId resolves outside its world.
     BodyMotionTypeImmutable,        // changing MotionType not permitted.
-    BodyStillReferencedByJoint,     // remove blocked by live Joint endpoint.
+    BodyStillReferencedByJoint,     // bodies-aggregate refusal at `remove_body`:
+                                    // a live `Joint` endpoint references this body
+                                    // (canonical site per
+                                    // reviews/decisions/physics-error-arm-joint-body-reconciliation.md).
     ColliderShapeRequired,          // missing ShapeHandle on add.
     ShapeBlobMalformed,             // invalid Fory bytes / unknown variant.
     ShapeBlobVersionUnsupported,    // schema-version newer than this build.
@@ -1192,7 +1202,12 @@ enum class Error : std::uint16_t {
 
     // Joints (§4.1.7)
     JointEndpointInvalid,           // either BodyId resolves nowhere.
-    JointDanglingEndpoint,          // body remove attempted with live joint.
+    JointDanglingEndpoint,          // joints-aggregate refusal at `add_joint`:
+                                    // endpoint `BodyId` was once valid but is now
+                                    // stale (body despawned before add commit;
+                                    // distinct from JointEndpointInvalid's
+                                    // never-valid handle case — canonical site per
+                                    // reviews/decisions/physics-error-arm-joint-body-reconciliation.md).
     JointKindUnsupported,           // post-MVP joint kind requested.
     JointBroken,                    // attempt to mutate after break.
 
@@ -3793,9 +3808,14 @@ fallback.
 
 #### `BodyStillReferencedByJoint`
 
+- **Canonical construction site.** `PhysicsWorld::remove_body`
+  (bodies aggregate, §4.1.5). Per
+  `reviews/decisions/physics-error-arm-joint-body-reconciliation.md`,
+  this is the bodies-aggregate's reason-to-change: a body cannot
+  leave the world while a joint still references it.
 - **Trigger.** `PhysicsWorld::remove_body` called while a live
   `Joint` still references the body as endpoint A or B (§4.1.7
-  invariant 4). Detected by Jolt's joint registry walk before the
+  invariant 1). Detected by Jolt's joint registry walk before the
   body destruction is committed.
 - **Recovery.** Caller removes the offending joints first
   (`PhysicsWorld::remove_joint(jid)`) then re-issues the body
@@ -3887,13 +3907,24 @@ fallback.
 
 #### `JointDanglingEndpoint`
 
-- **Trigger.** `remove_body` attempted with a live joint still
-  referencing it (the *symmetric* case of `JointEndpointInvalid`,
-  detected at body-removal time rather than joint-add time;
-  §4.1.7 invariant 4). Surfaces from `PhysicsWorld::remove_body`.
-- **Recovery.** Caller removes joints first, then re-issues the
-  body remove. Physics **refuses** the body remove.
-- **Severity.** `warn`. Previous-good world unaffected.
+- **Canonical construction site.** `PhysicsWorld::add_joint`
+  (joints aggregate, §4.1.7). Per
+  `reviews/decisions/physics-error-arm-joint-body-reconciliation.md`,
+  this is the joints-aggregate's reason-to-change for an endpoint
+  that was once valid but became stale before add-commit.
+- **Trigger.** `PhysicsWorld::add_joint` invoked with an endpoint
+  `BodyId` that was live in this world at author-time but has been
+  despawned before the add-joint command commits (deferred-command
+  race; non-zero handle, same world, no longer resolves). Distinct
+  from `JointEndpointInvalid`, which covers the never-valid handle
+  case (zero-init, cross-world, hand-fabricated). The bodies-side
+  symmetric refusal at `remove_body` is `BodyStillReferencedByJoint`,
+  not this arm.
+- **Recovery.** Caller re-fetches a live endpoint `BodyId` for the
+  affected side and re-issues the joint add. Physics **refuses**
+  the joint add; no Jolt constraint is allocated.
+- **Severity.** `warn`. Previous-good world unaffected; caller
+  refreshes the endpoint and retries.
 
 #### `JointKindUnsupported`
 
@@ -4259,14 +4290,14 @@ into `spdlog`:
 | `BudgetExceeded`                 | `error`                                 | Content-budget violation                                       |
 | `BodyNotFound`                   | `info`                                  | Despawn-during-step is steady-state traffic                    |
 | `BodyMotionTypeImmutable`        | `warn`                                  | Simulation continues correctly                                 |
-| `BodyStillReferencedByJoint`     | `warn`                                  | Caller fixes ordering and retries                              |
+| `BodyStillReferencedByJoint`     | `warn`                                  | Bodies-aggregate refusal at `PhysicsWorld::remove_body` (canonical site; §4.1.7 inv 1, §10.1; reconciliation record `physics-error-arm-joint-body-reconciliation.md`). Caller removes joints first and retries. |
 | `ColliderShapeRequired`          | `error`                                 | Content-pipeline drift                                         |
 | `ShapeBlobMalformed`             | `error`                                 | Content-pipeline drift                                         |
 | `ShapeBlobVersionUnsupported`    | `error`                                 | Operator-actionable                                            |
 | `ShapeHandleStale`               | `warn`                                  | Simulation continues                                           |
 | `ShapeBlobMissing`               | `warn`                                  | §8.4 hot-reload contract — previous plugin keeps stepping      |
 | `JointEndpointInvalid`           | `error`                                 | Content / gameplay ordering bug                                |
-| `JointDanglingEndpoint`          | `warn`                                  | Previous-good world unaffected                                 |
+| `JointDanglingEndpoint`          | `warn`                                  | Joints-aggregate refusal at `PhysicsWorld::add_joint` for once-valid-now-stale endpoint (canonical site; distinct from `JointEndpointInvalid`'s never-valid case; §4.1.7 inv 1, §10.1; reconciliation record `physics-error-arm-joint-body-reconciliation.md`). Previous-good world unaffected. |
 | `JointKindUnsupported`           | `error`                                 | Operator-actionable                                            |
 | `JointBroken`                    | `info`                                  | Routine post-break cleanup                                     |
 | `StepCalledOutsidePhase3`        | `error`                                 | Frame-loop integration failure                                 |
