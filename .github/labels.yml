@@ -46,6 +46,3 @@
 # DoD verifier outcome labels (set by .github/workflows/dod-verify.yml).
 - { name: "dod:verified",      color: "0e8a16" }
 - { name: "dod:failed",        color: "b60205" }
-
-# /go orchestration workflow-state labels.
-- { name: "orchestration:multi-stage", color: "0075ca" }

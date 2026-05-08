@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -91,13 +92,13 @@ def check_pr_merged_closes_self(_arg: object) -> tuple[bool, str]:
         "pr", "list",
         "--repo", REPO,
         "--state", "merged",
-        "--search", f"is:merged base:main closes:#{ISSUE_NUMBER}",
+        "--search", f"is:merged base:main #{ISSUE_NUMBER} in:body",
         "--json", "number,body,title",
         "--limit", "50",
     )
     prs = json.loads(raw or "[]")
     pat = re.compile(
-        rf"\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#{ISSUE_NUMBER}\b",
+        rf"\b(closes|fixes|resolves)\s+(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#{ISSUE_NUMBER}\b",
         flags=re.IGNORECASE,
     )
     for pr in prs:

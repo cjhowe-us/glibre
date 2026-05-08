@@ -63,7 +63,7 @@ If at any point you discover the question as posed is malformed (unanswerable as
 ## Tool surface
 
 - Read, Grep, Glob: full.
-- Bash: read-only commands only (`gh ... --json ...`, `git log/show/diff/blame`, `ls`, `find`, `grep`, `wc`). Never `git commit`, `git push`, `gh pr create/merge`, package installs, or service starts. Use the Read tool for file content — do not use `cat`, `head`, or `tail`.
+- Bash: read-only commands only (`gh ... --json ...`, `git log/show/diff/blame`, `ls`, `find`, `grep`, `wc`, `head` only via Read). Never `git commit`, `git push`, `gh pr create/merge`, package installs, or service starts.
 - WebFetch, WebSearch: full.
 - `gh issue comment` / `gh pr comment`: ONLY for posting the final analysis when the dispatch prompt names a target.
 - Agent: forbidden. Thinker does not delegate.

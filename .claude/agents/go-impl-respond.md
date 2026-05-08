@@ -13,7 +13,7 @@ You will receive a dispatch prompt naming the target PR, the round number (1 / 2
 ## Hard project rules
 
 - Required reads (unless cited in the dispatch prompt): `PHILOSOPHY.md`, `AGENTS.md`, `.github/DOD-DSL.md`, the just-posted review (`gh api repos/cjhowe-us/glibre/pulls/<N>/reviews/<REVIEW_ID>` plus `/pulls/<N>/comments` filtered to that review), the relevant `specs/<ctx>/SPEC.md` for the contexts the PR touches.
-- Determine the PR state up-front: `gh pr view <N> --json state,mergedAt,headRefName,baseRefName,mergeCommit`. The branch protocol below depends on it.
+- Determine the PR state up-front: `gh pr view <N> --json state,merged,headRefName,baseRefName,mergeCommit`. The branch protocol below depends on it.
 - If a review finding asks you to add or refresh the closing issue's `## Definition of Done` block, treat it as `severity:HIGH` regardless of how the comment was tagged — DoD is the closure rule, so wrong DoD = wrong closure. Update the block via `gh issue edit <N> --body-file ...` in the same response that addresses the finding.
 - If reasoning depth is the actual blocker on a finding (e.g. a hard root-cause question, a recurring blocker), spawn a `go-thinker` nested child and use its analysis to write the reply / code change. Do NOT push code based on hand-waved judgement when a thinker would clarify.
 

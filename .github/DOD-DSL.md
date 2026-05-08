@@ -26,25 +26,19 @@ they cannot be expressed as a composition of existing ones.
 The verifier uses the **first** fenced ```yaml block following the
 `## Definition of Done` heading. Anything outside the block is ignored.
 
-> **Authoring constraint:** Do not place any fenced code block (triple-backtick fence) between
-> the `## Definition of Done` heading and the DoD yaml block itself. The verifier regex
-> captures the first ` ```yaml ` fence after the heading; an intervening ` ``` ` fence (e.g.
-> a YAML example in a note paragraph) will cause it to parse the wrong block and produce a
-> false-negative. Keep the yaml block immediately below the heading.
-
 ## Assertion grammar
 
 Each list entry is an object with a single key. Supported keys:
 
-| Key | Argument | Meaning |
-|---|---|---|
-| `pr_merged_closes_self` | `true` | At least one merged PR into `main` whose body or commit messages contain a GitHub closing keyword followed by `#<this-issue>`. Accepted keywords (case-insensitive): `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, `resolved`. |
-| `file_exists` | path (string) | Path is a regular file at `main` HEAD. |
-| `file_contains` | `{ path, regex }` | File exists AND a POSIX-extended regex matches at least one line. |
-| `glob_nonempty` | glob (string) | At least one path matches the glob (uses `git ls-files` so it sees only tracked files). |
-| `workflow_passed` | workflow filename or display name | The most recent run of that workflow on the `main` branch concluded `success`. |
-| `unit_test_named` | Catch2 test name (string) | A `TEST_CASE` (or `SCENARIO`) with that exact name appears under `tests/`. |
-| `issue_comment_matches` | POSIX-ext regex (string) | At least one comment on this issue (excluding bots flagged with `[bot]`) matches the regex. |
+| Key                     | Argument                          | Meaning                                                                                                                    |
+| ----------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `pr_merged_closes_self` | `true`                            | At least one merged PR into `main` whose body or commit messages contain `closes #<this-issue>` (or `fixes` / `resolves`). |
+| `file_exists`           | path (string)                     | Path is a regular file at `main` HEAD.                                                                                     |
+| `file_contains`         | `{ path, regex }`                 | File exists AND a POSIX-extended regex matches at least one line.                                                          |
+| `glob_nonempty`         | glob (string)                     | At least one path matches the glob (uses `git ls-files` so it sees only tracked files).                                    |
+| `workflow_passed`       | workflow filename or display name | The most recent run of that workflow on the `main` branch concluded `success`.                                             |
+| `unit_test_named`       | Catch2 test name (string)         | A `TEST_CASE` (or `SCENARIO`) with that exact name appears under `tests/`.                                                 |
+| `issue_comment_matches` | POSIX-ext regex (string)          | At least one comment on this issue (excluding bots flagged with `[bot]`) matches the regex.                                |
 
 All paths are relative to the repository root. All regexes are matched
 with `grep -E`. All checks run in O(repo); none invoke a project build.
