@@ -2554,9 +2554,9 @@ schema glibre.physics.JointDescriptorRecord {
    are immutable; adding a kind is a schema bump (§7.2.3 below).
 2. **Endpoints exist at load time.** `body_a` and `body_b` ordinals
    resolve to live `BodyId`s in the world; an unresolved endpoint
-   returns `physics::Error::JointDanglingEndpoint` (§4.1.7
-   invariant 1). The error fires at **load time**, not at decode
-   time — the bytes are well-formed; the world's body roster is
+   returns `physics::Error::JointDanglingEndpoint` (§10.1;
+   §4.1.7 invariant 1 note). The error fires at **load time**, not at
+   decode time — the bytes are well-formed; the world's body roster is
    what is incomplete.
 3. **Companion presence is the discriminator.** The `has_*` bits
    are the only discriminators for which optional payload bytes
@@ -4181,10 +4181,10 @@ re-translate a `PhysicsWorld` error.
 |--------------------------------------|----------------------------------------------------------------------------------------------------------|--------------------------------------------------------------|
 | `PhysicsWorld::create`               | `ConfigInvalid`, `WorldAlreadyInitialised`, `JoltMiddlemanUnavailable`, `JoltMiddlemanHashMismatch`      | bad config, double-init, middleman missing / hash mismatch   |
 | `PhysicsWorld::add_body`             | `WorldNotInitialised`, `BudgetExceeded`, `ColliderShapeRequired`, `ShapeHandleStale`                     | budget cap, missing shape, stale handle                      |
-| `PhysicsWorld::remove_body`          | `WorldNotInitialised`, `BodyNotFound`, `BodyStillReferencedByJoint`, `JointDanglingEndpoint`             | live joint endpoint, stale `BodyId`                          |
+| `PhysicsWorld::remove_body`          | `WorldNotInitialised`, `BodyNotFound`, `BodyStillReferencedByJoint`                                      | live joint endpoint, stale `BodyId`                          |
 | `PhysicsWorld::set_motion_type`      | `WorldNotInitialised`, `BodyNotFound`, `BodyMotionTypeImmutable`                                         | mutation post-create forbidden                               |
 | `PhysicsWorld::add_collider`         | `WorldNotInitialised`, `BodyNotFound`, `ColliderShapeRequired`, `ShapeHandleStale`, `ShapeBlobMalformed` | shape table drift                                            |
-| `PhysicsWorld::add_joint`            | `WorldNotInitialised`, `JointEndpointInvalid`, `JointKindUnsupported`, `BudgetExceeded`                  | bad endpoints, post-MVP kind                                 |
+| `PhysicsWorld::add_joint`            | `WorldNotInitialised`, `JointEndpointInvalid`, `JointDanglingEndpoint`, `JointKindUnsupported`, `BudgetExceeded` | bad endpoints, stale body handle, post-MVP kind         |
 | `PhysicsWorld::remove_joint`         | `WorldNotInitialised`, `BodyNotFound`                                                                    | stale `JointId`                                              |
 | `PhysicsWorld::set_joint_motor`      | `WorldNotInitialised`, `BodyNotFound`, `JointBroken`                                                     | broken-joint mutation                                        |
 | `PhysicsWorld::step`                 | `StepCalledOutsidePhase3`, `AccumulatorClampExceeded`, `SubstepEcsCommitInverted`, `NumericalInstabilityDetected`, `DeterminismCheckFailed` | phase guard, clamp, mirror inversion, NaN, divergence      |
