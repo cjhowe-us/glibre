@@ -937,6 +937,14 @@ If the `TraceOp` vocabulary, write discipline, or file schema
 evolves, this aggregate changes; the replay runner and the editor
 shell do not.
 
+**See also.** `DebugOverlay` (§4.11) is the non-shipping sibling
+sink: it shares this aggregate's non-perturbing-capture discipline
+(invariant 1 above) but writes typed pre/post records into the
+`OverlayCaptureTable` rather than `TraceOp` entries into a
+`.glibre-trace` file. AssertState evaluations lowered by
+`TraceRecorder` against `OverlayCapture` paths read the table per
+§4.11 invariants 1, 3, and 6.
+
 ### 4.10 Cross-aggregate invariants
 
 Invariants that span more than one aggregate and must hold at every
@@ -1229,6 +1237,47 @@ The expected closed sum of arms a handler may surface:
 Successful handler return implies invariants 1–5 held for that
 press. CI exercises happy-path + each refusal arm via the E2E
 trace fixtures under `tests/e2e/`.
+
+**Cross-references.** This footer is the citable ledger of every
+decision record and adjacent spec the §4.11 contract binds. New
+trace authors landing here should follow these links before
+authoring AssertState payloads against `OverlayCapture` paths:
+
+- `reviews/decisions/frame-phases.md` — phase 1 (input) hosts the
+  action handler; phase 9 (present) is the next-write boundary
+  that closes the auto-publish read-only window for invariants 1
+  and 3. Provisional placement per open question 3 (tools writes
+  in phase 1 before sim consumers read).
+- `reviews/decisions/error-model.md` — handler return type
+  (`std::expected<void, glibre::Error>`); the closed sum of refusal
+  arms enumerated under "Failure modes" above; `ErrorContext::detail`
+  carries the `"debug-overlay-shipping-build"` defence-in-depth
+  payload per §"Type Sketch".
+- `reviews/decisions/hot-reload-protocol.md` — the
+  `OverlayCaptureTable` rides the standard middleman survival rule
+  across non-tools plugin swaps; tools' own dylib swap re-runs
+  `glibre_plugin_register` and re-installs the bindings table while
+  the table itself survives.
+- `reviews/decisions/plugin-abi.md` — `cfg(debug_overlay)` is the
+  link-time feature flag that determines whether overlay handler
+  symbols are reachable; the middleman type registry the table
+  resolves through is independent of this flag.
+- `specs/core/SPEC.md` §4.1 / §4.2 / §5.5 — `World::set_component` /
+  `World::remove_component` are the only ABI calls handlers may
+  invoke against `GameWorld` (§4.11 invariant 4); archetype
+  migration / observer / atomicity rules are inherited unchanged.
+- `specs/e2e/SPEC.md` §4.1.5 / §7.1.5 — `AssertState` evaluations
+  read `OverlayCapture` paths through the codegen-emitted
+  reflection table; the `OverlayCaptureValue` shape is the same
+  closed sum `AssertStatePayload.expected_fory_blob` lowers to.
+- `specs/platform/SPEC.md` §4.2 — the input-phase ordering rule
+  serialises multi-binding presses within one frame; §4.11
+  invariant 2 inherits this ordering for cross-binding atomicity.
+- `tests/e2e/core/component-mutation.glibre-trace` — the first
+  `.glibre-trace` artefact citing this anchor (frame-13 assertions
+  id=17..19 read F4's `last_unregistered_set_error` and
+  `target_archetype_set_after_refusal` per invariants 1 and 3).
+  Future traces follow the same citation pattern (§4.11 invariant 6).
 
 ## 5. Public Interface
 
