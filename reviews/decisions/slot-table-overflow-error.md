@@ -351,6 +351,8 @@ up; they are independent SRP questions that would not fit one session.
    `RingBandExhausted` riding the same ABI bump cluster, with
    construction site `resources/ring_buffer.cpp::RingBufferManager::
    acquire_slice` and recovery `lower-tier`. Not blocking this PR.
+   **Tracked as #934** (`[SPIKE] iterate-render-ring-buffer-heapoutofmemory-srp`,
+   parented to epic #83).
 2. **`tests/render/spec_§5_§10_consistency.cpp` static-assert
    harness.** The harness is named in spike #874's "Consequences"
    section and again here; it does not yet exist (it is part of the
