@@ -292,13 +292,38 @@ static bool emit_headers_for_schema(
 // -----------------------------------------------------------------------
 
 // Derive a plugin name from a TypeDecl FQN by stripping the last dot-separated
-// component.  For "glibre.render.PluginManifest" returns "glibre.render".
-// Returns the full FQN unchanged if it contains no dot.
-static eastl::string plugin_name_from_fqn(const eastl::string& fqn) noexcept {
-    const std::size_t dot = fqn.rfind('.');
-    if (dot == eastl::string::npos)
-        return fqn;
-    return fqn.substr(0, dot);
+// component.
+//
+// Convention (enforced here): the first TypeDecl in a PluginManifest schema MUST
+// have an FQN whose last component is exactly "PluginManifest", e.g.
+// "glibre.render.PluginManifest" → plugin name "glibre.render".
+// plugin-abi.md §"name" field: "fully-qualified plugin id (e.g. glibre.render)".
+//
+// Returns an empty string and sets *error_msg if the FQN does not end with
+// ".PluginManifest" (including the case of a single-component FQN with no dot,
+// which would otherwise silently return the FQN as-is and produce a non-namespaced
+// plugin name).
+static eastl::string
+plugin_name_from_fqn(const eastl::string& fqn, eastl::string* error_msg) noexcept {
+    static constexpr std::string_view kSuffix = ".PluginManifest";
+    const std::string_view fqn_sv{fqn.data(), fqn.size()};
+
+    if (!fqn_sv.ends_with(kSuffix)) {
+        if (error_msg) {
+            *error_msg = eastl::string(
+                std::format(
+                    "first TypeDecl FQN \"{}\" does not end with \".PluginManifest\"; "
+                    "rename the type or update the schema convention",
+                    fqn_sv
+                )
+                    .c_str()
+            );
+        }
+        return {};
+    }
+
+    // Strip the ".PluginManifest" suffix to get the plugin namespace id.
+    return fqn.substr(0, fqn.size() - kSuffix.size());
 }
 
 static bool emit_manifest_for_file(
@@ -312,9 +337,19 @@ static bool emit_manifest_for_file(
     }
 
     // Derive plugin name from the first TypeDecl's FQN (not from the path stem).
-    // e.g. schema "glibre.render.PluginManifest" → plugin name "glibre.render".
+    // Convention: FQN must end with ".PluginManifest" (enforced by plugin_name_from_fqn).
+    // e.g. "glibre.render.PluginManifest" → plugin name "glibre.render".
     // plugin-abi.md §"name" field: "fully-qualified plugin id (e.g. glibre.render)".
-    const eastl::string plugin_fqn = plugin_name_from_fqn(schema.types[0].fqn);
+    eastl::string fqn_error;
+    const eastl::string plugin_fqn = plugin_name_from_fqn(schema.types[0].fqn, &fqn_error);
+    if (plugin_fqn.empty()) {
+        std::cerr << std::format(
+            "foryc: {}: {}\n",
+            source_path.native(),
+            std::string_view{fqn_error.data(), fqn_error.size()}
+        );
+        return false;
+    }
 
     // Parse `since` version from the first TypeDecl if present.
     // Format: "MAJOR.MINOR.PATCH" (e.g. "0.1.0").  Defaults to {0,1,0} if absent

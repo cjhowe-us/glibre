@@ -13,8 +13,6 @@
 
 #include "emit_manifest.hpp"
 
-#include <algorithm>
-#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -191,6 +189,7 @@ bytes_to_hex_initializer(const eastl::vector<std::uint8_t>& bytes) noexcept {
     out += "\n";
     out += "\n";
     out += "// Byte length of the manifest blob.\n";
+    out += "// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)\n";
     out += "size_t glibre_plugin_manifest_size = sizeof(kManifestBytes);\n";
     out += "\n";
     out += "// 64-char blake3 hex ABI hash, captured at plugin compile time.\n";

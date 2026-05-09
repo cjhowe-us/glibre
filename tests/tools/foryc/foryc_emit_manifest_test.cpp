@@ -21,6 +21,7 @@
 #include <fstream>
 #include <string>
 #include <string_view>
+#include <unistd.h>
 
 #include <EASTL/string.h>
 #include <EASTL/vector.h>
