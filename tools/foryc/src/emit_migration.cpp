@@ -14,6 +14,8 @@
 #include <EASTL/string.h>
 #include <EASTL/vector.h>
 
+#include "fqn_mangle.hpp"
+
 namespace glibre::tools::foryc {
 
 namespace {
@@ -73,19 +75,22 @@ struct FqnParts {
 // -----------------------------------------------------------------------
 // emit_type_block — emit the per-TypeDecl section of the generated TU.
 //
+// Symbol names use the mangled FQN (<MangledFQN> = FQN with '.' → '__').
+// Example: "glibre.core.Transform" → "glibre__core__Transform".
+//
 // For a TypeDecl with migrations, emits:
 //   1. C++ namespace + forward-declarations of each provider with the correct
 //      signature per fory-codegen.md §"Migration Mechanic" point 2:
 //        std::expected<void, glibre::Error> migrate_<Type>_v<N>_to_v<N+1>(
 //            const <Type>V<N>&, <Type>V<N+1>&)
-//   2. A static per-type MigrationEntry table: k_migrations_<TypeName>[].
+//   2. A static per-type MigrationEntry table: k_migrations_<MangledFQN>[].
 //   3. Two extern "C" exported symbols:
-//        glibre_plugin_migrations_<TypeName>  (pointer to the table)
-//        glibre_plugin_migrations_<TypeName>_size  (count)
+//        glibre_plugin_migrations_<MangledFQN>  (pointer to the table)
+//        glibre_plugin_migrations_<MangledFQN>_size  (count)
 //
 // For a TypeDecl with no migrations, emits the empty-table form:
-//   extern "C" const MigrationEntry* glibre_plugin_migrations_<TypeName> = nullptr;
-//   extern "C" std::size_t glibre_plugin_migrations_<TypeName>_size = 0;
+//   extern "C" const MigrationEntry* glibre_plugin_migrations_<MangledFQN> = nullptr;
+//   extern "C" std::size_t glibre_plugin_migrations_<MangledFQN>_size = 0;
 //
 // fory-codegen.md §"Migration Mechanic" point 1:
 //   "Each generated type carries a static migrations table populated at
@@ -96,6 +101,15 @@ struct FqnParts {
 [[nodiscard]] static eastl::string emit_type_block(const TypeDecl& td) noexcept {
     const FqnParts parts = split_fqn(td.fqn);
     const eastl::string& type_name = parts.type_name;
+
+    // Mangle the full FQN into the C symbol suffix (plan #1010).
+    // "glibre.core.Transform" → "glibre__core__Transform"
+    // This prevents symbol collisions when two schema types share the same
+    // unqualified name but live in different namespaces (e.g. glibre.core.Particle
+    // and glibre.fx.Particle would collide without mangling).
+    // fory-codegen.md §"ABI Stability Rules" point 4.
+    // Shared helper from fqn_mangle.hpp — also reused by parser.cpp.
+    const eastl::string mangled = fqn_mangle::fqn_to_mangled(td.fqn);
 
     eastl::string out;
     out += "// ---- ";
@@ -108,7 +122,7 @@ struct FqnParts {
     // and to detect payloads from future schema versions (plan #978).
     out += fmt_e(
         "extern \"C\" const std::uint32_t glibre_plugin_current_version_{} = {};\n",
-        std::string_view(type_name.data(), type_name.size()),
+        std::string_view(mangled.data(), mangled.size()),
         td.version
     );
     out += "\n";
@@ -116,10 +130,10 @@ struct FqnParts {
     if (td.migrations.empty()) {
         // Empty-table form.
         out += "extern \"C\" const MigrationEntry* glibre_plugin_migrations_";
-        out += type_name;
+        out += mangled;
         out += " = nullptr;\n";
         out += "extern \"C\" std::size_t glibre_plugin_migrations_";
-        out += type_name;
+        out += mangled;
         out += "_size = 0;\n";
         out += "\n";
         return out;
@@ -228,9 +242,11 @@ struct FqnParts {
     // Static per-type migration table.
     // Fully-qualified provider is used here so the reference links even if
     // the forward decl above is in a different namespace.
+    // Use mangled FQN for the C++ static variable name so that two types with
+    // the same unqualified name but different FQNs don't clash in the same TU.
     const std::size_t count = td.migrations.size();
     out += "static const MigrationEntry k_migrations_";
-    out += type_name;
+    out += mangled;
     out += "[] = {\n";
     for (const auto& mig : td.migrations) {
         out += fmt_e(
@@ -243,15 +259,16 @@ struct FqnParts {
     out += "};\n";
     out += "\n";
 
-    // Exported per-type symbols.
+    // Exported per-type symbols — use mangled FQN as the suffix (plan #1010).
+    // fory-codegen.md §"ABI Stability Rules" point 4.
     out += "extern \"C\" const MigrationEntry* glibre_plugin_migrations_";
-    out += type_name;
+    out += mangled;
     out += " = k_migrations_";
-    out += type_name;
+    out += mangled;
     out += ";\n";
     out += fmt_e(
         "extern \"C\" std::size_t glibre_plugin_migrations_{}_size = {};\n",
-        std::string_view(type_name.data(), type_name.size()),
+        std::string_view(mangled.data(), mangled.size()),
         count
     );
     out += "\n";
@@ -269,10 +286,26 @@ emit_migration(const Schema& schema, std::string_view source_path) noexcept {
     if (schema.types.empty())
         return std::unexpected{glibre::Error{tools::Error::ForycEmptySchema}};
 
-    // Validate: every TypeDecl must have a non-empty FQN.
+    // Validate: every TypeDecl must have a non-empty FQN, and no segment of that
+    // FQN may contain "__" (double-underscore).  This defensive check mirrors the
+    // parse-time guard in parser.cpp::parse_fqn() so that callers who build IR
+    // directly (without going through the parser) cannot silently produce
+    // non-injective mangles (plan #1010, fory-codegen.md §"ABI Stability Rules"
+    // point 4).  Shared helper from fqn_mangle.hpp.
     for (const auto& td : schema.types) {
         if (td.fqn.empty())
             return std::unexpected{glibre::Error{tools::Error::ForycSyntaxError}};
+
+        // Walk segments (split on '.') and check each for "__".
+        std::string_view fqn_sv(td.fqn.data(), td.fqn.size());
+        while (!fqn_sv.empty()) {
+            const auto dot = fqn_sv.find('.');
+            const std::string_view seg =
+                (dot == std::string_view::npos) ? fqn_sv : fqn_sv.substr(0, dot);
+            if (fqn_mangle::segment_contains_double_underscore(seg))
+                return std::unexpected{glibre::Error{tools::Error::ForycInvalidIdentifier}};
+            fqn_sv = (dot == std::string_view::npos) ? std::string_view{} : fqn_sv.substr(dot + 1);
+        }
     }
 
     // -----------------------------------------------------------------------

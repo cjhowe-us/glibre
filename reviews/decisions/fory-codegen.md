@@ -213,6 +213,22 @@ Notes:
    `glibre_types_deserialize_<fqn>`,
    `glibre_types_register_migration_<fqn>`. These have stable C
    signatures; the C++ wrapper templates live in headers.
+   (Note: `emit_header` and `emit_manifest` do not yet emit per-type C
+   symbols for the `glibre_types_*` families — see plan #221 for status.
+   When those emitters gain per-type C symbols, the mangling rule below
+   will apply uniformly.)
+   Per-type plugin export symbols use a mangled FQN suffix (plan #1010):
+   the dotted FQN is mangled to a C-identifier suffix by replacing every
+   `.` with `__` (double-underscore). For example:
+   `glibre.core.Particle` → mangled suffix `glibre__core__Particle`,
+   producing `glibre_plugin_migrations_glibre__core__Particle`,
+   `glibre_plugin_migrations_glibre__core__Particle_size`, and
+   `glibre_plugin_current_version_glibre__core__Particle`. This prevents
+   link-time collisions between schema types that share the same
+   unqualified name but live in different namespaces. FQN segments
+   containing `__` are rejected by the parser
+   (`tools::Error::ForycInvalidIdentifier`) to keep the mangling
+   injective.
 5. The middleman dylib's SONAME is bumped only on ABI-breaking schema
    changes; minor schema additions keep SONAME but bump the embedded
    `glibre_types_abi_hash`. The plugin loader's hash check catches the

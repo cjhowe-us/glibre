@@ -133,6 +133,9 @@ using ParseResult = glibre::Result<Schema>;
 //   tools::Error::ForycNonMonotoneVersion— version is not > 0 or not unique
 //   tools::Error::ForycUnknownType       — field type not in builtins set
 //   tools::Error::ForycIOError           — file read failure
+//   tools::Error::ForycInvalidIdentifier — FQN segment contains "__" (reserved
+//     for codegen mangling; plan #1010, fory-codegen.md §"ABI Stability Rules"
+//     point 4)
 [[nodiscard]] ParseResult parse_file(const std::filesystem::path& path) noexcept;
 
 // Parse .fory source from an in-memory string (used by unit tests).

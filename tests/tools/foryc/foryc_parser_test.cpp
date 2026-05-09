@@ -262,3 +262,71 @@ schema glibre.test.Generics {
     REQUIRE(result.has_value());
     CHECK(result->types[0].fields.size() == 3);
 }
+
+// -----------------------------------------------------------------------
+// Plan #1010 — double-underscore guard in FQN segments
+// -----------------------------------------------------------------------
+
+// Test: foryc_parser_rejects_double_underscore_segment
+//
+// Verify that the parser rejects FQN segments containing "__" (double-
+// underscore).  The codegen mangling scheme (fory-codegen.md §"ABI Stability
+// Rules" point 4, plan #1010) replaces every '.' in a dotted FQN with "__" to
+// form C symbol suffixes.  A segment that already contains "__" would alias a
+// distinct FQN (e.g. "glibre.core__Foo" and "glibre.core.Foo" would both
+// mangle to "glibre__core__Foo"), making fqn_to_mangled non-injective.
+//
+// The parser must reject such schemas with ForycInvalidIdentifier.
+TEST_CASE("foryc_parser_rejects_double_underscore_segment", "[foryc][parser][fqn_mangle]") {
+    // Case 1: double-underscore in the first (top-level) segment.
+    {
+        constexpr std::string_view src = R"(
+schema glibre__bad.core.Foo {
+  version 1
+  field x : u32 tag 1
+}
+)";
+        auto result = parse_string(src, "bad_fqn_first.fory");
+        REQUIRE(!result.has_value());
+        CHECK(has_tools_error(result.error(), glibre::tools::Error::ForycInvalidIdentifier));
+    }
+
+    // Case 2: double-underscore in a middle segment.
+    {
+        constexpr std::string_view src = R"(
+schema glibre.core__bad.Foo {
+  version 1
+  field x : u32 tag 1
+}
+)";
+        auto result = parse_string(src, "bad_fqn_middle.fory");
+        REQUIRE(!result.has_value());
+        CHECK(has_tools_error(result.error(), glibre::tools::Error::ForycInvalidIdentifier));
+    }
+
+    // Case 3: double-underscore in the type-name (last) segment.
+    {
+        constexpr std::string_view src = R"(
+schema glibre.core.Foo__Bar {
+  version 1
+  field x : u32 tag 1
+}
+)";
+        auto result = parse_string(src, "bad_fqn_last.fory");
+        REQUIRE(!result.has_value());
+        CHECK(has_tools_error(result.error(), glibre::tools::Error::ForycInvalidIdentifier));
+    }
+
+    // Case 4: single underscore is still accepted (sanity guard).
+    {
+        constexpr std::string_view src = R"(
+schema glibre.core.Foo_Bar {
+  version 1
+  field x : u32 tag 1
+}
+)";
+        auto result = parse_string(src, "single_underscore_ok.fory");
+        REQUIRE(result.has_value());
+        CHECK(result->types[0].fqn == eastl::string("glibre.core.Foo_Bar"));
+    }
+}

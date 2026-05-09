@@ -22,17 +22,17 @@ struct MigrationEntry {
 };
 
 // ---- test.Particle ----
-extern "C" const std::uint32_t glibre_plugin_current_version_Particle = 2;
+extern "C" const std::uint32_t glibre_plugin_current_version_test__Particle = 2;
 
 namespace test { struct ParticleV1; struct ParticleV2; }  // namespace test
 namespace test {
 std::expected<void, glibre::Error> migrate_Particle_v1_to_v2(const test::ParticleV1&, test::ParticleV2&);
 }  // namespace test
 
-static const MigrationEntry k_migrations_Particle[] = {
+static const MigrationEntry k_migrations_test__Particle[] = {
     { 1, 2, reinterpret_cast<void*>(&test::migrate_Particle_v1_to_v2) },
 };
 
-extern "C" const MigrationEntry* glibre_plugin_migrations_Particle = k_migrations_Particle;
-extern "C" std::size_t glibre_plugin_migrations_Particle_size = 1;
+extern "C" const MigrationEntry* glibre_plugin_migrations_test__Particle = k_migrations_test__Particle;
+extern "C" std::size_t glibre_plugin_migrations_test__Particle_size = 1;
 

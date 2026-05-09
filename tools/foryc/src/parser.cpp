@@ -14,6 +14,8 @@
 
 #include <EASTL/unordered_set.h>
 
+#include "fqn_mangle.hpp"
+
 namespace glibre::tools::foryc {
 
 namespace {
@@ -285,9 +287,23 @@ private:
 
     // Parse a dotted FQN: word ('.' word)* — may also consume as Ident+Dot tokens
     // Returns the concatenated string.
+    //
+    // Rejects identifier segments containing "__" (double-underscore) because
+    // that sequence is reserved by the codegen mangling scheme (plan #1010,
+    // fory-codegen.md §"ABI Stability Rules" point 4).  The rejection keeps
+    // fqn_to_mangled injective: "glibre.core__Foo" and "glibre.core.Foo" would
+    // otherwise both mangle to "glibre__core__Foo".
+    // Validation delegated to fqn_mangle::segment_contains_double_underscore
+    // (fqn_mangle.hpp) so the same rule is reusable from any emitter.
     [[nodiscard]] std::expected<eastl::string, glibre::Error> parse_fqn() {
         if (current_.kind != TokenKind::Ident)
             return FORYC_ERR(tools::Error::ForycSyntaxError, "expected schema FQN");
+
+        if (fqn_mangle::segment_contains_double_underscore(current_.text))
+            return FORYC_ERR(
+                tools::Error::ForycInvalidIdentifier,
+                "FQN segment contains '__' which is reserved for codegen mangling"
+            );
 
         eastl::string fqn(current_.text.data(), current_.text.size());
         advance();
@@ -296,6 +312,11 @@ private:
             advance();  // consume '.'
             if (current_.kind != TokenKind::Ident)
                 return FORYC_ERR(tools::Error::ForycSyntaxError, "expected identifier after '.'");
+            if (fqn_mangle::segment_contains_double_underscore(current_.text))
+                return FORYC_ERR(
+                    tools::Error::ForycInvalidIdentifier,
+                    "FQN segment contains '__' which is reserved for codegen mangling"
+                );
             fqn += '.';
             fqn += eastl::string(current_.text.data(), current_.text.size());
             advance();
