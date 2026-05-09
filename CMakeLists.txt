@@ -55,6 +55,7 @@ endif()
 
 add_subdirectory(core)
 add_subdirectory(data)
+add_subdirectory(plugins/shader)  # plan #508 — ShaderSource plugin (glibre::shader)
 
 # add_subdirectory(plugins)
 # add_subdirectory(runtime)

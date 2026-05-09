@@ -110,6 +110,39 @@ enum class Error : std::uint16_t {
 };
 }  // namespace tools
 
+namespace shader {
+// Error codes for the shader bounded context.
+// Added by plan #508 (ShaderSource open + include resolver + entry-point scanner).
+// Authority: specs/shader/SPEC.md §10.
+enum class Error : std::uint16_t {
+    SourceNotFound,               // file does not exist or cannot be opened
+    SourceParseFailed,            // file exists but cannot be parsed
+    IncludeEscape,                // absolute or ../-escaping include path
+    IncludeCycle,                 // include graph contains a cycle
+    EncodingInvalid,              // non-UTF-8 or binary content in source
+    EntryPointMissing,            // no [shader("...")] attribute found
+    EntryPointStageAmbiguous,     // function bears more than one stage attribute
+    PermutationKeyMalformed,      // packed bytes fail invariant checks
+    PermutationKeyOutOfRange,     // index >= kPermutationCrossProductCardinality
+    CompilerInvocationFailed,     // slangc subprocess could not be launched
+    CompilerExitNonZero,          // slangc returned a non-zero exit code
+    CompilerTimedOut,             // slangc subprocess exceeded time limit
+    UnsupportedTarget,            // requested CompileTarget is not supported
+    MetalLibEmitFailed,           // slangc emitted metallib but file is invalid
+    ReflectionExtractionFailed,   // slangc reflection API returned an error
+    DescriptorFrequencyAmbiguous, // binding has conflicting frequency group tags
+    DescriptorFrequencyMissing,   // binding has no frequency group tag
+    LinkFailed,                   // artifact link step failed
+    SpecializationConstantMissing,// required specialization constant absent
+    CacheLookupMiss,              // ShaderHash not found in the cache
+    CacheCorrupt,                 // cache blob fails integrity check
+    CacheIntegrity,               // orphan or missing artifact in cooked library
+    CacheReadOnlyViolation,       // write attempted to a read-only cache
+    CapabilityNotSupported,       // backend lacks required capability
+    ShippingCompilationAttempted, // compile path invoked in a shipping build
+};
+}  // namespace shader
+
 // -----------------------------------------------------------------------
 // ErrorContext — source-location attachment (optional human hint)
 //
@@ -137,8 +170,9 @@ public:
     using Variant = eastl::variant<
         core::Error,
         render::Error,
-        tools::Error
-        // physics::Error, data::Error, shader::Error, ...
+        tools::Error,
+        shader::Error
+        // physics::Error, data::Error, ...
         // append as each context lands
         >;
 
@@ -203,9 +237,9 @@ static_assert(
     "glibre::Result<void> must remain an alias for std::expected<void, glibre::Error>."
 );
 
-// I2: All three registered per-context enums must use std::uint16_t as their
-// underlying type.  The loop is unrolled by the compiler; the asserts fire
-// at compile time with a clear diagnostic if someone changes the base type.
+// I2: All registered per-context enums must use std::uint16_t as their
+// underlying type.  The asserts fire at compile time with a clear diagnostic
+// if someone changes the base type.
 static_assert(
     std::is_same_v<std::underlying_type_t<core::Error>, std::uint16_t>,
     "core::Error underlying type must be std::uint16_t (error-model.md §Type Sketch)."
@@ -217,6 +251,10 @@ static_assert(
 static_assert(
     std::is_same_v<std::underlying_type_t<tools::Error>, std::uint16_t>,
     "tools::Error underlying type must be std::uint16_t (error-model.md §Type Sketch)."
+);
+static_assert(
+    std::is_same_v<std::underlying_type_t<shader::Error>, std::uint16_t>,
+    "shader::Error underlying type must be std::uint16_t (error-model.md §Type Sketch)."
 );
 
 }  // namespace glibre

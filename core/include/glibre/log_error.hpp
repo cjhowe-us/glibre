@@ -136,6 +136,66 @@ namespace glibre::tools {
 
 }  // namespace glibre::tools
 
+namespace glibre::shader {
+
+[[nodiscard]] constexpr const char* to_string(Error e) noexcept {
+    switch (e) {
+    case Error::SourceNotFound:
+        return "SourceNotFound";
+    case Error::SourceParseFailed:
+        return "SourceParseFailed";
+    case Error::IncludeEscape:
+        return "IncludeEscape";
+    case Error::IncludeCycle:
+        return "IncludeCycle";
+    case Error::EncodingInvalid:
+        return "EncodingInvalid";
+    case Error::EntryPointMissing:
+        return "EntryPointMissing";
+    case Error::EntryPointStageAmbiguous:
+        return "EntryPointStageAmbiguous";
+    case Error::PermutationKeyMalformed:
+        return "PermutationKeyMalformed";
+    case Error::PermutationKeyOutOfRange:
+        return "PermutationKeyOutOfRange";
+    case Error::CompilerInvocationFailed:
+        return "CompilerInvocationFailed";
+    case Error::CompilerExitNonZero:
+        return "CompilerExitNonZero";
+    case Error::CompilerTimedOut:
+        return "CompilerTimedOut";
+    case Error::UnsupportedTarget:
+        return "UnsupportedTarget";
+    case Error::MetalLibEmitFailed:
+        return "MetalLibEmitFailed";
+    case Error::ReflectionExtractionFailed:
+        return "ReflectionExtractionFailed";
+    case Error::DescriptorFrequencyAmbiguous:
+        return "DescriptorFrequencyAmbiguous";
+    case Error::DescriptorFrequencyMissing:
+        return "DescriptorFrequencyMissing";
+    case Error::LinkFailed:
+        return "LinkFailed";
+    case Error::SpecializationConstantMissing:
+        return "SpecializationConstantMissing";
+    case Error::CacheLookupMiss:
+        return "CacheLookupMiss";
+    case Error::CacheCorrupt:
+        return "CacheCorrupt";
+    case Error::CacheIntegrity:
+        return "CacheIntegrity";
+    case Error::CacheReadOnlyViolation:
+        return "CacheReadOnlyViolation";
+    case Error::CapabilityNotSupported:
+        return "CapabilityNotSupported";
+    case Error::ShippingCompilationAttempted:
+        return "ShippingCompilationAttempted";
+    }
+    return "Unknown";
+}
+
+}  // namespace glibre::shader
+
 namespace glibre {
 
 // ---------------------------------------------------------------------------
@@ -147,17 +207,18 @@ namespace glibre {
 //   0 → core::Error   → "core::Error"
 //   1 → render::Error → "render::Error"
 //   2 → tools::Error  → "tools::Error"
+//   3 → shader::Error → "shader::Error"
 //
 // Compile-time guard: the static_assert below fires if Error::Variant grows
-// beyond the currently-known 3 alternatives without this function being
-// updated.  Adding a 4th alternative to Error::Variant will fail the build
+// beyond the currently-known 4 alternatives without this function being
+// updated.  Adding a 5th alternative to Error::Variant will fail the build
 // with an actionable message ("extend tag_string when Error::Variant grows").
 //
 // Once tag_string is extended for the new alternative, increment the
 // static_assert count to match.
 
 static_assert(
-    eastl::variant_size_v<Error::Variant> == 3,
+    eastl::variant_size_v<Error::Variant> == 4,
     "extend tag_string() when Error::Variant grows (add a new case and bump "
     "the static_assert count in log_error.hpp)"
 );
@@ -170,6 +231,8 @@ static_assert(
         return "render::Error";
     case 2:
         return "tools::Error";
+    case 3:
+        return "shader::Error";
     }
     // err.code().index() == eastl::variant_npos only when the variant holds
     // valueless_by_exception state, which cannot occur in -fno-exceptions

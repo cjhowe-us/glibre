@@ -164,6 +164,14 @@ TEST_CASE("core/log_error: tag_string_stable_for_core", "[core][log_error]") {
         REQUIRE(tag != nullptr);
         CHECK(std::string{tag} == "tools::Error");
     }
+
+    // shader::Error — variant index 3 (added by plan #508).
+    {
+        const glibre::Error err{glibre::shader::Error::SourceNotFound};
+        const char* tag = glibre::tag_string(err);
+        REQUIRE(tag != nullptr);
+        CHECK(std::string{tag} == "shader::Error");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -263,4 +271,62 @@ TEST_CASE("core/log_error: tostring_complete_for_tools_error", "[core][log_error
     check(E::ForycUnknownType, "ForycUnknownType");
     check(E::ForycIOError, "ForycIOError");
     check(E::ForycEmptySchema, "ForycEmptySchema");
+}
+
+// ---------------------------------------------------------------------------
+// Test: core/log_error: tag_string_stable_for_shader
+//
+// Verifies that tag_string() returns "shader::Error" for shader::Error variants.
+// Added by plan #508 (ShaderSource open + include resolver + entry-point scanner).
+// ---------------------------------------------------------------------------
+TEST_CASE("core/log_error: tag_string_stable_for_shader", "[core][log_error]") {
+    // shader::Error — variant index 3.
+    const glibre::Error err{glibre::shader::Error::SourceNotFound};
+    const char* tag = glibre::tag_string(err);
+    REQUIRE(tag != nullptr);
+    CHECK(std::string{tag} == "shader::Error");
+}
+
+// ---------------------------------------------------------------------------
+// Test: core/log_error: tostring_complete_for_shader_error
+//
+// Verifies that glibre::shader::to_string(shader::Error) returns a non-null,
+// non-empty string for every enumerator in shader::Error.
+// Added by plan #508.
+// ---------------------------------------------------------------------------
+TEST_CASE("core/log_error: tostring_complete_for_shader_error", "[core][log_error]") {
+    using E = glibre::shader::Error;
+
+    const auto check = [](E e, const char* expected) {
+        const char* s = glibre::shader::to_string(e);
+        REQUIRE(s != nullptr);
+        CHECK(*s != '\0');
+        CHECK(std::string{s} == std::string{expected});
+    };
+
+    check(E::SourceNotFound,               "SourceNotFound");
+    check(E::SourceParseFailed,            "SourceParseFailed");
+    check(E::IncludeEscape,                "IncludeEscape");
+    check(E::IncludeCycle,                 "IncludeCycle");
+    check(E::EncodingInvalid,              "EncodingInvalid");
+    check(E::EntryPointMissing,            "EntryPointMissing");
+    check(E::EntryPointStageAmbiguous,     "EntryPointStageAmbiguous");
+    check(E::PermutationKeyMalformed,      "PermutationKeyMalformed");
+    check(E::PermutationKeyOutOfRange,     "PermutationKeyOutOfRange");
+    check(E::CompilerInvocationFailed,     "CompilerInvocationFailed");
+    check(E::CompilerExitNonZero,          "CompilerExitNonZero");
+    check(E::CompilerTimedOut,             "CompilerTimedOut");
+    check(E::UnsupportedTarget,            "UnsupportedTarget");
+    check(E::MetalLibEmitFailed,           "MetalLibEmitFailed");
+    check(E::ReflectionExtractionFailed,   "ReflectionExtractionFailed");
+    check(E::DescriptorFrequencyAmbiguous, "DescriptorFrequencyAmbiguous");
+    check(E::DescriptorFrequencyMissing,   "DescriptorFrequencyMissing");
+    check(E::LinkFailed,                   "LinkFailed");
+    check(E::SpecializationConstantMissing,"SpecializationConstantMissing");
+    check(E::CacheLookupMiss,              "CacheLookupMiss");
+    check(E::CacheCorrupt,                 "CacheCorrupt");
+    check(E::CacheIntegrity,               "CacheIntegrity");
+    check(E::CacheReadOnlyViolation,       "CacheReadOnlyViolation");
+    check(E::CapabilityNotSupported,       "CapabilityNotSupported");
+    check(E::ShippingCompilationAttempted, "ShippingCompilationAttempted");
 }

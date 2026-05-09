@@ -93,6 +93,8 @@ namespace glibre {
 //                   (placeholder; render context has no plugin dylib yet)
 // CONTEXT: tools  — glibre::tools::Error  — core/include/glibre/error.hpp
 //                   (added by plan #219 — foryc skeleton)
+// CONTEXT: shader — glibre::shader::Error — core/include/glibre/error.hpp
+//                   (added by plan #508 — ShaderSource open + include resolver)
 //
 // When a new context ships, add a CONTEXT line here + an entry in
 // kAllErrorContexts + increment kExpectedArmCount.
@@ -101,10 +103,11 @@ namespace glibre {
 /// Human-readable names for all currently registered error contexts.
 /// Entries are in the same order as glibre::Error::Variant arms.
 /// Used by glibre::log_error() to map variant_index → context tag string.
-inline constexpr eastl::array<eastl::string_view, 3> kAllErrorContexts{{
+inline constexpr eastl::array<eastl::string_view, 4> kAllErrorContexts{{
     "core",    // index 0 — glibre::core::Error
     "render",  // index 1 — glibre::render::Error
     "tools",   // index 2 — glibre::tools::Error
+    "shader",  // index 3 — glibre::shader::Error
 }};
 
 /// Expected number of arms in glibre::Error::Variant.
@@ -113,7 +116,7 @@ inline constexpr eastl::array<eastl::string_view, 3> kAllErrorContexts{{
 /// static_assert below will fail to compile if kExpectedArmCount drifts
 /// from the actual variant arm count — catching the common mistake of
 /// editing error.hpp without updating this registry.
-inline constexpr std::size_t kExpectedArmCount = 3;
+inline constexpr std::size_t kExpectedArmCount = 4;
 
 // --------------------------------------------------------------------------
 // Compile-time invariant R1: arm count must match the manifest.
