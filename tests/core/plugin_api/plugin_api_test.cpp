@@ -111,9 +111,7 @@ struct PluginContextFixture {
     // (perf-budget.md §Allocator Rules #1: e2e carries no ceiling in
     // shipping builds; no limit enforced in GLIBRE_ALLOC_STRICT=0 builds).
     // A 1 MiB ceiling is used here to prevent OutOfBudget in strict-mode.
-    glibre::PerContextAllocator test_alloc{
-        glibre::ContextTag::core, 1024ULL * 1024ULL
-    };
+    glibre::PerContextAllocator test_alloc{glibre::ContextTag::core, 1024ULL * 1024ULL};
     StubLogSink log;
 
     glibre::core::PluginContext ctx{

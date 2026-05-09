@@ -293,7 +293,8 @@ public:
     // Precondition: `alloc` must outlive all AllocatorHandle instances
     // derived from it (the engine guarantees this for plugin lifetimes).
     explicit AllocatorHandle(PerContextAllocator& alloc, ContextTag tag) noexcept
-        : alloc_{alloc}, tag_{tag} {}
+        : alloc_{alloc},
+          tag_{tag} {}
 
     // AllocatorHandle is copy-constructible — multiple handles with the same
     // tag and underlying allocator are permitted.  Copying does not transfer

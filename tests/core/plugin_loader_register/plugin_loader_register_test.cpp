@@ -160,7 +160,13 @@ TEST_CASE("register_invokes_plugin_entry_point", "[core][register]") {
     glibre::PerContextAllocator test_alloc{glibre::ContextTag::core, 1024ULL * 1024ULL};
     auto manifest = make_manifest("glibre.test.register.noop");
     auto ctx = make_context(
-        world, type_reg, sys_reg, pass_reg, panel_reg, log_sink, manifest,
+        world,
+        type_reg,
+        sys_reg,
+        pass_reg,
+        panel_reg,
+        log_sink,
+        manifest,
         glibre::AllocatorHandle{test_alloc, glibre::ContextTag::core}
     );
 
@@ -225,7 +231,13 @@ TEST_CASE("register_failure_cleans_up_dlopen", "[core][register]") {
     glibre::PerContextAllocator test_alloc{glibre::ContextTag::core, 1024ULL * 1024ULL};
     auto manifest = make_manifest("glibre.test.register.fails");
     auto ctx = make_context(
-        world, type_reg, sys_reg, pass_reg, panel_reg, log_sink, manifest,
+        world,
+        type_reg,
+        sys_reg,
+        pass_reg,
+        panel_reg,
+        log_sink,
+        manifest,
         glibre::AllocatorHandle{test_alloc, glibre::ContextTag::core}
     );
 
