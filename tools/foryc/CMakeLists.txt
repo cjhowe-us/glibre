@@ -1,27 +1,34 @@
 cmake_minimum_required(VERSION 3.30)
 
 # ---------------------------------------------------------------------------
-# glibre-foryc — .fory schema compiler host tool (plan #219)
+# glibre-foryc — .fory schema compiler host tool (plans #219, #220)
 #
 # This target is a host-side tool only. glibre-core is linked for
 # glibre::Error; EASTL is propagated from core.
 #
-# Fory::fory is NOT linked here yet — this skeleton only parses .fory
-# files into an IR (parser-only, SRP). Fory reflection/serializer APIs
-# will be required when codegen emission lands (plans #220–#222).
-# Add back: find_package(Fory CONFIG REQUIRED) + Fory::fory in
-# target_link_libraries once those plans are implemented.
+# Plan #219: parser skeleton (parser.{hpp,cpp}).
+# Plan #220: header emission pass (emit_header.{hpp,cpp}, builtin_map.hpp).
+#            Adds --emit=header flag to the CLI; outputs one .hpp per TypeDecl
+#            to <out>/include/glibre/types/<ctx>/<Type>.hpp per
+#            reviews/decisions/fory-codegen.md §Pipeline.
 #
-# CLI: glibre-foryc --in <dir> --out <dir> --stamp <file>
+# Fory::fory is NOT linked here yet — codegen uses a hand-written type
+# mapping table (fory-codegen.md §"Rules").  Fory reflection/serializer
+# APIs will be required for ABI hash export (plan #222) and migration
+# dispatcher (plan #221). Add back: find_package(Fory CONFIG REQUIRED) +
+# Fory::fory in target_link_libraries once those plans are implemented.
+#
+# CLI: glibre-foryc --in <dir> --out <dir> --stamp <file> [--emit=header]
 #
 # Per reviews/decisions/fory-codegen.md §CMake Integration, the caller
-# (data/CMakeLists.txt, future plan) adds a custom_command that invokes
-# glibre-foryc --in ... --out ... --stamp ... to trigger codegen.
+# (data/CMakeLists.txt) adds a custom_command that invokes
+# glibre-foryc --in ... --out ... --stamp ... --emit=header.
 # ---------------------------------------------------------------------------
 
 add_executable(glibre-foryc
     src/main.cpp
     src/parser.cpp
+    src/emit_header.cpp  # plan #220: header emission pass
 )
 
 target_include_directories(glibre-foryc

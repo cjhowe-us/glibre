@@ -1,21 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // tools/foryc/src/main.cpp
 //
-// glibre-foryc — .fory schema compiler host tool (plan #219 skeleton).
+// glibre-foryc — .fory schema compiler host tool.
 //
 // Usage:
-//   glibre-foryc --in <dir> --out <dir> --stamp <file>
+//   glibre-foryc --in <dir> --out <dir> --stamp <file> [--emit=header]
 //
 // Walks <in>/**/*.fory, parses each file into the schema IR, validates
-// basic shape (unique tags, version >= 1, builtins-only types), emits a
-// one-line summary to stdout per file, touches <stamp> on success.
+// basic shape (unique tags, version >= 1, builtins-only types).
 //
-// Exits non-zero on parse failure, with a diagnostic on stderr.
+// Without --emit: parse-only mode (plan #219 behaviour).  Emits a
+//   one-line summary to stdout per file and touches <stamp> on success.
 //
-// Out of scope (sibling plans #220–#225):
-//   - C++ header / source emission
-//   - Migration dispatcher emit
-//   - ABI hash export
+// With --emit=header: emits one .hpp file per TypeDecl to
+//   <out>/include/glibre/types/<ctx>/<Type>.hpp
+// where <ctx> is derived from the source-relative subdirectory path of
+// the .fory file under <in> (e.g. data/schemas/core/Transform.fory with
+// --in data/schemas → <ctx> = "core") and <Type> is the last component
+// of the schema FQN.  Multi-type .fory files produce multiple .hpp files.
+//
+// Output path derivation (fory-codegen.md §Pipeline):
+//   source:  <in>/<rel>/<file>.fory
+//   for each TypeDecl with FQN "glibre.<ns>.<Type>":
+//     output: <out>/include/glibre/types/<rel>/<Type>.hpp
+//
+// Exits non-zero on parse or emit failure, with a diagnostic on stderr.
 
 #include <cstdlib>
 #include <filesystem>
@@ -28,10 +37,20 @@
 #include <EASTL/optional.h>
 #include <EASTL/vector.h>
 
+#include "emit_header.hpp"
 #include "parser.hpp"
 
 namespace fs = std::filesystem;
 using namespace glibre::tools::foryc;
+
+// -----------------------------------------------------------------------
+// Emit mode enum
+// -----------------------------------------------------------------------
+
+enum class EmitMode {
+    None,    // parse-only (default, plan #219 behaviour)
+    Header,  // emit C++ header per TypeDecl (plan #220)
+};
 
 // -----------------------------------------------------------------------
 // Argument parsing
@@ -41,10 +60,11 @@ struct Args {
     fs::path in_dir{};
     fs::path out_dir{};
     fs::path stamp_file{};
+    EmitMode emit{EmitMode::None};
 };
 
 static void usage(std::string_view program) {
-    std::cerr << "Usage: " << program << " --in <dir> --out <dir> --stamp <file>\n";
+    std::cerr << "Usage: " << program << " --in <dir> --out <dir> --stamp <file> [--emit=header]\n";
 }
 
 static eastl::optional<Args> parse_args(int argc, char** argv) {
@@ -72,6 +92,8 @@ static eastl::optional<Args> parse_args(int argc, char** argv) {
             if (!v)
                 return eastl::nullopt;
             args.stamp_file = *v;
+        } else if (tok == "--emit=header") {
+            args.emit = EmitMode::Header;
         } else {
             std::cerr << "foryc: unknown flag: " << tok << "\n";
             return eastl::nullopt;
@@ -100,11 +122,120 @@ static std::string_view error_name(const glibre::Error& e) noexcept {
             return "unknown type";
         case Error::ForycIOError:
             return "I/O error";
+        case Error::ForycEmptySchema:
+            return "schema has zero TypeDecl blocks";
         default:
             __builtin_unreachable();
         }
     }
     return "unknown error";
+}
+
+// -----------------------------------------------------------------------
+// Header emission helper
+//
+// Emits one .hpp file per TypeDecl in the schema, calling
+// emit_header_for_type directly (canonical per-type entry, MED-3 r2).
+//
+// Output path per fory-codegen.md §Pipeline:
+//   <out_dir>/include/glibre/types/<rel_subdir>/<Type>.hpp
+// where:
+//   <rel_subdir> is the source path relative to in_dir (directory part).
+//   <Type>       is the last component of the TypeDecl FQN.
+//
+// Multi-type .fory files produce one file per TypeDecl.
+// Schemas with no TypeDecls are rejected (ForycEmptySchema).
+//
+// Returns true on success, false on error (diagnostic already printed).
+// -----------------------------------------------------------------------
+
+static bool emit_headers_for_schema(
+    const Schema& schema,
+    const fs::path& source_path,
+    const fs::path& in_dir,
+    const fs::path& out_dir
+) noexcept {
+    if (schema.types.empty()) {
+        std::cerr << std::format(
+            "foryc: {}: schema has zero TypeDecl blocks\n", source_path.native()
+        );
+        return false;
+    }
+
+    // Compute the subdirectory relative to in_dir.
+    // e.g. source_path = data/schemas/core/Transform.fory, in_dir = data/schemas
+    //   → rel_subdir = "core"
+    fs::path rel_subdir;
+    {
+        std::error_code ec;
+        const fs::path rel = fs::relative(source_path.parent_path(), in_dir, ec);
+        if (ec) {
+            std::cerr << std::format(
+                "foryc: cannot compute relative path for {}: {}\n",
+                source_path.native(),
+                ec.message()
+            );
+            return false;
+        }
+        // rel may be "." if the file is directly under in_dir; use empty subdir.
+        rel_subdir = (rel == fs::path(".")) ? fs::path{} : rel;
+    }
+
+    const fs::path include_base = out_dir / "include" / "glibre" / "types";
+    const std::string src_native = source_path.native();
+
+    for (const auto& td : schema.types) {
+        // Extract the type name (last FQN component).
+        // FQN format: "glibre.core.Transform" — type name is "Transform".
+        const eastl::string& fqn = td.fqn;
+        const std::size_t dot = fqn.rfind('.');
+        const eastl::string type_name = (dot == eastl::string::npos) ? fqn : fqn.substr(dot + 1);
+
+        // Build the per-type output directory.
+        fs::path type_dir = include_base;
+        if (!rel_subdir.empty())
+            type_dir /= rel_subdir;
+
+        std::error_code ec;
+        fs::create_directories(type_dir, ec);
+        if (ec) {
+            std::cerr << std::format(
+                "foryc: cannot create directory {}: {}\n", type_dir.native(), ec.message()
+            );
+            return false;
+        }
+
+        // Emit header for this TypeDecl via the canonical per-type entry point.
+        auto result = emit_header_for_type(td, src_native);
+        if (!result) {
+            std::cerr << std::format(
+                "foryc: {}: header emit failed for type {}: {}\n",
+                source_path.native(),
+                std::string_view(type_name.data(), type_name.size()),
+                error_name(result.error())
+            );
+            return false;
+        }
+
+        const fs::path out_path =
+            type_dir / (std::string(type_name.data(), type_name.size()) + ".hpp");
+        std::ofstream ofs{out_path, std::ios::trunc};
+        if (!ofs) {
+            std::cerr << std::format("foryc: cannot write header: {}\n", out_path.native());
+            return false;
+        }
+
+        const eastl::string& text = *result;
+        ofs.write(text.data(), static_cast<std::streamsize>(text.size()));
+        if (!ofs) {
+            std::cerr << std::format("foryc: write error: {}\n", out_path.native());
+            return false;
+        }
+
+        std::cout << std::format("foryc: emitted header {}\n", out_path.native());
+    }
+
+    return true;
 }
 
 // -----------------------------------------------------------------------
@@ -131,7 +262,7 @@ int main(int argc, char** argv) {
             schema_files.push_back(entry.path());
     }
 
-    // Parse each file.
+    // Parse (and optionally emit) each file.
     std::size_t total_types = 0;
     for (const auto& path : schema_files) {
         auto result = parse_file(path);
@@ -144,6 +275,12 @@ int main(int argc, char** argv) {
         std::cout << std::format(
             "foryc: parsed {} type(s) from {}\n", schema.types.size(), path.native()
         );
+
+        // Emit headers if requested.
+        if (args.emit == EmitMode::Header) {
+            if (!emit_headers_for_schema(schema, path, args.in_dir, args.out_dir))
+                return EXIT_FAILURE;
+        }
     }
 
     // Emit overall summary.
