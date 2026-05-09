@@ -34,6 +34,7 @@
 
 #include <EASTL/string_view.h>
 #include <catch2/catch_test_macros.hpp>
+#include <glibre/alloc.hpp>                       // AllocatorHandle, PerContextAllocator
 #include <glibre/core/plugin_api.hpp>             // PluginContext aggregate
 #include <glibre/core/plugin_loader.hpp>          // PluginLoader::open
 #include <glibre/core/plugin_loader_actions.hpp>  // call_register, rebuild_schedule, migrate_components
@@ -85,6 +86,8 @@ glibre::core::PluginManifest make_manifest(
 /// Build a minimal PluginContext from stub references.
 /// Each stub object is passed by reference; none of the test stubs dereference
 /// the fields, so the stubs' layout is irrelevant — only their address matters.
+/// `alloc_handle` is the tag-stamped AllocatorHandle the loader stamps at
+/// glibre_plugin_register time (perf-budget.md §Allocator Rules #1, plan #989).
 glibre::core::PluginContext make_context(
     glibre::core::World& world,
     glibre::core::TypeRegistry& type_reg,
@@ -92,7 +95,8 @@ glibre::core::PluginContext make_context(
     glibre::core::PassRegistry& pass_reg,
     glibre::core::PanelRegistry& panel_reg,
     glibre::core::LogSink& log_sink,
-    const glibre::core::PluginManifest& manifest
+    const glibre::core::PluginManifest& manifest,
+    glibre::AllocatorHandle alloc_handle
 ) {
     return glibre::core::PluginContext{
         .world = world,
@@ -101,6 +105,7 @@ glibre::core::PluginContext make_context(
         .pass_registry = pass_reg,
         .panel_registry = panel_reg,
         .manifest = manifest,
+        .alloc = alloc_handle,
         .log = log_sink,
     };
 }
@@ -150,8 +155,14 @@ TEST_CASE("register_invokes_plugin_entry_point", "[core][register]") {
     glibre::core::PassRegistry pass_reg;
     glibre::core::PanelRegistry panel_reg;
     glibre::core::LogSink log_sink;
+    // AllocatorHandle stamped with ContextTag::e2e for test fixtures
+    // (perf-budget.md §Allocator Rules #1, plan #989).
+    glibre::PerContextAllocator test_alloc{glibre::ContextTag::core, 1024ULL * 1024ULL};
     auto manifest = make_manifest("glibre.test.register.noop");
-    auto ctx = make_context(world, type_reg, sys_reg, pass_reg, panel_reg, log_sink, manifest);
+    auto ctx = make_context(
+        world, type_reg, sys_reg, pass_reg, panel_reg, log_sink, manifest,
+        glibre::AllocatorHandle{test_alloc, glibre::ContextTag::core}
+    );
 
     // Step 4: call call_register — noop plugin returns success.
     auto result = glibre::core::call_register(loader.register_fn(), ctx);
@@ -209,8 +220,14 @@ TEST_CASE("register_failure_cleans_up_dlopen", "[core][register]") {
     glibre::core::PassRegistry pass_reg;
     glibre::core::PanelRegistry panel_reg;
     glibre::core::LogSink log_sink;
+    // AllocatorHandle stamped with ContextTag::core for test fixtures
+    // (perf-budget.md §Allocator Rules #1, plan #989).
+    glibre::PerContextAllocator test_alloc{glibre::ContextTag::core, 1024ULL * 1024ULL};
     auto manifest = make_manifest("glibre.test.register.fails");
-    auto ctx = make_context(world, type_reg, sys_reg, pass_reg, panel_reg, log_sink, manifest);
+    auto ctx = make_context(
+        world, type_reg, sys_reg, pass_reg, panel_reg, log_sink, manifest,
+        glibre::AllocatorHandle{test_alloc, glibre::ContextTag::core}
+    );
 
     // Step 4: call_register must return PluginInitFailed.
     auto result = glibre::core::call_register(loader.register_fn(), ctx);

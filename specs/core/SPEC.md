@@ -2572,6 +2572,12 @@ the only enforcement `core` SPEC §9 imposes per-aggregate.
 - Plan #238 — `glibre::PerContextAllocator` implementation
   (per-tag heap ceiling enforcement; Allocator Rules #1–#3 from
   `perf-budget.md`).
+- Plan #989 — `glibre::AllocatorHandle` wrapper (tag-stamped handle
+  obtained at `glibre_plugin_register` time; plugin call sites are
+  tag-free per `perf-budget.md` Allocator Rule #1). `AllocatorHandle`
+  is declared in `core/include/glibre/alloc.hpp` alongside
+  `PerContextAllocator`; `PluginContext::alloc` carries the stamped
+  handle into every plugin's registration entry-point).
 
 ## 10. Failure Modes & Error Model
 

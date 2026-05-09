@@ -53,6 +53,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <glibre/alloc.hpp>
 #include <glibre/error.hpp>
 
 // ---------------------------------------------------------------------------
@@ -131,6 +132,23 @@ struct PluginContext {
     /// The manifest is owned by the loader; its lifetime outlives the
     /// register() call.
     const PluginManifest& manifest;
+
+    // ------------------------------------------------------------------
+    // Allocator handle
+    // ------------------------------------------------------------------
+
+    /// Tag-stamped allocator handle for this plugin.
+    ///
+    /// The loader stamps the ContextTag corresponding to the registering
+    /// plugin's bounded context at glibre_plugin_register time
+    /// (perf-budget.md §Allocator Rules #1, plan #989).  Plugin call sites
+    /// use this handle exclusively — they do not supply a ContextTag on each
+    /// allocation call, eliminating the coupling between plugin code and the
+    /// engine's tag enum.
+    ///
+    /// The handle is a non-owning lightweight wrapper; plugins must not
+    /// persist it past the plugin's own lifetime.
+    glibre::AllocatorHandle alloc;
 
     // ------------------------------------------------------------------
     // Diagnostics

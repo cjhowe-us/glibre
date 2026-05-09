@@ -24,9 +24,11 @@ cmake_minimum_required(VERSION 4.3.0)
 # ---------------------------------------------------------------------------
 
 # ---- strict-mode suite (GLIBRE_ALLOC_STRICT=1) ----------------------------
+# Covers PerContextAllocator (plan #238) and AllocatorHandle (plan #989).
 
 add_executable(glibre-core-per-context-allocator-tests
     per_context_allocator_test.cpp
+    allocator_handle_test.cpp
 )
 
 target_link_libraries(glibre-core-per-context-allocator-tests
