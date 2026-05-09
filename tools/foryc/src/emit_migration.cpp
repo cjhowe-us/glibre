@@ -19,6 +19,23 @@ namespace glibre::tools::foryc {
 namespace {
 
 // -----------------------------------------------------------------------
+// fmt_e — format a string and return it as an eastl::string.
+//
+// std::format returns std::string.  Constructing eastl::string from
+// std::string::c_str() copies twice (format → std::string → eastl::string via
+// null-scan).  Using data() + size() avoids the null-scan and the second copy.
+// Codegen-time-only so the savings are minor, but avoiding the pattern
+// across 4 call sites also keeps the intent unambiguous.
+// -----------------------------------------------------------------------
+
+template <class... Args>
+[[nodiscard]] static eastl::string
+fmt_e(std::format_string<Args...> fmt, Args&&... args) noexcept {
+    const std::string s = std::format(fmt, std::forward<Args>(args)...);
+    return eastl::string(s.data(), s.size());
+}
+
+// -----------------------------------------------------------------------
 // fqn_to_ns_and_type — split a dotted FQN into C++ namespace + type name
 //
 // "glibre.core.Transform" -> ns="glibre::core"  type_name="Transform"
@@ -90,13 +107,10 @@ struct FqnParts {
     // point 1: "each generated type carries current_version").
     // The plugin loader dlsym()s this to short-circuit the no-migration-needed path
     // and to detect payloads from future schema versions (plan #978).
-    out += eastl::string(
-        std::format(
-            "extern \"C\" const std::uint32_t glibre_plugin_current_version_{} = {};\n",
-            std::string_view(type_name.data(), type_name.size()),
-            td.version
-        )
-            .c_str()
+    out += fmt_e(
+        "extern \"C\" const std::uint32_t glibre_plugin_current_version_{} = {};\n",
+        std::string_view(type_name.data(), type_name.size()),
+        td.version
     );
     out += "\n";
 
@@ -135,10 +149,8 @@ struct FqnParts {
         // type headers.  In the real glibre-types.dylib build the
         // generated headers are on the include path, but forward-
         // declarations make the TU independently well-formed.
-        const eastl::string from_unq =
-            type_name + eastl::string(std::format("V{}", mig.from_version).c_str());
-        const eastl::string to_unq =
-            type_name + eastl::string(std::format("V{}", mig.to_version).c_str());
+        const eastl::string from_unq = type_name + fmt_e("V{}", mig.from_version);
+        const eastl::string to_unq   = type_name + fmt_e("V{}", mig.to_version);
 
         // Emit struct forward-declarations in the type's namespace.
         if (!parts.ns.empty()) {
@@ -190,14 +202,11 @@ struct FqnParts {
             out += provider_ns;
             out += " {\n";
         }
-        out += eastl::string(
-            std::format(
-                "std::expected<void, glibre::Error> {}(const {}&, {}&);\n",
-                std::string_view(fn_name.data(), fn_name.size()),
-                std::string_view(from_fq.data(), from_fq.size()),
-                std::string_view(to_fq.data(), to_fq.size())
-            )
-                .c_str()
+        out += fmt_e(
+            "std::expected<void, glibre::Error> {}(const {}&, {}&);\n",
+            std::string_view(fn_name.data(), fn_name.size()),
+            std::string_view(from_fq.data(), from_fq.size()),
+            std::string_view(to_fq.data(), to_fq.size())
         );
         if (!provider_ns.empty()) {
             out += "}  // namespace ";
@@ -225,14 +234,11 @@ struct FqnParts {
     out += type_name;
     out += "[] = {\n";
     for (const auto& mig : td.migrations) {
-        out += eastl::string(
-            std::format(
-                "    {{ {}, {}, reinterpret_cast<void*>(&{}) }},\n",
-                mig.from_version,
-                mig.to_version,
-                std::string_view(mig.provider.data(), mig.provider.size())
-            )
-                .c_str()
+        out += fmt_e(
+            "    {{ {}, {}, reinterpret_cast<void*>(&{}) }},\n",
+            mig.from_version,
+            mig.to_version,
+            std::string_view(mig.provider.data(), mig.provider.size())
         );
     }
     out += "};\n";
@@ -244,13 +250,10 @@ struct FqnParts {
     out += " = k_migrations_";
     out += type_name;
     out += ";\n";
-    out += eastl::string(
-        std::format(
-            "extern \"C\" std::size_t glibre_plugin_migrations_{}_size = {};\n",
-            std::string_view(type_name.data(), type_name.size()),
-            count
-        )
-            .c_str()
+    out += fmt_e(
+        "extern \"C\" std::size_t glibre_plugin_migrations_{}_size = {};\n",
+        std::string_view(type_name.data(), type_name.size()),
+        count
     );
     out += "\n";
     return out;
