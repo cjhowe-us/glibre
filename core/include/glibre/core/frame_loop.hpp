@@ -101,7 +101,7 @@ public:
     // responsible for ensuring pointer validity.
     //
     // Thread safety: must not be called concurrently with tick().
-    void set_perf_budget(glibre::PerfBudget* budget) noexcept { perf_budget_ = budget; }
+    void set_perf_budget(glibre::PerfBudget* budget) noexcept;
 
     // tick() — advance one engine frame.
     //
@@ -133,6 +133,17 @@ private:
     // that might supply phases in a different order than kPhaseTable.
     [[nodiscard]] glibre::Result<void>
     run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept;
+
+    // present_reset_perf_budget() — step (1) of Phase::Present bookkeeping.
+    // Resets per-frame perf-budget counters unconditionally if a budget is set.
+    // Extracted for SRP (perf-budget.md §CI Gate Spec, plan #241).
+    void present_reset_perf_budget() noexcept;
+
+    // present_drain_arenas() — steps (2) & (3) of Phase::Present bookkeeping.
+    // Drains all registered transient arenas; in GLIBRE_ALLOC_STRICT builds
+    // asserts each arena was empty before drain and returns the first leak error.
+    // Extracted for SRP (perf-budget.md §Allocator Rules #4, plan #239).
+    [[nodiscard]] glibre::Result<void> present_drain_arenas() noexcept;
 
     std::uint64_t frame_index_{0};
 

@@ -35,8 +35,8 @@ namespace {
     const auto idx = static_cast<std::size_t>(tag);
     assert(
         idx < kContextTagCount &&
-        "PerfBudget: ContextTag::Count_ is not a valid context; "
-        "caller supplied an out-of-range raw cast value"
+        "PerfBudget: ContextTag is out-of-range; "
+        "caller supplied a raw cast value beyond kContextTagCount"
     );
     return idx;
 }
