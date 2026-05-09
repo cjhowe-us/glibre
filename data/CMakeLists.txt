@@ -3,6 +3,20 @@ cmake_minimum_required(VERSION 3.30)
 # ---------------------------------------------------------------------------
 # data/ — glibre middleman dylib (glibre-types)
 #
+# NOTE: data/CMakeLists.txt is a macOS-host-only context. On iOS subproject
+# builds (CMAKE_SYSTEM_NAME=iOS), this entire target is skipped. The types
+# are built separately for iOS frameworks without requiring this CMakeLists
+# to run. See PR #994 for the iOS skip pattern precedent (applied first to
+# core/CMakeLists.txt).
+# ---------------------------------------------------------------------------
+
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    return()
+endif()
+
+# ---------------------------------------------------------------------------
+# data/ — glibre middleman dylib (glibre-types)
+#
 # Authority: reviews/decisions/fory-codegen.md §"CMake Integration" and
 #            reviews/decisions/plugin-abi.md §"Plugin file shape" rule 2.
 #
