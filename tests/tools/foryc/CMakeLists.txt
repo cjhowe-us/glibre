@@ -8,7 +8,12 @@ cmake_minimum_required(VERSION 3.30)
 # ---------------------------------------------------------------------------
 
 find_package(Catch2 3 CONFIG REQUIRED)
-find_package(Fory CONFIG REQUIRED)
+
+# Fory::fory is NOT linked here yet — foryc-parser-tests exercises the
+# parser IR only. Fory reflection/serializer APIs will be required when
+# codegen emission lands (plans #220–#222).
+# Add back: find_package(Fory CONFIG REQUIRED) + Fory::fory in
+# target_link_libraries once those plans are implemented.
 
 add_executable(foryc-parser-tests
     foryc_parser_test.cpp
@@ -25,7 +30,6 @@ target_include_directories(foryc-parser-tests
 target_link_libraries(foryc-parser-tests
     PRIVATE
         Catch2::Catch2WithMain
-        Fory::fory
         glibre::core   # glibre::Error + EASTL
 )
 

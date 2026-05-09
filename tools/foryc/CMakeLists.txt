@@ -3,9 +3,14 @@ cmake_minimum_required(VERSION 3.30)
 # ---------------------------------------------------------------------------
 # glibre-foryc — .fory schema compiler host tool (plan #219)
 #
-# This target is a host-side tool only. It links Fory::fory privately
-# (only foryc needs it; no consumer links foryc as a library).
-# glibre-core is linked for glibre::Error; EASTL is propagated from core.
+# This target is a host-side tool only. glibre-core is linked for
+# glibre::Error; EASTL is propagated from core.
+#
+# Fory::fory is NOT linked here yet — this skeleton only parses .fory
+# files into an IR (parser-only, SRP). Fory reflection/serializer APIs
+# will be required when codegen emission lands (plans #220–#222).
+# Add back: find_package(Fory CONFIG REQUIRED) + Fory::fory in
+# target_link_libraries once those plans are implemented.
 #
 # CLI: glibre-foryc --in <dir> --out <dir> --stamp <file>
 #
@@ -13,8 +18,6 @@ cmake_minimum_required(VERSION 3.30)
 # (data/CMakeLists.txt, future plan) adds a custom_command that invokes
 # glibre-foryc --in ... --out ... --stamp ... to trigger codegen.
 # ---------------------------------------------------------------------------
-
-find_package(Fory CONFIG REQUIRED)
 
 add_executable(glibre-foryc
     src/main.cpp
@@ -28,7 +31,6 @@ target_include_directories(glibre-foryc
 
 target_link_libraries(glibre-foryc
     PRIVATE
-        Fory::fory
         glibre::core   # provides glibre::Error + EASTL transitively
 )
 
