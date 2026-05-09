@@ -6,16 +6,26 @@
 //
 // DESIGN (reviews/decisions/plugin-abi.md §"Registration Entry-Point Signature"):
 //
-//   • PluginContext is a POD-like aggregate of references.  It is *not* a
-//     class with a vtable; per Open Question #3 in plugin-abi.md the decision
-//     leaned toward a POD aggregate to keep the extern "C" boundary clean.
+//   • PluginContext is a POD-like aggregate passed to every plugin's
+//     glibre_plugin_register() entry-point.  It is *not* a class with a
+//     vtable; per Open Question #3 in plugin-abi.md the decision leaned
+//     toward a POD aggregate to keep the extern "C" boundary clean.
 //     Binary layout stability is guarded by PluginManifest.min_engine_version
 //     (see §"Versioning Rules", axis 4).
 //
-//   • The aggregate contains references, not pointers, so a plugin cannot
-//     take ownership or stash the context past the call.  The loader
-//     guarantees the context outlives the call; after register() returns the
-//     context is destroyed and any cached reference is dangling.
+//   • Most fields are references, so a plugin cannot take ownership or
+//     stash them past the call.  The loader guarantees the context outlives
+//     the call; after register() returns the context is destroyed and any
+//     cached reference is dangling.
+//
+//   • PluginContext::alloc is a value-typed AllocatorHandle (plan #989).
+//     AllocatorHandle is copy/move-constructible and non-assignable; it
+//     internally holds a PerContextAllocator& so the engine's long-lived
+//     allocator is not copied.  This makes PluginContext a mixed-storage
+//     aggregate (references + one value type) rather than a pure reference
+//     aggregate.  The "POD-like" characterisation refers to the absence of a
+//     vtable and user-provided constructors; it does not require all fields
+//     to be references.
 //
 //   • All registry types are forward-declared as opaque tags here.  Their
 //     real definitions land in their owning plans (ECS world, type registry,
@@ -134,7 +144,16 @@ struct PluginContext {
     const PluginManifest& manifest;
 
     // ------------------------------------------------------------------
-    // Allocator handle
+    // Diagnostics
+    // ------------------------------------------------------------------
+
+    /// Structured spdlog-backed sink for registration-time diagnostics.
+    /// The plugin MUST use this sink (not a global logger) so that log
+    /// lines carry the plugin name as a contextual tag.
+    LogSink& log;
+
+    // ------------------------------------------------------------------
+    // Allocator handle — APPEND-ONLY field; must remain last.
     // ------------------------------------------------------------------
 
     /// Tag-stamped allocator handle for this plugin.
@@ -148,16 +167,14 @@ struct PluginContext {
     ///
     /// The handle is a non-owning lightweight wrapper; plugins must not
     /// persist it past the plugin's own lifetime.
+    ///
+    /// AllocatorHandle is a value type (copy/move-constructible, non-assignable)
+    /// that internally holds a PerContextAllocator reference.  Its presence here
+    /// makes PluginContext a mixed-storage aggregate (references + value types)
+    /// rather than a pure reference aggregate; the POD-like characterisation
+    /// in the file-level DESIGN block refers to the absence of a vtable and
+    /// user-provided constructors, not to the storage category of each field.
     glibre::AllocatorHandle alloc;
-
-    // ------------------------------------------------------------------
-    // Diagnostics
-    // ------------------------------------------------------------------
-
-    /// Structured spdlog-backed sink for registration-time diagnostics.
-    /// The plugin MUST use this sink (not a global logger) so that log
-    /// lines carry the plugin name as a contextual tag.
-    LogSink& log;
 };
 
 // ---------------------------------------------------------------------------

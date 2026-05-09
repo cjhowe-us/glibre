@@ -107,10 +107,9 @@ struct PluginContextFixture {
     StubPanelRegistry panel_reg;
     StubPluginManifest manifest;
     // Per-context allocator used to construct the AllocatorHandle in the
-    // PluginContext.  ContextTag::e2e is appropriate for test fixtures
-    // (perf-budget.md §Allocator Rules #1: e2e carries no ceiling in
-    // shipping builds; no limit enforced in GLIBRE_ALLOC_STRICT=0 builds).
-    // A 1 MiB ceiling is used here to prevent OutOfBudget in strict-mode.
+    // PluginContext.  ContextTag::core is used here as a representative tag
+    // for test fixtures; a 1 MiB ceiling prevents OutOfBudget in strict-mode
+    // (GLIBRE_ALLOC_STRICT=1).
     glibre::PerContextAllocator test_alloc{glibre::ContextTag::core, 1024ULL * 1024ULL};
     StubLogSink log;
 
@@ -121,8 +120,8 @@ struct PluginContextFixture {
         reinterpret_cast<glibre::core::PassRegistry&>(pass_reg),
         reinterpret_cast<glibre::core::PanelRegistry&>(panel_reg),
         reinterpret_cast<const glibre::core::PluginManifest&>(manifest),
+        reinterpret_cast<glibre::core::LogSink&>(log),
         glibre::AllocatorHandle{test_alloc, glibre::ContextTag::core},
-        reinterpret_cast<glibre::core::LogSink&>(log)
     };
 };
 

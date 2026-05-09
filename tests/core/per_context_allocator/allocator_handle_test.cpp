@@ -117,26 +117,34 @@ TEST_CASE("allocator_handle_stamps_tag_at_construction", "[core][alloc][handle]"
 }
 
 // ===========================================================================
-// Test: allocator_handle_per_plugin_isolated_tag
+// Test: allocator_handle_carries_distinct_tag_per_plugin
 //
-// Verifies that two AllocatorHandle instances with different ContextTags route
-// allocations to their respective PerContextAllocator instances independently.
-// Allocating through handle_A does not affect handle_B's underlying allocator
-// and vice versa.
+// Verifies that two AllocatorHandle instances carrying different ContextTags
+// forward allocations to their respective PerContextAllocator instances
+// independently.  Each handle's tag reflects the bounded context it was
+// stamped with at construction; allocating through one handle does not affect
+// the other handle's underlying allocator.
 //
-// This exercises the isolation guarantee:
-//   "The tag is supplied by the caller via the allocator handle obtained at
-//    glibre_plugin_register time; the registration code stamps the tag into
-//    the handle so plugin call sites are tag-free."
-//   — perf-budget.md §Allocator Rules #1.
+// What this test proves:
+//   AllocatorHandle correctly stores and carries the ContextTag passed at
+//   construction (handle.tag()), and forwards allocations exclusively to the
+//   PerContextAllocator it was initialised with.  Two handles with different
+//   tags bound to separate PerContextAllocator instances behave as isolated
+//   byte-budget regions.
 //
-// Two plugins with different tags get separate PerContextAllocator instances;
-// their byte budgets are isolated.
+// What this test does NOT prove (separate concern):
+//   Tag-driven routing through a shared PerContextAllocator (where a single
+//   allocator would dispatch to per-tag sub-budgets).  PerContextAllocator is
+//   a single-tag allocator; isolation between contexts is achieved by giving
+//   each bounded context its own PerContextAllocator instance, not by routing
+//   within one.
 //
-// DoD: unit_test_named: allocator_handle_per_plugin_isolated_tag
+// Authority: perf-budget.md §Allocator Rules #1.
+// DoD: unit_test_named: allocator_handle_per_plugin_isolated_tag (renamed;
+//      canonical name registered in plan #989 DoD block).
 // ===========================================================================
 
-TEST_CASE("allocator_handle_per_plugin_isolated_tag", "[core][alloc][handle]") {
+TEST_CASE("allocator_handle_carries_distinct_tag_per_plugin", "[core][alloc][handle]") {
     constexpr std::uint64_t kCeiling = 1024ULL * 1024ULL;
 
     // Simulate two plugins with distinct bounded-context tags.

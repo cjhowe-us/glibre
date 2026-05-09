@@ -36,7 +36,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <glibre/alloc.hpp>                       // AllocatorHandle, PerContextAllocator
 #include <glibre/core/plugin_api.hpp>             // PluginContext aggregate
-#include <glibre/core/plugin_loader.hpp>          // PluginLoader::open
+#include <glibre/core/plugin_loader.hpp>          // PluginLoader::open, derive_context_tag
 #include <glibre/core/plugin_loader_actions.hpp>  // call_register, rebuild_schedule, migrate_components
 #include <glibre/core/plugin_manifest.hpp>
 #include <glibre/error.hpp>
@@ -105,8 +105,8 @@ glibre::core::PluginContext make_context(
         .pass_registry = pass_reg,
         .panel_registry = panel_reg,
         .manifest = manifest,
-        .alloc = alloc_handle,
         .log = log_sink,
+        .alloc = alloc_handle,
     };
 }
 
@@ -155,7 +155,7 @@ TEST_CASE("register_invokes_plugin_entry_point", "[core][register]") {
     glibre::core::PassRegistry pass_reg;
     glibre::core::PanelRegistry panel_reg;
     glibre::core::LogSink log_sink;
-    // AllocatorHandle stamped with ContextTag::e2e for test fixtures
+    // AllocatorHandle stamped with ContextTag::core for test fixtures
     // (perf-budget.md §Allocator Rules #1, plan #989).
     glibre::PerContextAllocator test_alloc{glibre::ContextTag::core, 1024ULL * 1024ULL};
     auto manifest = make_manifest("glibre.test.register.noop");
@@ -227,7 +227,8 @@ TEST_CASE("register_failure_cleans_up_dlopen", "[core][register]") {
     glibre::core::PanelRegistry panel_reg;
     glibre::core::LogSink log_sink;
     // AllocatorHandle stamped with ContextTag::core for test fixtures
-    // (perf-budget.md §Allocator Rules #1, plan #989).
+    // (plan #989: tag passed by the test caller; in production the loader
+    // derives the tag from the manifest name at glibre_plugin_register time).
     glibre::PerContextAllocator test_alloc{glibre::ContextTag::core, 1024ULL * 1024ULL};
     auto manifest = make_manifest("glibre.test.register.fails");
     auto ctx = make_context(
@@ -324,5 +325,84 @@ TEST_CASE("migrate_components_no_op_when_versions_equal", "[core][register]") {
     SECTION("upgrade path stub returns success") {
         auto result = glibre::core::migrate_components(1u, 2u);
         REQUIRE(result.has_value());
+    }
+}
+
+// ===========================================================================
+// Test: plugin_loader_stamps_allocator_handle_with_plugin_tag
+//
+// Integration test for loader-side AllocatorHandle stamping (plan #989,
+// perf-budget.md §Allocator Rules #1).
+//
+// Verifies that derive_context_tag() — the loader function called at
+// glibre_plugin_register time — maps a plugin's manifest name to the correct
+// ContextTag, and that the resulting AllocatorHandle carries that tag.
+//
+// This test exercises the full stamping pipeline that the loader orchestrator
+// (plans #230/#231) will invoke:
+//   1. Derive the ContextTag from the plugin manifest name.
+//   2. Construct an AllocatorHandle with that tag and the context's
+//      PerContextAllocator.
+//   3. Verify that handle.tag() == expected tag (the tag is preserved end-to-end).
+//
+// Named plugin samples and their expected tags (perf-budget.md §Budget Table):
+//   "glibre.render.camera"   → ContextTag::render
+//   "glibre.physics.jolt"    → ContextTag::physics
+//   "glibre.core.ecs"        → ContextTag::core
+//   "glibre.geometry.mesh"   → ContextTag::geometry
+//
+// Authority: plan #989 §Scope: "Plugin loader (core/src/plugin_loader.cpp):
+//   stamp AllocatorHandle with the plugin's ContextTag at glibre_plugin_register
+//   step, pass handle into plugin init via the plugin ABI struct."
+// ===========================================================================
+
+TEST_CASE("plugin_loader_stamps_allocator_handle_with_plugin_tag", "[core][register][alloc]") {
+    constexpr std::uint64_t kCeiling = 1024ULL * 1024ULL;  // 1 MiB — sufficient for test
+
+    struct Sample {
+        const char* plugin_name;
+        glibre::ContextTag expected_tag;
+    };
+
+    // Representative sample of the nine bounded contexts.
+    const Sample samples[] = {
+        {"glibre.render.camera",      glibre::ContextTag::render},
+        {"glibre.physics.jolt",       glibre::ContextTag::physics},
+        {"glibre.core.ecs",           glibre::ContextTag::core},
+        {"glibre.geometry.mesh",      glibre::ContextTag::geometry},
+        {"glibre.platform.sdl",       glibre::ContextTag::platform},
+        {"glibre.data.asset",         glibre::ContextTag::data},
+        {"glibre.shader.slang",       glibre::ContextTag::shader},
+        {"glibre.content.importer",   glibre::ContextTag::content},
+        {"glibre.tools.editor",       glibre::ContextTag::tools},
+    };
+
+    for (const auto& s : samples) {
+        // Step 1: derive the ContextTag from the manifest plugin name.
+        auto tag_result = glibre::core::derive_context_tag(
+            eastl::string_view{s.plugin_name}
+        );
+        REQUIRE(tag_result.has_value());
+        CHECK(tag_result.value() == s.expected_tag);
+
+        // Step 2: construct a PerContextAllocator and stamp an AllocatorHandle.
+        glibre::PerContextAllocator alloc{*tag_result, kCeiling};
+        glibre::AllocatorHandle handle{alloc, *tag_result};
+
+        // Step 3: the stamped handle carries the expected tag.
+        CHECK(handle.tag() == s.expected_tag);
+        CHECK(&handle.underlying() == &alloc);
+    }
+
+    // Edge: single-component name (no dot) must fail.
+    {
+        auto r = glibre::core::derive_context_tag(eastl::string_view{"myplugin"});
+        REQUIRE_FALSE(r.has_value());
+    }
+
+    // Edge: name with recognised prefix but unknown context must fail.
+    {
+        auto r = glibre::core::derive_context_tag(eastl::string_view{"glibre.unknown.foo"});
+        REQUIRE_FALSE(r.has_value());
     }
 }

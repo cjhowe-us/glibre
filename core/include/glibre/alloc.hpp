@@ -281,6 +281,37 @@ void register_allocator(PerContextAllocator& alloc) noexcept;
 //   same handle forwarding to the same PerContextAllocator behave identically
 //   to concurrent direct callers of that allocator.
 //
+// ## Value-category contract
+//
+//   AllocatorHandle is copy-constructible and move-constructible (both are
+//   semantically equivalent — the "copy" is a bitwise copy of the reference
+//   and tag, not a deep clone).  Both copy-assignment and move-assignment are
+//   deleted because C++ does not permit assigning to reference members.
+//
+//   In short:
+//     AllocatorHandle h1{alloc, tag};   // construct
+//     AllocatorHandle h2 = h1;          // copy-construct — OK
+//     AllocatorHandle h3 = std::move(h1); // move-construct — OK (same as copy)
+//     h2 = h3;                          // ERROR: copy-assignment deleted
+//
+//   This contract is intentional: rebinding a handle to a different allocator
+//   would be a lifetime hazard (the old reference could dangle).  The caller
+//   must construct a new handle explicitly.
+//
+//   PluginContext::alloc holds an AllocatorHandle by value; the loader can
+//   copy-construct it into PluginContext during aggregate initialisation
+//   because AllocatorHandle is copy-constructible.  Plugins must not store
+//   the handle past their own lifetime (the underlying PerContextAllocator is
+//   owned by the engine, not by the plugin).
+//
+// ## Lifetime contract
+//
+//   The PerContextAllocator passed at construction MUST outlive every
+//   AllocatorHandle derived from it.  The engine guarantees this for
+//   plugin-lifetime handles (the allocator is a long-lived context singleton).
+//   Test code must ensure the allocator is declared before the handle and goes
+//   out of scope after it (RAII ordering).
+//
 // ## -fno-exceptions clean
 //   No exceptions thrown or propagated.  Error path uses std::unexpected.
 // ---------------------------------------------------------------------------
@@ -296,9 +327,9 @@ public:
         : alloc_{alloc},
           tag_{tag} {}
 
-    // AllocatorHandle is copy-constructible — multiple handles with the same
-    // tag and underlying allocator are permitted.  Copying does not transfer
-    // ownership because AllocatorHandle is non-owning (holds a reference).
+    // Copy-constructible: multiple handles with the same tag and underlying
+    // allocator are permitted.  Copying does not transfer ownership — the
+    // handle is non-owning (holds a reference, not a pointer).
     AllocatorHandle(const AllocatorHandle&) noexcept = default;
 
     // Copy assignment is deleted: C++ does not allow assigning to references,
@@ -306,10 +337,13 @@ public:
     // Use a new handle to rebind to a different allocator.
     AllocatorHandle& operator=(const AllocatorHandle&) = delete;
 
-    // Move construction is copy for a non-owning handle.
+    // Move-constructible: semantically equivalent to copy for a non-owning
+    // handle (both the "source" and "destination" reference the same
+    // PerContextAllocator after the move).
     AllocatorHandle(AllocatorHandle&&) noexcept = default;
 
-    // Move assignment is deleted for the same reason as copy assignment.
+    // Move assignment is deleted for the same reason as copy assignment
+    // (reference member prevents rebinding via assignment).
     AllocatorHandle& operator=(AllocatorHandle&&) = delete;
 
     ~AllocatorHandle() noexcept = default;

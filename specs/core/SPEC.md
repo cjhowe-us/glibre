@@ -2577,7 +2577,7 @@ the only enforcement `core` SPEC §9 imposes per-aggregate.
   tag-free per `perf-budget.md` Allocator Rule #1). `AllocatorHandle`
   is declared in `core/include/glibre/alloc.hpp` alongside
   `PerContextAllocator`; `PluginContext::alloc` carries the stamped
-  handle into every plugin's registration entry-point).
+  handle into every plugin's registration entry-point.
 
 ## 10. Failure Modes & Error Model
 
