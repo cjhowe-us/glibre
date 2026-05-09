@@ -17,7 +17,6 @@ vcpkg_from_github(
     REPO apache/fury
     REF "v${VERSION}"
     SHA512 ce3cf158a184c19e9d7cfa974442846b77e1d893b8231b852b05fbd535ec1c39e30980ab5be513ada1432ef59b163681025088b902a2eb1442282348e54eeb2c
-    HEAD_REF main
     PATCHES
         patches/0001-use-vcpkg-abseil.patch
 )
@@ -55,6 +54,13 @@ file(WRITE "${CURRENT_PACKAGES_DIR}/share/fory/ForyAliases.cmake" [[
 # The upstream fory::fory ALIAS target is not exported by CMake's install()
 # command; its backing target fory::fory_lib is.  We create interface aliases
 # that glibre consumers can use.
+#
+# Abseil is a non-optional transitive dependency of Fory (used by the
+# debugging subsystem).  Declare it here so that consumers fail fast with a
+# clear CMake error rather than a cryptic linker error if absl is absent.
+include(CMakeFindDependencyMacro)
+find_dependency(absl CONFIG REQUIRED)
+
 if(TARGET fory::fory_lib AND NOT TARGET Fory::fory)
     add_library(Fory::fory INTERFACE IMPORTED GLOBAL)
     set_target_properties(Fory::fory PROPERTIES
@@ -79,8 +85,6 @@ endif()
 file(APPEND "${CURRENT_PACKAGES_DIR}/share/fory/ForyConfig.cmake"
     "\ninclude(\"\${CMAKE_CURRENT_LIST_DIR}/ForyAliases.cmake\")\n"
 )
-
-vcpkg_fixup_pkgconfig()
 
 vcpkg_copy_pdbs()
 

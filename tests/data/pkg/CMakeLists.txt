@@ -18,7 +18,11 @@ target_link_libraries(fory_target_links
         Fory::fory
 )
 
-# Disable C++ module std import for this target — it uses classical headers only.
+# CXX_MODULE_STD OFF: Catch2's generated main calls std:: symbols via classical
+# headers.  Apple-Clang's std module and Catch2's catch_all.hpp are
+# incompatible at the version pinned in vcpkg.json — enabling std module
+# import causes duplicate symbol linker errors on this toolchain.  This
+# property must remain OFF until Catch2 ships explicit module support.
 set_target_properties(fory_target_links PROPERTIES CXX_MODULE_STD OFF)
 
 include(CTest)

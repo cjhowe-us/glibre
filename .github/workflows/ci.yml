@@ -63,8 +63,7 @@ jobs:
             fory:arm64-osx \
             catch2:arm64-osx \
             --classic \
-            --overlay-ports=vcpkg-overlay-ports \
-            --overlay-ports=ports
+            --overlay-ports=vcpkg-overlay-ports
       - name: Configure
         run: |
           cmake --preset macos-debug \
