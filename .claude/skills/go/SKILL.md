@@ -305,9 +305,8 @@ Stop dispatching new leaves when one of:
 - The user asks to stop.
 - A completion run reports a structural problem (e.g. agent split a
   leaf — the new leaves need to be triaged before continuing).
-- The 95%-budget watermark trips (see Step 6).
 
-## Step 6 — Continuous-drive policy (95% budget)
+## Step 6 — Continuous-drive policy
 
 `/go` is a continuous driver, not a one-shot dispatcher. Once
 invoked, the skill keeps the dispatch pipeline saturated until one
@@ -318,42 +317,22 @@ loop:
   1. Sync local main (git fetch + git pull --ff-only).
   2. If any leaf is `dod:verified` since last tick, run Step 4c
      (stage-transition) — open + dispatch the next-stage children.
-  3. If a top-level slot is free AND the budget watermark has not
-     tripped, run Steps 1–3 to fill the slot with a fresh
-     unblocked leaf (or a Step-5 review-pipeline tick on an open
-     PR).
+  3. If a top-level slot is free, run Steps 1–3 to fill the slot
+     with a fresh unblocked leaf (or a Step-5 review-pipeline tick
+     on an open PR).
   4. Wait for the next completion notification (no polling).
   5. On completion, run Step 4 (verify output + hand to review).
   6. Goto 1.
 ```
 
-**Budget watermark.** Stop dispatching new top-level work when the
-session's context-token usage reaches **~95%**. The remaining ~5% is
-reserved exclusively for: (a) in-flight nested children completing
-and posting their status comments, (b) the orchestrator/main thread
-posting its final round-up summary on the user-facing chat, (c) any
-emergency `gh pr merge --disable-auto` calls if a misbehaving PR
-needs to be paused. Concretely:
-
-- The harness exposes context budget via the system context-window
-  signal. Estimate token usage from prompt + tool-result accumulation
-  if no direct gauge is available — err on the side of stopping
-  earlier rather than later.
-- Once the watermark trips: do NOT call `Agent({ run_in_background:
-  true, ... })` again. Continue to read completion notifications and
-  apply Step 4 / Step 4b / Step 4c / Step 5 to in-flight work, since
-  those mutate GitHub but not the local context as much as fresh
-  dispatches do.
-- After all in-flight agents drain (or after the user explicitly
-  asks to stop), post a single round-up message summarising: PRs
-  opened, issues closed via dod-verify, stage transitions opened,
-  any leaves left blocked. Then end the turn.
-
-**Why 95%, not 100%.** A new dispatch's prompt is the most
-context-expensive operation per dollar. Reaching 100% mid-loop risks
-truncating an in-flight nested child's status comment or losing the
-final round-up. The 5% reserve is the smallest buffer that
-empirically holds for both.
+**Stop conditions.** Continuous drive runs until one of: (a) total
+open unblocked leaves becomes 0, (b) the user types stop/pause, or
+(c) a structural problem requires triage. Token-budget self-throttling
+is removed because the harness already auto-compresses prior messages
+near context limits, and the watermark heuristic is unreliable. At
+end-of-loop, post a single round-up message summarising: PRs opened,
+issues closed via dod-verify, stage transitions opened, any leaves
+left blocked. Then end the turn.
 
 **User-overridable.** If the user types "stop", "pause", or a fresh
 non-/go message, exit the loop immediately — leave running agents
