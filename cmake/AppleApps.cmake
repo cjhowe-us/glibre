@@ -34,7 +34,11 @@ endif()
 # 1. iOS device + simulator static-lib sub-builds.
 #    Recursive cmake invocations reuse our presets; their CMAKE_SYSTEM_NAME=iOS
 #    makes this file early-return there, so no infinite recursion.
+#    EXCLUDE_FROM_ALL: iOS deployment is post-MVP and the cross-build infra has recurring
+#    CI failures (#992, #993, #994, #995). This target is available for manual builds
+#    but skipped in the default `cmake --build` so CI can proceed.
 add_custom_target(glibre_ios_libs
+    EXCLUDE_FROM_ALL
     COMMAND ${CMAKE_COMMAND} --preset ios-${_sub_suffix}
     COMMAND ${CMAKE_COMMAND} --build --preset ios-${_sub_suffix}
     COMMAND ${CMAKE_COMMAND} --preset ios-sim-${_sub_suffix}
@@ -80,7 +84,10 @@ add_custom_target(glibre_macos_app ALL
     VERBATIM
 )
 
-add_custom_target(glibre_ios_app ALL
+# iOS app build excluded from default build; post-MVP feature.
+# See glibre_ios_libs comment for reasoning on recurring CI failures.
+add_custom_target(glibre_ios_app
+    EXCLUDE_FROM_ALL
     COMMAND ${XCODEBUILD_EXECUTABLE}
         -project   ${CMAKE_SOURCE_DIR}/Glibre.xcodeproj
         -scheme    GlibreIOS
