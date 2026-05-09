@@ -13,6 +13,7 @@ cmake_minimum_required(VERSION 3.30)
 
 add_library(glibre-core STATIC
     src/frame_loop.cpp
+    src/eastl_alloc.cpp   # EASTL custom operator new[] substrate (PHILOSOPHY §11)
 )
 
 # EASTL is the substrate container/string/variant library per PHILOSOPHY §11.
