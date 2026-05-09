@@ -1,4 +1,5 @@
 #pragma once
+
 // tests/core/plugin_loader_register/plugin_context_fixture.hpp
 //
 // Shared fixture header — minimal empty shell definitions for the pending

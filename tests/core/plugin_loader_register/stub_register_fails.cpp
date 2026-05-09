@@ -69,8 +69,7 @@ std::size_t glibre_plugin_manifest_size = 0u;
 #pragma clang diagnostic ignored "-Wreturn-type-c-linkage"
 
 extern "C" [[gnu::visibility("default")]]
-glibre::Result<void>
-glibre_plugin_register(glibre::core::PluginContext& /*ctx*/) noexcept {
+glibre::Result<void> glibre_plugin_register(glibre::core::PluginContext& /*ctx*/) noexcept {
     // Simulate registration failure.  The loader must treat this as
     // PluginInitFailed and run compensating cleanup (dlclose + abort load).
     return std::unexpected(glibre::Error{glibre::core::Error::PluginInitFailed});

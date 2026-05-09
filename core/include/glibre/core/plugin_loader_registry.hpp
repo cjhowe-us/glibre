@@ -3,7 +3,7 @@
 //
 // PluginLoaderRegistry — tracks loaded plugins and enforces the compatibility
 // gates described in reviews/decisions/plugin-abi.md §"Loader Sequence"
-// steps 4–11 (gate validation in steps 4–7; post-gate actions in 8–11).
+// steps 4–7.
 //
 // This class is NOT a singleton; callers own the registry value.  In
 // production the engine owns one instance per process.  In tests,
@@ -28,17 +28,11 @@
 //      every entry in manifest.depends_on must already be registered.
 //      Missing → core::Error::PluginDependencyMissing.
 //
-// Post-gate actions (steps 9–11) — added by plan #231:
-//   call_register   — invokes glibre_plugin_register(&ctx) after gates pass.
-//                     On failure → core::Error::PluginInitFailed; caller
-//                     is responsible for compensating cleanup (dlclose).
-//   rebuild_schedule — recomputes the per-phase system schedule topology.
-//                     MVP stub returns success unconditionally.
-//                     TODO(#247, #248): real schedule graph rebuild.
-//   migrate_components — walks per-type migration tables (plan #221 format).
-//                     MVP stub returns success unconditionally.
-//                     TODO(#221): real archetype migration once data-context
-//                     migration tables land.
+// Post-gate actions (steps 9–11) live in plugin_loader_actions.hpp as free
+// functions.  They are free functions — not methods here — because they do
+// not read or mutate this class's registry-of-records state (loaded_ map and
+// host_engine_version_).  Mixing registry-of-records state with loader-
+// procedure logic would introduce a second reason to change this class (SRP).
 //
 // PHILOSOPHY §11: EASTL replaces std:: for runtime data structures.
 // std:: is retained for std::expected (Result alias) and std::filesystem.
@@ -52,7 +46,6 @@
 #include <EASTL/string.h>
 #include <EASTL/string_view.h>
 #include <EASTL/vector.h>
-#include <glibre/core/plugin_api.hpp>     // RegisterFn (moved from plugin_entry.hpp, LOW-7)
 #include <glibre/core/plugin_manifest.hpp>
 #include <glibre/error.hpp>
 
@@ -216,96 +209,6 @@ public:
     // -----------------------------------------------------------------------
 
     [[nodiscard]] std::size_t loaded_count() const noexcept;
-
-    // -----------------------------------------------------------------------
-    // call_register — loader step 9 (plugin-abi.md §"Loader Sequence").
-    //
-    // Invokes the resolved glibre_plugin_register function pointer with the
-    // provided PluginContext reference.  This step must be called AFTER all
-    // four validate_* gates have passed.
-    //
-    // Preconditions (unchecked; caller must ensure):
-    //   • validate_all() returned success for this plugin.
-    //   • The world is drained (phase 8 invariant, frame-phases.md §8).
-    //   • register_fn is not nullptr.
-    //
-    // On failure:
-    //   Returns core::Error::PluginInitFailed, carrying the inner error code
-    //   returned by glibre_plugin_register in ErrorContext::detail as a
-    //   best-effort string (plugin-abi.md §"Failure Modes" step 9).
-    //   The caller is responsible for compensating cleanup:
-    //     - dlclose the dylib handle (the loader owns the handle).
-    //     - Remove any partial registrations the plugin made.
-    //   This method does NOT call dlclose; it only invokes the entry-point.
-    //
-    // @param register_fn  Function pointer resolved from dlsym.
-    // @param ctx          Engine context passed by reference to the plugin.
-    // -----------------------------------------------------------------------
-
-    [[nodiscard]] static Result<void>
-    call_register(RegisterFn register_fn, PluginContext& ctx) noexcept;
-
-    // -----------------------------------------------------------------------
-    // rebuild_schedule — loader step 10 (plugin-abi.md §"Loader Sequence").
-    //
-    // Recomputes the per-phase system schedule from the union of all loaded
-    // plugins' declared (reads, writes, after, before) edges.  A cycle →
-    // core::Error::SystemScheduleCycle; the loader rolls back the last
-    // plugin's registration and aborts that single load (other plugins keep
-    // running).
-    //
-    // MVP STUB: Returns success unconditionally.  Real schedule graph
-    // topology sort from SystemDecl.after / SystemDecl.before edges is
-    // deferred to frame-loop plans #247 and #248 which define SystemRegistry
-    // and the full schedule graph builder.
-    //
-    // TODO(#247, #248): replace stub with topological sort over loaded
-    // plugins' SystemDecl vectors; return SystemScheduleCycle on cycle.
-    //
-    // Per plugin-abi.md §"Open Questions" point 1, per-plugin ownership
-    // records for rollback may use an eastl::vector<eastl::string>; revisit
-    // at the hot-reload story.  The MVP stub does not yet record ownership.
-    // -----------------------------------------------------------------------
-
-    [[nodiscard]] Result<void> rebuild_schedule() noexcept;
-
-    // -----------------------------------------------------------------------
-    // migrate_components — loader step 11 (plugin-abi.md §"Loader Sequence").
-    //
-    // For each persistent component whose schema bumped versions, runs the
-    // per-type deserialize<T> migration path against the pre-swap snapshot
-    // (fory-codegen.md §"Migration Mechanic").
-    //
-    // MVP STUB: Returns success unconditionally when from_version ==
-    // to_version (no migration needed) and also when from_version !=
-    // to_version (real migration deferred — see TODO below).
-    //
-    // On real failure the caller must:
-    //   1. Call glibre_plugin_unregister if exported (step 9 reverse).
-    //   2. dlclose the dylib handle.
-    //   3. Abort the load, leaving prior plugins running.
-    //
-    // Error arm: core::Error::SchemaMigrationFailed.
-    //
-    // TODO(#221): real per-type migration once glibre-foryc emits
-    // glibre_plugin_migrations_<TypeName> export tables.  The table format
-    // is specified in plan #221 (foryc migrations); this stub acknowledges
-    // the interface contract while deferring the walk implementation.
-    //
-    // @param from_version  Component schema version before this load.
-    // @param to_version    Component schema version this plugin declares.
-    //
-    // PROVISIONAL SIGNATURE NOTE: The per-call (from_version, to_version)
-    // parameter pair is a placeholder for the MVP stub.  When plan #221 lands,
-    // the signature will likely change to accept a per-type migration table
-    // handle (e.g. a MigrationChain* or span<MigrationStep>) so that the
-    // caller passes the glibre_plugin_migrations_<TypeName> table pointer
-    // directly.  Do not build call sites that depend on the current parameter
-    // shape surviving unchanged across plan #221.
-    // -----------------------------------------------------------------------
-
-    [[nodiscard]] static Result<void>
-    migrate_components(std::uint32_t from_version, std::uint32_t to_version) noexcept;
 
 private:
     // -----------------------------------------------------------------------

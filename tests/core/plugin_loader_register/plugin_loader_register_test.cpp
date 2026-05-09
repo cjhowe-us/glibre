@@ -1,6 +1,6 @@
 // tests/core/plugin_loader_register/plugin_loader_register_test.cpp
 //
-// Unit tests for PluginLoaderRegistry loader steps 9–11:
+// Unit tests for loader-procedure free functions (steps 9–11):
 //   call_register   (step 9) — invoke glibre_plugin_register(PluginContext&)
 //   rebuild_schedule (step 10) — MVP stub; always succeeds
 //   migrate_components (step 11) — MVP stub; always succeeds
@@ -14,7 +14,7 @@
 // Design constraints:
 //   • -fno-exceptions (error-model.md §Decision 3).
 //   • EASTL for containers/strings per PHILOSOPHY §11.
-//   • Each TEST_CASE owns its own PluginLoaderRegistry (not a singleton).
+//   • Each TEST_CASE constructs its own objects (no singletons).
 //   • PluginContext references World, TypeRegistry, etc. which are opaque
 //     pending types.  The test defines minimal empty stubs for each
 //     forward-declared class so that PluginContext can be constructed
@@ -25,7 +25,8 @@
 // Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" steps 9–11,
 //            §"Failure Modes → core::Error" table (rows 9, 10, 11).
 //
-// Plan: #231 — PluginLoaderRegistry register + schedule rebuild + migrate.
+// Plan: #231 — loader-procedure free functions: call_register + rebuild_schedule
+//              + migrate_components.
 
 #include <cstddef>
 #include <cstdint>
@@ -33,9 +34,9 @@
 
 #include <EASTL/string_view.h>
 #include <catch2/catch_test_macros.hpp>
-#include <glibre/core/plugin_api.hpp>        // PluginContext aggregate
-#include <glibre/core/plugin_loader.hpp>     // PluginLoader::open
-#include <glibre/core/plugin_loader_registry.hpp>
+#include <glibre/core/plugin_api.hpp>             // PluginContext aggregate
+#include <glibre/core/plugin_loader.hpp>          // PluginLoader::open
+#include <glibre/core/plugin_loader_actions.hpp>  // call_register, rebuild_schedule, migrate_components
 #include <glibre/core/plugin_manifest.hpp>
 #include <glibre/error.hpp>
 
@@ -55,8 +56,6 @@
 
 namespace {
 
-constexpr glibre::core::SemVer kHostVersion{1, 0, 0};
-
 // ABI hash the noop plugin and stub_register_fails export (all-zeros).
 constexpr const char kNoopAbiHash[] =
     "0000000000000000000000000000000000000000000000000000000000000000";
@@ -68,7 +67,7 @@ constexpr const char kNoopAbiHash[] =
 }
 
 /// Build a minimal valid PluginManifest that passes all registry gates when
-/// expected_abi_hash == kNoopAbiHash and host version == kHostVersion.
+/// expected_abi_hash == kNoopAbiHash.
 glibre::core::PluginManifest make_manifest(
     const char* name = "glibre.test.register",
     const char* abi_hash = kNoopAbiHash,
@@ -155,8 +154,7 @@ TEST_CASE("register_invokes_plugin_entry_point", "[core][register]") {
     auto ctx = make_context(world, type_reg, sys_reg, pass_reg, panel_reg, log_sink, manifest);
 
     // Step 4: call call_register — noop plugin returns success.
-    auto result =
-        glibre::core::PluginLoaderRegistry::call_register(loader.register_fn(), ctx);
+    auto result = glibre::core::call_register(loader.register_fn(), ctx);
 
     REQUIRE(result.has_value());
 #endif
@@ -215,8 +213,7 @@ TEST_CASE("register_failure_cleans_up_dlopen", "[core][register]") {
     auto ctx = make_context(world, type_reg, sys_reg, pass_reg, panel_reg, log_sink, manifest);
 
     // Step 4: call_register must return PluginInitFailed.
-    auto result =
-        glibre::core::PluginLoaderRegistry::call_register(loader.register_fn(), ctx);
+    auto result = glibre::core::call_register(loader.register_fn(), ctx);
 
     REQUIRE_FALSE(result.has_value());
     const auto* core_err = as_core_error(result.error());
@@ -256,9 +253,7 @@ TEST_CASE("register_failure_cleans_up_dlopen", "[core][register]") {
 // ===========================================================================
 
 TEST_CASE("rebuild_schedule_smoke", "[core][register]") {
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
-
-    auto result = registry.rebuild_schedule();
+    auto result = glibre::core::rebuild_schedule();
 
     REQUIRE(result.has_value());
 }
@@ -285,20 +280,20 @@ TEST_CASE("rebuild_schedule_smoke", "[core][register]") {
 TEST_CASE("migrate_components_no_op_when_versions_equal", "[core][register]") {
     // Case 1: from == to (identity — nothing to migrate).
     SECTION("identical versions return success") {
-        auto result = glibre::core::PluginLoaderRegistry::migrate_components(3u, 3u);
+        auto result = glibre::core::migrate_components(3u, 3u);
         REQUIRE(result.has_value());
     }
 
     // Case 2: from == 0, to == 0 (initial install — no prior version).
     SECTION("both zero versions return success") {
-        auto result = glibre::core::PluginLoaderRegistry::migrate_components(0u, 0u);
+        auto result = glibre::core::migrate_components(0u, 0u);
         REQUIRE(result.has_value());
     }
 
     // Case 3: from < to (upgrade path — MVP stub returns success;
     //   real migration deferred to plan #221).
     SECTION("upgrade path stub returns success") {
-        auto result = glibre::core::PluginLoaderRegistry::migrate_components(1u, 2u);
+        auto result = glibre::core::migrate_components(1u, 2u);
         REQUIRE(result.has_value());
     }
 }

@@ -1,22 +1,18 @@
 // core/src/plugin_loader_registry.cpp
 //
-// PluginLoaderRegistry — gates 4–7 and post-gate actions 9–11 of the plugin
-// loader sequence.
+// PluginLoaderRegistry — gates 4–7 of the plugin loader sequence.
 //
-// Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" steps 4–11
+// Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" steps 4–7
 //            and §"Failure Modes → core::Error".
 //
 // Plans: #230 (ABI hash + version + name + deps gates, steps 4–7).
-//        #231 (register call + rebuild + migrate stubs, steps 9–11).
-// Out of scope: dlopen/dlsym (plan #229).
+// Out of scope: dlopen/dlsym (plan #229); post-gate actions 9–11
+//   (plugin_loader_actions.cpp, plan #231).
 
 #include "glibre/core/plugin_loader_registry.hpp"
 
 #include <cstddef>
 #include <cstdint>
-
-#include "glibre/core/plugin_api.hpp"  // PluginContext — required by call_register
-#include "glibre/log_error.hpp"        // glibre::variant_code_string — stable to_string for inner Error
 
 namespace glibre::core {
 
@@ -225,120 +221,5 @@ bool PluginLoaderRegistry::is_registered(eastl::string_view name) const noexcept
 // ---------------------------------------------------------------------------
 
 std::size_t PluginLoaderRegistry::loaded_count() const noexcept { return loaded_.size(); }
-
-// ---------------------------------------------------------------------------
-// call_register — loader step 9 (plugin-abi.md §"Loader Sequence")
-//
-// Invokes the resolved glibre_plugin_register function pointer with the
-// provided PluginContext reference.  On failure wraps the returned error
-// detail in core::Error::PluginInitFailed per plugin-abi.md §step 9.
-//
-// Caller responsibilities on failure:
-//   - dlclose the dylib handle (the loader owns the handle, not this method).
-//   - Remove any partial registrations the plugin may have made.
-//
-// MVP ownership-record note (plugin-abi.md §"Open Questions" point 1):
-//   Per-plugin ownership records for compensating unregister are deferred to
-//   the hot-reload story.  MVP load sequence aborts the entire load on
-//   register() failure; no partial unwind of individual registry entries is
-//   attempted here (the plugin either succeeds fully or the whole plugin load
-//   is rolled back at the dlopen level by the caller).
-// ---------------------------------------------------------------------------
-
-Result<void>
-PluginLoaderRegistry::call_register(RegisterFn register_fn, PluginContext& ctx) noexcept {
-    // register_fn must be non-null; the loader resolved it via dlsym step 2.
-    // A null pointer here indicates a caller logic error; refuse loudly.
-    if (register_fn == nullptr) {
-        return std::unexpected(
-            glibre::Error{
-                core::Error::PluginInitFailed,
-                ErrorContext{
-                    .file = __FILE__,
-                    .line = __LINE__,
-                    .detail = "register_fn is null — caller must resolve symbol before calling",
-                },
-            }
-        );
-    }
-
-    // Invoke the plugin entry-point.
-    // glibre_plugin_register returns std::expected<void, glibre::Error>; on
-    // failure the inner error is the plugin's own diagnostic.  We wrap it in
-    // PluginInitFailed so the loader's error arm is stable regardless of which
-    // inner code the plugin emits (plugin-abi.md §"Failure Modes" step 9
-    // mandates PluginInitFailed, *carrying the inner error in ErrorContext::detail*).
-    //
-    // glibre::variant_code_string() returns a const char* pointing to a
-    // string literal from the hand-written to_string() overloads in log_error.hpp.
-    // Those literals have static storage duration and are therefore safe to store
-    // in the eastl::string_view detail field — no pointer instability concern
-    // (contrast with dlerror() text per plugin-abi.md step 1 dlerror() note).
-    if (auto r = register_fn(ctx); !r) {
-        const char* inner_detail = glibre::variant_code_string(r.error());
-        return std::unexpected(
-            glibre::Error{
-                core::Error::PluginInitFailed,
-                ErrorContext{
-                    .file = __FILE__,
-                    .line = __LINE__,
-                    // detail carries the inner error's stable enumerator name
-                    // (plugin-abi.md §"Loader Sequence" step 9).
-                    .detail = eastl::string_view{inner_detail},
-                },
-            }
-        );
-    }
-    return {};
-}
-
-// ---------------------------------------------------------------------------
-// rebuild_schedule — loader step 10 (plugin-abi.md §"Loader Sequence")
-//
-// MVP STUB: returns success unconditionally.
-//
-// The real implementation recomputes the per-phase system schedule from the
-// union of all loaded plugins' declared (reads, writes, after, before) edges
-// and detects cycles (→ core::Error::SystemScheduleCycle).
-//
-// TODO(#247): integrate with frame-loop SystemRegistry schedule builder.
-// TODO(#248): topological sort of SystemDecl ordering edges within each phase.
-// ---------------------------------------------------------------------------
-
-Result<void> PluginLoaderRegistry::rebuild_schedule() noexcept {
-    // MVP stub — no topology to rebuild yet (SystemRegistry not landed).
-    // When #247 / #248 land, replace this body with:
-    //   return system_registry_.rebuild_schedule();  // → SystemScheduleCycle on cycle
-    return {};
-}
-
-// ---------------------------------------------------------------------------
-// migrate_components — loader step 11 (plugin-abi.md §"Loader Sequence")
-//
-// MVP STUB: returns success unconditionally for any (from_version, to_version)
-// pair, including when they differ.
-//
-// The real implementation walks glibre_plugin_migrations_<TypeName> export
-// tables emitted by glibre-foryc (plan #221) and dispatches each migration
-// step against the pre-swap archetype snapshot (fory-codegen.md §"Migration
-// Mechanic").
-//
-// TODO(#221): walk per-type migration tables once glibre-foryc emits them.
-//   Table format per plan #221: glibre_plugin_migrations_<TypeName> is an
-//   array of MigrationStep{from_v, to_v, fn} terminated by a sentinel entry
-//   with both versions == 0.  The loader dlsym()s each type's table and calls
-//   fn(raw_bytes, size) for each step whose from_v == current schema version.
-// ---------------------------------------------------------------------------
-
-Result<void> PluginLoaderRegistry::migrate_components(
-    std::uint32_t /*from_version*/, std::uint32_t /*to_version*/
-) noexcept {
-    // MVP stub — real archetype migration deferred to plan #221.
-    // When from_version == to_version there is nothing to migrate; this stub
-    // handles that case correctly.  When they differ, the real implementation
-    // will dispatch the migration chain; the stub silently succeeds (acceptable
-    // for MVP since no persistent archetype data exists yet).
-    return {};
-}
 
 }  // namespace glibre::core
