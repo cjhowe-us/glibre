@@ -20,6 +20,7 @@ cmake_minimum_required(VERSION 4.3.0)
 #
 # S1 Synthetic Scene Invariants (plan #243, perf-budget.md §S1 scenario):
 #   entity_count=100, archetype_count=4, system_count=2, viewport=1920x1080
+#   (canonical 1+200+8 entity split deferred to plan #1003)
 #
 # Build flags:
 #   - NO -fno-exceptions: Catch2 BENCHMARK requires exception support
@@ -44,10 +45,13 @@ target_compile_features(glibre-perf-budget-gate-tests PRIVATE cxx_std_23)
 set_target_properties(glibre-perf-budget-gate-tests PROPERTIES CXX_MODULE_STD OFF)
 
 # Include glibre core headers for perf_bench.hpp.
-# Does not link glibre::core; both the plan #242 scaffolding and the plan #243
-# S1 fixture use only the header-only BENCHMARK_CELL_BODY macro from
-# perf_bench.hpp.  Real ECS / FrameLoop linkage lands when those subsystems
-# provide stable public headers.
+# Does NOT link glibre::core for the following reason:
+#   plan #243 uses only the header-only BENCHMARK_CELL_BODY macro and the
+#   local ContextTag enum copy from perf_bench.hpp.  Collapsing the duplicate
+#   ContextTag (perf_bench.hpp vs. perf_budget.hpp) requires updating the
+#   namespace alias in perf_bench.hpp; that refactor is deferred to plan #1003
+#   which already links glibre::core for the load_s1() fixture helper.
+#   See issue #1003 and the perf_bench.hpp §Dependency note.
 target_include_directories(
     glibre-perf-budget-gate-tests PRIVATE "${CMAKE_SOURCE_DIR}/core/include"
 )

@@ -6,7 +6,7 @@
 // Authority: plan #243, perf-budget.md §CI Gate Spec #1.
 //
 // S1 Synthetic Scene Invariants:
-//   entity_count  : 100  (placeholder entities; real ECS archetype tables land later)
+//   entity_count  : 100  (placeholder entities; canonical 1+200+8 wires in #1003)
 //   archetype_count: 4   (four distinct component layouts, deterministically seeded)
 //   system_count  : 2    (core transform sweep + render visibility sweep)
 //   viewport      : 1920x1080 (descriptor constant matching perf-budget.md §S1)
@@ -16,6 +16,14 @@
 // staying strictly within their per-context CPU sim ceilings on Apple M1 at -O2.
 // Real ECS transform propagation and render cull-extract land once those subsystems
 // are built; the fixture invariants (entity/archetype/system counts) survive intact.
+//
+// Scope note (plan #243 amended after PR #1000 round-1 review):
+//   This file ships two BENCHMARK_CELL tests against 100 placeholder entities to
+//   populate the BENCHMARK_CELL_BODY contract for two contexts so the CI gate has
+//   live cells to enforce.  The canonical S1 fixture (1 char + 200 props + 8 lights,
+//   entity_count=209, e2e/perf/s1/ manifest, load_s1() helper, and the three named
+//   fixture tests) is deferred to plan #1003.
+//   See issue #243 §Iterates In and issue #1003.
 //
 // Named test cases (plan #243 DoD):
 //   - s1_scene_core_phase_within_budget
@@ -37,20 +45,21 @@
 //
 // Defines the synthetic scene dimensions referenced throughout this file.
 // These constants are the source of truth for the S1 fixture within this
-// plan; the S1 manifest (e2e/perf/s1/) records the same values in YAML for
-// the E2E gate (a separate plan).
+// plan; the canonical S1 scene invariants (1 character + 200 props + 8 dynamic
+// lights = 209 entities, perf-budget.md §S1) are established by plan #1003.
 // ---------------------------------------------------------------------------
 
 namespace {
 
-// S1 scene dimensions (perf-budget.md §Justification Per Cell — S1 scenario).
+// S1 scene dimensions (synthetic; canonical 1+200+8 entity split lands in #1003).
+// perf-budget.md §S1 full scenario: 1 character + 200 props + 8 dynamic lights at
+// 1920x1080.  The 100-entity placeholder is the macro-infra exercise workload only.
 inline constexpr std::uint32_t kS1EntityCount = 100u;
 inline constexpr std::uint32_t kS1ArchetypeCount = 4u;
 inline constexpr std::uint32_t kS1SystemCount = 2u;
 
 // Viewport descriptor (perf-budget.md §S1: "1 character + 200 props + 8 dynamic lights
-// at 1920x1080"). The fixture uses 100 placeholder entities; the viewport size matters
-// for the render visibility sweep stub.
+// at 1920x1080").
 inline constexpr std::uint32_t kS1ViewportWidth = 1920u;
 inline constexpr std::uint32_t kS1ViewportHeight = 1080u;
 
@@ -59,10 +68,9 @@ inline constexpr std::uint32_t kS1ViewportHeight = 1080u;
 //
 // Models the core context's phase 5 (transform) work:
 //   - Walk kS1EntityCount entity slots arranged in kS1ArchetypeCount groups.
-//   - Apply a simple parent→child transform accumulation (integer mat4 stub).
-//   - Write results to a volatile sink to prevent dead-code elimination.
+//   - Apply a simple parent->child transform accumulation (integer mat4 stub).
 //
-// Complexity: O(entity_count * archetype_count) with small constant — well
+// Complexity: O(entity_count * archetype_count) with small constant -- well
 // under the 400 µs (400_000 ns) core CPU sim ceiling on M1 at -O2.
 // ---------------------------------------------------------------------------
 [[nodiscard]] std::uint64_t run_s1_core_phase() noexcept {
@@ -70,15 +78,9 @@ inline constexpr std::uint32_t kS1ViewportHeight = 1080u;
     constexpr std::uint32_t kGroupSize = kS1EntityCount / kS1ArchetypeCount;
 
     // Simulate per-archetype transform storage: 4x4 integer matrix (4*4 = 16 cells).
-    // Using std::array for a non-heap, cache-coherent layout (PHILOSOPHY §11: EASTL
-    // containers; std::array is a language/runtime aggregate, not a std:: container
-    // in the EASTL sense — it carries no allocator and is retained here per the
-    // PHILOSOPHY §11 note that std::span and similar aggregates are permitted when
-    // interop with non-EASTL APIs requires it; std::array follows the same rule).
+    // std::array is permitted per PHILOSOPHY §11 (no allocator, language aggregate).
     using Mat4i = std::array<std::int32_t, 16>;
 
-    // Parent transform (world-space identity, seeded with archetype index).
-    // Each archetype group accumulates into an independent dirty-set walk.
     std::uint64_t acc = 0u;
 
     for (std::uint32_t arch = 0u; arch < kS1ArchetypeCount; ++arch) {
@@ -90,7 +92,7 @@ inline constexpr std::uint32_t kS1ViewportHeight = 1080u;
 
         for (std::uint32_t e = 0u; e < kGroupSize; ++e) {
             // Stub mat4 multiply: accumulate dot of diagonal with entity index.
-            // This is O(16) integer ops per entity — representative of a real
+            // This is O(16) integer ops per entity -- representative of a real
             // SIMD mat4 multiply's memory/compute ratio at this entity count.
             std::int32_t dot = 0;
             for (std::uint32_t k = 0u; k < 16u; ++k) {
@@ -102,7 +104,7 @@ inline constexpr std::uint32_t kS1ViewportHeight = 1080u;
 
     // kS1SystemCount systems run per frame.  The first (archetype sweep above)
     // ran inside the outer loop.  The remaining (kS1SystemCount - 1) systems
-    // each perform a linear entity walk — here modelling entity-lifecycle
+    // each perform a linear entity walk -- here modelling entity-lifecycle
     // bookkeeping that touches every slot once.
     for (std::uint32_t sys = 1u; sys < kS1SystemCount; ++sys) {
         for (std::uint32_t e = 0u; e < kS1EntityCount; ++e) {
@@ -110,10 +112,7 @@ inline constexpr std::uint32_t kS1ViewportHeight = 1080u;
         }
     }
 
-    // Write through a volatile pointer to prevent the accumulation loop from
-    // being elided as dead code even when the caller discards the return value.
-    volatile std::uint64_t sink = acc;
-    return static_cast<std::uint64_t>(sink);
+    return acc;
 }
 
 // ---------------------------------------------------------------------------
@@ -124,15 +123,13 @@ inline constexpr std::uint32_t kS1ViewportHeight = 1080u;
 //     (simplified to a 2D bounding-box clip against kS1ViewportWidth x kS1ViewportHeight).
 //   - Accumulate visible entity indices into a draw-list counter.
 //
-// Complexity: O(entity_count) — trivially under the 1_500_000 ns render CPU
-// sim+submit ceiling on M1 at -O2.  Real mesh-shader indirect draw list
-// building is O(drawcall) with Metal argument buffer reuse; this stub models
-// the CPU-side cull scan that feeds it.
+// The cull predicate tests x_max against the right viewport edge (x_max <
+// kS1ViewportWidth) so the result is data-dependent and not trivially
+// constant-foldable.  Adding [[gnu::noinline]] defeats call-site folding.
+//
+// Complexity: O(entity_count) -- well under the 1_500_000 ns render ceiling.
 // ---------------------------------------------------------------------------
-[[nodiscard]] std::uint64_t run_s1_render_phase() noexcept {
-    // Each entity has a stub AABB: min = (e*8, e*4), max = min + (64, 64).
-    // Deterministic and viewport-relative so the compiler cannot fold all
-    // results at compile time.
+[[nodiscard]] [[gnu::noinline]] std::uint64_t run_s1_render_phase() noexcept {
     std::uint64_t visible_count = 0u;
 
     for (std::uint32_t e = 0u; e < kS1EntityCount; ++e) {
@@ -141,8 +138,11 @@ inline constexpr std::uint32_t kS1ViewportHeight = 1080u;
         const std::uint32_t x_max = x_min + 64u;
         const std::uint32_t y_max = y_min + 64u;
 
-        // Clip test: entity is visible if its AABB overlaps [0, viewport).
-        if (x_max > 0u && x_min < kS1ViewportWidth && y_max > 0u && y_min < kS1ViewportHeight) {
+        // Clip test: visible if AABB overlaps [0, viewport).
+        // x_max < kS1ViewportWidth is data-dependent (entities near the right
+        // edge are clipped); x_min < kS1ViewportWidth and y_* checks similarly.
+        if (x_min < kS1ViewportWidth && x_max < kS1ViewportWidth && y_min < kS1ViewportHeight &&
+            y_max < kS1ViewportHeight) {
             ++visible_count;
         }
     }
@@ -155,10 +155,7 @@ inline constexpr std::uint32_t kS1ViewportHeight = 1080u;
         draw_mask |= (visible_count >> arch) & 0xFFu;
     }
 
-    // Write through a volatile pointer to prevent the cull/draw loops from
-    // being elided as dead code even when the caller discards the return value.
-    volatile std::uint64_t sink = draw_mask;
-    return static_cast<std::uint64_t>(sink);
+    return draw_mask;
 }
 
 }  // namespace
