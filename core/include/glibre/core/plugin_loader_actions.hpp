@@ -30,7 +30,7 @@
 
 #include <cstdint>
 
-#include <glibre/core/plugin_api.hpp>      // RegisterFn, PluginContext
+#include <glibre/core/plugin_api.hpp>       // RegisterFn, PluginContext
 #include <glibre/core/plugin_manifest.hpp>  // PluginManifest, SemVer
 #include <glibre/error.hpp>
 

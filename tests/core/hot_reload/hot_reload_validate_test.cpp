@@ -19,9 +19,8 @@
 //   - No filesystem access — manifests are constructed in-memory.
 //   - EASTL per PHILOSOPHY §11 (eastl::string for manifest fields).
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <EASTL/string.h>
+#include <catch2/catch_test_macros.hpp>
 
 #include "glibre/core/plugin_loader_actions.hpp"
 #include "glibre/core/plugin_manifest.hpp"
@@ -39,8 +38,7 @@ constexpr const char* kGoodHash =
     "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
 
 // A different 64-char hex string representing a mismatched ABI hash.
-constexpr const char* kBadHash =
-    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+constexpr const char* kBadHash = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
 
 /// Build a baseline PluginManifest with the given name, abi_hash, and version.
 /// All other fields are defaulted (empty).
@@ -52,9 +50,9 @@ glibre::core::PluginManifest make_manifest(
     std::uint16_t patch = 0
 ) {
     glibre::core::PluginManifest m;
-    m.name     = eastl::string{name};
+    m.name = eastl::string{name};
     m.abi_hash = eastl::string{abi_hash};
-    m.version  = glibre::core::SemVer{major, minor, patch};
+    m.version = glibre::core::SemVer{major, minor, patch};
     return m;
 }
 
@@ -140,7 +138,7 @@ TEST_CASE("hot_reload_accepts_compatible_swap", "[core][hot_reload]") {
 // ===========================================================================
 
 TEST_CASE("hot_reload_rejects_name_mismatch", "[core][hot_reload]") {
-    const auto outgoing = make_manifest("glibre.render",  kGoodHash, 1);
+    const auto outgoing = make_manifest("glibre.render", kGoodHash, 1);
     const auto incoming = make_manifest("glibre.physics", kGoodHash, 1);
 
     const auto result = glibre::core::hot_reload_validate(outgoing, incoming);
