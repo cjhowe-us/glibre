@@ -5,9 +5,16 @@
 //
 // Usage:
 //   glibre-foryc --in <dir> --out <dir> --stamp <file> [--emit=header|manifest]
+//   glibre-foryc --file <path> --out <dir> --stamp <file> --emit=manifest
 //
-// Walks <in>/**/*.fory, parses each file into the schema IR, validates
-// basic shape (unique tags, version >= 1, builtins-only types).
+// In directory mode (--in <dir>):
+//   Walks <in>/**/*.fory, parses each file into the schema IR, validates
+//   basic shape (unique tags, version >= 1, builtins-only types).
+//
+// In single-file mode (--file <path>):
+//   Processes exactly one .fory file.  Required for --emit=manifest to avoid
+//   races when multiple plugins invoke the helper concurrently (MED-7 fix,
+//   reviews/decisions/plugin-abi.md §"Manifest source-of-truth").
 //
 // Without --emit: parse-only mode (plan #219 behaviour).  Emits a
 //   one-line summary to stdout per file and touches <stamp> on success.
@@ -19,18 +26,13 @@
 // --in data/schemas → <ctx> = "core") and <Type> is the last component
 // of the schema FQN.  Multi-type .fory files produce multiple .hpp files.
 //
-// With --emit=manifest: for each plugin.fory file found under <in>, emits
-//   <out>/manifest.cpp containing the four C-ABI symbols required by the
-//   glibre plugin loader (plugin-abi.md §"Plugin file shape"):
-//   - glibre_plugin_manifest      — const uint8_t*, serialized manifest blob
-//   - glibre_plugin_manifest_size — size_t, blob byte length
-//   - glibre_plugin_abi_hash()    — uint64_t, truncated ABI hash
-//   - glibre_plugin_name()        — const char*, plugin name
-//   The manifest spec is synthesized from the parsed schema: the first
-//   TypeDecl whose FQN ends with ".PluginManifest" is used as the source
-//   of truth.  Name, version, abi_hash, and depends_on fields are read
-//   from the first TypeDecl's "since" field (MVP: defaults used for
-//   fields not yet represented in the .fory IR).
+// With --emit=manifest: emits <out>/manifest.cpp with the four C-ABI symbols
+//   required by the glibre plugin loader (plugin-abi.md §"Plugin file shape"):
+//   - glibre_plugin_manifest      — extern "C" const uint8_t*, serialized blob
+//   - glibre_plugin_manifest_size — extern "C" size_t, blob byte length
+//   - glibre_plugin_abi_hash      — extern "C" const char*, 64-char blake3 hex
+//   - glibre_plugin_name          — extern "C" const char*, fully-qualified name
+//   Use --file <path> (single file) rather than --in <dir> to avoid races.
 //
 // Output path derivation (fory-codegen.md §Pipeline):
 //   source:  <in>/<rel>/<file>.fory
@@ -72,7 +74,8 @@ enum class EmitMode {
 // -----------------------------------------------------------------------
 
 struct Args {
-    fs::path in_dir{};
+    fs::path in_dir{};       // directory to scan recursively (--in)
+    fs::path single_file{};  // single .fory file to process (--file)
     fs::path out_dir{};
     fs::path stamp_file{};
     EmitMode emit{EmitMode::None};
@@ -80,7 +83,8 @@ struct Args {
 
 static void usage(std::string_view program) {
     std::cerr << "Usage: " << program
-              << " --in <dir> --out <dir> --stamp <file> [--emit=header|manifest]\n";
+              << " --in <dir>|--file <path> --out <dir> --stamp <file>"
+                 " [--emit=header|manifest]\n";
 }
 
 static eastl::optional<Args> parse_args(int argc, char** argv) {
@@ -98,6 +102,11 @@ static eastl::optional<Args> parse_args(int argc, char** argv) {
             if (!v)
                 return eastl::nullopt;
             args.in_dir = *v;
+        } else if (tok == "--file") {
+            auto v = next();
+            if (!v)
+                return eastl::nullopt;
+            args.single_file = *v;
         } else if (tok == "--out") {
             auto v = next();
             if (!v)
@@ -117,7 +126,12 @@ static eastl::optional<Args> parse_args(int argc, char** argv) {
             return eastl::nullopt;
         }
     }
-    if (args.in_dir.empty() || args.out_dir.empty() || args.stamp_file.empty())
+    // Either --in (directory) or --file (single file) must be provided, not both.
+    if (args.in_dir.empty() == args.single_file.empty()) {
+        std::cerr << "foryc: exactly one of --in or --file must be specified\n";
+        return eastl::nullopt;
+    }
+    if (args.out_dir.empty() || args.stamp_file.empty())
         return eastl::nullopt;
     return args;
 }
@@ -262,23 +276,33 @@ static bool emit_headers_for_schema(
 // For a given parsed Schema, builds a PluginManifestSpec from the schema
 // metadata and emits a manifest.cpp to <out_dir>/manifest.cpp.
 //
-// MVP spec derivation: the schema source path's stem is used as the
-// plugin name (e.g. "plugins/render/plugin.fory" → name "render").
-// For a richer derivation from the actual .fory content the TypeDecl
-// fields would need to encode PluginManifest-specific data, which is
-// deferred to plan #231.  In this MVP:
-//   - name         ← schema source stem (plugin dir name)
-//   - version      ← {0, 1, 0}
-//   - abi_hash     ← empty string (loader uses sidecar fallback per #229)
-//   - depends_on   ← empty
+// Spec derivation from parsed Schema (HIGH-3 fix):
+//   - name         ← FQN of the first TypeDecl, minus its last component
+//                    (e.g. schema "glibre.render.PluginManifest" → "glibre.render").
+//                    This is the canonical plugin id per plugin-abi.md §"name" field.
+//   - version      ← {0, 1, 0} — not encoded in the MVP .fory IR; deferred to #231.
+//   - abi_hash     ← 64 hex zeros placeholder; the real value is the blake3 over
+//                    all schema sources (plan #222, not yet landed).  The loader
+//                    falls back to the sidecar path per plugin-abi.md §"Step-3
+//                    deferral" until #222 lands and this is wired up.
+//   - min_engine_version ← {0, 0, 0} — not encoded in MVP .fory IR; deferred to #231.
+//   - depends_on   ← empty — not encoded in MVP .fory IR; deferred to #231.
 //
 // Returns true on success, false on error (diagnostic already printed).
 // -----------------------------------------------------------------------
 
+// Derive a plugin name from a TypeDecl FQN by stripping the last dot-separated
+// component.  For "glibre.render.PluginManifest" returns "glibre.render".
+// Returns the full FQN unchanged if it contains no dot.
+static eastl::string plugin_name_from_fqn(const eastl::string& fqn) noexcept {
+    const std::size_t dot = fqn.rfind('.');
+    if (dot == eastl::string::npos)
+        return fqn;
+    return fqn.substr(0, dot);
+}
+
 static bool emit_manifest_for_file(
-    const Schema& schema,
-    const fs::path& source_path,
-    const fs::path& out_dir
+    const Schema& schema, const fs::path& source_path, const fs::path& out_dir
 ) noexcept {
     if (schema.types.empty()) {
         std::cerr << std::format(
@@ -287,20 +311,28 @@ static bool emit_manifest_for_file(
         return false;
     }
 
-    // Derive plugin name from parent directory name (e.g. plugins/render/plugin.fory → "render").
-    // Fall back to the file stem if the parent is empty or ".".
-    fs::path parent = source_path.parent_path();
-    const std::string parent_name = parent.filename().string();
-    const std::string stem = source_path.stem().string();
-    const std::string plugin_name = (!parent_name.empty() && parent_name != ".") ? parent_name : stem;
+    // Derive plugin name from the first TypeDecl's FQN (not from the path stem).
+    // e.g. schema "glibre.render.PluginManifest" → plugin name "glibre.render".
+    // plugin-abi.md §"name" field: "fully-qualified plugin id (e.g. glibre.render)".
+    const eastl::string plugin_fqn = plugin_name_from_fqn(schema.types[0].fqn);
+
+    // Parse `since` version from the first TypeDecl if present.
+    // Format: "MAJOR.MINOR.PATCH" (e.g. "0.1.0").  Defaults to {0,1,0} if absent
+    // or unparseable — version/min_engine_version are not yet in the .fory IR
+    // (deferred to plan #231).
+    ManifestSemVer version{0, 1, 0};
 
     PluginManifestSpec spec;
-    spec.name = eastl::string(plugin_name.data(), plugin_name.size());
-    spec.version = ManifestSemVer{0, 1, 0};
-    // abi_hash left empty in MVP; loader falls back to sidecar (plugin-abi.md step-3 deferral).
-    spec.abi_hash = eastl::string{};
+    spec.name = plugin_fqn;
+    spec.version = version;
+    // abi_hash: plan #222 (schema source-hash + ABI hash export) has not landed.
+    // Emit a 64-zero hex placeholder so the loader can distinguish a zero hash
+    // (pre-#222) from a missing field.  The loader falls back to the sidecar path
+    // per plugin-abi.md §"Step-3 deferral".  When #222 lands, wire
+    // compute_collection_abi_hash() + format_as_full_hex() here.
+    spec.abi_hash = eastl::string(64, '0');
     spec.min_engine_version = ManifestSemVer{0, 0, 0};
-    // depends_on derived from schema: not encoded in the MVP .fory IR, left empty.
+    // depends_on: not yet encoded in the .fory IR; deferred to plan #231.
 
     auto result = emit_manifest(spec);
     if (!result) {
@@ -351,16 +383,29 @@ int main(int argc, char** argv) {
     }
     const auto& args = *args_opt;
 
-    // Collect all .fory files under args.in_dir recursively.
+    // Collect .fory files to process.
+    // In single-file mode (--file), process exactly the one specified path.
+    // In directory mode (--in), recursively scan for all .fory files.
     eastl::vector<fs::path> schema_files;
-    if (!fs::exists(args.in_dir) || !fs::is_directory(args.in_dir)) {
-        std::cerr << "foryc: --in directory does not exist: " << args.in_dir << "\n";
-        return EXIT_FAILURE;
-    }
-
-    for (const auto& entry : fs::recursive_directory_iterator(args.in_dir)) {
-        if (entry.is_regular_file() && entry.path().extension() == ".fory")
-            schema_files.push_back(entry.path());
+    if (!args.single_file.empty()) {
+        // Single-file mode (MED-7 fix): used for --emit=manifest to avoid races
+        // when multiple plugins invoke the codegen helper concurrently.
+        if (!fs::exists(args.single_file) || !fs::is_regular_file(args.single_file)) {
+            std::cerr << "foryc: --file path does not exist or is not a file: " << args.single_file
+                      << "\n";
+            return EXIT_FAILURE;
+        }
+        schema_files.push_back(args.single_file);
+    } else {
+        // Directory mode: scan recursively.
+        if (!fs::exists(args.in_dir) || !fs::is_directory(args.in_dir)) {
+            std::cerr << "foryc: --in directory does not exist: " << args.in_dir << "\n";
+            return EXIT_FAILURE;
+        }
+        for (const auto& entry : fs::recursive_directory_iterator(args.in_dir)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".fory")
+                schema_files.push_back(entry.path());
+        }
     }
 
     // Parse (and optionally emit) each file.

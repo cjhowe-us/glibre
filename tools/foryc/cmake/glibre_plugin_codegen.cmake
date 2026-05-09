@@ -4,13 +4,20 @@
 # glibre_emit_plugin_manifest(<target> <plugin_fory_path>)
 #
 # Wires a CMake custom command that invokes glibre-foryc --emit=manifest on a
-# plugin.fory source file and compiles the emitted manifest.cpp into <target>.
+# single plugin.fory source file and compiles the emitted manifest.cpp into
+# <target>.
 #
 # Authority: reviews/decisions/plugin-abi.md §"Manifest source-of-truth":
 #   "The codegen step that already runs for data/schemas/*.fory is extended
 #   to also process plugins/*/plugin.fory, emitting a generated manifest.cpp
 #   that embeds the Fory-serialized manifest blob into the plugin's
 #   translation unit."
+#
+# MED-7 fix (round-1 review): the helper takes a single .fory file path and
+# passes --file <path> to glibre-foryc instead of --in <dir>.  This avoids
+# the race condition that arises when multiple plugins' codegen targets each
+# write to their own manifest.cpp but receive --in pointing at a shared
+# source tree (causing concurrent writers to the same output path).
 #
 # Usage (in a plugin's CMakeLists.txt):
 #   include(tools/foryc/cmake/glibre_plugin_codegen.cmake)
@@ -46,17 +53,21 @@ function(glibre_emit_plugin_manifest target plugin_fory_path)
     set(_gen_dir "${CMAKE_CURRENT_BINARY_DIR}/glibre_gen/${target}")
     set(_manifest_out "${_gen_dir}/manifest.cpp")
     set(_stamp "${_gen_dir}/.manifest.stamp")
-    set(_in_dir "${CMAKE_CURRENT_SOURCE_DIR}")
 
     file(MAKE_DIRECTORY "${_gen_dir}")
 
+    # Pass --file <plugin_fory_path> (single-file mode) to avoid recursive
+    # directory scans that could race with other targets writing to the same
+    # output.  Each plugin target invokes this helper for its own plugin.fory
+    # only.  (MED-7 fix, round-1 review.)
     add_custom_command(
-        OUTPUT  "${_manifest_out}" "${_stamp}"
-        COMMAND "$<TARGET_FILE:glibre-foryc>"
-                --in   "${_in_dir}"
-                --out  "${_gen_dir}"
-                --stamp "${_stamp}"
-                --emit=manifest
+        OUTPUT "${_manifest_out}" "${_stamp}"
+        COMMAND
+            "$<TARGET_FILE:glibre-foryc>"
+            --file "${plugin_fory_path}"
+            --out "${_gen_dir}"
+            --stamp "${_stamp}"
+            --emit=manifest
         DEPENDS glibre-foryc "${plugin_fory_path}"
         COMMENT "glibre-foryc: emitting manifest.cpp for ${target}"
         VERBATIM

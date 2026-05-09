@@ -8,10 +8,16 @@
 // exports the four C-ABI symbols required by the loader (plugin-abi.md
 // §"Plugin file shape"):
 //
-//   glibre_plugin_manifest      — const uint8_t*, Fory-serialized blob
-//   glibre_plugin_manifest_size — size_t, byte length of the blob
-//   glibre_plugin_abi_hash      — uint64_t noexcept, ABI hash at compile time
-//   glibre_plugin_name          — const char* noexcept, fully-qualified name
+//   glibre_plugin_manifest      — extern "C" const uint8_t*, Fory-serialized blob
+//   glibre_plugin_manifest_size — extern "C" size_t, byte length of the blob
+//   glibre_plugin_abi_hash      — extern "C" const char*, 64-char blake3 hex global
+//   glibre_plugin_name          — extern "C" const char*, fully-qualified name global
+//
+// plugin-abi.md §"Plugin file shape" item 3 mandates:
+//   glibre_plugin_abi_hash — `extern "C" const char*`, 32-byte blake3 hex string
+//   (64 lowercase hex chars) compiled in from the middleman headers at build time.
+//   The plugin obtains this value by #include <glibre/types/abi_hash.hpp> and
+//   re-exports glibre_types_abi_hash()'s value as a string literal.
 //
 // MVP blob format:
 //   Real Apache Fory C++ serialization is deferred (plugin-abi.md §"Step-3
@@ -79,11 +85,11 @@ struct ManifestSemVer {
 // ---------------------------------------------------------------------------
 
 struct PluginManifestSpec {
-    eastl::string name;                          // tag 1 — e.g. "glibre.render"
-    ManifestSemVer version{};                    // tag 2
-    eastl::string abi_hash;                      // tag 3 — 64-char blake3 hex
-    ManifestSemVer min_engine_version{};         // tag 4
-    eastl::vector<eastl::string> depends_on;     // tag 9
+    eastl::string name;                       // tag 1 — e.g. "glibre.render"
+    ManifestSemVer version{};                 // tag 2
+    eastl::string abi_hash;                   // tag 3 — 64-char blake3 hex
+    ManifestSemVer min_engine_version{};      // tag 4
+    eastl::vector<eastl::string> depends_on;  // tag 9
 };
 
 // ---------------------------------------------------------------------------
@@ -95,12 +101,11 @@ struct PluginManifestSpec {
 //      anonymous namespace, populated with the hand-serialized blob (see
 //      §"MVP blob format" above).
 //   2. Exports four C-ABI symbols in an `extern "C"` block:
-//      - glibre_plugin_manifest      → pointer to kManifestBytes
+//      - glibre_plugin_manifest      → const uint8_t* const pointer to blob
 //      - glibre_plugin_manifest_size → sizeof(kManifestBytes)
-//      - glibre_plugin_abi_hash()    → uint64_t, truncated lower 8 bytes of
-//                                      spec.abi_hash interpreted as hex (or 0
-//                                      if spec.abi_hash is empty / too short)
-//      - glibre_plugin_name()        → C-string literal of spec.name
+//      - glibre_plugin_abi_hash      → const char* 64-char hex string literal
+//                                      (plugin-abi.md §"Plugin file shape" item 3)
+//      - glibre_plugin_name          → const char* string literal of spec.name
 //
 // The generated source compiles cleanly with:
 //   clang++ -std=c++23 -fno-exceptions -fno-rtti -c manifest.cpp
@@ -109,7 +114,6 @@ struct PluginManifestSpec {
 //   tools::Error::ForycSyntaxError — spec.name or spec.abi_hash is empty
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] glibre::Result<eastl::string>
-emit_manifest(const PluginManifestSpec& spec) noexcept;
+[[nodiscard]] glibre::Result<eastl::string> emit_manifest(const PluginManifestSpec& spec) noexcept;
 
 }  // namespace glibre::tools::foryc

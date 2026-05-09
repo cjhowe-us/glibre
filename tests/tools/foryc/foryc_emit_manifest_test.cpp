@@ -12,21 +12,18 @@
 //   std:: retained for: std::expected (glibre::Result), std::string_view,
 //   std::filesystem, std::system (subprocess invocation), dlfcn.h.
 
-#include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <string>
 #include <string_view>
 
-#include <dlfcn.h>
-
 #include <EASTL/string.h>
 #include <EASTL/vector.h>
-
 #include <catch2/catch_test_macros.hpp>
 
 #include "emit_manifest.hpp"
@@ -44,25 +41,24 @@ static bool has_tools_error(const glibre::Error& e, glibre::tools::Error code) n
 }
 
 // Build a minimal PluginManifestSpec for testing.
+// abi_hash_hex must be a 64-char lowercase hex string (blake3 format).
+// Defaults to 64 zeros if not provided.
 static PluginManifestSpec make_test_spec(
     const char* name = "glibre.test",
-    std::uint64_t abi_hash_u64 = 0xDEADBEEFCAFEBABEULL
+    const char* abi_hash_hex = "0000000000000000000000000000000000000000000000000000000000000000"
 ) {
     PluginManifestSpec spec;
     spec.name = eastl::string(name);
     spec.version = ManifestSemVer{0, 1, 0};
-    // Build a 64-char hex string from the uint64_t by padding (MVP test only).
-    // Full blake3 hex (64 chars) = 32 bytes; we embed our hash in the lower 16 chars.
-    spec.abi_hash = eastl::string("0000000000000000000000000000000000000000000000000");
-    const auto hex_tail = std::format("{:016X}", abi_hash_u64);
-    // Replace last 16 chars of the 65-char buffer (we made it 49 + 16 = 65? — fix:
-    // use a proper 64-char string)
-    spec.abi_hash = eastl::string(
-        "000000000000000000000000000000000000000000000000"  // 48 zeros
-    );
-    spec.abi_hash += eastl::string(hex_tail.c_str(), hex_tail.size());  // 16 hex chars → 64 total
+    spec.abi_hash = eastl::string(abi_hash_hex);
     spec.min_engine_version = ManifestSemVer{0, 0, 0};
     return spec;
+}
+
+// Build a 64-char lowercase hex string with the given uint64_t in the lower 16 chars.
+static std::string make_hex64_from_u64(std::uint64_t val) {
+    // 48 zero chars + 16 hex chars = 64 chars total.
+    return std::format("000000000000000000000000000000000000000000000000{:016x}", val);
 }
 
 // -----------------------------------------------------------------------
@@ -100,18 +96,19 @@ TEST_CASE("foryc_emit_manifest_writes_plugin_manifest_blob", "[foryc][emit_manif
     // The manifest pointer symbol must be present.
     CHECK(src.find("glibre_plugin_manifest") != eastl::string::npos);
 
-    // The plugin name must appear as a string literal in glibre_plugin_name().
-    // e.g.: return "glibre.render";
+    // The plugin name must appear as a string literal in glibre_plugin_name.
+    // e.g.: const char* glibre_plugin_name = "glibre.render";
     CHECK(src.find("\"glibre.render\"") != eastl::string::npos);
 
     // The extern "C" block must be present.
     CHECK(src.find("extern \"C\"") != eastl::string::npos);
 
-    // The glibre_plugin_name function must be present.
-    CHECK(src.find("glibre_plugin_name()") != eastl::string::npos);
+    // The glibre_plugin_name global must be present.
+    CHECK(src.find("glibre_plugin_name") != eastl::string::npos);
 
-    // The glibre_plugin_abi_hash function must be present.
-    CHECK(src.find("glibre_plugin_abi_hash()") != eastl::string::npos);
+    // The glibre_plugin_abi_hash global must be present.
+    // plugin-abi.md §"Plugin file shape" item 3: extern "C" const char* global.
+    CHECK(src.find("glibre_plugin_abi_hash") != eastl::string::npos);
 
     // Blob initializer must contain hex byte literals (0xNN pattern).
     CHECK(src.find("0x") != eastl::string::npos);
@@ -128,29 +125,30 @@ TEST_CASE("foryc_emit_manifest_writes_plugin_manifest_blob", "[foryc][emit_manif
 //
 // DoD: unit_test_named: foryc_emit_manifest_includes_abi_hash
 //
-// Verifies that when emit_manifest is given a spec with abi_hash containing
-// 0xDEADBEEFCAFEBABE in the lower 16 hex chars, the generated source
-// contains that hex value (in uppercase, matching std::format("{:016X}")).
+// Verifies that when emit_manifest is given a spec with a distinct abi_hash,
+// the generated source contains that hex string as a const char* literal.
+// plugin-abi.md §"Plugin file shape" item 3 mandates extern "C" const char*
+// (64-char hex string global), not a numeric return value.
 // -----------------------------------------------------------------------
 
 TEST_CASE("foryc_emit_manifest_includes_abi_hash", "[foryc][emit_manifest]") {
-    constexpr std::uint64_t kTestHash = 0xDEADBEEFCAFEBABEULL;
-    const auto spec = make_test_spec("glibre.test.hash", kTestHash);
+    // Use a recognisable 64-char hex string.
+    constexpr const char* kHash64 =
+        "deadbeefcafebabe0000000000000000000000000000000000000000cafef00d";
+    const auto spec = make_test_spec("glibre.test.hash", kHash64);
 
     auto result = emit_manifest(spec);
     REQUIRE(result.has_value());
 
     const eastl::string& src = *result;
 
-    // The glibre_plugin_abi_hash() function must return the truncated hash.
-    // emit_manifest.cpp parses the lower 16 chars of the 64-char hex string
-    // and emits them as a uint64_t literal via std::format("{:016X}").
-    const auto expected_literal = std::format("0x{:016X}ULL", kTestHash);
-    CHECK(src.find(eastl::string(expected_literal.c_str(), expected_literal.size()))
-              != eastl::string::npos);
+    // The glibre_plugin_abi_hash global must contain the full 64-char hex string
+    // as a string literal (plugin-abi.md §"Plugin file shape" item 3).
+    const eastl::string expected_literal = eastl::string("\"") + eastl::string(kHash64) + "\"";
+    CHECK(src.find(expected_literal) != eastl::string::npos);
 
-    // The return statement in glibre_plugin_abi_hash() must reference the hash.
-    CHECK(src.find("glibre_plugin_abi_hash()") != eastl::string::npos);
+    // The const char* global must be present (not a function returning uint64_t).
+    CHECK(src.find("glibre_plugin_abi_hash") != eastl::string::npos);
 }
 
 // -----------------------------------------------------------------------
@@ -160,6 +158,17 @@ TEST_CASE("foryc_emit_manifest_includes_abi_hash", "[foryc][emit_manifest]") {
 TEST_CASE("foryc_emit_manifest_rejects_empty_name", "[foryc][emit_manifest]") {
     PluginManifestSpec spec;
     spec.name = eastl::string{};  // empty name — should fail
+    spec.abi_hash = eastl::string(64, '0');
+
+    auto result = emit_manifest(spec);
+    REQUIRE(!result.has_value());
+    CHECK(has_tools_error(result.error(), glibre::tools::Error::ForycSyntaxError));
+}
+
+TEST_CASE("foryc_emit_manifest_rejects_empty_abi_hash", "[foryc][emit_manifest]") {
+    PluginManifestSpec spec;
+    spec.name = eastl::string("glibre.test");
+    spec.abi_hash = eastl::string{};  // empty abi_hash — should fail
 
     auto result = emit_manifest(spec);
     REQUIRE(!result.has_value());
@@ -200,8 +209,8 @@ TEST_CASE("foryc_emit_manifest_depends_on_encoded_in_blob", "[foryc][emit_manife
     // The generated source must still export the four required symbols.
     CHECK(src.find("glibre_plugin_manifest") != eastl::string::npos);
     CHECK(src.find("glibre_plugin_manifest_size") != eastl::string::npos);
-    CHECK(src.find("glibre_plugin_abi_hash()") != eastl::string::npos);
-    CHECK(src.find("glibre_plugin_name()") != eastl::string::npos);
+    CHECK(src.find("glibre_plugin_abi_hash") != eastl::string::npos);
+    CHECK(src.find("glibre_plugin_name") != eastl::string::npos);
 }
 
 // -----------------------------------------------------------------------
@@ -212,26 +221,37 @@ TEST_CASE("foryc_emit_manifest_depends_on_encoded_in_blob", "[foryc][emit_manife
 // symbols.  Verifies:
 //   1. All four symbols resolve (non-null).
 //   2. glibre_plugin_manifest_size > 0.
-//   3. glibre_plugin_name() returns the expected plugin name.
-//   4. glibre_plugin_abi_hash() returns the expected truncated hash value.
+//   3. glibre_plugin_name returns the expected plugin name.
+//   4. glibre_plugin_abi_hash returns the expected 64-char hex string.
 //
-// This test is skipped if clang++ is not found on PATH (CI will have it;
-// a minimal dev machine may not).
+// plugin-abi.md §"Plugin file shape" item 3:
+//   glibre_plugin_abi_hash — extern "C" const char* global (64-char hex).
+//
+// Compile failure is a hard REQUIRE failure — if clang++ is unavailable
+// the CI configuration is broken, not the source.
 // -----------------------------------------------------------------------
 
 TEST_CASE("foryc_emit_manifest_round_trip_via_compile", "[foryc][emit_manifest][integration]") {
-    // Build a deterministic spec.
-    constexpr std::uint64_t kHash = 0xCAFEBABEDEAD1234ULL;
+    // Build a deterministic spec with a recognizable 64-char abi_hash.
+    constexpr const char* kHash64 =
+        "cafebabe000000000000000000000000000000000000000000000000dead1234";
     constexpr const char* kName = "glibre.roundtrip.test";
-    const auto spec = make_test_spec(kName, kHash);
+    const auto spec = make_test_spec(kName, kHash64);
 
     auto emit_result = emit_manifest(spec);
     REQUIRE(emit_result.has_value());
 
     const eastl::string& src_text = *emit_result;
 
-    // --- Write the generated source to a temp file. ---
-    const fs::path tmp_dir = fs::temp_directory_path() / "glibre_foryc_test";
+    // --- Write the generated source to a per-test unique temp directory. ---
+    // LOW-8 fix: avoid shared path races between parallel test runs.
+    const fs::path tmp_base = fs::temp_directory_path() / "glibre_foryc_test";
+    // Generate a unique subdirectory name using the address of a local variable
+    // (unique per test invocation within the process) combined with the pid.
+    const auto unique_suffix =
+        std::format("roundtrip_{}_{}", getpid(), reinterpret_cast<uintptr_t>(&src_text));
+    const fs::path tmp_dir = tmp_base / unique_suffix;
+
     std::error_code ec;
     fs::create_directories(tmp_dir, ec);
     REQUIRE(!ec);
@@ -250,20 +270,15 @@ TEST_CASE("foryc_emit_manifest_round_trip_via_compile", "[foryc][emit_manifest][
     // Use the same C++ standard as the rest of the project.
     const auto compile_cmd = std::format(
         "clang++ -std=c++23 -fno-exceptions -fno-rtti "
-        "-dynamiclib -o \"{}\" \"{}\" 2>/dev/null",
+        "-dynamiclib -o \"{}\" \"{}\" 2>&1",
         dylib_path.native(),
         src_path.native()
     );
 
+    // HIGH-4 fix: compile failure is a hard REQUIRE failure.
+    // If clang++ is unavailable the CI environment is broken, not the source.
     const int compile_rc = std::system(compile_cmd.c_str());  // NOLINT(concurrency-mt-unsafe)
-    if (compile_rc != 0) {
-        // clang++ not available or compilation failed.
-        // Mark as a skipped warning rather than a hard failure so CI without
-        // a full clang++ on PATH still passes the suite.
-        WARN("foryc_emit_manifest_round_trip_via_compile: clang++ compile failed or not found "
-             "(rc=" << compile_rc << ") — skipping round-trip assertions");
-        return;
-    }
+    REQUIRE(compile_rc == 0);
 
     REQUIRE(fs::exists(dylib_path));
 
@@ -273,26 +288,27 @@ TEST_CASE("foryc_emit_manifest_round_trip_via_compile", "[foryc][emit_manifest][
     REQUIRE(handle != nullptr);
 
     // --- dlsym the four required C-ABI symbols. ---
+    // plugin-abi.md §"Plugin file shape" item 3:
+    //   glibre_plugin_abi_hash — extern "C" const char* (global, not a function).
+    //   glibre_plugin_name     — extern "C" const char* (global).
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     const uint8_t** manifest_ptr =
         reinterpret_cast<const uint8_t**>(dlsym(handle, "glibre_plugin_manifest"));
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     size_t* manifest_size_ptr =
         reinterpret_cast<size_t*>(dlsym(handle, "glibre_plugin_manifest_size"));
+    // glibre_plugin_abi_hash is a const char* global, not a function pointer.
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    using AbiHashFn = uint64_t (*)() noexcept;
+    const char** abi_hash_ptr =
+        reinterpret_cast<const char**>(dlsym(handle, "glibre_plugin_abi_hash"));
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    AbiHashFn abi_hash_fn = reinterpret_cast<AbiHashFn>(dlsym(handle, "glibre_plugin_abi_hash"));
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    using NameFn = const char* (*)() noexcept;
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    NameFn name_fn = reinterpret_cast<NameFn>(dlsym(handle, "glibre_plugin_name"));
+    const char** name_ptr = reinterpret_cast<const char**>(dlsym(handle, "glibre_plugin_name"));
 
-    // All four symbols must resolve.
+    // All four symbols must resolve (non-null).
     CHECK(manifest_ptr != nullptr);
     CHECK(manifest_size_ptr != nullptr);
-    CHECK(abi_hash_fn != nullptr);
-    CHECK(name_fn != nullptr);
+    CHECK(abi_hash_ptr != nullptr);
+    CHECK(name_ptr != nullptr);
 
     if (manifest_ptr && manifest_size_ptr) {
         // The manifest pointer must be non-null and size > 0.
@@ -300,21 +316,20 @@ TEST_CASE("foryc_emit_manifest_round_trip_via_compile", "[foryc][emit_manifest][
         CHECK(*manifest_size_ptr > 0);
     }
 
-    if (abi_hash_fn) {
-        // The ABI hash must be the expected truncated value.
-        CHECK(abi_hash_fn() == kHash);
+    if (abi_hash_ptr) {
+        // The ABI hash must be the expected 64-char hex string.
+        REQUIRE(*abi_hash_ptr != nullptr);
+        CHECK(std::string_view{*abi_hash_ptr} == std::string_view{kHash64});
     }
 
-    if (name_fn) {
+    if (name_ptr) {
         // The plugin name must match.
-        const char* returned_name = name_fn();
-        REQUIRE(returned_name != nullptr);
-        CHECK(std::string_view{returned_name} == std::string_view{kName});
+        REQUIRE(*name_ptr != nullptr);
+        CHECK(std::string_view{*name_ptr} == std::string_view{kName});
     }
 
     dlclose(handle);
 
     // Cleanup temp files (best effort; test isolation, not production code).
-    fs::remove(src_path, ec);
-    fs::remove(dylib_path, ec);
+    fs::remove_all(tmp_dir, ec);
 }
