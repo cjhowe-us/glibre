@@ -4,12 +4,18 @@
 // Authority: core/include/glibre/alloc.hpp, plan #238,
 //            reviews/decisions/perf-budget.md §Allocator Rules #1-3.
 //
-// Named test cases (plan #238 Unit Test Plan + dispatch DoD):
+// Named test cases (plan #238 Unit Test Plan):
 //   - per_context_allocator_tracks_bytes_per_tag
 //   - per_context_allocator_rejects_alloc_over_ceiling
 //   - per_context_allocator_release_decrements_counter
 //   - per_context_allocator_alignment_respected
 //   - per_context_allocator_threadsafe_allocations
+//
+// Note: per_context_allocator_register_fires_on_construction is deferred.
+// Verifying register_allocator() fires on construction requires a registry or
+// test-hook whose design is in plan #241.  See alloc.hpp §register_allocator
+// observability.  Follow-up: [PLAN] test(core): allocator registry
+// observability (iterate #238).
 //
 // Design constraints:
 //   - -fno-exceptions (error-model.md §Decision 3).
@@ -249,3 +255,4 @@ TEST_CASE("per_context_allocator_threadsafe_allocations", "[core][alloc]") {
     }
     CHECK(alloc.bytes_used() == 0);
 }
+

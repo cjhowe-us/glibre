@@ -30,10 +30,12 @@
 // ## Shipping-mode soft warning (Rule #3)
 //
 //   When GLIBRE_ALLOC_STRICT is not set, ceiling overruns emit spdlog::warn
-//   once per ContextTag for the lifetime of the process via warn_once_flags_.
+//   once per ContextTag for the lifetime of the PerContextAllocator instance,
+//   via the per-instance warn_once_flag_ member in alloc.hpp.  The flag is
+//   per-instance (not TU-static) so tests can construct multiple allocators
+//   with independent warn state and verify the warn-once path independently.
 //   Full once-per-tag-per-frame throttling (linked to FrameLoop phase 9 drain)
-//   is deferred to plan #241 (perf-budget framework).  The MVP throttle is
-//   once-per-tag-per-process, documented in the header comment.
+//   is deferred to plan #241 (perf-budget framework).
 //
 // ## bytes == 0 allocations
 //
@@ -49,16 +51,6 @@
 #include <spdlog/spdlog.h>
 
 namespace glibre {
-
-// ---------------------------------------------------------------------------
-// Shipping-mode warn-once flags (one per ContextTag)
-// ---------------------------------------------------------------------------
-
-#if !defined(GLIBRE_ALLOC_STRICT) || !GLIBRE_ALLOC_STRICT
-// One flag per tag; false = warn not yet emitted, true = already warned.
-// Indexed by static_cast<uint8_t>(ContextTag).
-static std::atomic<bool> warn_once_flags_[kContextTagCount] = {};
-#endif
 
 // ---------------------------------------------------------------------------
 // Constructors
@@ -77,7 +69,7 @@ PerContextAllocator::PerContextAllocator(ContextTag tag) noexcept
 // allocate
 // ---------------------------------------------------------------------------
 
-glibre::Result<void*>
+Result<void*>
 PerContextAllocator::allocate(std::size_t bytes, std::size_t align) noexcept {
     // Normalise alignment: 0 → alignof(std::max_align_t), less than
     // sizeof(void*) → sizeof(void*) (posix_memalign minimum).
@@ -105,7 +97,7 @@ PerContextAllocator::allocate(std::size_t bytes, std::size_t align) noexcept {
     while (true) {
         const std::uint64_t after = current + static_cast<std::uint64_t>(bytes);
         if (bytes > 0 && after > ceiling_) {
-            return std::unexpected{glibre::Error{core::Error::OutOfBudget}};
+            return std::unexpected{Error{core::Error::OutOfBudget}};
         }
         if (bytes_used_.compare_exchange_weak(
                 current, after,
@@ -122,21 +114,21 @@ PerContextAllocator::allocate(std::size_t bytes, std::size_t align) noexcept {
             bytes_used_.fetch_add(static_cast<std::uint64_t>(bytes), std::memory_order_relaxed)
             + static_cast<std::uint64_t>(bytes);
         if (after > ceiling_) {
-            const auto tag_idx = static_cast<std::size_t>(static_cast<std::uint8_t>(tag_));
-            bool already_warned = warn_once_flags_[tag_idx].load(std::memory_order_relaxed);
+            // Per-instance warn-once flag (alloc.hpp §Shipping-build soft warning).
+            bool already_warned = warn_once_flag_.load(std::memory_order_relaxed);
             if (!already_warned &&
-                warn_once_flags_[tag_idx].compare_exchange_strong(
+                warn_once_flag_.compare_exchange_strong(
                     already_warned, true,
                     std::memory_order_relaxed, std::memory_order_relaxed)) {
                 // Rule #3 (perf-budget.md §Allocator Rules): emit spdlog::warn
                 // once per ContextTag on ceiling overrun in shipping builds.
-                // MVP throttle is once-per-tag-per-process; per-frame reset is
-                // deferred to plan #241.
+                // MVP throttle is once-per-tag-per-instance-lifetime; per-frame
+                // reset is deferred to plan #241.
                 spdlog::warn(
                     "PerContextAllocator: context tag {} exceeded ceiling "
                     "(requested {} bytes, ceiling {} bytes, live {} bytes) — "
-                    "perf-budget.md Rule #3 [further overruns suppressed for this tag]",
-                    tag_idx,
+                    "perf-budget.md Rule #3 [further overruns suppressed for this instance]",
+                    static_cast<std::uint8_t>(tag_),
                     bytes,
                     ceiling_,
                     after);
@@ -148,17 +140,10 @@ PerContextAllocator::allocate(std::size_t bytes, std::size_t align) noexcept {
     void* ptr = nullptr;
     const int rc = ::posix_memalign(&ptr, align, actual_bytes);
     if (rc != 0) {
-        // System OOM: the engine aborts (we do not recover from OOM).
-        // In strict mode we already committed the byte counter increment
-        // above; rolling it back here would be visible only to atexit handlers
-        // that run after abort() — which is implementation-defined.  We accept
-        // the inconsistency: the only observable consequence is a slightly
-        // elevated bytes_used() reading in a handler that is already aborting.
-#if defined(GLIBRE_ALLOC_STRICT) && GLIBRE_ALLOC_STRICT
-        if (bytes > 0) {
-            bytes_used_.fetch_sub(static_cast<std::uint64_t>(bytes), std::memory_order_relaxed);
-        }
-#endif
+        // System OOM: the engine aborts.  We do not attempt to recover from
+        // system-level out-of-memory.  The byte counter may be slightly
+        // inconsistent after abort() but that is irrelevant for a crashing
+        // process.
         std::abort();
     }
 
@@ -196,6 +181,10 @@ void register_allocator([[maybe_unused]] PerContextAllocator& alloc) noexcept {
     // populate a global registry that the CI gate and perf HUD enumerate.
     // The stable call-site ABI means existing callers need no change when
     // plan #241 lands.
+    //
+    // Test observability (MED-7) is deferred: verifying this call fires
+    // requires a registry or hook whose design lives in plan #241.
+    // See alloc.hpp §register_allocator observability.
 }
 
 }  // namespace glibre

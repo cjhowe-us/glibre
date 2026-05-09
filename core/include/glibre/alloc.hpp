@@ -58,10 +58,15 @@
 // ## Shipping-build soft warning (Rule #3)
 //
 //   When GLIBRE_ALLOC_STRICT is NOT set, a ceiling overrun emits
-//   spdlog::warn once per ContextTag for the lifetime of the process.
+//   spdlog::warn once per ContextTag PER INSTANCE (not process-global).
+//   The warn-once flag is a per-instance atomic<bool> member so that:
+//     (a) tests can construct independent PerContextAllocator instances
+//         and each will see its own untripped warn-once state; and
+//     (b) the flag is clearly owned and reset when the allocator is
+//         destroyed, with no hidden process-global side effects.
 //   Full once-per-tag-per-frame throttling (tied to FrameLoop phase 9 reset)
 //   is deferred to the perf-budget framework in plan #241; the MVP throttle
-//   is once-per-tag-per-process.
+//   is once-per-tag-per-instance-lifetime.
 //
 // ## -fno-exceptions clean
 //   No exceptions thrown or propagated.  Error path uses std::unexpected.
@@ -98,14 +103,35 @@ inline constexpr std::size_t kContextTagCount = 9;
 //
 // Indexed by static_cast<std::uint8_t>(tag).  Values from perf-budget.md
 // §Per-Context Budget Table, heap column.
+//
+// Static asserts below (kContextCeilings_static_checks) pin each enum
+// enumerator to its positional index.  If the ContextTag enum is reordered,
+// the assert fires at compile time instead of silently scrambling ceilings.
 // ---------------------------------------------------------------------------
 
 inline constexpr std::uint64_t kMiB = 1024ULL * 1024ULL;
 
 inline constexpr std::uint64_t kContextCeilings[kContextTagCount] = {
-    //  core      platform  data      shader    render     geometry   physics   content    tools
-    64 * kMiB, 16 * kMiB, 32 * kMiB, 32 * kMiB, 512 * kMiB, 256 * kMiB, 128 * kMiB, 256 * kMiB, 256 * kMiB,
+    //  [0] core     [1] platform  [2] data     [3] shader   [4] render
+    64 * kMiB, 16 * kMiB, 32 * kMiB, 32 * kMiB, 512 * kMiB,
+    //  [5] geometry  [6] physics   [7] content  [8] tools
+    256 * kMiB, 128 * kMiB, 256 * kMiB, 256 * kMiB,
 };
+
+// Compile-time index pinning: if ContextTag enum order changes these fail.
+static_assert(static_cast<std::uint8_t>(ContextTag::core)     == 0);
+static_assert(static_cast<std::uint8_t>(ContextTag::platform) == 1);
+static_assert(static_cast<std::uint8_t>(ContextTag::data)     == 2);
+static_assert(static_cast<std::uint8_t>(ContextTag::shader)   == 3);
+static_assert(static_cast<std::uint8_t>(ContextTag::render)   == 4);
+static_assert(static_cast<std::uint8_t>(ContextTag::geometry) == 5);
+static_assert(static_cast<std::uint8_t>(ContextTag::physics)  == 6);
+static_assert(static_cast<std::uint8_t>(ContextTag::content)  == 7);
+static_assert(static_cast<std::uint8_t>(ContextTag::tools)    == 8);
+// Ceiling spot-checks: verify representative entries match perf-budget.md values.
+static_assert(kContextCeilings[static_cast<std::uint8_t>(ContextTag::core)]    ==  64 * kMiB);
+static_assert(kContextCeilings[static_cast<std::uint8_t>(ContextTag::render)]  == 512 * kMiB);
+static_assert(kContextCeilings[static_cast<std::uint8_t>(ContextTag::physics)] == 128 * kMiB);
 
 // ---------------------------------------------------------------------------
 // PerContextAllocator — tag-tracked, ceiling-enforced heap allocator
@@ -156,7 +182,7 @@ public:
     // Returns std::unexpected{core::Error::OutOfBudget} only on ceiling breach
     // (strict mode).  A system-level allocation failure (OOM) calls
     // std::abort() — the engine does not attempt to recover from OOM.
-    [[nodiscard]] glibre::Result<void*>
+    [[nodiscard]] Result<void*>
     allocate(std::size_t bytes, std::size_t align = alignof(std::max_align_t)) noexcept;
 
     // deallocate(p, bytes) — release memory previously returned by allocate().
@@ -184,6 +210,12 @@ private:
     ContextTag tag_;
     std::uint64_t ceiling_;
     std::atomic<std::uint64_t> bytes_used_{0};
+#if !defined(GLIBRE_ALLOC_STRICT) || !GLIBRE_ALLOC_STRICT
+    // Per-instance warn-once flag for the shipping-build soft-warn path (Rule #3).
+    // Per-instance (not TU-static) so multiple PerContextAllocator instances in
+    // tests each have independent warn state.  See §Shipping-build soft warning.
+    std::atomic<bool> warn_once_flag_{false};
+#endif
 };
 
 // ---------------------------------------------------------------------------
@@ -195,5 +227,16 @@ private:
 // ---------------------------------------------------------------------------
 
 void register_allocator(PerContextAllocator& alloc) noexcept;
+
+// ---------------------------------------------------------------------------
+// register_allocator observability (MED-7, deferred to plan #241)
+//
+// Verifying that the PerContextAllocator constructor calls register_allocator
+// requires an observable registry or a test-visible hook.  The design of that
+// hook depends on the AllocatorRegistry introduced in plan #241 (perf-budget
+// framework).  A test asserting the call is deferred to:
+//   [PLAN] test(core): allocator registry observability (iterate #238)
+// opened as a follow-up to this PR.
+// ---------------------------------------------------------------------------
 
 }  // namespace glibre
