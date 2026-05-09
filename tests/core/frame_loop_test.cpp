@@ -7,14 +7,14 @@
 //   - core/frame_loop: tick_invokes_phases_in_strict_order
 //   - core/frame_loop: empty_mvp_phases_succeed
 
+#include <array>
+#include <cstdint>
+
 #include <catch2/catch_test_macros.hpp>
 
 #include "glibre/core/frame_loop.hpp"
 #include "glibre/core/frame_phase.hpp"
 #include "glibre/error.hpp"
-
-#include <cstdint>
-#include <array>
 
 // ---------------------------------------------------------------------------
 // Test: phase_table_ids_are_1_through_9
@@ -31,22 +31,21 @@ TEST_CASE("core/frame_loop: phase_table_ids_are_1_through_9", "[core][frame_loop
     // Verify every ordinal 1..=9 is present in sequence.
     for (std::uint8_t i = 0; i < kPhaseCount; ++i) {
         const std::uint8_t expected_ordinal = static_cast<std::uint8_t>(i + 1u);
-        const std::uint8_t actual_ordinal   =
-            static_cast<std::uint8_t>(kPhaseTable[i].id);
+        const std::uint8_t actual_ordinal = static_cast<std::uint8_t>(kPhaseTable[i].id);
 
         CHECK(actual_ordinal == expected_ordinal);
     }
 
     // Spot-check the specific named phases from the decision record.
-    CHECK(static_cast<std::uint8_t>(Phase::Input)        == 1u);
-    CHECK(static_cast<std::uint8_t>(Phase::Logic)        == 2u);
+    CHECK(static_cast<std::uint8_t>(Phase::Input) == 1u);
+    CHECK(static_cast<std::uint8_t>(Phase::Logic) == 2u);
     CHECK(static_cast<std::uint8_t>(Phase::PhysicsFixed) == 3u);
-    CHECK(static_cast<std::uint8_t>(Phase::Animation)    == 4u);
-    CHECK(static_cast<std::uint8_t>(Phase::Transform)    == 5u);
-    CHECK(static_cast<std::uint8_t>(Phase::CullExtract)  == 6u);
+    CHECK(static_cast<std::uint8_t>(Phase::Animation) == 4u);
+    CHECK(static_cast<std::uint8_t>(Phase::Transform) == 5u);
+    CHECK(static_cast<std::uint8_t>(Phase::CullExtract) == 6u);
     CHECK(static_cast<std::uint8_t>(Phase::RenderSubmit) == 7u);
-    CHECK(static_cast<std::uint8_t>(Phase::HotReload)    == 8u);
-    CHECK(static_cast<std::uint8_t>(Phase::Present)      == 9u);
+    CHECK(static_cast<std::uint8_t>(Phase::HotReload) == 8u);
+    CHECK(static_cast<std::uint8_t>(Phase::Present) == 9u);
 
     // Verify kPhaseTable order matches the Phase ordinals.
     CHECK(kPhaseTable[0].id == Phase::Input);
@@ -60,13 +59,13 @@ TEST_CASE("core/frame_loop: phase_table_ids_are_1_through_9", "[core][frame_loop
     CHECK(kPhaseTable[8].id == Phase::Present);
 
     // Verify the helper accessor.
-    CHECK(phase_desc(Phase::Input).id        == Phase::Input);
-    CHECK(phase_desc(Phase::HotReload).id    == Phase::HotReload);
-    CHECK(phase_desc(Phase::Present).id      == Phase::Present);
+    CHECK(phase_desc(Phase::Input).id == Phase::Input);
+    CHECK(phase_desc(Phase::HotReload).id == Phase::HotReload);
+    CHECK(phase_desc(Phase::Present).id == Phase::Present);
 
     // Verify reserved-slot flags (phases 2 and 4 are MVP-reserved).
-    CHECK(kPhaseTable[1].mvp_reserved == true);   // Logic
-    CHECK(kPhaseTable[3].mvp_reserved == true);   // Animation
+    CHECK(kPhaseTable[1].mvp_reserved == true);  // Logic
+    CHECK(kPhaseTable[3].mvp_reserved == true);  // Animation
     // All other phases are not reserved.
     CHECK(kPhaseTable[0].mvp_reserved == false);  // Input
     CHECK(kPhaseTable[2].mvp_reserved == false);  // PhysicsFixed

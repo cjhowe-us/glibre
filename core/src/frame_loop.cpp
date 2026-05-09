@@ -38,8 +38,7 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
 #ifndef NDEBUG
     const auto ordinal = static_cast<std::uint8_t>(phase);
     if (ordinal != expected_ordinal) {
-        return std::unexpected(
-            glibre::Error{core::Error::FramePhaseMisordered});
+        return std::unexpected(glibre::Error{core::Error::FramePhaseMisordered});
     }
 #else
     (void)expected_ordinal;
@@ -52,15 +51,24 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
     // lands).  The slot exists to validate the ordering infrastructure
     // and to give the CI a stable hook for phase-level benchmarking.
     switch (phase) {
-        case Phase::Input:        /* platform — MVP empty */ break;
-        case Phase::Logic:        /* gameplay/scripting — reserved empty */ break;
-        case Phase::PhysicsFixed: /* physics — MVP empty */ break;
-        case Phase::Animation:    /* animation — reserved empty */ break;
-        case Phase::Transform:    /* core — MVP empty */ break;
-        case Phase::CullExtract:  /* render — MVP empty */ break;
-        case Phase::RenderSubmit: /* render — MVP empty */ break;
-        case Phase::HotReload:    /* core (barrier) — MVP empty */ break;
-        case Phase::Present:      /* platform — MVP empty */ break;
+    case Phase::Input: /* platform — MVP empty */
+        break;
+    case Phase::Logic: /* gameplay/scripting — reserved empty */
+        break;
+    case Phase::PhysicsFixed: /* physics — MVP empty */
+        break;
+    case Phase::Animation: /* animation — reserved empty */
+        break;
+    case Phase::Transform: /* core — MVP empty */
+        break;
+    case Phase::CullExtract: /* render — MVP empty */
+        break;
+    case Phase::RenderSubmit: /* render — MVP empty */
+        break;
+    case Phase::HotReload: /* core (barrier) — MVP empty */
+        break;
+    case Phase::Present: /* platform — MVP empty */
+        break;
     }
 
     return {};  // success — no allocation
@@ -77,8 +85,7 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
 // No heap allocation occurs inside this function.
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] std::expected<void, glibre::Error>
-FrameLoop::tick() noexcept {
+[[nodiscard]] std::expected<void, glibre::Error> FrameLoop::tick() noexcept {
     std::uint8_t expected_ordinal = kPhaseMin;
 
     for (const PhaseDesc& desc : kPhaseTable) {

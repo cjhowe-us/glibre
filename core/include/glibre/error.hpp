@@ -51,7 +51,7 @@ enum class Error : std::uint16_t {
 
 struct ErrorContext {
     std::string_view file{};    // __FILE__
-    int              line{0};   // __LINE__
+    int line{0};                // __LINE__
     std::string_view detail{};  // optional human hint, never load-bearing
 };
 
@@ -66,23 +66,25 @@ public:
         render::Error
         // physics::Error, data::Error, shader::Error, ...
         // append as each context lands
-    >;
+        >;
 
     // Constructible from any per-context error enum that is a member of
     // Variant.  The constraint prevents the generic constructor from
     // participating in overload resolution for unrelated types (e.g.
     // std::expected<…>), which would cause circular constraint evaluation
     // in libc++ clang-22.
-    template <class E>
+    template<class E>
         requires std::constructible_from<Variant, E>
     constexpr Error(E e, ErrorContext ctx = {}) noexcept
-        : variant_{e}, ctx_{ctx} {}
+        : variant_{e},
+          ctx_{ctx} {}
 
-    [[nodiscard]] constexpr const Variant&      code()  const noexcept { return variant_; }
+    [[nodiscard]] constexpr const Variant& code() const noexcept { return variant_; }
+
     [[nodiscard]] constexpr const ErrorContext& where() const noexcept { return ctx_; }
 
 private:
-    Variant      variant_;
+    Variant variant_;
     ErrorContext ctx_;
 };
 
@@ -90,7 +92,7 @@ private:
 // Convenience alias used throughout the engine
 // -----------------------------------------------------------------------
 
-template <class T>
+template<class T>
 using Result = std::expected<T, Error>;
 
 }  // namespace glibre

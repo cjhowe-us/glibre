@@ -43,10 +43,10 @@ public:
     FrameLoop() noexcept = default;
 
     // Non-copyable, non-movable (owns frame state).
-    FrameLoop(const FrameLoop&)            = delete;
+    FrameLoop(const FrameLoop&) = delete;
     FrameLoop& operator=(const FrameLoop&) = delete;
-    FrameLoop(FrameLoop&&)                 = delete;
-    FrameLoop& operator=(FrameLoop&&)      = delete;
+    FrameLoop(FrameLoop&&) = delete;
+    FrameLoop& operator=(FrameLoop&&) = delete;
 
     ~FrameLoop() noexcept = default;
 
@@ -64,9 +64,7 @@ public:
 
     // frame_index() — the number of successfully completed ticks.
     // Incremented only after all nine phases succeed.
-    [[nodiscard]] std::uint64_t frame_index() const noexcept {
-        return frame_index_;
-    }
+    [[nodiscard]] std::uint64_t frame_index() const noexcept { return frame_index_; }
 
 private:
     // run_phase() — execute one phase.  Returns an error if the phase

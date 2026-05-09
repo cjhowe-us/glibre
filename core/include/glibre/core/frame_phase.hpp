@@ -21,30 +21,30 @@ namespace glibre::core {
 // -----------------------------------------------------------------------
 
 enum class Phase : std::uint8_t {
-    Input        = 1,
-    Logic        = 2,  // reserved — empty body in MVP (gameplay/scripting)
+    Input = 1,
+    Logic = 2,  // reserved — empty body in MVP (gameplay/scripting)
     PhysicsFixed = 3,
-    Animation    = 4,  // reserved — empty body in MVP (animation plugin)
-    Transform    = 5,
-    CullExtract  = 6,
+    Animation = 4,  // reserved — empty body in MVP (animation plugin)
+    Transform = 5,
+    CullExtract = 6,
     RenderSubmit = 7,
-    HotReload    = 8,
-    Present      = 9,
+    HotReload = 8,
+    Present = 9,
 };
 
 inline constexpr std::uint8_t kPhaseCount = 9;
-inline constexpr std::uint8_t kPhaseMin   = 1;
-inline constexpr std::uint8_t kPhaseMax   = 9;
+inline constexpr std::uint8_t kPhaseMin = 1;
+inline constexpr std::uint8_t kPhaseMax = 9;
 
 // -----------------------------------------------------------------------
 // PhaseDesc — compile-time descriptor for one phase slot
 // -----------------------------------------------------------------------
 
 struct PhaseDesc {
-    Phase            id;            // numeric ordinal (1..=9)
-    std::string_view name;          // canonical lower_snake_case name
-    std::string_view owning_context; // bounded-context owner per frame-phases.md
-    bool             mvp_reserved;  // true → empty body in MVP (phases 2, 4)
+    Phase id;                         // numeric ordinal (1..=9)
+    std::string_view name;            // canonical lower_snake_case name
+    std::string_view owning_context;  // bounded-context owner per frame-phases.md
+    bool mvp_reserved;                // true → empty body in MVP (phases 2, 4)
 };
 
 // -----------------------------------------------------------------------
@@ -57,15 +57,15 @@ struct PhaseDesc {
 // -----------------------------------------------------------------------
 
 inline constexpr std::array<PhaseDesc, kPhaseCount> kPhaseTable{{
-    { Phase::Input,        "input",         "platform",           false },
-    { Phase::Logic,        "logic",         "gameplay/scripting", true  },
-    { Phase::PhysicsFixed, "physics_fixed", "physics",            false },
-    { Phase::Animation,    "animation",     "animation",          true  },
-    { Phase::Transform,    "transform",     "core",               false },
-    { Phase::CullExtract,  "cull_extract",  "render",             false },
-    { Phase::RenderSubmit, "render_submit", "render",             false },
-    { Phase::HotReload,    "hot_reload",    "core",               false },
-    { Phase::Present,      "present",       "platform",           false },
+    {Phase::Input, "input", "platform", false},
+    {Phase::Logic, "logic", "gameplay/scripting", true},
+    {Phase::PhysicsFixed, "physics_fixed", "physics", false},
+    {Phase::Animation, "animation", "animation", true},
+    {Phase::Transform, "transform", "core", false},
+    {Phase::CullExtract, "cull_extract", "render", false},
+    {Phase::RenderSubmit, "render_submit", "render", false},
+    {Phase::HotReload, "hot_reload", "core", false},
+    {Phase::Present, "present", "platform", false},
 }};
 
 // -----------------------------------------------------------------------
