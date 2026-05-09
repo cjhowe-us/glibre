@@ -7,15 +7,47 @@
 // (NDEBUG not defined), per SPEC §4.4 invariant 1 and the schedule-
 // frame-design.md §3.1 note: "Violation is a … debug-build runtime
 // assertion core::Error::FramePhaseMisordered."
+//
+// TransientArena drain at phase 9 (Phase::Present) is per
+// perf-budget.md §Allocator Rules #4 and plan #239.
 
 #include "glibre/core/frame_loop.hpp"
 
+#include <cassert>
 #include <cstdint>
 
 #include "glibre/core/frame_phase.hpp"
 #include "glibre/error.hpp"
+#include "glibre/transient_arena.hpp"
 
 namespace glibre::core {
+
+// ---------------------------------------------------------------------------
+// register_transient_arena — add an arena to the drain registry.
+// ---------------------------------------------------------------------------
+
+[[nodiscard]] glibre::Result<void>
+FrameLoop::register_transient_arena(glibre::TransientArena* arena) noexcept {
+    // Null pointer is a precondition violation; assert in debug builds.
+    // In release builds we skip silently rather than crash, to avoid undefined
+    // behaviour at phase 9 drain.  Callers must ensure the pointer is valid.
+    assert(arena != nullptr && "register_transient_arena: null arena pointer");
+    if (arena == nullptr) {
+        return {};  // skip silently in release; debug assert fires above
+    }
+    if (arena_count_ >= kMaxTransientArenas) {
+        return std::unexpected(glibre::Error{
+            core::Error::OutOfBudget,
+            glibre::ErrorContext{
+                .file = "core/src/frame_loop.cpp",
+                .line = __LINE__,
+                .detail = "transient arena registry full",
+            },
+        });
+    }
+    arenas_[arena_count_++] = arena;
+    return {};
+}
 
 // ---------------------------------------------------------------------------
 // run_phase — execute one phase slot.
@@ -37,6 +69,9 @@ namespace glibre::core {
 //
 // MVP phase bodies are empty (no-op): the skeleton ships the ordering
 // infrastructure; individual context plans fill the bodies.
+//
+// Phase::Present (9) additionally drains all registered TransientArena
+// instances (perf-budget.md §Allocator Rules #4, plan #239).
 // ---------------------------------------------------------------------------
 
 [[nodiscard]] glibre::Result<void>
@@ -73,7 +108,14 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
         break;
     case Phase::HotReload: /* core (barrier) — MVP empty */
         break;
-    case Phase::Present: /* platform — MVP empty */
+    case Phase::Present: /* platform — drains transient arenas at frame end */
+        // Drain all registered transient arenas at end of frame.
+        // perf-budget.md §Allocator Rules #4: transient arenas must be
+        // drained by phase 9 so they do not count against context ceilings.
+        // drain() is O(1) per arena; no heap allocation occurs.
+        for (std::size_t i = 0; i < arena_count_; ++i) {
+            arenas_[i]->drain();
+        }
         break;
     }
 

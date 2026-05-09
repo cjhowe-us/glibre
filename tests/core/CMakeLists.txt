@@ -15,7 +15,8 @@ add_subdirectory(error_propagation)             # plan #240 — C-ABI error-prop
 add_executable(glibre-core-tests
     frame_loop_test.cpp
     plugin_manifest/plugin_manifest_test.cpp
-    log_error_test.cpp  # structured error logging helper (plan #236)
+    log_error_test.cpp          # structured error logging helper (plan #236)
+    transient_arena_test.cpp    # per-context transient arena (plan #239)
 )
 
 target_link_libraries(glibre-core-tests

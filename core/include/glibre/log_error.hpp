@@ -82,6 +82,8 @@ namespace glibre::core {
         return "PluginNameCollision";
     case Error::PluginDependencyMissing:
         return "PluginDependencyMissing";
+    case Error::TransientArenaExhausted:
+        return "TransientArenaExhausted";
     }
     return "Unknown";
 }

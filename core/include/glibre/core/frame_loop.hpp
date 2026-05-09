@@ -10,6 +10,8 @@
 //   - Empty MVP phase bodies — phases 1, 2, 3, 4, 6, 7, 8, 9 are no-ops
 //     until each owning context's plan lands its body (phase 5 transform
 //     is similarly empty at this skeleton stage).
+//   - At Phase::Present (9), drain all registered TransientArena instances
+//     (perf-budget.md §Allocator Rules #4, plan #239).
 //   - No dynamic allocation inside tick().
 //   - -fno-exceptions clean; noexcept throughout the public surface.
 //
@@ -18,10 +20,12 @@
 
 #include <array>
 #include <cstdint>
+#include <cstddef>
 #include <span>
 
 #include "glibre/core/frame_phase.hpp"
 #include "glibre/error.hpp"
+#include "glibre/transient_arena.hpp"
 
 namespace glibre::core {
 
@@ -36,7 +40,13 @@ namespace glibre::core {
 //   (b) No phase observes writes from a later phase of the same frame.
 //   (c) No heap allocation occurs inside tick().
 //   (d) The call returns glibre::Result<void>; callers must inspect the result.
+//   (e) Every registered TransientArena is drained at the end of phase 9
+//       (perf-budget.md §Allocator Rules #4).
 // -----------------------------------------------------------------------
+
+// Maximum number of TransientArena instances that can be registered with
+// one FrameLoop.  One slot per bounded context (9 MVP contexts + headroom).
+inline constexpr std::size_t kMaxTransientArenas = 16;
 
 class FrameLoop {
 public:
@@ -50,12 +60,29 @@ public:
 
     ~FrameLoop() noexcept = default;
 
+    // register_transient_arena() — register a TransientArena for phase-9 drain.
+    //
+    // The arena pointer must remain valid for the lifetime of this FrameLoop.
+    // Callers are responsible for ensuring pointer validity.
+    //
+    // Returns:
+    //   glibre::Result<void> — success if registered; failure with
+    //   core::Error::OutOfBudget when kMaxTransientArenas slots are full.
+    //
+    // Thread safety: must be called before tick() begins (not safe to call
+    // concurrently with tick()).
+    [[nodiscard]] glibre::Result<void>
+    register_transient_arena(glibre::TransientArena* arena) noexcept;
+
     // tick() — advance one engine frame.
     //
     // Walks all nine phases in numeric order.  In debug builds a
     // per-frame phase counter is maintained; any phase that attempts
     // to execute out of sequence (e.g. because a future registration
     // mechanism misfires) returns core::Error::FramePhaseMisordered.
+    //
+    // At Phase::Present (9), all registered TransientArena instances are
+    // drained (drain() called) before phase exit (perf-budget.md §4).
     //
     // Returns:
     //   glibre::Result<void> (= std::expected<void, glibre::Error>) —
@@ -67,6 +94,11 @@ public:
     // Incremented only after all nine phases succeed.
     [[nodiscard]] std::uint64_t frame_index() const noexcept { return frame_index_; }
 
+    // transient_arena_count() — number of registered transient arenas.
+    [[nodiscard]] std::size_t transient_arena_count() const noexcept {
+        return arena_count_;
+    }
+
 private:
     // run_phase() — execute one phase.  Returns an error if the phase
     // ordinal does not match the expected_ordinal (debug builds only).
@@ -76,6 +108,11 @@ private:
     run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept;
 
     std::uint64_t frame_index_{0};
+
+    // Registered transient arenas — drained at the end of Phase::Present (9).
+    // Non-owning pointers; lifetimes are caller-managed.
+    std::array<glibre::TransientArena*, kMaxTransientArenas> arenas_{};
+    std::size_t arena_count_{0};
 
 #ifdef GLIBRE_TESTING
     // Under GLIBRE_TESTING builds the last tick's phase execution order is

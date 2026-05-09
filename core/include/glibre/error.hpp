@@ -65,6 +65,11 @@ enum class Error : std::uint16_t {
     // After dlclose, the loader aborts without further steps.
     // Added by plan #230.
     PluginDependencyMissing,
+    // Transient arena exhausted — allocate() was called when the arena had
+    // insufficient capacity for the requested (bytes, align) pair.
+    // Returned by TransientArena::allocate() (plan #239).
+    // Callers should fall back to a larger arena or defer the allocation.
+    TransientArenaExhausted,
 };
 }  // namespace core
 
