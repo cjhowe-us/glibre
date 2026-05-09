@@ -82,3 +82,8 @@ target_compile_options(glibre-foryc PRIVATE
 # std module import is enabled. Since foryc uses #include headers only
 # this flag is consistently OFF project-wide.
 set_target_properties(glibre-foryc PROPERTIES CXX_MODULE_STD OFF)
+
+# Self-register into the engine roots list so the deferred configure-time
+# reachability check (cmake/Compile.cmake §4) covers this host tool without
+# requiring a manually maintained hardcoded list.  See plan #1005.
+glibre_register_engine_root(glibre-foryc)

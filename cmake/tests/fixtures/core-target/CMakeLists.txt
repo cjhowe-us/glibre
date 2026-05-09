@@ -9,8 +9,11 @@ add_library(glibre-core-stub INTERFACE)
 target_link_libraries(glibre-core-stub INTERFACE glibre::compile_contract)
 
 # A concrete "engine" module that links glibre-core-stub (transitive consumer).
+# Calls glibre_register_engine_root to exercise the self-registration path
+# introduced by plan #1005.
 add_library(engine_module INTERFACE)
 target_link_libraries(engine_module INTERFACE glibre-core-stub)
+glibre_register_engine_root(engine_module)
 
 # --- Assertion 1 ---
 # The contract target itself must carry the flags.
@@ -85,3 +88,19 @@ message(STATUS "glibre-core-stub INTERFACE_COMPILE_OPTIONS: ${_core_stub_opts}")
 # generator time.  The contract flags are validated in Assertion 1 above.
 
 message(STATUS "PASS: engine_module correctly linked to glibre::compile_contract via glibre-core-stub")
+
+# --- Assertion 3 ---
+# glibre_register_engine_root(engine_module) must have appended engine_module
+# to the GLIBRE_ENGINE_ROOTS global property (plan #1005).
+get_property(_engine_roots GLOBAL PROPERTY GLIBRE_ENGINE_ROOTS)
+message(STATUS "GLIBRE_ENGINE_ROOTS: ${_engine_roots}")
+
+if(NOT "engine_module" IN_LIST _engine_roots)
+    message(FATAL_ERROR
+        "ASSERTION FAILED: engine_module not found in GLIBRE_ENGINE_ROOTS. "
+        "Got: ${_engine_roots}. "
+        "glibre_register_engine_root(engine_module) should have appended it."
+    )
+endif()
+
+message(STATUS "PASS: engine_module is registered in GLIBRE_ENGINE_ROOTS")

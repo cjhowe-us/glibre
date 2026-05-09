@@ -16,6 +16,12 @@ glibre_target_exceptions(bad_exception_lib)
 add_library(glibre-core INTERFACE)
 target_link_libraries(glibre-core INTERFACE bad_exception_lib)
 
+# Self-register glibre-core as an engine root (mirrors what the real
+# core/CMakeLists.txt does after add_library).  Without this call the
+# deferred check would have nothing to walk — the refactor (plan #1005)
+# removed the hardcoded list in favour of self-registration.
+glibre_register_engine_root(glibre-core)
+
 # The deferred check in Compile.cmake will fire here and issue FATAL_ERROR.
 # cmake_language(DEFER CALL _glibre_run_core_exception_check) was installed
 # by include(Compile) above — it will run at the end of this configure pass.
