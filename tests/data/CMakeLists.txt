@@ -10,4 +10,5 @@ cmake_minimum_required(VERSION 3.30)
 # targets; the fory_smoke test is a host-machine link verification only.
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     add_subdirectory(pkg)
+    add_subdirectory(dylib)  # glibre-types.dylib link-surface tests (plan #224)
 endif()

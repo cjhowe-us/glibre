@@ -53,6 +53,7 @@ if(GLIBRE_BUILD_TESTS)
 endif()
 
 add_subdirectory(core)
+add_subdirectory(data)
 
 # add_subdirectory(plugins)
 # add_subdirectory(runtime)
