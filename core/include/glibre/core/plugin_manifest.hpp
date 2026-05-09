@@ -87,9 +87,9 @@ struct SemVer {
 // ---------------------------------------------------------------------------
 
 struct ComponentDecl {
-    eastl::string fqn;               // tag 1
-    eastl::string schema_hash;       // tag 2 — 64-char blake3 hex
-    std::uint8_t storage_hint{0};   // tag 3 — archetype=0, sparse=1, singleton=2
+    eastl::string fqn;             // tag 1
+    eastl::string schema_hash;     // tag 2 — 64-char blake3 hex
+    std::uint8_t storage_hint{0};  // tag 3 — archetype=0, sparse=1, singleton=2
 
     [[nodiscard]] bool operator==(const ComponentDecl&) const noexcept = default;
 };
@@ -108,7 +108,7 @@ struct ComponentDecl {
 
 struct SystemDecl {
     eastl::string name;                   // tag 1
-    std::uint8_t phase{0};               // tag 2 — 1..=9
+    std::uint8_t phase{0};                // tag 2 — 1..=9
     eastl::vector<eastl::string> reads;   // tag 3
     eastl::vector<eastl::string> writes;  // tag 4
     eastl::vector<eastl::string> after;   // tag 5
@@ -132,7 +132,7 @@ struct SystemDecl {
 
 struct PassDecl {
     eastl::string name;                    // tag 1
-    std::uint8_t render_phase{0};         // tag 2 — 6 or 7
+    std::uint8_t render_phase{0};          // tag 2 — 6 or 7
     eastl::vector<eastl::string> inputs;   // tag 3
     eastl::vector<eastl::string> outputs;  // tag 4
 
@@ -151,9 +151,9 @@ struct PassDecl {
 // ---------------------------------------------------------------------------
 
 struct PanelDecl {
-    eastl::string id;          // tag 1
-    eastl::string title;       // tag 2
-    std::uint8_t area{0};     // tag 3 — docked-area byte enum
+    eastl::string id;      // tag 1
+    eastl::string title;   // tag 2
+    std::uint8_t area{0};  // tag 3 — docked-area byte enum
 
     [[nodiscard]] bool operator==(const PanelDecl&) const noexcept = default;
 };
