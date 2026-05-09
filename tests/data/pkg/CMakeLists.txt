@@ -18,6 +18,7 @@ target_link_libraries(fory_smoke
         Catch2::Catch2WithMain
         Fory::fory
         absl::status
+        absl::statusor
 )
 
 # CXX_MODULE_STD OFF: Catch2's generated main calls std:: symbols via classical
