@@ -14,6 +14,7 @@ add_subdirectory(error_register)                 # plan #234 — per-context Err
 add_subdirectory(error_propagation)             # plan #240 — C-ABI error-propagation contract tests
 add_subdirectory(error_variant)                 # plan #233 — Error variant shape + Result<T> alias contract
 add_subdirectory(per_context_allocator)         # plan #238 — PerContextAllocator with per-tag heap ceiling
+add_subdirectory(perf_budget)                   # plan #241 — per-context perf-budget counters
 add_subdirectory(hot_reload)                    # plan #250 — hot-reload manifest + ABI hash gate
 
 add_executable(glibre-core-tests

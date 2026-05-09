@@ -12,6 +12,8 @@
 //     is similarly empty at this skeleton stage).
 //   - At Phase::Present (9), drain all registered TransientArena instances
 //     (perf-budget.md §Allocator Rules #4, plan #239).
+//   - At Phase::Present (9), reset the registered PerfBudget if one has
+//     been set via set_perf_budget() (perf-budget.md §CI Gate Spec, plan #241).
 //   - No dynamic allocation inside tick().
 //   - -fno-exceptions clean; noexcept throughout the public surface.
 //
@@ -25,6 +27,7 @@
 
 #include "glibre/core/frame_phase.hpp"
 #include "glibre/error.hpp"
+#include "glibre/perf_budget.hpp"
 #include "glibre/transient_arena.hpp"
 
 namespace glibre::core {
@@ -75,6 +78,18 @@ public:
     [[nodiscard]] glibre::Result<void>
     register_transient_arena(glibre::TransientArena* arena) noexcept;
 
+    // set_perf_budget() — register a PerfBudget for phase-9 reset.
+    //
+    // The pointer may be null (default) to opt out of budget reset.
+    // When non-null, tick() calls perf_budget->reset() at the end of
+    // Phase::Present (9) before frame_index_ is incremented.
+    //
+    // The budget pointer must remain valid for the lifetime of this FrameLoop.
+    // Callers are responsible for ensuring pointer validity.
+    //
+    // Thread safety: must be called before tick() begins.
+    void set_perf_budget(glibre::PerfBudget* budget) noexcept { perf_budget_ = budget; }
+
     // tick() — advance one engine frame.
     //
     // Walks all nine phases in numeric order.  In debug builds a
@@ -112,6 +127,10 @@ private:
     // Non-owning pointers; lifetimes are caller-managed.
     std::array<glibre::TransientArena*, kMaxTransientArenas> arenas_{};
     std::size_t arena_count_{0};
+
+    // Optional PerfBudget — reset() called at end of Phase::Present (9).
+    // Non-owning pointer; lifetime is caller-managed.  Null = no-op.
+    glibre::PerfBudget* perf_budget_{nullptr};
 
 #ifdef GLIBRE_TESTING
     // Under GLIBRE_TESTING builds the last tick's phase execution order is

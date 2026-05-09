@@ -10,6 +10,9 @@
 //
 // TransientArena drain at phase 9 (Phase::Present) is per
 // perf-budget.md §Allocator Rules #4 and plan #239.
+//
+// PerfBudget reset at phase 9 (Phase::Present) is per
+// perf-budget.md §CI Gate Spec and plan #241.
 
 #include "glibre/core/frame_loop.hpp"
 
@@ -17,6 +20,7 @@
 
 #include "glibre/core/frame_phase.hpp"
 #include "glibre/error.hpp"
+#include "glibre/perf_budget.hpp"
 #include "glibre/transient_arena.hpp"
 
 namespace glibre::core {
@@ -158,6 +162,14 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
                 return std::unexpected(std::move(first_leak_error.error()));
             }
 #endif
+        }
+        // Reset per-frame perf-budget counters.
+        // perf-budget.md §CI Gate Spec (plan #241): counters are reset at the
+        // end of each frame so the next frame starts with zeroed accumulators.
+        // No-op when perf_budget_ is null (opt-out path for code that does not
+        // use the budget framework yet).
+        if (perf_budget_ != nullptr) {
+            perf_budget_->reset();
         }
         break;
     }
