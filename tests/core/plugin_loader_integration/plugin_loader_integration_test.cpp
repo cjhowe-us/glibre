@@ -18,10 +18,16 @@
 //   - integration_name_collision_propagates
 //   - integration_happy_path_loads_and_validates
 //
+// Named test cases (plan #968 Unit Test Plan + DoD):
+//   - integration_manifest_invalid_propagates
+//   - integration_engine_too_old_propagates
+//   - integration_dependency_missing_propagates
+//
 // Compile-time path macros (injected by CMakeLists.txt):
-//   GLIBRE_NOOP_DYLIB_PATH            — glibre-plugin-noop.dylib (noop reference)
-//   GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH — stub with NO required symbols
-//   GLIBRE_STUB_WRONG_ABI_DYLIB_PATH  — stub with WRONG ABI hash symbol
+//   GLIBRE_NOOP_DYLIB_PATH                    — glibre-plugin-noop.dylib
+//   GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH         — stub with NO required symbols
+//   GLIBRE_STUB_WRONG_ABI_DYLIB_PATH          — stub with WRONG ABI hash symbol
+//   GLIBRE_STUB_INVALID_MANIFEST_DYLIB_PATH   — stub with garbage manifest blob
 //
 // Build contract: GLIBRE_NOOP_DYLIB_PATH and GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH
 // are defined by CMakeLists.txt only when the corresponding targets exist
@@ -37,15 +43,17 @@
 //   • Each test owns its own PluginLoaderRegistry (not a singleton).
 //
 // Coverage vs. plugin-abi.md §"Loader Sequence":
-//   Loader steps covered by this PR:  1, 2, 4, 6 (failure), 1–4 + 6–7 (success).
-//   Steps 3 (manifest_invalid), 5 (engine_too_old), 7 (dependency_missing):
-//     deferred to follow-up plans filed as part of round-1 review response.
+//   Loader steps covered by plan #232: 1, 2, 4, 6 (failure), 1–4 + 6–7 (success).
+//   Loader steps covered by plan #968: 3 (manifest_invalid), 5 (engine_too_old),
+//     7 (dependency_missing — non-vacuous).
 //   Steps 8, 9, 10, 11: depend on plan #231 (register + migrate); deferred.
 //
 // Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" steps 1–7,
 //            §"Failure Modes → core::Error" table.
 //
 // Plan: #232 — plugin loader integration — full failure-mode coverage.
+// Plan: #968 — plugin loader integration — manifest_invalid / engine_too_old /
+//              dependency_missing failure modes.
 
 #include <cstddef>
 #include <cstdint>
@@ -350,9 +358,12 @@ TEST_CASE("integration_name_collision_propagates", "[core][integration]") {
 //   4. register_plugin() succeeds; loaded_count() == 1.
 //
 // Steps NOT exercised here:
-//   • Step 3 (manifest deserialization) — awaits manifest_invalid plan.
-//   • Step 5 (engine_too_old check)     — awaits engine_too_old plan.
-//   • Step 7 non-vacuously              — awaits dependency_missing plan.
+//   • Step 3 (manifest deserialization) — covered by plan #968:
+//       integration_manifest_invalid_propagates.
+//   • Step 5 (engine_too_old check)     — covered by plan #968:
+//       integration_engine_too_old_propagates.
+//   • Step 7 non-vacuously              — covered by plan #968:
+//       integration_dependency_missing_propagates.
 //   • Steps 8 (drain), 9 (register()) — await plan #231 (register + migrate).
 //
 // This test catches regressions where unit-test mocking masks an integration
@@ -417,5 +428,235 @@ TEST_CASE("integration_happy_path_loads_and_validates", "[core][integration]") {
 
     CHECK(registry.loaded_count() == 1u);
     CHECK(registry.is_registered(eastl::string_view{"glibre.integration.happy"}));
+#endif
+}
+
+// ===========================================================================
+// Test: integration_manifest_invalid_propagates
+//
+// Exercises loader step 3 (plugin-abi.md §"Loader Sequence"):
+//   PluginLoader::open() reads a sidecar <dylib>.manifest file via
+//   PluginManifest::open().  If the sidecar file exists but cannot be
+//   Fory-deserialized, the manifest_result_ holds PluginManifestInvalid.
+//
+// Steps exercised end-to-end:
+//   1. PluginLoader::open(stub_path) → dlopen succeeds; all four symbols
+//      resolve (glibre-plugin-stub-invalid-manifest exports them all).
+//   2. Sidecar read: the .manifest file created at build time alongside the
+//      stub dylib is a regular file but contains zero valid Fory bytes.
+//      PluginManifest::open() returns PluginManifestInvalid (stub impl in
+//      core/src/plugin_manifest.cpp).
+//   3. loader.manifest_result() carries the PluginManifestInvalid error.
+//
+// No mocking: uses the real OS dlopen/dlsym path and the real sidecar read.
+//
+// Build contract: GLIBRE_STUB_INVALID_MANIFEST_DYLIB_PATH is injected
+// unconditionally by CMakeLists.txt (not conditional on any target guard).
+// Reaching the #ifndef branch indicates a CMake misconfiguration — fail loudly.
+//
+// Refs: plugin-abi.md §"Failure Modes → core::Error" step 3.
+// DoD: unit_test_named: integration_manifest_invalid_propagates
+// ===========================================================================
+
+TEST_CASE("integration_manifest_invalid_propagates", "[core][integration]") {
+#ifndef GLIBRE_STUB_INVALID_MANIFEST_DYLIB_PATH
+    // GLIBRE_STUB_INVALID_MANIFEST_DYLIB_PATH is injected unconditionally by
+    // CMakeLists.txt.  Reaching here indicates a CMake misconfiguration — fail
+    // loudly so CI surfaces the gap rather than silently skipping DoD coverage.
+    FAIL(
+        "GLIBRE_STUB_INVALID_MANIFEST_DYLIB_PATH not defined — "
+        "this macro is unconditional; check CMakeLists.txt for "
+        "glibre-plugin-stub-invalid-manifest"
+    );
+#else
+    const eastl::string_view stub_path{GLIBRE_STUB_INVALID_MANIFEST_DYLIB_PATH};
+    REQUIRE_FALSE(stub_path.empty());
+
+    // Steps 1–2: dlopen + dlsym must succeed — the stub exports all four symbols.
+    auto loader_result = glibre::core::PluginLoader::open(stub_path);
+    REQUIRE(loader_result.has_value());
+
+    const glibre::core::PluginLoader& loader = *loader_result;
+
+    // Verify that the stub's ABI hash symbol resolved (step 2 passed).
+    REQUIRE(loader.abi_hash() != nullptr);
+
+    // Step 3: the sidecar <stub>.manifest file exists but fails deserialization.
+    // PluginManifest::open() must return PluginManifestInvalid.
+    const glibre::Result<glibre::core::PluginManifest>& manifest_res = loader.manifest_result();
+
+    // The manifest result must be an error.
+    REQUIRE_FALSE(manifest_res.has_value());
+
+    const auto* core_err = as_core_error(manifest_res.error());
+    REQUIRE(core_err != nullptr);
+    CHECK(*core_err == glibre::core::Error::PluginManifestInvalid);
+
+    // Coverage note (refs #225): this test depends on PluginManifest::open()
+    // returning PluginManifestInvalid for ANY regular file, which is the current
+    // stub behaviour in core/src/plugin_manifest.cpp:41.  The empty sidecar
+    // created by `cmake -E touch` satisfies the gate trivially — we are not yet
+    // testing that garbage bytes fail Fory deserialization, only that the loader
+    // propagates the PluginManifestInvalid error correctly.
+    //
+    // Once plan #225 lands real Fory decoders, this test must be refreshed:
+    //   • write a non-empty garbage payload to the sidecar (or use the
+    //     kGarbageBlob already embedded in stub_invalid_manifest.cpp), and
+    //   • update the sidecar creation in CMakeLists.txt accordingly.
+    // At that point the test will verify the actual deserialise-failure path.
+#endif
+}
+
+// ===========================================================================
+// Test: integration_engine_too_old_propagates
+//
+// Exercises loader step 5 (plugin-abi.md §"Loader Sequence"):
+//   PluginLoaderRegistry::validate_engine_version() rejects a plugin whose
+//   manifest.min_engine_version exceeds the host engine version.
+//
+// Steps exercised end-to-end:
+//   1. PluginLoader::open(noop_path) → success (all four symbols present;
+//      the noop plugin is a valid dylib).
+//   2. Synthesise a PluginManifest with min_engine_version = {99, 0, 0},
+//      which exceeds the test fixture's kHostVersion = {1, 0, 0}.
+//   3. PluginLoaderRegistry::validate_all() runs gate 2 (engine version):
+//      host {1,0,0} < min_engine_version {99,0,0} → PluginEngineTooOld.
+//
+// No new stub is needed: the noop plugin is reused for the dlopen/dlsym path;
+// the version incompatibility is injected via the synthetic manifest.
+//
+// Build contract: GLIBRE_NOOP_DYLIB_PATH is injected conditionally (requires
+// GLIBRE_BUILD_EXAMPLES=ON).  Fail loudly if missing — same rationale as
+// integration_name_collision_propagates.
+//
+// Refs: plugin-abi.md §"Failure Modes → core::Error" step 5.
+// DoD: unit_test_named: integration_engine_too_old_propagates
+// ===========================================================================
+
+TEST_CASE("integration_engine_too_old_propagates", "[core][integration]") {
+#ifndef GLIBRE_NOOP_DYLIB_PATH
+    // FAIL rather than SKIP: this test is part of the DoD for #968.
+    // A missing macro means the noop plugin was not built; that is a build
+    // configuration error for this test suite — fail loudly so CI surfaces it.
+    FAIL(
+        "GLIBRE_NOOP_DYLIB_PATH not defined — "
+        "rebuild with GLIBRE_BUILD_EXAMPLES=ON (noop plugin required for #968 DoD)"
+    );
+#else
+    const eastl::string_view noop_path{GLIBRE_NOOP_DYLIB_PATH};
+    REQUIRE_FALSE(noop_path.empty());
+
+    // Step 1–2: dlopen + dlsym must succeed — the noop plugin exports all four
+    // required symbols.
+    auto loader_result = glibre::core::PluginLoader::open(noop_path);
+    REQUIRE(loader_result.has_value());
+
+    // Anchor the dlopen: verify the ABI hash symbol resolved to the noop
+    // sentinel.  Without this check the open() call is performative; this
+    // assertion confirms dlsym reached the correct dylib before we feed the
+    // synthetic manifest into the registry gates below.
+    REQUIRE(loader_result->abi_hash() != nullptr);
+    CHECK(eastl::string_view{loader_result->abi_hash()} == eastl::string_view{kNoopAbiHash});
+
+    // Registry with host engine version {1, 0, 0}.
+    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+
+    // Synthesise a manifest whose min_engine_version far exceeds the host.
+    // min_engine_version {99, 0, 0} > host {1, 0, 0} → gate 2 fires.
+    auto manifest = make_manifest(
+        "glibre.integration.engine_too_old",
+        kNoopAbiHash,
+        /*version=*/{1, 0, 0},
+        /*min_engine=*/{99, 0, 0}
+    );
+
+    // Step 5 (gate 2): validate_all must fail at the engine-version gate.
+    // Gates 1a and 1b pass because the manifest and symbol both carry kNoopAbiHash.
+    auto result = registry.validate_all(
+        manifest,
+        eastl::string_view{kNoopAbiHash},  // expected
+        eastl::string_view{kNoopAbiHash},  // symbol value (noop hash)
+        noop_path
+    );
+
+    REQUIRE_FALSE(result.has_value());
+    const auto* core_err = as_core_error(result.error());
+    REQUIRE(core_err != nullptr);
+    CHECK(*core_err == glibre::core::Error::PluginEngineTooOld);
+#endif
+}
+
+// ===========================================================================
+// Test: integration_dependency_missing_propagates
+//
+// Exercises loader step 7 (plugin-abi.md §"Loader Sequence"):
+//   PluginLoaderRegistry::validate_dependencies() refuses to load a plugin
+//   whose depends_on lists a name that is not yet registered.
+//
+// Steps exercised end-to-end:
+//   1. PluginLoader::open(noop_path) → success.
+//   2. Construct an empty registry (no plugins registered).
+//   3. Synthesise a PluginManifest for plugin B that depends_on a plugin
+//      named "glibre.integration.missing_dep" — which has NOT been registered.
+//   4. PluginLoaderRegistry::validate_all() runs gate 4 (dependency resolution):
+//      "glibre.integration.missing_dep" is absent → PluginDependencyMissing.
+//
+// Distinction from the vacuous happy-path case: the happy-path test has
+// depends_on empty, so gate 4 always passes.  This test adds one entry to
+// depends_on that is genuinely unmet, exercising the non-vacuous code path.
+//
+// No new stub is needed: the noop plugin is reused; the dependency mismatch
+// is injected via the synthetic manifest.
+//
+// Build contract: GLIBRE_NOOP_DYLIB_PATH is injected conditionally — fail
+// loudly if missing (same rationale as integration_name_collision_propagates).
+//
+// Refs: plugin-abi.md §"Failure Modes → core::Error" step 7.
+// DoD: unit_test_named: integration_dependency_missing_propagates
+// ===========================================================================
+
+TEST_CASE("integration_dependency_missing_propagates", "[core][integration]") {
+#ifndef GLIBRE_NOOP_DYLIB_PATH
+    // FAIL rather than SKIP: this test is part of the DoD for #968.
+    FAIL(
+        "GLIBRE_NOOP_DYLIB_PATH not defined — "
+        "rebuild with GLIBRE_BUILD_EXAMPLES=ON (noop plugin required for #968 DoD)"
+    );
+#else
+    const eastl::string_view noop_path{GLIBRE_NOOP_DYLIB_PATH};
+    REQUIRE_FALSE(noop_path.empty());
+
+    // Step 1–2: dlopen + dlsym must succeed.
+    auto loader_result = glibre::core::PluginLoader::open(noop_path);
+    REQUIRE(loader_result.has_value());
+
+    // Anchor the dlopen: verify the ABI hash symbol resolved to the noop
+    // sentinel.  Without this check the open() call is performative; this
+    // assertion confirms dlsym reached the correct dylib before we feed the
+    // synthetic manifest into the registry gates below.
+    REQUIRE(loader_result->abi_hash() != nullptr);
+    CHECK(eastl::string_view{loader_result->abi_hash()} == eastl::string_view{kNoopAbiHash});
+
+    // Registry is empty — "glibre.integration.missing_dep" is not registered.
+    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+
+    // Synthesise a manifest for plugin B that lists an unmet dependency.
+    glibre::core::PluginManifest manifest = make_manifest("glibre.integration.dep_consumer");
+    manifest.depends_on.push_back(eastl::string{"glibre.integration.missing_dep"});
+
+    // Step 7 (gate 4): validate_all must fail at the dependency gate.
+    // Gates 1a, 1b, 2, and 3 pass: abi hash matches, engine version is fine,
+    // and "glibre.integration.dep_consumer" is not yet registered.
+    auto result = registry.validate_all(
+        manifest,
+        eastl::string_view{kNoopAbiHash},  // expected
+        eastl::string_view{kNoopAbiHash},  // symbol value (noop hash)
+        noop_path
+    );
+
+    REQUIRE_FALSE(result.has_value());
+    const auto* core_err = as_core_error(result.error());
+    REQUIRE(core_err != nullptr);
+    CHECK(*core_err == glibre::core::Error::PluginDependencyMissing);
 #endif
 }
