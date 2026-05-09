@@ -113,24 +113,31 @@ inline constexpr std::uint64_t kMiB = 1024ULL * 1024ULL;
 
 inline constexpr std::uint64_t kContextCeilings[kContextTagCount] = {
     //  [0] core     [1] platform  [2] data     [3] shader   [4] render
-    64 * kMiB, 16 * kMiB, 32 * kMiB, 32 * kMiB, 512 * kMiB,
+    64 * kMiB,
+    16 * kMiB,
+    32 * kMiB,
+    32 * kMiB,
+    512 * kMiB,
     //  [5] geometry  [6] physics   [7] content  [8] tools
-    256 * kMiB, 128 * kMiB, 256 * kMiB, 256 * kMiB,
+    256 * kMiB,
+    128 * kMiB,
+    256 * kMiB,
+    256 * kMiB,
 };
 
 // Compile-time index pinning: if ContextTag enum order changes these fail.
-static_assert(static_cast<std::uint8_t>(ContextTag::core)     == 0);
+static_assert(static_cast<std::uint8_t>(ContextTag::core) == 0);
 static_assert(static_cast<std::uint8_t>(ContextTag::platform) == 1);
-static_assert(static_cast<std::uint8_t>(ContextTag::data)     == 2);
-static_assert(static_cast<std::uint8_t>(ContextTag::shader)   == 3);
-static_assert(static_cast<std::uint8_t>(ContextTag::render)   == 4);
+static_assert(static_cast<std::uint8_t>(ContextTag::data) == 2);
+static_assert(static_cast<std::uint8_t>(ContextTag::shader) == 3);
+static_assert(static_cast<std::uint8_t>(ContextTag::render) == 4);
 static_assert(static_cast<std::uint8_t>(ContextTag::geometry) == 5);
-static_assert(static_cast<std::uint8_t>(ContextTag::physics)  == 6);
-static_assert(static_cast<std::uint8_t>(ContextTag::content)  == 7);
-static_assert(static_cast<std::uint8_t>(ContextTag::tools)    == 8);
+static_assert(static_cast<std::uint8_t>(ContextTag::physics) == 6);
+static_assert(static_cast<std::uint8_t>(ContextTag::content) == 7);
+static_assert(static_cast<std::uint8_t>(ContextTag::tools) == 8);
 // Ceiling spot-checks: verify representative entries match perf-budget.md values.
-static_assert(kContextCeilings[static_cast<std::uint8_t>(ContextTag::core)]    ==  64 * kMiB);
-static_assert(kContextCeilings[static_cast<std::uint8_t>(ContextTag::render)]  == 512 * kMiB);
+static_assert(kContextCeilings[static_cast<std::uint8_t>(ContextTag::core)] == 64 * kMiB);
+static_assert(kContextCeilings[static_cast<std::uint8_t>(ContextTag::render)] == 512 * kMiB);
 static_assert(kContextCeilings[static_cast<std::uint8_t>(ContextTag::physics)] == 128 * kMiB);
 
 // ---------------------------------------------------------------------------

@@ -44,11 +44,11 @@
 //   This matches the C++ standard's "zero-size allocation returns a unique
 //   non-null pointer" contract.
 
-#include "glibre/alloc.hpp"
-
 #include <cstdlib>  // posix_memalign, free, std::abort
 
 #include <spdlog/spdlog.h>
+
+#include "glibre/alloc.hpp"
 
 namespace glibre {
 
@@ -69,8 +69,7 @@ PerContextAllocator::PerContextAllocator(ContextTag tag) noexcept
 // allocate
 // ---------------------------------------------------------------------------
 
-Result<void*>
-PerContextAllocator::allocate(std::size_t bytes, std::size_t align) noexcept {
+Result<void*> PerContextAllocator::allocate(std::size_t bytes, std::size_t align) noexcept {
     // Normalise alignment: 0 → alignof(std::max_align_t), less than
     // sizeof(void*) → sizeof(void*) (posix_memalign minimum).
     if (align == 0) {
@@ -100,9 +99,8 @@ PerContextAllocator::allocate(std::size_t bytes, std::size_t align) noexcept {
             return std::unexpected{Error{core::Error::OutOfBudget}};
         }
         if (bytes_used_.compare_exchange_weak(
-                current, after,
-                std::memory_order_acq_rel,
-                std::memory_order_relaxed)) {
+                current, after, std::memory_order_acq_rel, std::memory_order_relaxed
+            )) {
             break;
         }
         // CAS failed: `current` has been refreshed with the actual value; retry.
@@ -111,15 +109,15 @@ PerContextAllocator::allocate(std::size_t bytes, std::size_t align) noexcept {
     // Shipping mode: update counter after allocation; emit warn-once on overrun.
     if (bytes > 0) {
         const std::uint64_t after =
-            bytes_used_.fetch_add(static_cast<std::uint64_t>(bytes), std::memory_order_relaxed)
-            + static_cast<std::uint64_t>(bytes);
+            bytes_used_.fetch_add(static_cast<std::uint64_t>(bytes), std::memory_order_relaxed) +
+            static_cast<std::uint64_t>(bytes);
         if (after > ceiling_) {
             // Per-instance warn-once flag (alloc.hpp §Shipping-build soft warning).
             bool already_warned = warn_once_flag_.load(std::memory_order_relaxed);
             if (!already_warned &&
                 warn_once_flag_.compare_exchange_strong(
-                    already_warned, true,
-                    std::memory_order_relaxed, std::memory_order_relaxed)) {
+                    already_warned, true, std::memory_order_relaxed, std::memory_order_relaxed
+                )) {
                 // Rule #3 (perf-budget.md §Allocator Rules): emit spdlog::warn
                 // once per ContextTag on ceiling overrun in shipping builds.
                 // MVP throttle is once-per-tag-per-instance-lifetime; per-frame
@@ -131,7 +129,8 @@ PerContextAllocator::allocate(std::size_t bytes, std::size_t align) noexcept {
                     static_cast<std::uint8_t>(tag_),
                     bytes,
                     ceiling_,
-                    after);
+                    after
+                );
             }
         }
     }

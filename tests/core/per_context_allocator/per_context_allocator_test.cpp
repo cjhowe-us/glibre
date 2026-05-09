@@ -31,7 +31,6 @@
 #include <thread>
 
 #include <EASTL/vector.h>
-
 #include <catch2/catch_test_macros.hpp>
 #include <glibre/alloc.hpp>
 
@@ -255,4 +254,3 @@ TEST_CASE("per_context_allocator_threadsafe_allocations", "[core][alloc]") {
     }
     CHECK(alloc.bytes_used() == 0);
 }
-
