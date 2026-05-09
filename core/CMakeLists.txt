@@ -20,6 +20,7 @@ add_library(glibre-core STATIC
     src/plugin_loader_actions.cpp    # Loader-procedure free functions: steps 9–11 (plan #231)
     src/log_error.cpp                # Structured error logging helper (plan #236)
     src/alloc/transient_arena.cpp    # Per-context transient bump-pointer arena (plan #239)
+    src/alloc/per_context_allocator.cpp  # Tag-tracked ceiling-enforced heap allocator (plan #238)
 )
 
 # EASTL is the substrate container/string/variant library per PHILOSOPHY §11.
@@ -64,6 +65,25 @@ target_compile_options(glibre-core PRIVATE
     # completeness is enforced at build time, not just by runtime unit tests.
     # This is the guarantee described in log_error.hpp §"to_string design choice".
     -Werror=switch
+)
+
+# ---------------------------------------------------------------------------
+# GLIBRE_ALLOC_STRICT — hard ceiling enforcement in diagnostic/debug builds
+#
+# perf-budget.md §Allocator Rules #2: "when GLIBRE_ALLOC_STRICT=1, the
+# allocator tracks live bytes per ContextTag and returns OutOfBudget when an
+# allocation would push the tag over its cell ceiling."
+#
+# Wired on Debug builds; shipping builds compile with GLIBRE_ALLOC_STRICT=0
+# (soft-warning path) per Allocator Rules #3.
+#
+# Note: the per_context_allocator unit-test CMakeLists also sets
+# GLIBRE_ALLOC_STRICT=1 explicitly so that all test-suite builds exercise
+# the strict-mode path regardless of CMAKE_BUILD_TYPE.
+# ---------------------------------------------------------------------------
+target_compile_definitions(glibre-core PUBLIC
+    $<$<CONFIG:Debug>:GLIBRE_ALLOC_STRICT=1>
+    $<$<NOT:$<CONFIG:Debug>>:GLIBRE_ALLOC_STRICT=0>
 )
 
 # ---------------------------------------------------------------------------

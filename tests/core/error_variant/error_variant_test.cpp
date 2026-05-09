@@ -155,8 +155,8 @@ TEST_CASE("error_context_round_trip", "[core][error][context]") {
     constexpr eastl::string_view test_detail = "synthetic error for round-trip test";
 
     const glibre::ErrorContext ctx{
-        .file   = test_file,
-        .line   = test_line,
+        .file = test_file,
+        .line = test_line,
         .detail = test_detail,
     };
     const glibre::Error err{glibre::core::Error::HotReloadRefused, ctx};
@@ -168,8 +168,8 @@ TEST_CASE("error_context_round_trip", "[core][error][context]") {
     REQUIRE(*arm == glibre::core::Error::HotReloadRefused);
 
     // Context fields survive the round-trip unchanged.
-    REQUIRE(err.where().file   == test_file);
-    REQUIRE(err.where().line   == test_line);
+    REQUIRE(err.where().file == test_file);
+    REQUIRE(err.where().line == test_line);
     REQUIRE(err.where().detail == test_detail);
 
     SECTION("default ErrorContext is empty") {
