@@ -72,6 +72,9 @@ TEST_CASE("error_variant_holds_alternative_per_context", "[core][error][variant]
 
     // Compile-time: variant arm count matches the registered manifest.
     // (The static_assert lives in error_register.hpp; including it is sufficient.)
+    // mirrors error_register.hpp — intentionally redundant for test-side
+    // documentation: if the header-level assert is removed, the test still pins
+    // the contract and the breakage is caught here.
     static_assert(
         eastl::variant_size_v<glibre::Error::Variant> == glibre::kExpectedArmCount,
         "Variant arm count drifted from kExpectedArmCount — "
@@ -95,12 +98,15 @@ TEST_CASE("result_alias_default_constructs_to_void_success", "[core][error][resu
     REQUIRE(static_cast<bool>(r));
 
     // Compile-time: alias identity — must remain std::expected<T, glibre::Error>.
+    // mirrors error.hpp:188 — intentionally redundant for test-side documentation:
+    // if the header-level assert is removed, the test still pins the contract.
     static_assert(
         std::is_same_v<glibre::Result<void>, std::expected<void, glibre::Error>>,
         "glibre::Result<T> must be an alias for std::expected<T, glibre::Error>."
     );
 
     // Underlying type contract: per-context enums use std::uint16_t.
+    // mirrors error.hpp:196 — intentionally redundant for test-side documentation.
     static_assert(
         std::is_same_v<std::underlying_type_t<glibre::core::Error>, std::uint16_t>,
         "core::Error underlying type must be std::uint16_t."
@@ -165,4 +171,17 @@ TEST_CASE("error_context_round_trip", "[core][error][context]") {
     REQUIRE(err.where().file   == test_file);
     REQUIRE(err.where().line   == test_line);
     REQUIRE(err.where().detail == test_detail);
+
+    SECTION("default ErrorContext is empty") {
+        // When glibre::Error is constructed without an explicit ErrorContext
+        // (the path used by every production Result<T>=std::unexpected(Error{e})
+        // call site that does not supply a GLIBRE_TRY_AT location), all three
+        // fields must be at their zero-value: empty string_views and line 0.
+        // This guards against accidental aggregate-init drift in ErrorContext.
+        const glibre::Error bare{glibre::core::Error::OutOfBudget};
+
+        REQUIRE(bare.where().file.empty());
+        REQUIRE(bare.where().line == 0);
+        REQUIRE(bare.where().detail.empty());
+    }
 }

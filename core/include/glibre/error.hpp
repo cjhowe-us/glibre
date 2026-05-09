@@ -189,6 +189,14 @@ static_assert(
     std::is_same_v<Result<int>, std::expected<int, Error>>,
     "glibre::Result<T> must remain an alias for std::expected<T, glibre::Error>."
 );
+// I1b — void specialisation: Result<void> is the canonical success-only return
+// shape used throughout the engine (e.g. every Init/Shutdown function returns
+// Result<void>).  The int-only assert above would not catch a partial-
+// specialisation change that broke only the void path; pin it separately.
+static_assert(
+    std::is_same_v<Result<void>, std::expected<void, Error>>,
+    "glibre::Result<void> must remain an alias for std::expected<void, glibre::Error>."
+);
 
 // I2: All three registered per-context enums must use std::uint16_t as their
 // underlying type.  The loop is unrolled by the compiler; the asserts fire
