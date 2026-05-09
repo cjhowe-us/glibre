@@ -429,6 +429,86 @@ TEST_CASE("plugin_loader_stamps_allocator_handle_with_plugin_tag", "[core][regis
 }
 
 // ===========================================================================
+// Test: migrate_components_returns_failed_on_broken_migration_step
+//
+// Exercises loader step 11 failure path (plugin-abi.md §"Loader Sequence"
+// step 11, §"Failure Modes → core::Error" row 11):
+//   migration step failed → core::Error::SchemaMigrationFailed.
+//
+// Uses option 1 from plan #983 §Scope: inject a mock MigrationStepFn that
+// returns std::unexpected(core::Error::SchemaMigrationFailed) to simulate a
+// broken migration step.  This exercises the failure arm without requiring
+// the real per-type migration table walk from plan #221.
+//
+// Placed here (plugin_loader_register/) because the SUT is
+// plugin_loader_actions.hpp free functions — the same translation unit that
+// hosts migrate_components_no_op_when_versions_equal and the other step 9–11
+// tests (cohesion: all plugin_loader_actions.* tests live together).
+//
+// Sections:
+//   A. from!=to + broken step_fn → SchemaMigrationFailed propagated.
+//      step_fn invocation counter == 1 (step_fn was called exactly once).
+//   B. from==to + broken step_fn → success (identity short-circuit fires
+//      before step_fn).  step_fn invocation counter == 0 (step_fn not called).
+//
+// Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" step 11,
+//            §"Failure Modes → core::Error" table (row 11).
+// Plan: #983 — SchemaMigrationFailed integration test.
+// DoD: unit_test_named: migrate_components_returns_failed_on_broken_migration_step
+// ===========================================================================
+
+// TU-local invocation counter for the broken_step lambda (accessed via a
+// file-scope helper so it can be used from a non-capturing function pointer).
+// Reset to 0 before each SECTION to avoid cross-section interference.
+namespace {
+int g_broken_step_call_count = 0;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+
+glibre::Result<void> broken_step_fn() noexcept {
+    ++g_broken_step_call_count;
+    return std::unexpected(glibre::Error{glibre::core::Error::SchemaMigrationFailed});
+}
+}  // namespace
+
+TEST_CASE(
+    "migrate_components_returns_failed_on_broken_migration_step", "[core][register][migrate]"
+) {
+    SECTION("from!=to: step_fn invoked once, failure propagated") {
+        // Reset invocation counter for this section.
+        g_broken_step_call_count = 0;
+
+        // from_version (1) != to_version (2): a real schema bump — step_fn is
+        // invoked and its failure propagated to the caller.
+        auto result = glibre::core::migrate_components(1u, 2u, broken_step_fn);
+
+        // step_fn must have been called exactly once (plugin-abi.md §"Loader
+        // Sequence" step 11 — when versions differ, the migration step runs).
+        CHECK(g_broken_step_call_count == 1);
+
+        // The failure from step_fn must be propagated unchanged.
+        REQUIRE(!result);
+        const auto* core_err = as_core_error(result.error());
+        REQUIRE(core_err != nullptr);
+        CHECK(*core_err == glibre::core::Error::SchemaMigrationFailed);
+    }
+
+    SECTION("from==to: step_fn not invoked, success returned") {
+        // Reset invocation counter for this section.
+        g_broken_step_call_count = 0;
+
+        // from_version == to_version: identity case — the implementation must
+        // short-circuit before calling step_fn (plugin_loader_actions.hpp
+        // lines 186-187: "When from_version == to_version, step_fn is NOT called").
+        auto result = glibre::core::migrate_components(3u, 3u, broken_step_fn);
+
+        // step_fn must NOT have been called: counter remains 0.
+        CHECK(g_broken_step_call_count == 0);
+
+        // The identity case always succeeds (nothing to migrate).
+        REQUIRE(result.has_value());
+    }
+}
+
+// ===========================================================================
 // Test: call_register_stamped_stamps_correct_tag_from_manifest_name
 //
 // Integration test proving that the production call path:

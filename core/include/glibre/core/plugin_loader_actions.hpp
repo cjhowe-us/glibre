@@ -150,15 +150,43 @@ namespace glibre::core {
 [[nodiscard]] Result<void> rebuild_schedule() noexcept;
 
 // ---------------------------------------------------------------------------
+// MigrationStepFn — function-pointer type for a single migration step.
+//
+// A MigrationStepFn takes no arguments and returns Result<void>.  In
+// production (post-plan #221) the loader resolves this from a
+// glibre_plugin_migrations_<TypeName> export table; in tests a mock
+// function can be injected directly to exercise the SchemaMigrationFailed
+// path without the real migration table infrastructure.
+//
+// The noexcept qualifier is required: engine code compiles with
+// -fno-exceptions (error-model.md §Decision 3).
+// ---------------------------------------------------------------------------
+
+using MigrationStepFn = Result<void> (*)() noexcept;
+
+// ---------------------------------------------------------------------------
 // migrate_components — loader step 11 (plugin-abi.md §"Loader Sequence").
 //
 // For each persistent component whose schema bumped versions, runs the
 // per-type deserialize<T> migration path against the pre-swap snapshot
 // (fory-codegen.md §"Migration Mechanic").
 //
-// MVP STUB: Returns success unconditionally when from_version == to_version
-// (no migration needed) and also when from_version != to_version (real
-// migration deferred — see TODO below).
+// Two overloads:
+//
+//   (1) migrate_components(from_version, to_version)
+//       Production and smoke-test path.  Takes no step_fn parameter;
+//       returns success unconditionally in the MVP stub.  The plan #221
+//       implementation will walk a per-type migration table internally
+//       rather than accepting an injected step.  For tests that need an
+//       injection seam, use overload (2).
+//
+//   (2) migrate_components(from_version, to_version, step_fn)
+//       Test-injectable overload.  Calls step_fn() once when from_version
+//       != to_version; propagates the result unmodified.  Lets tests inject
+//       a mock that returns std::unexpected(SchemaMigrationFailed) to
+//       exercise the step-11 failure path without real migration table
+//       infrastructure (plan #221).  When from_version == to_version,
+//       step_fn is NOT called (nothing to migrate).
 //
 // On real failure the caller must:
 //   1. Call glibre_plugin_unregister if exported (step 9 reverse).
@@ -174,6 +202,8 @@ namespace glibre::core {
 //
 // @param from_version  Component schema version before this load.
 // @param to_version    Component schema version this plugin declares.
+// @param step_fn       [overload 2 only] Migration step to invoke when
+//                      from_version != to_version.  Must be non-null.
 //
 // PROVISIONAL SIGNATURE NOTE: The per-call (from_version, to_version)
 // parameter pair is a placeholder for the MVP stub.  When plan #221 lands,
@@ -186,6 +216,10 @@ namespace glibre::core {
 
 [[nodiscard]] Result<void>
 migrate_components(std::uint32_t from_version, std::uint32_t to_version) noexcept;
+
+[[nodiscard]] Result<void> migrate_components(
+    std::uint32_t from_version, std::uint32_t to_version, MigrationStepFn step_fn
+) noexcept;
 
 // ---------------------------------------------------------------------------
 // hot_reload_validate — pre-swap compatibility check (plan #250).
