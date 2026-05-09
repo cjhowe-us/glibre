@@ -71,9 +71,7 @@ FrameLoop::register_transient_arena(glibre::TransientArena* arena) noexcept {
 // the doc-comment in the header carries the full contract.
 // ---------------------------------------------------------------------------
 
-void FrameLoop::set_perf_budget(glibre::PerfBudget* budget) noexcept {
-    perf_budget_ = budget;
-}
+void FrameLoop::set_perf_budget(glibre::PerfBudget* budget) noexcept { perf_budget_ = budget; }
 
 // ---------------------------------------------------------------------------
 // present_reset_perf_budget — Phase::Present step (1).
