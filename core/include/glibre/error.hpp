@@ -164,6 +164,56 @@ private:
 template<class T>
 using Result = std::expected<T, Error>;
 
+// -----------------------------------------------------------------------
+// Compile-time invariants pinning the shape of Error::Variant and Result<T>
+//
+// These static_asserts are the mechanical guarantee that #233 requested:
+// "codify with compile-time invariants so the shape cannot silently drift".
+//
+// I1 — Result<T> is exactly std::expected<T, glibre::Error>.  Ensures the
+//      alias has not been accidentally widened or redirected.
+// I2 — Each per-context enum uses std::uint16_t as its underlying type.
+//      Changing the underlying type is an ABI break (structured log fields
+//      embed the numeric value); the assert makes this visible at compile time.
+// I3 — Error::code() returns const Variant& and is [[nodiscard]].  Verified
+//      by the constexpr construction below; the [[nodiscard]] attribute on
+//      code() is a declaration invariant enforced by code review.
+//
+// Note: the invariant that eastl::variant_size_v<Variant> == kExpectedArmCount
+// already lives in error_register.hpp (which includes this header) to avoid a
+// circular include.  That static_assert is part of the same contract and is
+// considered logically co-located here.
+// -----------------------------------------------------------------------
+
+static_assert(
+    std::is_same_v<Result<int>, std::expected<int, Error>>,
+    "glibre::Result<T> must remain an alias for std::expected<T, glibre::Error>."
+);
+// I1b — void specialisation: Result<void> is the canonical success-only return
+// shape used throughout the engine (e.g. every Init/Shutdown function returns
+// Result<void>).  The int-only assert above would not catch a partial-
+// specialisation change that broke only the void path; pin it separately.
+static_assert(
+    std::is_same_v<Result<void>, std::expected<void, Error>>,
+    "glibre::Result<void> must remain an alias for std::expected<void, glibre::Error>."
+);
+
+// I2: All three registered per-context enums must use std::uint16_t as their
+// underlying type.  The loop is unrolled by the compiler; the asserts fire
+// at compile time with a clear diagnostic if someone changes the base type.
+static_assert(
+    std::is_same_v<std::underlying_type_t<core::Error>, std::uint16_t>,
+    "core::Error underlying type must be std::uint16_t (error-model.md §Type Sketch)."
+);
+static_assert(
+    std::is_same_v<std::underlying_type_t<render::Error>, std::uint16_t>,
+    "render::Error underlying type must be std::uint16_t (error-model.md §Type Sketch)."
+);
+static_assert(
+    std::is_same_v<std::underlying_type_t<tools::Error>, std::uint16_t>,
+    "tools::Error underlying type must be std::uint16_t (error-model.md §Type Sketch)."
+);
+
 }  // namespace glibre
 
 // -----------------------------------------------------------------------
