@@ -11,3 +11,7 @@ find_package(Catch2 3 REQUIRED)
 
 add_subdirectory(core)
 add_subdirectory(data)
+
+if(GLIBRE_BUILD_TOOLS)
+    add_subdirectory(tools)
+endif()

@@ -39,9 +39,10 @@ if(NOT APPLE)
     message(FATAL_ERROR "glibre MVP is macOS-only; cross-platform deferred")
 endif()
 
-option(GLIBRE_BUILD_TESTS  "Build Catch2 tests"     ON)
-option(GLIBRE_BUILD_EDITOR "Build editor binary"    ON)
-option(GLIBRE_BUILD_RUNTIME "Build runtime binary" ON)
+option(GLIBRE_BUILD_TESTS   "Build Catch2 tests"     ON)
+option(GLIBRE_BUILD_TOOLS   "Build host tools (glibre-foryc, …)" ON)
+option(GLIBRE_BUILD_EDITOR  "Build editor binary"   ON)
+option(GLIBRE_BUILD_RUNTIME "Build runtime binary"  ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
@@ -54,8 +55,11 @@ endif()
 add_subdirectory(core)
 
 # add_subdirectory(plugins)
-# add_subdirectory(tools)
 # add_subdirectory(runtime)
+
+if(GLIBRE_BUILD_TOOLS)
+    add_subdirectory(tools)
+endif()
 
 if(GLIBRE_BUILD_TESTS)
     add_subdirectory(tests)

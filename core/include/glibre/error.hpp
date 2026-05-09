@@ -50,6 +50,18 @@ enum class Error : std::uint16_t {
 };
 }  // namespace render
 
+namespace tools {
+// Error codes for host tools (glibre-foryc and future codegen tools).
+// Added by plan #219 (foryc skeleton).
+enum class Error : std::uint16_t {
+    ForycSyntaxError,         // .fory file contains a parse error
+    ForycDuplicateTag,        // two fields share the same tag number
+    ForycNonMonotoneVersion,  // schema version is not strictly increasing
+    ForycUnknownType,         // field type is not in the builtins set
+    ForycIOError,             // file read / write failure
+};
+}  // namespace tools
+
 // -----------------------------------------------------------------------
 // ErrorContext — source-location attachment (optional human hint)
 //
@@ -76,7 +88,8 @@ class Error {
 public:
     using Variant = eastl::variant<
         core::Error,
-        render::Error
+        render::Error,
+        tools::Error
         // physics::Error, data::Error, shader::Error, ...
         // append as each context lands
         >;

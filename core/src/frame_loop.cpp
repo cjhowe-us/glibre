@@ -8,9 +8,10 @@
 // frame-design.md §3.1 note: "Violation is a … debug-build runtime
 // assertion core::Error::FramePhaseMisordered."
 
+#include "glibre/core/frame_loop.hpp"
+
 #include <cstdint>
 
-#include "glibre/core/frame_loop.hpp"
 #include "glibre/core/frame_phase.hpp"
 #include "glibre/error.hpp"
 

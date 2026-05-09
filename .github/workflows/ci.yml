@@ -54,14 +54,17 @@ jobs:
       - name: Bootstrap vcpkg
         run: ./vendor/vcpkg/bootstrap-vcpkg.sh -disableMetrics
       - name: vcpkg install test deps (fory_overlay_port_resolves)
-        # Install fory + catch2 in classic mode so the cmake configure step finds
-        # Fory::fory and Catch2 for the tests/data/pkg smoke test (refs #218).
+        # Install fory + catch2 + eastl in classic mode so the cmake configure
+        # step finds Fory::fory, Catch2, and EASTL for all test targets.
         # Classic mode is used because manifest mode would attempt to resolve all
         # vcpkg.json deps including ports not yet authored (metal-cpp, etc.).
+        # eastl added by plan #219 (glibre-foryc uses eastl::vector/string in
+        # tools/foryc/ and the allocator shim is now in core/).
         run: |
           ./vendor/vcpkg/vcpkg install \
             fory:arm64-osx \
             catch2:arm64-osx \
+            eastl:arm64-osx \
             --classic \
             --overlay-ports=vcpkg-overlay-ports
       - name: Configure
