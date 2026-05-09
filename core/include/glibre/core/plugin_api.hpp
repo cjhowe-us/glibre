@@ -29,13 +29,14 @@
 //     The LogSink reference is spdlog-backed; spdlog itself is a compile-time
 //     dependency of the plugin (header-only), not a runtime ABI surface.
 //
-//   • ABI boundary string rule: The convenience methods (register_component,
-//     register_system) accept string arguments as a (const char*, std::size_t)
-//     pair rather than eastl::string_view.  EASTL has no formal ABI stability
-//     guarantee; exposing eastl::string_view across the plugin boundary would
-//     break plugins compiled against a different EASTL version.  The engine-
-//     side implementation converts to eastl::string_view internally.
-//     (PHILOSOPHY §11: "POD spans / handles only" across the ABI surface.)
+//   • Registration: plugins call the registry objects directly through the
+//     references exposed in PluginContext (type_registry, system_registry,
+//     pass_registry, panel_registry).  No convenience wrapper methods live on
+//     PluginContext itself — that would split responsibility between the context
+//     aggregate and the registries that own registration logic (SRP).  The real
+//     TypeRegistry and SystemRegistry APIs land in plan #229 when those types
+//     are fully defined.  Until then, plugins reference the opaque registry
+//     fields and plan #229 will define the complete callable surface.
 //
 //   • Registration phase: plugin_api.md §"Loader Sequence" step 9 — all
 //     mutations happen during phase 8 (HotReload); the world is already
@@ -51,7 +52,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <expected>
 
 #include <glibre/error.hpp>
 
@@ -106,7 +106,7 @@ struct PluginContext {
     World& world;
 
     /// Component-type registry.  Plugins call register_component() against
-    /// this sink (forwarded by the convenience methods below).
+    /// this object directly once plan #229 defines the real TypeRegistry API.
     TypeRegistry& type_registry;
 
     /// System-schedule registry.  Plugins call register_system() against
@@ -143,53 +143,6 @@ struct PluginContext {
     /// The plugin MUST use this sink (not a global logger) so that log
     /// lines carry the plugin name as a contextual tag.
     LogSink& log;
-
-    // ------------------------------------------------------------------
-    // Convenience registration methods (declarations only — MVP stubs)
-    //
-    // Implementations live in the loader plan (#229) when the real
-    // registry types are fully defined.  These declarations exist here so
-    // plugin code can call them at the correct site; the compiler defers
-    // resolution to link time.
-    //
-    // All return glibre::Result<void> so failure propagates naturally
-    // through std::expected without exceptions.
-    //
-    // Per plugin-abi.md §"Registration Entry-Point Signature": the
-    // registries record per-plugin ownership so the loader can run
-    // compensating unregister() of any partial registration if
-    // glibre_plugin_register() returns an unexpected(err).
-    //
-    // ABI boundary: string arguments cross as (const char*, std::size_t)
-    // pairs — no EASTL or std:: string types on the boundary surface.
-    // The engine-side impl (plan #229) converts to eastl::string_view
-    // internally.  Plugins that already hold an eastl::string_view can
-    // pass .data() and .size().
-    // ------------------------------------------------------------------
-
-    /// Register a component type by fully-qualified name.
-    /// @param type_name      pointer to the component fqn UTF-8 bytes
-    /// @param type_name_len  byte length of type_name (no NUL terminator needed)
-    /// @param schema_hash      pointer to the blake3 hex string bytes
-    /// @param schema_hash_len  byte length of schema_hash
-    /// @param storage_hint  0=archetype, 1=sparse, 2=singleton
-    [[nodiscard]] glibre::Result<void> register_component(
-        const char*  type_name,
-        std::size_t  type_name_len,
-        const char*  schema_hash,
-        std::size_t  schema_hash_len,
-        std::uint8_t storage_hint
-    ) noexcept;
-
-    /// Register a system into the named phase.
-    /// @param name      pointer to the system name UTF-8 bytes
-    /// @param name_len  byte length of name (no NUL terminator needed)
-    /// @param phase     frame phase ordinal (1..=9 from frame_phase.hpp)
-    [[nodiscard]] glibre::Result<void> register_system(
-        const char*  name,
-        std::size_t  name_len,
-        std::uint8_t phase
-    ) noexcept;
 };
 
 }  // namespace glibre::core

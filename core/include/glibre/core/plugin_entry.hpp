@@ -34,8 +34,8 @@
 // Usage — plugin side:
 //   #include <glibre/core/plugin_entry.hpp>   // or plugin_context.hpp
 //
-//   // Declaration (links against the engine's exported prototype):
-//   extern "C" [[gnu::visibility("default")]]
+//   // Definition (GLIBRE_PLUGIN_EXPORT guards the visibility attribute):
+//   extern "C" GLIBRE_PLUGIN_EXPORT
 //   glibre::Result<void>
 //   glibre_plugin_register(glibre::core::PluginContext& ctx) noexcept {
 //       // ... register components, systems, passes, panels
@@ -49,8 +49,6 @@
 // Compilation requirements:
 //   -fno-exceptions (error-model.md §Decision 3)
 //   C++23
-
-#include <expected>
 
 #include <glibre/error.hpp>
 #include <glibre/core/plugin_api.hpp>
@@ -114,7 +112,7 @@ extern "C" {
 ///
 /// On failure the loader runs compensating unregister of any partial
 /// registration the plugin made, then dlclose()s the dylib.
-[[gnu::visibility("default")]]
+GLIBRE_PLUGIN_EXPORT
 glibre::Result<void>
 glibre_plugin_register(glibre::core::PluginContext& ctx) noexcept;
 
@@ -124,7 +122,7 @@ glibre_plugin_register(glibre::core::PluginContext& ctx) noexcept;
 /// The loader calls this during phase 8 (drain) before unloading a plugin.
 /// Plugins that do not export this symbol are unloadable only via process
 /// restart in MVP.
-[[gnu::visibility("default")]]
+GLIBRE_PLUGIN_EXPORT
 glibre::Result<void>
 glibre_plugin_unregister(glibre::core::PluginContext& ctx) noexcept;
 

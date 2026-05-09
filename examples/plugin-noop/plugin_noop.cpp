@@ -85,8 +85,9 @@ extern "C" GLIBRE_PLUGIN_EXPORT
 glibre::Result<void>
 glibre_plugin_register(glibre::core::PluginContext& /*ctx*/) noexcept {
     // No-op: this reference plugin registers nothing.
-    // A real plugin would call ctx.register_component(...), ctx.register_system(...),
-    // etc., and return std::unexpected(err) on any failure.
+    // A real plugin would call ctx.type_registry.register_component(...),
+    // ctx.system_registry.register_system(...), etc. (plan #229 defines the
+    // registry APIs), and return std::unexpected(err) on any failure.
     return {};
 }
 

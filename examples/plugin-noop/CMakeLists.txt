@@ -20,9 +20,13 @@ add_library(glibre-plugin-noop MODULE
     plugin_noop.cpp
 )
 
-target_link_libraries(glibre-plugin-noop
+# plugin-abi.md §"Plugin file shape" rule 2: plugins must NOT link glibre-core.
+# They link only glibre-types.dylib (added here once that target exists in plan
+# #223/#225).  For MVP the plugin needs only the C-ABI declarations and the
+# PluginContext POD layout — both header-only from core/include.
+target_include_directories(glibre-plugin-noop
     PRIVATE
-        glibre::core
+        ${CMAKE_SOURCE_DIR}/core/include
 )
 
 target_compile_features(glibre-plugin-noop PRIVATE cxx_std_23)

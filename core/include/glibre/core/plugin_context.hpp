@@ -25,8 +25,9 @@
 //   extern "C" GLIBRE_PLUGIN_EXPORT
 //   glibre::Result<void>
 //   glibre_plugin_register(glibre::core::PluginContext& ctx) noexcept {
-//       // ctx.register_component(...)
-//       // ctx.register_system(...)
+//       // Registration methods live on the registry types, not on PluginContext:
+//       //   ctx.type_registry.register_component(...)   // plan #229
+//       //   ctx.system_registry.register_system(...)    // plan #229
 //       return {};  // success
 //   }
 

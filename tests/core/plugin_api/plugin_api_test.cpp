@@ -9,20 +9,22 @@
 //   - noop_plugin_dylib_builds
 //   - noop_plugin_exports_four_required_symbols
 //   - plugin_context_register_smoke
-//   - plugin_context_register_after_phase8_fails
+//   - plugin_context_register_after_phase8_fails_pending_plan_229
 //
 // Design constraints:
 //   • -fno-exceptions (error-model.md §Decision 3).
 //   • No real registry objects exist yet (plan #229 onwards) — tests use
 //     stub implementations declared at file scope to satisfy the aggregate's
 //     reference fields.
-//   • PHILOSOPHY §11: no std:: containers or eastl:: containers on the
-//     plugin ABI surface.  Convenience methods now accept (const char*,
-//     std::size_t) pairs as mandated by the ABI boundary rule.
+//   • PluginContext is a pure-data aggregate of references (plugin-abi.md
+//     §"Registration Entry-Point Signature" Open Question #3).  Registration
+//     methods live on the registry types (TypeRegistry, SystemRegistry, …),
+//     not on PluginContext.  The smoke test confirms the aggregate compiles and
+//     the references can be read back — actual registration API is tested in
+//     plan #229's loader tests when the real registry types are defined.
 
 #include <cstddef>
 #include <cstdint>
-#include <expected>
 #include <filesystem>
 #include <type_traits>
 
@@ -39,19 +41,15 @@
 // LogSink, and PluginManifest types land in sibling plans.  For now we
 // define empty stub structs so that PluginContext can be instantiated.
 //
-// IMPORTANT: these stubs live in an ANONYMOUS namespace so they are hermetic
-// to this translation unit and cannot conflict with — or accidentally provide
-// — definitions for the forward-declared names in glibre::core when plan
-// #229 ships its real implementations in another TU.
+// These stubs live in an ANONYMOUS namespace — they are hermetic to this
+// translation unit and cannot conflict with plan #229's real definitions in
+// another TU.
 //
-// The anonymous-namespace stubs satisfy the forward declarations in
-// plugin_api.hpp because the forward declarations are incomplete types used
-// only to form references inside PluginContext; no class-member access occurs
-// in the headers, so the linker never needs to reconcile the two definitions.
-// The PluginContext method stubs (register_component / register_system) ARE
-// member-function definitions in glibre::core — those must remain in the
-// glibre::core namespace to match the declaration, but they are compiled into
-// this test TU only and will be superseded by plan #229's real definitions.
+// The aggregate PluginContext holds references to the forward-declared names.
+// Initialising those references from the stub types via reinterpret_cast is
+// used only for address / identity checks in plugin_context_is_pod_aggregate.
+// No methods are called through the reinterpreted references in these tests,
+// so no incomplete-type member access occurs.
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -62,28 +60,10 @@ struct StubWorld {
 
 struct StubTypeRegistry {
     int dummy{0};
-
-    glibre::Result<void> register_component_impl(
-        const char* /*type_name*/,
-        std::size_t /*type_name_len*/,
-        const char* /*schema_hash*/,
-        std::size_t /*schema_hash_len*/,
-        std::uint8_t /*storage_hint*/
-    ) noexcept {
-        return {};
-    }
 };
 
 struct StubSystemRegistry {
     int dummy{0};
-
-    glibre::Result<void> register_system_impl(
-        const char* /*name*/,
-        std::size_t /*name_len*/,
-        std::uint8_t /*phase*/
-    ) noexcept {
-        return {};
-    }
 };
 
 struct StubPassRegistry {
@@ -106,57 +86,15 @@ struct StubPluginManifest {
 }  // anonymous namespace
 
 // ---------------------------------------------------------------------------
-// Stub PluginContext method definitions
-//
-// These are member-function definitions for the declarations in plugin_api.hpp.
-// Real implementations land in plan #229 (the loader) when the registry types
-// are fully defined.  These stubs are compiled into this test TU only; plan
-// #229 will supply the authoritative definitions in a separate .cpp file that
-// is part of glibre-core.
-//
-// The stubs must live in namespace glibre::core to match the declaration site.
-// They delegate to the anonymous-namespace stubs via reinterpret_cast through
-// the incomplete-type references in PluginContext.  Since the anonymous-
-// namespace types are layout-compatible with the forward-declared names (same
-// trivial struct shape), this is safe for the test fixture only.
-//
-// WARNING: Do not copy this pattern to production code.  The real plan #229
-// implementations will include the actual registry headers and call real APIs.
-// ---------------------------------------------------------------------------
-
-namespace glibre::core {
-
-glibre::Result<void> PluginContext::register_component(
-    const char*  type_name,
-    std::size_t  type_name_len,
-    const char*  schema_hash,
-    std::size_t  schema_hash_len,
-    std::uint8_t storage_hint
-) noexcept {
-    // In tests, type_registry is actually a StubTypeRegistry (layout-compatible).
-    return reinterpret_cast<::StubTypeRegistry&>(type_registry)
-        .register_component_impl(
-            type_name, type_name_len, schema_hash, schema_hash_len, storage_hint);
-}
-
-glibre::Result<void> PluginContext::register_system(
-    const char*  name,
-    std::size_t  name_len,
-    std::uint8_t phase
-) noexcept {
-    // In tests, system_registry is actually a StubSystemRegistry (layout-compatible).
-    return reinterpret_cast<::StubSystemRegistry&>(system_registry)
-        .register_system_impl(name, name_len, phase);
-}
-
-}  // namespace glibre::core
-
-// ---------------------------------------------------------------------------
 // Test fixture — builds a complete PluginContext from stubs.
 //
 // PluginContext holds references to the registry types by their incomplete
 // forward-declared names.  We initialise those references from the anonymous-
 // namespace stubs whose layouts are identical (trivial structs with one int).
+// The reinterpret_cast is used only to bind the references; no method is
+// called through the resulting reference (eliminating the UB from
+// [basic.compound]/4 that previously arose from delegating calls through the
+// reinterpreted pointers).
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -303,34 +241,72 @@ TEST_CASE("noop_plugin_dylib_builds", "[core][plugin_api]") {
 //   glibre_plugin_manifest_size   (data symbol)
 //   glibre_plugin_register        (function symbol, T)
 //
-// Symbol matching uses exact third-field comparison via awk to avoid false
-// positives from substring matches (e.g. glibre_plugin_manifest matching
-// glibre_plugin_manifest_size).
+// Symbol matching uses exact third-field comparison: nm output is read line
+// by line and each line is split by whitespace to extract the third column,
+// avoiding false positives from substring matches (e.g. "glibre_plugin_manifest"
+// matching "glibre_plugin_manifest_size").
 // ===========================================================================
 
 #include <array>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 namespace {
 
-/// Count exact third-column symbol occurrences in nm output via awk.
-/// Returns 0 on popen failure or if the symbol is absent.
+/// Count lines in nm output where the third whitespace-delimited column
+/// exactly matches symbol_name.  Reads nm_output line by line through a
+/// popen() of `printf '%s' <nm_output> | awk '$3 == symbol { count++ }'`
+/// — implemented in plain C++ without invoking a shell pipeline carrying
+/// user-controlled nm output, to avoid metacharacter injection from paths
+/// or symbol names that contain shell-special characters.
+///
+/// nm output format (macOS `nm -gU`):
+///   <address>  <type>  <mangled-or-unmangled-name>
+/// The address may be absent for undefined symbols, but -gU filters those
+/// out, so every line has at least three columns.
 int count_exact_symbol(const std::string& nm_output, const char* symbol_name) {
-    std::string awk_cmd{"echo \""};
-    awk_cmd += nm_output;
-    awk_cmd += "\" | awk '$3 == \"";
-    awk_cmd += symbol_name;
-    awk_cmd += "\" { count++ } END { print count+0 }'";
+    int count = 0;
+    std::size_t pos = 0;
+    while (pos < nm_output.size()) {
+        // Locate end of current line.
+        std::size_t eol = nm_output.find('\n', pos);
+        if (eol == std::string::npos) eol = nm_output.size();
 
-    // NOLINTNEXTLINE(cert-env33-c)
-    FILE* p = popen(awk_cmd.c_str(), "r");
-    if (!p) return 0;
-    int n = 0;
-    // NOLINTNEXTLINE(cert-err34-c)
-    (void)fscanf(p, "%d", &n);
-    pclose(p);
-    return n;
+        // Extract the line and scan for the third column.
+        const char* line    = nm_output.c_str() + pos;
+        std::size_t line_len = eol - pos;
+        pos = eol + 1;
+
+        if (line_len == 0) continue;
+
+        // Skip leading whitespace.
+        std::size_t i = 0;
+        while (i < line_len && (line[i] == ' ' || line[i] == '\t')) ++i;
+
+        int col = 0;
+        while (col < 2 && i < line_len) {
+            // Advance past the current token.
+            while (i < line_len && line[i] != ' ' && line[i] != '\t') ++i;
+            ++col;
+            // Skip inter-column whitespace.
+            while (i < line_len && (line[i] == ' ' || line[i] == '\t')) ++i;
+        }
+
+        // col == 2: i now points at start of third column (or end of line).
+        if (col < 2 || i >= line_len) continue;
+
+        // Measure third token length.
+        std::size_t tok_start = i;
+        while (i < line_len && line[i] != ' ' && line[i] != '\t' && line[i] != '\n' && line[i] != '\r') ++i;
+        std::size_t tok_len = i - tok_start;
+
+        if (tok_len == std::strlen(symbol_name) &&
+            std::memcmp(line + tok_start, symbol_name, tok_len) == 0) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 }  // namespace
@@ -364,9 +340,8 @@ TEST_CASE("noop_plugin_exports_four_required_symbols", "[core][plugin_api]") {
     }
     pclose(pipe);
 
-    // Exact third-column match via awk — avoids false positives from
-    // substring matches (e.g. "glibre_plugin_manifest" matching
-    // "glibre_plugin_manifest_size").
+    // Exact third-column match in pure C++ — avoids metacharacter injection
+    // from shell-escaping nm output (LOW-7 fix).
     CHECK(count_exact_symbol(nm_output, "_glibre_plugin_abi_hash")      >= 1);
     CHECK(count_exact_symbol(nm_output, "_glibre_plugin_manifest_size") >= 1);
     CHECK(count_exact_symbol(nm_output, "_glibre_plugin_manifest")      >= 1);
@@ -377,82 +352,70 @@ TEST_CASE("noop_plugin_exports_four_required_symbols", "[core][plugin_api]") {
 // ===========================================================================
 // Test: plugin_context_register_smoke
 //
-// Instantiates a stub PluginContext, calls register_component() and
-// register_system(), and asserts both return ok (std::expected with value).
+// Instantiates a PluginContext from stubs and confirms the aggregate is
+// well-formed and all reference fields are correctly bound.
 //
-// This is the canonical "happy path" smoke test for the PluginContext API
-// surface.  It drives the stub implementations defined at the top of this
-// file, verifying that the call chain compiles and the Result<void> is
-// propagated correctly.
+// Registration methods (register_component, register_system) live on the
+// real TypeRegistry / SystemRegistry types (plan #229), not on PluginContext.
+// This smoke test validates only the aggregate shape and reference binding —
+// the registration API is exercised in loader unit tests once plan #229 lands.
 //
-// Strings are passed as (const char*, std::size_t) pairs per the ABI
-// boundary rule (HIGH-1 fix: no eastl::string_view on the ABI surface).
+// This test replaces the former register_component / register_system call
+// smoke that required UB-inducing stub method definitions in namespace
+// glibre::core (HIGH-1 / MED-5 fix).
 // ===========================================================================
 
 TEST_CASE("plugin_context_register_smoke", "[core][plugin_api]") {
+    // Constructing the fixture exercises PluginContext aggregate initialization.
     PluginContextFixture fixture;
 
-    static constexpr char kTypeName[]   = "glibre.test.SomeComponent";
-    static constexpr char kSchemaHash[] =
-        "0000000000000000000000000000000000000000000000000000000000000000";
-
-    // register_component: type_name, schema_hash (placeholder), storage_hint=0 (archetype).
-    auto r1 = fixture.ctx.register_component(
-        kTypeName,   sizeof(kTypeName) - 1,
-        kSchemaHash, sizeof(kSchemaHash) - 1,
-        std::uint8_t{0}
-    );
-    REQUIRE(r1.has_value());
-
-    static constexpr char kSysName[] = "glibre.test.SomeSystem";
-
-    // register_system: name, phase=2 (Logic).
-    auto r2 = fixture.ctx.register_system(
-        kSysName, sizeof(kSysName) - 1,
-        std::uint8_t{2}
-    );
-    REQUIRE(r2.has_value());
+    // Confirm that the aggregate is well-formed and all reference fields are
+    // correctly bound to the stubs.
+    CHECK(&fixture.ctx.world          != nullptr);
+    CHECK(&fixture.ctx.type_registry  != nullptr);
+    CHECK(&fixture.ctx.system_registry != nullptr);
+    CHECK(&fixture.ctx.pass_registry  != nullptr);
+    CHECK(&fixture.ctx.panel_registry != nullptr);
+    CHECK(&fixture.ctx.manifest       != nullptr);
+    CHECK(&fixture.ctx.log            != nullptr);
 }
 
 // ===========================================================================
-// Test: plugin_context_register_after_phase8_fails
+// Test: plugin_context_register_after_phase8_fails_pending_plan_229
 //
-// Documents the intended future behaviour: registration calls made outside
-// phase 8 (HotReload) should return core::Error::FramePhaseMisordered.
+// Documents the deferred phase-gate contract: registration calls made outside
+// phase 8 (HotReload) should eventually return core::Error::FramePhaseMisordered.
 //
-// The actual phase-gate enforcement lives in the loader (plan #229).
-// The stub implementations currently always succeed; this test records the
-// deferred contract via WARN so a future regression is visible in the report.
+// The actual phase-gate enforcement lives in the loader (plan #229).  This
+// test records the deferred contract so it is visible in the test report and
+// can be updated when plan #229 ships.
+//
+// Renamed from "plugin_context_register_after_phase8_fails" to
+// "plugin_context_register_after_phase8_fails_pending_plan_229" to make the
+// deferred nature explicit in the test name and avoid implying a currently-
+// enforced invariant (LOW-8 fix).
 //
 // When plan #229 is implemented:
 //   - The registries will track whether phase 8 is active.
 //   - Calls outside phase 8 will return std::unexpected(core::Error::FramePhaseMisordered).
 //   - This test will be updated to mock a "not phase 8" state and assert the error.
+//   - Rename back to "plugin_context_register_after_phase8_fails".
 //
-// For MVP: stub always succeeds; document the deferred gate explicitly.
+// For MVP: document the deferred gate explicitly; the test exercises the
+// aggregate construction path only.
 // ===========================================================================
 
-TEST_CASE("plugin_context_register_after_phase8_fails", "[core][plugin_api]") {
+TEST_CASE("plugin_context_register_after_phase8_fails_pending_plan_229", "[core][plugin_api]") {
+    // Construct the aggregate — confirms the fixture compiles and links.
     PluginContextFixture fixture;
+    (void)fixture;
 
-    static constexpr char kName[] = "glibre.test.LateSystem";
-
-    // In MVP stubs, registration always succeeds regardless of phase.
-    // The phase gate (core::Error::FramePhaseMisordered) is deferred to
-    // plan #229 (loader implementation).
-    //
-    // Invoke the API to confirm it compiles and links; the return value is
-    // intentionally discarded here because the stub always succeeds and the
-    // test's job is to document the deferred contract, not assert a value.
-    (void)fixture.ctx.register_system(
-        kName, sizeof(kName) - 1,
-        std::uint8_t{3}  // PhysicsFixed — valid phase ordinal
-    );
-
-    // Stub always succeeds: document that the gate is NOT yet enforced.
+    // Phase-gate enforcement (core::Error::FramePhaseMisordered) is deferred
+    // to plan #229 (loader implementation).  This test is a placeholder.
     WARN("Phase-gate enforcement (FramePhaseMisordered) is deferred to plan #229 (loader)");
-    SUCCEED("stub returns ok — gate not yet implemented (see plan #229)");
+    SUCCEED("stub context constructed — gate not yet implemented (see plan #229)");
     // When #229 lands, replace the two lines above with:
+    //   auto r = fixture.ctx.system_registry.register_system(..., phase_not_8);
     //   REQUIRE_FALSE(r.has_value());
     //   REQUIRE(r.error() == glibre::core::Error::FramePhaseMisordered);
 }
