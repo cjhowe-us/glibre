@@ -27,6 +27,14 @@
 //   only checks that the total counter is correct, not that concurrent
 //   allocations near the ceiling are perfectly serialized.
 //
+// ## Shipping-mode soft warning (Rule #3)
+//
+//   When GLIBRE_ALLOC_STRICT is not set, ceiling overruns emit spdlog::warn
+//   once per ContextTag for the lifetime of the process via warn_once_flags_.
+//   Full once-per-tag-per-frame throttling (linked to FrameLoop phase 9 drain)
+//   is deferred to plan #241 (perf-budget framework).  The MVP throttle is
+//   once-per-tag-per-process, documented in the header comment.
+//
 // ## bytes == 0 allocations
 //
 //   bytes == 0 is forwarded as bytes = 1 to posix_memalign (allocating a
@@ -34,17 +42,23 @@
 //   This matches the C++ standard's "zero-size allocation returns a unique
 //   non-null pointer" contract.
 
-#include "glibre/per_context_allocator.hpp"
+#include "glibre/alloc.hpp"
 
-#include <cassert>
-#include <cerrno>
-#include <cstdlib>  // std::abort
-#include <cstring>  // std::memset (debug zero; not used in release)
+#include <cstdlib>  // posix_memalign, free, std::abort
 
-// posix_memalign is POSIX (macOS, Linux). Required by platform baseline.
-#include <cstdlib>  // posix_memalign / free on POSIX
+#include <spdlog/spdlog.h>
 
 namespace glibre {
+
+// ---------------------------------------------------------------------------
+// Shipping-mode warn-once flags (one per ContextTag)
+// ---------------------------------------------------------------------------
+
+#if !defined(GLIBRE_ALLOC_STRICT) || !GLIBRE_ALLOC_STRICT
+// One flag per tag; false = warn not yet emitted, true = already warned.
+// Indexed by static_cast<uint8_t>(ContextTag).
+static std::atomic<bool> warn_once_flags_[kContextTagCount] = {};
+#endif
 
 // ---------------------------------------------------------------------------
 // Constructors
@@ -52,7 +66,9 @@ namespace glibre {
 
 PerContextAllocator::PerContextAllocator(ContextTag tag, std::uint64_t ceiling_bytes) noexcept
     : tag_{tag},
-      ceiling_{ceiling_bytes} {}
+      ceiling_{ceiling_bytes} {
+    register_allocator(*this);
+}
 
 PerContextAllocator::PerContextAllocator(ContextTag tag) noexcept
     : PerContextAllocator{tag, kContextCeilings[static_cast<std::uint8_t>(tag)]} {}
@@ -99,14 +115,45 @@ PerContextAllocator::allocate(std::size_t bytes, std::size_t align) noexcept {
         }
         // CAS failed: `current` has been refreshed with the actual value; retry.
     }
+#else
+    // Shipping mode: update counter after allocation; emit warn-once on overrun.
+    if (bytes > 0) {
+        const std::uint64_t after =
+            bytes_used_.fetch_add(static_cast<std::uint64_t>(bytes), std::memory_order_relaxed)
+            + static_cast<std::uint64_t>(bytes);
+        if (after > ceiling_) {
+            const auto tag_idx = static_cast<std::size_t>(static_cast<std::uint8_t>(tag_));
+            bool already_warned = warn_once_flags_[tag_idx].load(std::memory_order_relaxed);
+            if (!already_warned &&
+                warn_once_flags_[tag_idx].compare_exchange_strong(
+                    already_warned, true,
+                    std::memory_order_relaxed, std::memory_order_relaxed)) {
+                // Rule #3 (perf-budget.md §Allocator Rules): emit spdlog::warn
+                // once per ContextTag on ceiling overrun in shipping builds.
+                // MVP throttle is once-per-tag-per-process; per-frame reset is
+                // deferred to plan #241.
+                spdlog::warn(
+                    "PerContextAllocator: context tag {} exceeded ceiling "
+                    "(requested {} bytes, ceiling {} bytes, live {} bytes) — "
+                    "perf-budget.md Rule #3 [further overruns suppressed for this tag]",
+                    tag_idx,
+                    bytes,
+                    ceiling_,
+                    after);
+            }
+        }
+    }
 #endif
 
     void* ptr = nullptr;
     const int rc = ::posix_memalign(&ptr, align, actual_bytes);
     if (rc != 0) {
         // System OOM: the engine aborts (we do not recover from OOM).
-        // Undo the byte counter increment in strict mode before aborting so
-        // that any atexit / destructor-based logging sees consistent state.
+        // In strict mode we already committed the byte counter increment
+        // above; rolling it back here would be visible only to atexit handlers
+        // that run after abort() — which is implementation-defined.  We accept
+        // the inconsistency: the only observable consequence is a slightly
+        // elevated bytes_used() reading in a handler that is already aborting.
 #if defined(GLIBRE_ALLOC_STRICT) && GLIBRE_ALLOC_STRICT
         if (bytes > 0) {
             bytes_used_.fetch_sub(static_cast<std::uint64_t>(bytes), std::memory_order_relaxed);
@@ -114,13 +161,6 @@ PerContextAllocator::allocate(std::size_t bytes, std::size_t align) noexcept {
 #endif
         std::abort();
     }
-
-#if !defined(GLIBRE_ALLOC_STRICT) || !GLIBRE_ALLOC_STRICT
-    // Shipping mode: update counter after allocation succeeds (no ceiling check).
-    if (bytes > 0) {
-        bytes_used_.fetch_add(static_cast<std::uint64_t>(bytes), std::memory_order_relaxed);
-    }
-#endif
 
     return ptr;
 }

@@ -1,5 +1,5 @@
 #pragma once
-// core/include/glibre/per_context_allocator.hpp
+// core/include/glibre/alloc.hpp
 //
 // glibre::PerContextAllocator — tag-tracked heap allocator with per-context
 // ceiling enforcement.
@@ -16,7 +16,8 @@
 //   When GLIBRE_ALLOC_STRICT=1 (diagnostic/debug builds), allocate() returns
 //   std::unexpected{core::Error::OutOfBudget} if the requested allocation
 //   would push bytes_used() above the ceiling.  In shipping builds the ceiling
-//   check is elided; callers always receive a valid pointer.
+//   check is elided; callers always receive a valid pointer.  Ceiling overruns
+//   in shipping builds emit a one-time spdlog::warn per ContextTag (Rule #3).
 //
 //   Backing allocations delegate to posix_memalign / free (PHILOSOPHY §11
 //   carve-out: raw allocation below all allocator abstractions).  This class
@@ -42,14 +43,25 @@
 //
 //   bytes_used() is maintained by an atomic<uint64_t> with relaxed ordering
 //   for reads (telemetry only) and memory_order_acq_rel on the
-//   compare-exchange in allocate() so that ceiling enforcement is
-//   sequentially consistent within each PerContextAllocator instance.
+//   compare-exchange in allocate() so that the byte-counter increment has
+//   acquire-release happens-before guarantees within each PerContextAllocator
+//   instance.
 //
 // ## Registry stub
 //
 //   glibre::register_allocator(PerContextAllocator&) provides a forward point
 //   for the perf-budget framework (#241) to enumerate all allocators.  MVP
 //   implementation is a no-op stub; the registry is wired in plan #241.
+//   The constructor calls register_allocator(*this) so the wiring is automatic
+//   once plan #241 provides a real registry.
+//
+// ## Shipping-build soft warning (Rule #3)
+//
+//   When GLIBRE_ALLOC_STRICT is NOT set, a ceiling overrun emits
+//   spdlog::warn once per ContextTag for the lifetime of the process.
+//   Full once-per-tag-per-frame throttling (tied to FrameLoop phase 9 reset)
+//   is deferred to the perf-budget framework in plan #241; the MVP throttle
+//   is once-per-tag-per-process.
 //
 // ## -fno-exceptions clean
 //   No exceptions thrown or propagated.  Error path uses std::unexpected.
@@ -57,8 +69,6 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-
-#include <EASTL/string_view.h>
 
 #include "glibre/error.hpp"
 
@@ -109,6 +119,9 @@ public:
     // hard ceiling enforced in GLIBRE_ALLOC_STRICT builds (diagnostic / debug).
     // Pass kContextCeilings[static_cast<uint8_t>(tag)] for the canonical ceiling,
     // or a smaller value in unit tests to exercise the ceiling enforcement path.
+    //
+    // Calls register_allocator(*this) so the allocator is enumerable by the
+    // perf-budget framework once plan #241 wires the real registry.
     explicit PerContextAllocator(ContextTag tag, std::uint64_t ceiling_bytes) noexcept;
 
     // Convenience constructor: ceiling is taken from kContextCeilings[tag].
@@ -125,16 +138,17 @@ public:
     // allocate(bytes, align) — allocate `bytes` aligned to `align` bytes.
     //
     // `align` must be a power of two.  Passing zero for `align` uses
-    // alignof(std::max_align_t).
+    // alignof(std::max_align_t).  Values less than sizeof(void*) are rounded
+    // up to sizeof(void*) (posix_memalign minimum).
     //
     // In GLIBRE_ALLOC_STRICT builds:
     //   Returns std::unexpected{core::Error::OutOfBudget} if
     //   bytes_used() + bytes > ceiling_bytes().
     //
     // In shipping builds (GLIBRE_ALLOC_STRICT not set):
-    //   Ceiling check is skipped; callers always receive a valid pointer
-    //   (budget overruns are surfaced as soft warnings by the perf HUD,
-    //   not as errors — perf-budget.md §Allocator Rules #3).
+    //   Ceiling check is skipped; callers always receive a valid pointer.
+    //   If bytes_used() + bytes would exceed ceiling_bytes(), a one-time
+    //   spdlog::warn is emitted per ContextTag (Rule #3).
     //
     // bytes == 0 is valid and returns a non-null uniquely-aligned pointer
     // without advancing the byte counter.
@@ -169,14 +183,13 @@ public:
 private:
     ContextTag tag_;
     std::uint64_t ceiling_;
-    // mutable so bytes_used() can be const while the atomic is loaded.
-    mutable std::atomic<std::uint64_t> bytes_used_{0};
+    std::atomic<std::uint64_t> bytes_used_{0};
 };
 
 // ---------------------------------------------------------------------------
 // register_allocator — stub registration point for the perf-budget framework
 //
-// Called once per PerContextAllocator at initialization.  Plan #241 will wire
+// Called once per PerContextAllocator at construction.  Plan #241 will wire
 // a real registry that the perf-budget CI gate and HUD enumerate.  The MVP
 // stub is a no-op; the signature is stable so callers can opt in now.
 // ---------------------------------------------------------------------------

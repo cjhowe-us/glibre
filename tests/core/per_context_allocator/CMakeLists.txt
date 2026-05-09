@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 4.3.0)
 # tests/core/per_context_allocator — unit tests for glibre::PerContextAllocator
 #
 # Plan: #238 — feat(core): PerContextAllocator with per-tag heap ceiling
-# Authority: core/include/glibre/per_context_allocator.hpp,
+# Authority: core/include/glibre/alloc.hpp,
 #            reviews/decisions/perf-budget.md §Allocator Rules #1-3
 #
 # Named test cases (plan #238 Unit Test Plan + DoD):

@@ -1,7 +1,7 @@
 // tests/core/per_context_allocator/per_context_allocator_test.cpp
 //
 // Catch2 unit tests for glibre::PerContextAllocator.
-// Authority: core/include/glibre/per_context_allocator.hpp, plan #238,
+// Authority: core/include/glibre/alloc.hpp, plan #238,
 //            reviews/decisions/perf-budget.md §Allocator Rules #1-3.
 //
 // Named test cases (plan #238 Unit Test Plan + dispatch DoD):
@@ -27,7 +27,7 @@
 #include <EASTL/vector.h>
 
 #include <catch2/catch_test_macros.hpp>
-#include <glibre/per_context_allocator.hpp>
+#include <glibre/alloc.hpp>
 
 // ===========================================================================
 // Test: per_context_allocator_tracks_bytes_per_tag
@@ -124,6 +124,10 @@ TEST_CASE("per_context_allocator_release_decrements_counter", "[core][alloc]") {
 //
 // allocate() with 16, 32, and 64-byte alignment returns pointers whose
 // addresses are divisible by the requested alignment.
+//
+// Also verifies the two normalisation branches in allocate():
+//   - align == 0 normalises to alignof(std::max_align_t).
+//   - align < sizeof(void*) (e.g. align == 1) normalises to sizeof(void*).
 // ===========================================================================
 
 TEST_CASE("per_context_allocator_alignment_respected", "[core][alloc]") {
@@ -155,6 +159,28 @@ TEST_CASE("per_context_allocator_alignment_respected", "[core][alloc]") {
         const auto addr = reinterpret_cast<std::uintptr_t>(*r);
         CHECK((addr % 64) == 0);
         alloc.deallocate(*r, 128);
+    }
+
+    // align == 0 normalisation: must produce a validly aligned pointer.
+    // The contract normalises 0 → alignof(std::max_align_t), so the result
+    // must be aligned to at least alignof(std::max_align_t).
+    {
+        auto r = alloc.allocate(64, 0);
+        REQUIRE(r.has_value());
+        const auto addr = reinterpret_cast<std::uintptr_t>(*r);
+        CHECK((addr % alignof(std::max_align_t)) == 0);
+        alloc.deallocate(*r, 64);
+    }
+
+    // align < sizeof(void*) normalisation: align == 1 is below the
+    // posix_memalign minimum.  Contract normalises it to sizeof(void*).
+    // The returned pointer must be at least sizeof(void*)-aligned.
+    {
+        auto r = alloc.allocate(64, 1);
+        REQUIRE(r.has_value());
+        const auto addr = reinterpret_cast<std::uintptr_t>(*r);
+        CHECK((addr % sizeof(void*)) == 0);
+        alloc.deallocate(*r, 64);
     }
 
     // Counter must be back to zero after all deallocations.
