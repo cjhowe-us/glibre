@@ -31,24 +31,28 @@ FrameLoop::register_transient_arena(glibre::TransientArena* arena) noexcept {
     // callers can distinguish "null" from "registry full" without depending
     // on a debug assert that disappears in release builds.
     if (arena == nullptr) {
-        return std::unexpected(glibre::Error{
-            core::Error::InvalidArgument,
-            glibre::ErrorContext{
-                .file = "core/src/frame_loop.cpp",
-                .line = __LINE__,
-                .detail = "register_transient_arena: null arena pointer",
-            },
-        });
+        return std::unexpected(
+            glibre::Error{
+                core::Error::NullArgument,
+                glibre::ErrorContext{
+                    .file = "core/src/frame_loop.cpp",
+                    .line = __LINE__,
+                    .detail = "register_transient_arena: null arena pointer",
+                },
+            }
+        );
     }
     if (arena_count_ >= kMaxTransientArenas) {
-        return std::unexpected(glibre::Error{
-            core::Error::OutOfBudget,
-            glibre::ErrorContext{
-                .file = "core/src/frame_loop.cpp",
-                .line = __LINE__,
-                .detail = "transient arena registry full",
-            },
-        });
+        return std::unexpected(
+            glibre::Error{
+                core::Error::OutOfBudget,
+                glibre::ErrorContext{
+                    .file = "core/src/frame_loop.cpp",
+                    .line = __LINE__,
+                    .detail = "transient arena registry full",
+                },
+            }
+        );
     }
     arenas_[arena_count_++] = arena;
     return {};
@@ -120,25 +124,40 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
         // drain() is O(1) per arena; no heap allocation occurs.
         //
         // GLIBRE_ALLOC_STRICT gate (perf-budget.md §Allocator Rules #4):
-        //   assert_drained() is called BEFORE drain() so that undrained
-        //   allocations (leaks past phase 9) are surfaced as
-        //   core::Error::OutOfBudget.  The check is gated by
-        //   GLIBRE_ALLOC_STRICT so it compiles to zero cost in unstrict builds.
-        //   CI diagnostic builds define -DGLIBRE_ALLOC_STRICT=1.
+        //   assert_drained() is called BEFORE drain() (drain-then-aggregate
+        //   pattern): every arena is drained regardless of whether a leak is
+        //   detected, then the first encountered leak error is returned.
+        //   This ensures all arenas are in a clean state after each tick()
+        //   even when GLIBRE_ALLOC_STRICT is active, making the error
+        //   diagnostic rather than fatal to arena state.
+        //   The check is gated by GLIBRE_ALLOC_STRICT so it compiles to zero
+        //   cost in unstrict builds.  CI diagnostic builds define
+        //   -DGLIBRE_ALLOC_STRICT=1.
         //
         // NOTE: this is core-owned bookkeeping running inside the
         //   platform-owned Phase::Present slot.  This is a deliberate
         //   "core barrier carve-out" that must be documented and eventually
         //   formalised as a post_phase() hook or a frame-phases.md §Phase 9
         //   amendment.  See [SPIKE] iterate-frame-phases-core-barrier-carveout.
-        for (std::size_t i = 0; i < arena_count_; ++i) {
+        {
 #ifdef GLIBRE_ALLOC_STRICT
-            auto check = arenas_[i]->assert_drained();
-            if (!check) {
-                return std::unexpected(std::move(check.error()));
+            glibre::Result<void> first_leak_error{};  // holds first leak error (if any)
+#endif
+            for (std::size_t i = 0; i < arena_count_; ++i) {
+#ifdef GLIBRE_ALLOC_STRICT
+                auto check = arenas_[i]->assert_drained();
+                if (!check && first_leak_error.has_value()) {
+                    // Capture the first leak; subsequent arenas still get drained.
+                    first_leak_error = std::unexpected(std::move(check.error()));
+                }
+#endif
+                arenas_[i]->drain();  // always drain, regardless of strict-mode result
+            }
+#ifdef GLIBRE_ALLOC_STRICT
+            if (!first_leak_error.has_value()) {
+                return std::unexpected(std::move(first_leak_error.error()));
             }
 #endif
-            arenas_[i]->drain();
         }
         break;
     }

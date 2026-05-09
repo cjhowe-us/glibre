@@ -40,8 +40,10 @@ TransientArena::TransientArena(std::size_t capacity_bytes)
 [[nodiscard]] glibre::Result<void*>
 TransientArena::allocate(std::size_t bytes, std::size_t align) noexcept {
     // align must be a power of two in [1, 4096].
-    assert(align >= 1u && align <= 4096u && (align & (align - 1u)) == 0u &&
-           "TransientArena::allocate: align must be a power-of-two in [1, 4096]");
+    assert(
+        align >= 1u && align <= 4096u && (align & (align - 1u)) == 0u &&
+        "TransientArena::allocate: align must be a power-of-two in [1, 4096]"
+    );
 
     // Align the cursor up to the requested alignment using standard bit trick.
     // cursor_aligned = (cursor_ + align - 1) & ~(align - 1).
@@ -83,14 +85,16 @@ void TransientArena::drain() noexcept {
 
 [[nodiscard]] glibre::Result<void> TransientArena::assert_drained() const noexcept {
     if (cursor_ != 0) {
-        return std::unexpected(glibre::Error{
-            glibre::core::Error::OutOfBudget,
-            glibre::ErrorContext{
-                .file = "core/src/alloc/transient_arena.cpp",
-                .line = __LINE__,
-                .detail = "transient arena leak",
-            },
-        });
+        return std::unexpected(
+            glibre::Error{
+                glibre::core::Error::OutOfBudget,
+                glibre::ErrorContext{
+                    .file = "core/src/alloc/transient_arena.cpp",
+                    .line = __LINE__,
+                    .detail = "transient arena leak",
+                },
+            }
+        );
     }
     return {};
 }

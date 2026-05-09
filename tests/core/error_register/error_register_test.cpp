@@ -80,8 +80,8 @@ constexpr eastl::array<std::underlying_type_t<glibre::core::Error>, 17> kCoreErr
     static_cast<std::uint16_t>(glibre::core::Error::PluginDependencyMissing),
     // plan #239: TransientArenaExhausted — transient arena capacity exhausted.
     static_cast<std::uint16_t>(glibre::core::Error::TransientArenaExhausted),
-    // plan #239 r1: InvalidArgument — null or invalid parameter to core API.
-    static_cast<std::uint16_t>(glibre::core::Error::InvalidArgument),
+    // plan #239 r1/r2: NullArgument — null pointer to core API (was InvalidArgument).
+    static_cast<std::uint16_t>(glibre::core::Error::NullArgument),
     // When a new enumerator is added to core::Error, add it here and
     // increment the array size template argument above.
 }};

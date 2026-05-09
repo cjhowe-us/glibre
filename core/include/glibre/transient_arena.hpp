@@ -39,7 +39,6 @@
 // the one backing-store allocation in the constructor.
 
 #include <cstddef>
-#include <cstdint>
 
 #include <EASTL/unique_ptr.h>
 

@@ -324,8 +324,7 @@ TEST_CASE("transient_arena_exhaustion_returns_error", "[core][transient_arena]")
 // ===========================================================================
 
 TEST_CASE(
-    "core/transient_arena: allocations_do_not_count_against_cell_ceiling",
-    "[core][transient_arena]"
+    "core/transient_arena: allocations_do_not_count_against_cell_ceiling", "[core][transient_arena]"
 ) {
     // Two independent arenas — one for "context A", one for "context B".
     glibre::TransientArena arena_a{1024};
@@ -359,18 +358,16 @@ TEST_CASE(
 }
 
 // ===========================================================================
-// Test: transient_arena_register_null_returns_invalid_argument
+// Test: transient_arena_register_null_returns_null_argument
 //
-// MED-3: register_transient_arena(nullptr) must return InvalidArgument
+// MED-3: register_transient_arena(nullptr) must return NullArgument
 // (not success) in both debug and release builds.  Prior code asserted-only
 // in debug and silently returned success in release, creating a null
 // dereference in Phase::Present on the next tick().
+// Renamed NullArgument (was InvalidArgument) per round-2 LOW-3 finding.
 // ===========================================================================
 
-TEST_CASE(
-    "transient_arena_register_null_returns_invalid_argument",
-    "[core][transient_arena]"
-) {
+TEST_CASE("transient_arena_register_null_returns_invalid_argument", "[core][transient_arena]") {
     glibre::core::FrameLoop loop;
 
     auto result = loop.register_transient_arena(nullptr);
@@ -379,7 +376,7 @@ TEST_CASE(
     const glibre::Error& err = result.error();
     const auto* core_err = eastl::get_if<glibre::core::Error>(&err.code());
     REQUIRE(core_err != nullptr);
-    CHECK(*core_err == glibre::core::Error::InvalidArgument);
+    CHECK(*core_err == glibre::core::Error::NullArgument);
 
     // Registry must not have been modified.
     CHECK(loop.transient_arena_count() == 0u);
@@ -435,14 +432,15 @@ TEST_CASE("transient_arena_zero_byte_allocation", "[core][transient_arena]") {
 // ===========================================================================
 // Test: undrained_allocation_through_tick_returns_out_of_budget
 //
-// HIGH-2: perf-budget.md §Allocator Rules #4 mandates that drain failure
-// (allocations still live at phase 9) propagates as
+// HIGH-2 / MED-2: perf-budget.md §Allocator Rules #4 mandates that drain
+// failure (allocations still live at phase 9) propagates as
 // core::Error::OutOfBudget through tick().
 //
-// This integration test exercises the GLIBRE_ALLOC_STRICT gate in
-// FrameLoop::run_phase(Phase::Present): a non-empty arena at tick() must
-// cause tick() to return OutOfBudget and must NOT drain the arena (so the
-// caller can inspect the leak).
+// Under the drain-then-aggregate contract (round-2 MED-2 fix):
+//   - tick() returns OutOfBudget for the FIRST undrained leak detected.
+//   - ALL arenas are drained regardless (even if a leak is found), so the
+//     arena is EMPTY after tick() completes.  This keeps arena state
+//     consistent for the next frame even when strict-mode fires.
 //
 // Compiled only when -DGLIBRE_ALLOC_STRICT is set; in unstrict builds the
 // test body is a no-op (the guard is intentionally the same condition as
@@ -477,11 +475,71 @@ TEST_CASE(
 
     // The detail string must identify the leak (perf-budget.md §Allocator Rules #4).
     CHECK(err.where().detail == eastl::string_view{"transient arena leak"});
+
+    // Under drain-then-aggregate, the arena must be EMPTY after tick() even
+    // though a leak was detected.  Arena state is consistent for the next frame.
+    CHECK(arena.bytes_used() == 0u);
 #else
     // GLIBRE_ALLOC_STRICT not set: this test is a structural placeholder only.
     // In strict builds the assertion above fires; in non-strict builds the
     // drain silently succeeds.  Mark the test PASS unconditionally so CI
     // does not report it as a skipped test in the non-strict configuration.
+    SUCCEED("GLIBRE_ALLOC_STRICT not defined — strict-mode path not active in this build");
+#endif
+}
+
+// ===========================================================================
+// Test: all_arenas_drained_even_when_first_arena_leaks
+//
+// MED-2 (round-2): Under drain-then-aggregate, if the FIRST registered arena
+// leaks (bytes_used() > 0 at phase 9), ALL subsequent arenas must still be
+// drained.  The error from the first leak is returned, but later arenas must
+// not be skipped.
+//
+// This test registers two arenas with a FrameLoop.  Arena A leaks (no drain).
+// Arena B is also registered with a live allocation.  After tick() fails with
+// OutOfBudget, both arenas must be empty.
+//
+// Compiled only when -DGLIBRE_ALLOC_STRICT is set (same guard as production).
+// ===========================================================================
+
+TEST_CASE(
+    "all_arenas_drained_even_when_first_arena_leaks", "[core][transient_arena][alloc_strict]"
+) {
+#ifdef GLIBRE_ALLOC_STRICT
+    glibre::TransientArena arena_a{4096};
+    glibre::TransientArena arena_b{4096};
+    glibre::core::FrameLoop loop;
+
+    auto reg_a = loop.register_transient_arena(&arena_a);
+    REQUIRE(reg_a.has_value());
+    auto reg_b = loop.register_transient_arena(&arena_b);
+    REQUIRE(reg_b.has_value());
+    CHECK(loop.transient_arena_count() == 2u);
+
+    // Both arenas have live allocations — both leak past phase 9.
+    auto alloc_a = arena_a.allocate(64, 8);
+    REQUIRE(alloc_a.has_value());
+    auto alloc_b = arena_b.allocate(32, 4);
+    REQUIRE(alloc_b.has_value());
+
+    REQUIRE(arena_a.bytes_used() >= 64u);
+    REQUIRE(arena_b.bytes_used() >= 32u);
+
+    // tick() must fail with OutOfBudget (from arena_a, the first leaker).
+    auto tick_result = loop.tick();
+    REQUIRE_FALSE(tick_result.has_value());
+
+    const glibre::Error& err = tick_result.error();
+    const auto* core_err = eastl::get_if<glibre::core::Error>(&err.code());
+    REQUIRE(core_err != nullptr);
+    CHECK(*core_err == glibre::core::Error::OutOfBudget);
+
+    // Both arenas must be drained — drain-then-aggregate guarantees all
+    // arenas are empty even when an earlier arena leaked.
+    CHECK(arena_a.bytes_used() == 0u);
+    CHECK(arena_b.bytes_used() == 0u);
+#else
     SUCCEED("GLIBRE_ALLOC_STRICT not defined — strict-mode path not active in this build");
 #endif
 }
