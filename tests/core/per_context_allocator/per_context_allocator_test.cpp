@@ -308,12 +308,12 @@ TEST_CASE("per_context_allocator_register_fires_on_construction", "[core][alloc]
         glibre::testing_reset_register_allocator_call_count();
         {
             glibre::PerContextAllocator c0{glibre::ContextTag::render, 512ULL * 1024ULL * 1024ULL};
-            glibre::PerContextAllocator c1{glibre::ContextTag::geometry,
-                                           256ULL * 1024ULL * 1024ULL};
+            glibre::PerContextAllocator c1{
+                glibre::ContextTag::geometry, 256ULL * 1024ULL * 1024ULL
+            };
             glibre::PerContextAllocator c2{glibre::ContextTag::tools};
         }
-        CHECK(glibre::testing_register_allocator_call_count() ==
-              static_cast<std::uint64_t>(kN));
+        CHECK(glibre::testing_register_allocator_call_count() == static_cast<std::uint64_t>(kN));
     }
 }
 
