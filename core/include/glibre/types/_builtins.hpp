@@ -23,6 +23,7 @@
 #pragma once
 
 #include <cstdint>
+#include <type_traits>
 
 // -----------------------------------------------------------------------
 // glibre::math — POD math aggregates
@@ -98,7 +99,26 @@ namespace glibre::core {
 struct EntityId {
     std::uint64_t value{};
     EntityId() = default;
+
     [[nodiscard]] constexpr bool is_null() const noexcept { return value == 0; }
 };
 
 }  // namespace glibre::core
+
+// -----------------------------------------------------------------------
+// Compile-time trivial-copyability guarantees
+//
+// Every type declared in this file is required to be trivially copyable so
+// that it can appear in fory-generated structs (ABI rule 2 from
+// reviews/decisions/fory-codegen.md §"ABI Stability Rules").  These
+// static_asserts turn the comment-level audit into a hard build-time check.
+// -----------------------------------------------------------------------
+
+static_assert(std::is_trivially_copyable_v<glibre::math::Vec2f>);
+static_assert(std::is_trivially_copyable_v<glibre::math::Vec3f>);
+static_assert(std::is_trivially_copyable_v<glibre::math::Vec4f>);
+static_assert(std::is_trivially_copyable_v<glibre::math::Vec2i>);
+static_assert(std::is_trivially_copyable_v<glibre::math::Vec3i>);
+static_assert(std::is_trivially_copyable_v<glibre::math::Vec4i>);
+static_assert(std::is_trivially_copyable_v<glibre::math::Quatf>);
+static_assert(std::is_trivially_copyable_v<glibre::core::EntityId>);

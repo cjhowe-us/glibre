@@ -52,8 +52,9 @@
 #include <EASTL/string.h>
 #include <EASTL/vector.h>
 
-#include "builtin_map.hpp"
 #include "glibre/error.hpp"
+
+#include "builtin_map.hpp"
 
 namespace glibre::tools::foryc {
 

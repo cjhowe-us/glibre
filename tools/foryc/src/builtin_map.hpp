@@ -45,6 +45,7 @@ struct BuiltinEntry {
 // Order: unsigned int, signed int, float, bool, math, entity, variable-length.
 // -----------------------------------------------------------------------
 
+// clang-format off
 static constexpr BuiltinEntry k_builtin_scalar_map[] = {
     // Unsigned integers
     {"u8",     "uint8_t",                    false},
@@ -75,6 +76,7 @@ static constexpr BuiltinEntry k_builtin_scalar_map[] = {
     {"string", "eastl::string",              false},
     {"bytes",  "eastl::vector<std::byte>",   false},
 };
+// clang-format on
 
 // Sentinel count — static_assert users can reference this.
 static constexpr std::size_t k_builtin_scalar_count =

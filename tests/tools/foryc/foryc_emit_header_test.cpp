@@ -169,7 +169,12 @@ schema glibre.test.Sorted {
 
 TEST_CASE("foryc_map_builtin_scalars", "[foryc][emit_header][mapping]") {
     // Verify the complete scalar mapping table from fory-codegen.md.
-    struct Case { std::string_view fory; std::string_view cpp; };
+    struct Case {
+        std::string_view fory;
+        std::string_view cpp;
+    };
+
+    // clang-format off
     static constexpr Case k_cases[] = {
         {"u8",     "uint8_t"},
         {"u16",    "uint16_t"},
@@ -193,6 +198,7 @@ TEST_CASE("foryc_map_builtin_scalars", "[foryc][emit_header][mapping]") {
         {"string", "eastl::string"},
         {"bytes",  "eastl::vector<std::byte>"},
     };
+    // clang-format on
 
     for (const auto& c : k_cases) {
         auto r = map_builtin_to_cpp(c.fory);
@@ -349,8 +355,7 @@ schema glibre.core.Transform {
     CHECK(text.find("glibre::core::EntityId") != eastl::string::npos);
 }
 
-TEST_CASE("foryc_emit_header_no_builtins_include_for_scalar_only_schema",
-          "[foryc][emit_header]") {
+TEST_CASE("foryc_emit_header_no_builtins_include_for_scalar_only_schema", "[foryc][emit_header]") {
     // A schema using only stdlib-mapped types must NOT include _builtins.hpp.
     constexpr std::string_view src = R"(
 schema glibre.example.Widget {
