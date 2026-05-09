@@ -6,7 +6,8 @@
 // Test names match the Unit Test Plan in issue #219:
 //   - parses_minimal_schema
 //   - rejects_duplicate_tag
-//   - rejects_non_monotone_version
+//   - rejects_zero_version          (was: rejects_non_monotone_version — renamed to match assertion)
+//   - rejects_duplicate_version_key
 //   - walks_input_directory_recursively
 //
 // Also covers the dispatch-prompt-named cases:
@@ -98,8 +99,11 @@ schema glibre.test.Bad {
     CHECK(has_tools_error(result.error(), glibre::tools::Error::ForycDuplicateTag));
 }
 
-TEST_CASE("rejects_non_monotone_version", "[foryc][parser]") {
+TEST_CASE("rejects_zero_version", "[foryc][parser]") {
     // version 0 is invalid (must be >= 1).
+    // Renamed from rejects_non_monotone_version: the parser only rejects
+    // version == 0 at this stage; monotonicity across migration blocks is
+    // out of scope for plan #219 (sibling plans #220–#225).
     constexpr std::string_view src = R"(
 schema glibre.test.Zero {
   version 0
@@ -110,6 +114,37 @@ schema glibre.test.Zero {
     auto result = parse_string(src, "zero.fory");
     REQUIRE(!result.has_value());
     CHECK(has_tools_error(result.error(), glibre::tools::Error::ForycNonMonotoneVersion));
+}
+
+TEST_CASE("rejects_duplicate_version_key", "[foryc][parser]") {
+    // A schema block with two `version` lines must yield ForycSyntaxError.
+    constexpr std::string_view src = R"(
+schema glibre.test.DupVersion {
+  version 1
+  version 2
+  field x : u32 tag 1
+}
+)";
+
+    auto result = parse_string(src, "dup_version.fory");
+    REQUIRE(!result.has_value());
+    CHECK(has_tools_error(result.error(), glibre::tools::Error::ForycSyntaxError));
+}
+
+TEST_CASE("rejects_duplicate_since_key", "[foryc][parser]") {
+    // A schema block with two `since` lines must yield ForycSyntaxError.
+    constexpr std::string_view src = R"(
+schema glibre.test.DupSince {
+  version 1
+  since "0.0.1"
+  since "0.0.2"
+  field x : u32 tag 1
+}
+)";
+
+    auto result = parse_string(src, "dup_since.fory");
+    REQUIRE(!result.has_value());
+    CHECK(has_tools_error(result.error(), glibre::tools::Error::ForycSyntaxError));
 }
 
 TEST_CASE("walks_input_directory_recursively", "[foryc][parser][fs]") {
