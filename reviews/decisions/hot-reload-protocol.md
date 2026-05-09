@@ -497,6 +497,80 @@ covers the loader's own state machine.
   and (b) post-reload behaviour is captured starting at frame
   N+1 with the new plugin's deterministic systems.
 
+## §12 — Plan-Level Departures from This Record
+
+The following divergences between the protocol as written above and the
+current implementation are intentional.  Each is recorded here so that
+rounds 2/3 of the review pipeline do not re-litigate them as bugs.
+
+### 12.1 — Check B comparator: incoming-vs-outgoing instead of incoming-vs-host
+
+`§"Step 2 — Swap" 2.1` specifies the ABI hash check as
+`Q::glibre_types_abi_hash() == host_glibre_types_abi_hash`
+(incoming-vs-host).
+
+`hot_reload_validate` (plan #250) compares `incoming.abi_hash ==
+outgoing.abi_hash` (incoming-vs-outgoing) instead.  This is
+semantically equivalent because `PluginLoaderRegistry::validate_all()`
+confirms both manifests equal the host hash before `hot_reload_validate`
+is ever called.  Transitively: both equal host → they equal each other.
+The comparison of the two manifests also surfaces manifest-vs-manifest
+divergence as a distinct diagnostic.  Debug-build assertions
+(`#ifndef NDEBUG` assert blocks) catch the "validate_all not called"
+misuse by asserting neither abi_hash is empty.
+
+Resolution path: when the full phase-8 orchestrator (plans #251+) passes
+a direct reference to the host hash string, the comparison may be
+changed to incoming-vs-host per the spec letter.
+
+### 12.2 — Check C: SemVer-major equality rather than type-superset check
+
+`§"Step 2 — Swap" 2.2` specifies a component-type-set superset check
+on `(fqn, schema_version)`.
+
+`hot_reload_validate` (plan #250) performs a SemVer-major equality
+check instead (`incoming.version.major == outgoing.version.major`).
+This is a **plan-level extension**, not a verbatim derivation of §2.2.
+
+Rationale: the superset check requires archetype storage access
+(deferred to plans #251+).  SemVer-major equality is a cheaper,
+manifest-only proxy that catches the most common incompatible-swap
+case without touching ECS state.  The phrase "major-version change" in
+§2.2 is descriptive language about the *consequence* of the superset
+check failing, not a discrete check in the protocol itself.  Plan #250's
+scope statement introduces the SemVer gate explicitly as a fast-fail
+manifest-only precondition.
+
+Resolution path: plans #251+ will add the full type-superset check from
+§2.2 alongside this SemVer gate; both will run in sequence.
+
+### 12.3 — Refusals return bare cause arms, not `HotReloadRefused` umbrella
+
+`§"Refusal Cases"` stipulates that every refusal is wrapped in
+`core::Error::HotReloadRefused` with a nested cause so that consumers
+can pattern-match on `HotReloadRefused` to discover all three refusal
+cases at once.
+
+`hot_reload_validate` (plan #250) returns the cause arms directly
+(`PluginNameMismatch`, `PluginAbiHashMismatch`, `HotReloadRefused`)
+without a wrapping umbrella for the first two.  This is intentional:
+`glibre::Error` uses an `eastl::variant` over per-context enum arms
+with no nesting facility in the current error model (error-model.md
+§"Type Sketch").  Adding umbrella-wrap semantics would require either
+(a) a `HotReloadRefusedReason` companion enum carried in
+`ErrorContext::detail`, or (b) a nested `glibre::Error` inside the
+variant — neither of which the error model supports today.
+
+`HotReloadRefused` is already one of the cause arms and is returned
+directly for Check C (major-version mismatch).  The other two cause
+arms (`PluginNameMismatch`, `PluginAbiHashMismatch`) are returned bare.
+
+Resolution path: if the error model grows nesting support (post-MVP),
+wrap all three arms in `HotReloadRefused` per this protocol.  Until
+then, callers that need to distinguish "refused during hot-reload" from
+"refused during initial load" should track call-site context rather than
+pattern-matching `HotReloadRefused` alone.
+
 ## Open Questions
 
 1. **Per-phase migration arena sizing**: pick a default budget

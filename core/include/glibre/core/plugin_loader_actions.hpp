@@ -144,20 +144,53 @@ migrate_components(std::uint32_t from_version, std::uint32_t to_version) noexcep
 //     Failure → core::Error::PluginNameMismatch.
 //
 //   Check B — ABI hash (hot-reload-protocol §2.1):
-//     incoming.abi_hash == outgoing.abi_hash.  Both must match the host
-//     `glibre_types_abi_hash()`.  In this function we compare the two manifests
-//     against each other; the PluginLoaderRegistry's validate_all() already
-//     confirmed both equal the host hash before the loader ever called
-//     hot_reload_validate, so manifest-vs-manifest equality is equivalent to
-//     both-vs-host equality.
+//     incoming.abi_hash == outgoing.abi_hash.
+//
+//     Protocol §2.1 specifies the check as `incoming == host_glibre_types_abi_hash`
+//     (incoming-vs-host).  Here we compare incoming-vs-outgoing instead.  This
+//     is semantically equivalent under the following precondition:
+//
+//       PRECONDITION: PluginLoaderRegistry::validate_all() confirmed that BOTH
+//       manifests equal the host hash before the loader ever called
+//       hot_reload_validate.  If that precondition holds, then:
+//         incoming.abi_hash == host   (guaranteed by validate_all)
+//         outgoing.abi_hash == host   (guaranteed by validate_all)
+//         → incoming.abi_hash == outgoing.abi_hash   (transitively)
+//
+//     Comparing the two manifests against each other rather than against the
+//     host hash surfaces one additional failure mode: a bug where the two
+//     loaded manifests disagree with each other despite both nominally passing
+//     validate_all (e.g. a race that replaced outgoing's manifest between
+//     validate_all and this call).  In practice that race cannot occur because
+//     the loader holds the exclusive phase-8 lock, but the belt-and-suspenders
+//     check is cheap and the error message is more specific.
+//
+//     The PRECONDITION is asserted in debug builds via GLIBRE_DCHECK inside
+//     hot_reload_validate (see plugin_loader_actions.cpp).  Call sites must
+//     not invoke this function without first calling validate_all.
+//
 //     Failure → core::Error::PluginAbiHashMismatch.
 //
-//   Check C — SemVer major version (hot-reload-protocol §2.2, compatible-swap
-//             rule):
+//   Check C — SemVer major version (plan #250 extension of protocol §2.2):
 //     The incoming plugin's semantic version major must equal the outgoing's.
 //     The minor/patch may advance (additive changes are safe); they may also
 //     stay the same (a patch rebuild).  A major-version change signals a
 //     breaking redesign that requires a fresh world, not a hot-reload.
+//
+//     DIVERGENCE NOTE: hot-reload-protocol §2.2 defines a component-type-set
+//     superset check on (fqn, schema_version) — it does NOT define a discrete
+//     SemVer-major equality check.  The phrase "major-version change" in the
+//     protocol is descriptive language about *why* the superset check fails
+//     when a plugin drops a registered type, not a separate criterion.
+//
+//     Plan #250 introduces SemVer-major equality as an additional,
+//     manifest-only precondition that is cheaper to evaluate than the full
+//     superset check (which requires archetype storage — deferred to plans
+//     #251+).  It is a plan-level extension that supersedes, but does not
+//     contradict, protocol §2.2: the superset check will still run in plans
+//     #251+ and the major-version check here is a fast-fail gate that catches
+//     the most obvious incompatible swap before touching ECS state.
+//
 //     Failure → core::Error::HotReloadRefused.
 //
 // Note on type-superset check (protocol §2.2 second bullet):

@@ -15,6 +15,7 @@
 
 #include "glibre/core/plugin_loader_actions.hpp"
 
+#include <cassert>
 #include <cstdint>
 
 #include "glibre/core/plugin_api.hpp"  // PluginContext, RegisterFn
@@ -155,17 +156,38 @@ Result<void> migrate_components(
 //   different name is a configuration error (wrong dylib).
 //   Failure → core::Error::PluginNameMismatch.
 //
-// Check B — ABI hash equality (protocol §2.1):
+// Check B — ABI hash equality (protocol §2.1, incoming-vs-outgoing form):
 //   The incoming manifest's abi_hash must equal the outgoing manifest's
-//   abi_hash.  Both were already validated against the host hash by
-//   PluginLoaderRegistry::validate_all() before this function is called,
-//   so manifest-vs-manifest equality implies both-vs-host equality.
+//   abi_hash.
+//
+//   Protocol §2.1 specifies incoming == host_glibre_types_abi_hash
+//   (incoming-vs-host).  Here we compare incoming-vs-outgoing.  This is
+//   equivalent under the PRECONDITION that PluginLoaderRegistry::validate_all()
+//   confirmed BOTH manifests equal the host hash before this function is
+//   called.  Transitivity: both equal host → they equal each other.  The
+//   comparison of the two manifests also surfaces manifest-vs-manifest
+//   disagreement as a distinct diagnostic (see .hpp docstring for full
+//   rationale).
+//
+//   PRECONDITION ASSERTION: The GLIBRE_DCHECK below fires in debug builds if
+//   outgoing.abi_hash is empty (a proxy for "validate_all not called"), catching
+//   the most common misuse without requiring a host_abi_hash parameter.
+//
 //   Failure → core::Error::PluginAbiHashMismatch.
 //
-// Check C — SemVer major version compatibility (protocol §2.2 compatible swap):
+// Check C — SemVer major version (plan #250 extension — NOT a verbatim
+//            derivation of protocol §2.2):
 //   The incoming plugin's major version must equal the outgoing's.  Minor and
 //   patch may advance.  A major bump signals a breaking change requiring a
 //   fresh world.
+//
+//   Protocol §2.2 defines a component-type-set superset check on
+//   (fqn, schema_version).  Check C here is a FASTER MANIFEST-ONLY GATE that
+//   plan #250 adds as a precondition: if the major versions differ, the swap
+//   is refused immediately without touching ECS state.  The full superset check
+//   from protocol §2.2 is deferred to plans #251+ and will supplement, not
+//   replace, this check.  See .hpp docstring for full divergence note.
+//
 //   Failure → core::Error::HotReloadRefused.
 // ---------------------------------------------------------------------------
 
@@ -187,11 +209,32 @@ hot_reload_validate(const PluginManifest& outgoing, const PluginManifest& incomi
         );
     }
 
-    // Check B — ABI hash equality (hot-reload-protocol §2.1).
-    // The two manifests must carry identical abi_hash strings.  The
-    // PluginLoaderRegistry already confirmed each against the host hash
-    // independently; here we confirm they agree with each other (a belt-and-
-    // suspenders guard and a clear error message if they somehow diverge).
+    // Check B — ABI hash equality (hot-reload-protocol §2.1, incoming-vs-outgoing form).
+    //
+    // Protocol §2.1 requires incoming == host_glibre_types_abi_hash (incoming-vs-host).
+    // We compare incoming-vs-outgoing here, which is equivalent under the precondition
+    // that PluginLoaderRegistry::validate_all() confirmed BOTH manifests equal the host
+    // hash before this function is called.  See the function-level comment above (and
+    // the .hpp docstring) for the full equivalence proof and rationale.
+    //
+    // The assertion below fires in debug builds if outgoing.abi_hash is empty, which
+    // is a proxy for "validate_all() was never called for the outgoing plugin".  An
+    // empty hash string cannot be a valid 64-char blake3 hex string, so it indicates
+    // a caller-contract violation rather than a legitimate hash mismatch.
+#ifndef NDEBUG
+    assert(
+        !outgoing.abi_hash.empty() &&
+        "hot_reload_validate precondition: "
+        "outgoing must have been validated by PluginLoaderRegistry::validate_all() "
+        "before calling hot_reload_validate — outgoing.abi_hash is empty"
+    );
+    assert(
+        !incoming.abi_hash.empty() &&
+        "hot_reload_validate precondition: "
+        "incoming must have been validated by PluginLoaderRegistry::validate_all() "
+        "before calling hot_reload_validate — incoming.abi_hash is empty"
+    );
+#endif
     if (incoming.abi_hash != outgoing.abi_hash) {
         return std::unexpected(
             glibre::Error{
@@ -205,9 +248,23 @@ hot_reload_validate(const PluginManifest& outgoing, const PluginManifest& incomi
         );
     }
 
-    // Check C — SemVer major version compatibility (hot-reload-protocol §2.2).
-    // A major-version change is a breaking redesign that cannot be hot-reloaded
-    // into a running world; it requires a process restart with a fresh world.
+    // Check C — SemVer major version (plan #250 extension of hot-reload-protocol §2.2).
+    //
+    // Protocol §2.2 defines a component-type-set superset check on (fqn, schema_version).
+    // This check is NOT a verbatim derivation of that rule.  It is an additional manifest-only
+    // precondition introduced by plan #250: if the incoming plugin's SemVer major differs from
+    // the outgoing plugin's, the swap is refused immediately without touching ECS state.  The
+    // full superset check from protocol §2.2 (which requires archetype storage access) is
+    // deferred to plans #251+.  When those plans land, both checks will run; this one fires
+    // first as an inexpensive fast-path gate.
+    //
+    // The protocol's descriptive phrase "major-version change" refers to a symptom of dropping
+    // a registered type (the superset check failing), not to a SemVer field comparison.  Plan
+    // #250 adopts SemVer-major equality as a stricter, observable proxy for that symptom.  Any
+    // plugin where major changed is presumed to have made breaking schema changes; it gets a
+    // clear, early refusal rather than waiting for the ECS-level check.
+    //
+    // See the .hpp docstring (Check C divergence note) for the full decision reasoning.
     if (incoming.version.major != outgoing.version.major) {
         return std::unexpected(
             glibre::Error{
