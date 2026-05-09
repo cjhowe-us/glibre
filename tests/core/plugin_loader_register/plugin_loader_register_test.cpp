@@ -547,10 +547,8 @@ TEST_CASE(
 // file-scope helpers so they can be used from non-capturing function pointers).
 // Reset to 0 before each SECTION to avoid cross-section interference.
 namespace {
-int g_cycle_rebuild_call_count =
-    0;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
-int g_success_rebuild_call_count =
-    0;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+int g_cycle_rebuild_call_count = 0;    // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+int g_success_rebuild_call_count = 0;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 /// Mock rebuild_fn that returns SystemScheduleCycle.
 /// Simulates a cycle detected in the system schedule graph (step 10 failure path).
@@ -567,9 +565,7 @@ glibre::Result<void> success_rebuild_fn() noexcept {
 }
 }  // namespace
 
-TEST_CASE(
-    "rebuild_schedule_returns_cycle_on_conflicting_systems", "[core][register][schedule]"
-) {
+TEST_CASE("rebuild_schedule_returns_cycle_on_conflicting_systems", "[core][register][schedule]") {
     SECTION("injected rebuild_fn returns cycle: failure propagated, mock called once") {
         // Reset invocation counter for this section.
         g_cycle_rebuild_call_count = 0;
