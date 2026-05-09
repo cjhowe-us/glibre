@@ -86,6 +86,20 @@ struct FqnParts {
     out += td.fqn;
     out += " ----\n";
 
+    // Emit the current_version symbol first (fory-codegen.md §"Migration Mechanic"
+    // point 1: "each generated type carries current_version").
+    // The plugin loader dlsym()s this to short-circuit the no-migration-needed path
+    // and to detect payloads from future schema versions (plan #978).
+    out += eastl::string(
+        std::format(
+            "extern \"C\" const std::uint32_t glibre_plugin_current_version_{} = {};\n",
+            std::string_view(type_name.data(), type_name.size()),
+            td.version
+        )
+            .c_str()
+    );
+    out += "\n";
+
     if (td.migrations.empty()) {
         // Empty-table form.
         out += "extern \"C\" const MigrationEntry* glibre_plugin_migrations_";
