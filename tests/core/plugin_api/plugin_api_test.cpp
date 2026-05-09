@@ -29,7 +29,6 @@
 #include <type_traits>
 
 #include <catch2/catch_test_macros.hpp>
-
 #include <glibre/core/plugin_api.hpp>
 #include <glibre/core/plugin_entry.hpp>
 #include <glibre/error.hpp>
@@ -101,13 +100,13 @@ namespace {
 
 // Concrete storage for stub registries — outlives the PluginContext.
 struct PluginContextFixture {
-    StubWorld           world;
-    StubTypeRegistry    type_reg;
-    StubSystemRegistry  sys_reg;
-    StubPassRegistry    pass_reg;
-    StubPanelRegistry   panel_reg;
-    StubPluginManifest  manifest;
-    StubLogSink         log;
+    StubWorld world;
+    StubTypeRegistry type_reg;
+    StubSystemRegistry sys_reg;
+    StubPassRegistry pass_reg;
+    StubPanelRegistry panel_reg;
+    StubPluginManifest manifest;
+    StubLogSink log;
 
     glibre::core::PluginContext ctx{
         reinterpret_cast<glibre::core::World&>(world),
@@ -156,11 +155,25 @@ TEST_CASE("plugin_context_is_pod_aggregate", "[core][plugin_api]") {
     // If aggregate initialization fails to compile, this test will not compile.
     PluginContextFixture fixture;
     CHECK(&fixture.ctx.world == reinterpret_cast<glibre::core::World*>(&fixture.world));
-    CHECK(&fixture.ctx.type_registry == reinterpret_cast<glibre::core::TypeRegistry*>(&fixture.type_reg));
-    CHECK(&fixture.ctx.system_registry == reinterpret_cast<glibre::core::SystemRegistry*>(&fixture.sys_reg));
-    CHECK(&fixture.ctx.pass_registry == reinterpret_cast<glibre::core::PassRegistry*>(&fixture.pass_reg));
-    CHECK(&fixture.ctx.panel_registry == reinterpret_cast<glibre::core::PanelRegistry*>(&fixture.panel_reg));
-    CHECK(&fixture.ctx.manifest == reinterpret_cast<glibre::core::PluginManifest*>(&fixture.manifest));
+    CHECK(
+        &fixture.ctx.type_registry ==
+        reinterpret_cast<glibre::core::TypeRegistry*>(&fixture.type_reg)
+    );
+    CHECK(
+        &fixture.ctx.system_registry ==
+        reinterpret_cast<glibre::core::SystemRegistry*>(&fixture.sys_reg)
+    );
+    CHECK(
+        &fixture.ctx.pass_registry ==
+        reinterpret_cast<glibre::core::PassRegistry*>(&fixture.pass_reg)
+    );
+    CHECK(
+        &fixture.ctx.panel_registry ==
+        reinterpret_cast<glibre::core::PanelRegistry*>(&fixture.panel_reg)
+    );
+    CHECK(
+        &fixture.ctx.manifest == reinterpret_cast<glibre::core::PluginManifest*>(&fixture.manifest)
+    );
     CHECK(&fixture.ctx.log == reinterpret_cast<glibre::core::LogSink*>(&fixture.log));
 }
 
@@ -179,30 +192,21 @@ TEST_CASE("plugin_context_is_pod_aggregate", "[core][plugin_api]") {
 // ===========================================================================
 
 // The loader (plan #229) will dlsym + reinterpret_cast to this type.
-using PluginRegisterFn = glibre::Result<void>(*)(glibre::core::PluginContext&) noexcept;
+using PluginRegisterFn = glibre::Result<void> (*)(glibre::core::PluginContext&) noexcept;
 
 static_assert(
-    std::is_same_v<
-        PluginRegisterFn,
-        decltype(&glibre_plugin_register)
-    >,
+    std::is_same_v<PluginRegisterFn, decltype(&glibre_plugin_register)>,
     "glibre_plugin_register must have signature: "
     "glibre::Result<void>(glibre::core::PluginContext&) noexcept"
 );
 
 TEST_CASE("register_signature_compiles", "[core][plugin_api]") {
     // Runtime mirror of the static_assert.
-    CHECK(std::is_same_v<
-        PluginRegisterFn,
-        decltype(&glibre_plugin_register)
-    >);
+    CHECK(std::is_same_v<PluginRegisterFn, decltype(&glibre_plugin_register)>);
 
     // Verify the unregister counterpart has the same shape.
-    using PluginUnregisterFn = glibre::Result<void>(*)(glibre::core::PluginContext&) noexcept;
-    CHECK(std::is_same_v<
-        PluginUnregisterFn,
-        decltype(&glibre_plugin_unregister)
-    >);
+    using PluginUnregisterFn = glibre::Result<void> (*)(glibre::core::PluginContext&) noexcept;
+    CHECK(std::is_same_v<PluginUnregisterFn, decltype(&glibre_plugin_unregister)>);
 }
 
 // ===========================================================================
@@ -218,7 +222,9 @@ TEST_CASE("register_signature_compiles", "[core][plugin_api]") {
 
 TEST_CASE("noop_plugin_dylib_builds", "[core][plugin_api]") {
 #ifndef GLIBRE_NOOP_DYLIB_PATH
-    SKIP("GLIBRE_NOOP_DYLIB_PATH not defined — build with GLIBRE_BUILD_EXAMPLES=ON to run this test");
+    SKIP(
+        "GLIBRE_NOOP_DYLIB_PATH not defined — build with GLIBRE_BUILD_EXAMPLES=ON to run this test"
+    );
 #else
     constexpr const char* kDylibPath = GLIBRE_NOOP_DYLIB_PATH;
     REQUIRE(std::filesystem::exists(kDylibPath));
@@ -271,34 +277,42 @@ int count_exact_symbol(const std::string& nm_output, const char* symbol_name) {
     while (pos < nm_output.size()) {
         // Locate end of current line.
         std::size_t eol = nm_output.find('\n', pos);
-        if (eol == std::string::npos) eol = nm_output.size();
+        if (eol == std::string::npos)
+            eol = nm_output.size();
 
         // Extract the line and scan for the third column.
-        const char* line    = nm_output.c_str() + pos;
+        const char* line = nm_output.c_str() + pos;
         std::size_t line_len = eol - pos;
         pos = eol + 1;
 
-        if (line_len == 0) continue;
+        if (line_len == 0)
+            continue;
 
         // Skip leading whitespace.
         std::size_t i = 0;
-        while (i < line_len && (line[i] == ' ' || line[i] == '\t')) ++i;
+        while (i < line_len && (line[i] == ' ' || line[i] == '\t'))
+            ++i;
 
         int col = 0;
         while (col < 2 && i < line_len) {
             // Advance past the current token.
-            while (i < line_len && line[i] != ' ' && line[i] != '\t') ++i;
+            while (i < line_len && line[i] != ' ' && line[i] != '\t')
+                ++i;
             ++col;
             // Skip inter-column whitespace.
-            while (i < line_len && (line[i] == ' ' || line[i] == '\t')) ++i;
+            while (i < line_len && (line[i] == ' ' || line[i] == '\t'))
+                ++i;
         }
 
         // col == 2: i now points at start of third column (or end of line).
-        if (col < 2 || i >= line_len) continue;
+        if (col < 2 || i >= line_len)
+            continue;
 
         // Measure third token length.
         std::size_t tok_start = i;
-        while (i < line_len && line[i] != ' ' && line[i] != '\t' && line[i] != '\n' && line[i] != '\r') ++i;
+        while (i < line_len && line[i] != ' ' && line[i] != '\t' && line[i] != '\n' &&
+               line[i] != '\r')
+            ++i;
         std::size_t tok_len = i - tok_start;
 
         if (tok_len == std::strlen(symbol_name) &&
@@ -314,7 +328,9 @@ int count_exact_symbol(const std::string& nm_output, const char* symbol_name) {
 TEST_CASE("noop_plugin_exports_four_required_symbols", "[core][plugin_api]") {
     // GLIBRE_NOOP_DYLIB_PATH is injected by CMake via compile definition.
 #ifndef GLIBRE_NOOP_DYLIB_PATH
-    SKIP("GLIBRE_NOOP_DYLIB_PATH not defined — build with GLIBRE_BUILD_EXAMPLES=ON to run this test");
+    SKIP(
+        "GLIBRE_NOOP_DYLIB_PATH not defined — build with GLIBRE_BUILD_EXAMPLES=ON to run this test"
+    );
 #else
     constexpr const char* kDylibPath = GLIBRE_NOOP_DYLIB_PATH;
 
@@ -342,10 +358,10 @@ TEST_CASE("noop_plugin_exports_four_required_symbols", "[core][plugin_api]") {
 
     // Exact third-column match in pure C++ — avoids metacharacter injection
     // from shell-escaping nm output (LOW-7 fix).
-    CHECK(count_exact_symbol(nm_output, "_glibre_plugin_abi_hash")      >= 1);
+    CHECK(count_exact_symbol(nm_output, "_glibre_plugin_abi_hash") >= 1);
     CHECK(count_exact_symbol(nm_output, "_glibre_plugin_manifest_size") >= 1);
-    CHECK(count_exact_symbol(nm_output, "_glibre_plugin_manifest")      >= 1);
-    CHECK(count_exact_symbol(nm_output, "_glibre_plugin_register")      >= 1);
+    CHECK(count_exact_symbol(nm_output, "_glibre_plugin_manifest") >= 1);
+    CHECK(count_exact_symbol(nm_output, "_glibre_plugin_register") >= 1);
 #endif  // GLIBRE_NOOP_DYLIB_PATH
 }
 
@@ -371,13 +387,13 @@ TEST_CASE("plugin_context_register_smoke", "[core][plugin_api]") {
 
     // Confirm that the aggregate is well-formed and all reference fields are
     // correctly bound to the stubs.
-    CHECK(&fixture.ctx.world          != nullptr);
-    CHECK(&fixture.ctx.type_registry  != nullptr);
+    CHECK(&fixture.ctx.world != nullptr);
+    CHECK(&fixture.ctx.type_registry != nullptr);
     CHECK(&fixture.ctx.system_registry != nullptr);
-    CHECK(&fixture.ctx.pass_registry  != nullptr);
+    CHECK(&fixture.ctx.pass_registry != nullptr);
     CHECK(&fixture.ctx.panel_registry != nullptr);
-    CHECK(&fixture.ctx.manifest       != nullptr);
-    CHECK(&fixture.ctx.log            != nullptr);
+    CHECK(&fixture.ctx.manifest != nullptr);
+    CHECK(&fixture.ctx.log != nullptr);
 }
 
 // ===========================================================================

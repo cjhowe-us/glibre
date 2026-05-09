@@ -81,8 +81,7 @@ std::size_t glibre_plugin_manifest_size = 0u;
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wreturn-type-c-linkage"
 
-extern "C" GLIBRE_PLUGIN_EXPORT
-glibre::Result<void>
+extern "C" GLIBRE_PLUGIN_EXPORT glibre::Result<void>
 glibre_plugin_register(glibre::core::PluginContext& /*ctx*/) noexcept {
     // No-op: this reference plugin registers nothing.
     // A real plugin would call ctx.type_registry.register_component(...),
@@ -98,8 +97,7 @@ glibre_plugin_register(glibre::core::PluginContext& /*ctx*/) noexcept {
 // (plugin-abi.md §"Open Questions" point 1).
 // ---------------------------------------------------------------------------
 
-extern "C" GLIBRE_PLUGIN_EXPORT
-glibre::Result<void>
+extern "C" GLIBRE_PLUGIN_EXPORT glibre::Result<void>
 glibre_plugin_unregister(glibre::core::PluginContext& /*ctx*/) noexcept {
     // No-op: nothing was registered, so nothing to unregister.
     return {};

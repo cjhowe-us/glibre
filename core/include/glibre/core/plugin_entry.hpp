@@ -50,8 +50,8 @@
 //   -fno-exceptions (error-model.md §Decision 3)
 //   C++23
 
-#include <glibre/error.hpp>
 #include <glibre/core/plugin_api.hpp>
+#include <glibre/error.hpp>
 
 // ---------------------------------------------------------------------------
 // GLIBRE_PLUGIN_EXPORT — macro for plugin translation units
@@ -67,9 +67,9 @@
 // ---------------------------------------------------------------------------
 
 #if defined(__GNUC__) || defined(__clang__)
-#  define GLIBRE_PLUGIN_EXPORT [[gnu::visibility("default")]]
+#define GLIBRE_PLUGIN_EXPORT [[gnu::visibility("default")]]
 #else
-#  define GLIBRE_PLUGIN_EXPORT
+#define GLIBRE_PLUGIN_EXPORT
 #endif
 
 // ---------------------------------------------------------------------------
@@ -113,8 +113,7 @@ extern "C" {
 /// On failure the loader runs compensating unregister of any partial
 /// registration the plugin made, then dlclose()s the dylib.
 GLIBRE_PLUGIN_EXPORT
-glibre::Result<void>
-glibre_plugin_register(glibre::core::PluginContext& ctx) noexcept;
+glibre::Result<void> glibre_plugin_register(glibre::core::PluginContext& ctx) noexcept;
 
 /// Optional paired teardown, required once hot-reload migrations land.
 /// (plugin-abi.md §"Open Questions" point 1 — optional in MVP)
@@ -123,8 +122,7 @@ glibre_plugin_register(glibre::core::PluginContext& ctx) noexcept;
 /// Plugins that do not export this symbol are unloadable only via process
 /// restart in MVP.
 GLIBRE_PLUGIN_EXPORT
-glibre::Result<void>
-glibre_plugin_unregister(glibre::core::PluginContext& ctx) noexcept;
+glibre::Result<void> glibre_plugin_unregister(glibre::core::PluginContext& ctx) noexcept;
 
 }  // extern "C"
 
