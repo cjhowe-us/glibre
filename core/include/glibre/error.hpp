@@ -64,6 +64,7 @@ enum class Error : std::uint16_t {
     ForycNonMonotoneVersion,  // schema version is not strictly increasing
     ForycUnknownType,         // field type is not in the builtins set
     ForycIOError,             // file read / write failure
+    ForycEmptySchema,         // schema contains zero TypeDecl blocks
 };
 }  // namespace tools
 

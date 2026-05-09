@@ -7,8 +7,10 @@ cmake_minimum_required(VERSION 3.30)
 # glibre::Error; EASTL is propagated from core.
 #
 # Plan #219: parser skeleton (parser.{hpp,cpp}).
-# Plan #220: header emission pass (emit_header.{hpp,cpp}).
-#            Adds --emit=header flag to the CLI; outputs .fory.h files.
+# Plan #220: header emission pass (emit_header.{hpp,cpp}, builtin_map.hpp).
+#            Adds --emit=header flag to the CLI; outputs one .hpp per TypeDecl
+#            to <out>/include/glibre/types/<ctx>/<Type>.hpp per
+#            reviews/decisions/fory-codegen.md §Pipeline.
 #
 # Fory::fory is NOT linked here yet — codegen uses a hand-written type
 # mapping table (fory-codegen.md §"Rules").  Fory reflection/serializer

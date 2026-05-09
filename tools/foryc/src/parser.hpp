@@ -22,8 +22,7 @@
 //   - migration blocks (parsed but not stored — out of scope for this plan)
 //   - line comments starting with "//"
 //
-// Not implemented (future plans #220–#225):
-//   - Code generation / header emission
+// Not implemented (future plans #221–#225):
 //   - ABI hash emission
 //   - Migration dispatcher emit
 //
@@ -35,10 +34,12 @@
 //     std::string_view (zero-copy interop at API boundaries),
 //     std::string / std::ifstream / std::ostringstream (file I/O in
 //       parse_file — EASTL has no file-stream equivalent),
-//     std::array (k_builtins table — fixed-size compile-time array),
 //     std::isalpha / std::isdigit / std::from_chars (character classification
 //       and parsing, no EASTL equivalent).
 //   Container/string types in the IR are eastl::.
+//
+// Builtin type membership is derived from builtin_map.hpp — the single
+// source of truth shared with emit_header.cpp.
 
 #pragma once
 
@@ -51,24 +52,10 @@
 #include <EASTL/string.h>
 #include <EASTL/vector.h>
 
+#include "builtin_map.hpp"
 #include "glibre/error.hpp"
 
 namespace glibre::tools::foryc {
-
-// -----------------------------------------------------------------------
-// Builtin type set (from fory-codegen.md §"Rules")
-// -----------------------------------------------------------------------
-// The canonical set of scalar/aggregate type names that the parser
-// accepts without a schema-defined declaration. Any field type not in
-// this set is reported as ForycUnknownType.
-static constexpr std::string_view k_builtins[] = {
-    "u8",     "u16",   "u32",   "u64",   "i8",     "i16",    "i32",
-    "i64",    "f32",   "f64",   "bool",  "vec2f",  "vec3f",  "vec4f",
-    "vec2i",  "vec3i", "vec4i", "quatf", "entity", "string", "bytes",
-    "list",    // list<T> — generic name checked as prefix
-    "map",     // map<K,V>
-    "option",  // option<T>
-};
 
 // -----------------------------------------------------------------------
 // Schema IR

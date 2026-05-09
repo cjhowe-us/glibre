@@ -16,6 +16,17 @@
 //   - foryc_map_generic_map_type
 //   - foryc_emits_generated_file_comment
 //   - foryc_emits_pragma_once_guard
+//
+// ABI-shape tests (fory-codegen.md §"ABI Stability Rules" rule 2):
+//   - foryc_emit_header_marks_struct_final
+//   - foryc_emit_header_emits_default_ctor
+//
+// Empty-schema guard:
+//   - foryc_emit_header_rejects_empty_schema
+//
+// Builtin include tests:
+//   - foryc_emit_header_includes_builtins_for_math_type
+//   - foryc_emit_header_no_builtins_include_for_scalar_only_schema
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -97,7 +108,8 @@ TEST_CASE("foryc_emit_header_rejects_unknown_type", "[foryc][emit_header]") {
     // emit_header is called in normal operation.  However, emit_header must
     // also be robust against a hand-crafted Schema IR containing an unknown
     // type (e.g. if the parser builtins and emit_header's mapping table
-    // diverge in future).
+    // diverge in future).  Since both now share builtin_map.hpp, drift is
+    // prevented at the source; this test guards the emit path independently.
     //
     // We construct the IR manually to bypass the parser's type check.
     Schema schema;
@@ -240,4 +252,120 @@ schema glibre.test.Guard {
     auto result = emit_header(schema);
     REQUIRE(result.has_value());
     CHECK(result->find("#pragma once") != eastl::string::npos);
+}
+
+// -----------------------------------------------------------------------
+// ABI shape tests — fory-codegen.md §"ABI Stability Rules" rule 2.
+//
+// Generated structs MUST be marked `final` and have `= default` ctor only.
+// These tests guard against future refactors silently dropping either
+// requirement.
+// -----------------------------------------------------------------------
+
+TEST_CASE("foryc_emit_header_marks_struct_final", "[foryc][emit_header][abi]") {
+    // The emitted struct must be declared `struct <Name> final {`.
+    constexpr std::string_view src = R"(
+schema glibre.abi.Foo {
+  version 1
+  field x : u32 tag 1
+}
+)";
+
+    const auto schema = parse_ok(src);
+    auto result = emit_header(schema);
+    REQUIRE(result.has_value());
+
+    const eastl::string& text = *result;
+    // Exact token sequence mandated by ABI rule 2.
+    CHECK(text.find("struct Foo final {") != eastl::string::npos);
+}
+
+TEST_CASE("foryc_emit_header_emits_default_ctor", "[foryc][emit_header][abi]") {
+    // The emitted struct must contain `<Name>() = default;` and nothing else
+    // in the way of constructors/destructors (ABI rule 2: no user-defined ctors).
+    constexpr std::string_view src = R"(
+schema glibre.abi.Bar {
+  version 1
+  field y : f32 tag 1
+}
+)";
+
+    const auto schema = parse_ok(src);
+    auto result = emit_header(schema);
+    REQUIRE(result.has_value());
+
+    const eastl::string& text = *result;
+    // Exact ctor line mandated by ABI rule 2.
+    CHECK(text.find("Bar() = default;") != eastl::string::npos);
+    // Negative guard: no user-defined ctor body (would contain a real '{').
+    // `Bar() = default;` ends with ';', not '{'. The struct body's opening brace
+    // appears only once, on the `struct Bar final {` line.
+    // If a body-ctor appeared it would look like `Bar(...) {` or `Bar() {`.
+    // We rely on the absence of "Bar() {" as the negative signal.
+    CHECK(text.find("Bar() {") == eastl::string::npos);
+}
+
+// -----------------------------------------------------------------------
+// Empty-schema guard
+// -----------------------------------------------------------------------
+
+TEST_CASE("foryc_emit_header_rejects_empty_schema", "[foryc][emit_header]") {
+    // A Schema with zero TypeDecls must return ForycEmptySchema.
+    // This guards against migration-only .fory files producing misleading
+    // preamble-only output.
+    Schema schema;
+    schema.source_path = eastl::string("<empty>");
+    // schema.types is empty by default.
+
+    auto result = emit_header(schema);
+    REQUIRE(!result.has_value());
+    CHECK(has_tools_error(result.error(), glibre::tools::Error::ForycEmptySchema));
+}
+
+// -----------------------------------------------------------------------
+// _builtins.hpp conditional include tests
+// -----------------------------------------------------------------------
+
+TEST_CASE("foryc_emit_header_includes_builtins_for_math_type", "[foryc][emit_header]") {
+    // A schema with a vec3f field must emit #include <glibre/types/_builtins.hpp>.
+    constexpr std::string_view src = R"(
+schema glibre.core.Transform {
+  version 1
+  field position : vec3f tag 1
+  field rotation : quatf tag 2
+  field owner    : entity tag 3
+}
+)";
+
+    const auto schema = parse_ok(src);
+    auto result = emit_header(schema);
+    REQUIRE(result.has_value());
+
+    const eastl::string& text = *result;
+    CHECK(text.find("#include <glibre/types/_builtins.hpp>") != eastl::string::npos);
+    // Must also contain the resolved C++ type names.
+    CHECK(text.find("glibre::math::Vec3f") != eastl::string::npos);
+    CHECK(text.find("glibre::math::Quatf") != eastl::string::npos);
+    CHECK(text.find("glibre::core::EntityId") != eastl::string::npos);
+}
+
+TEST_CASE("foryc_emit_header_no_builtins_include_for_scalar_only_schema",
+          "[foryc][emit_header]") {
+    // A schema using only stdlib-mapped types must NOT include _builtins.hpp.
+    constexpr std::string_view src = R"(
+schema glibre.example.Widget {
+  version 1
+  field id     : u32    tag 1
+  field weight : f32    tag 2
+  field name   : string tag 3
+  field active : bool   tag 4
+}
+)";
+
+    const auto schema = parse_ok(src);
+    auto result = emit_header(schema);
+    REQUIRE(result.has_value());
+
+    const eastl::string& text = *result;
+    CHECK(text.find("#include <glibre/types/_builtins.hpp>") == eastl::string::npos);
 }

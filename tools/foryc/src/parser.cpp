@@ -6,7 +6,6 @@
 
 #include "parser.hpp"
 
-#include <array>
 #include <cctype>
 #include <charconv>
 #include <cstring>
@@ -190,14 +189,22 @@ private:
 
 // Returns true if type_name is in the builtins set (prefix match for
 // generic types like list<T>, map<K,V>, option<T>).
+// Uses k_builtin_scalar_map and k_generic_prefixes from builtin_map.hpp —
+// the single source of truth shared with emit_header.cpp.
 [[nodiscard]] static bool is_builtin(std::string_view type_name) noexcept {
     // Strip generic parameter if present: "list<T>" → "list"
     const std::size_t lt_pos = type_name.find('<');
     const std::string_view base =
         (lt_pos == std::string_view::npos) ? type_name : type_name.substr(0, lt_pos);
 
-    for (const std::string_view b : k_builtins) {
-        if (b == base)
+    // Check scalar builtins.
+    for (const auto& entry : k_builtin_scalar_map) {
+        if (entry.fory == base)
+            return true;
+    }
+    // Check generic prefixes.
+    for (const std::string_view g : k_generic_prefixes) {
+        if (g == base)
             return true;
     }
     return false;
