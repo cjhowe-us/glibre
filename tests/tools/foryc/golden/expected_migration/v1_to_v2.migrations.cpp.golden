@@ -1,0 +1,31 @@
+// GENERATED FILE — do not edit by hand.
+// Source: v1_to_v2.fory
+// Generator: glibre-foryc (plan #221)
+//
+// Migration dispatcher table for plugin-loader use.
+// The plugin loader reads glibre_plugin_migrations[0..size-1] at
+// deserialization time and chains (from_version -> to_version) steps.
+
+#include <cstddef>
+#include <cstdint>
+
+// MigrationEntry — ABI-stable entry in the dispatcher table.
+// Layout MUST match glibre::types::MigrationEntry in the plugin loader.
+struct MigrationEntry {
+    std::uint32_t from_version;
+    std::uint32_t to_version;
+    void* provider;  // type-erased function pointer
+};
+
+// Provider forward declarations.
+// The owning context supplies the function bodies.
+extern "C" void test::migrate_Particle_v1_to_v2();
+
+// clang-format off
+static const MigrationEntry k_migrations[] = {
+    { 1, 2, reinterpret_cast<void*>(&test::migrate_Particle_v1_to_v2) },
+};
+// clang-format on
+
+extern "C" const MigrationEntry* glibre_plugin_migrations = k_migrations;
+extern "C" std::size_t glibre_plugin_migrations_size = 1;
