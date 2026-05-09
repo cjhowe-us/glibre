@@ -49,7 +49,7 @@ template<class... Args>
 
 [[nodiscard]] static eastl::string fqn_to_mangled(const eastl::string& fqn) noexcept {
     eastl::string out;
-    out.reserve(fqn.size() + 4);  // pessimistic: each '.' expands to '__'
+    out.reserve(fqn.size() * 2);  // upper bound: each char emits at most 2 chars ('.' → "__")
     for (std::size_t i = 0; i < fqn.size(); ++i) {
         if (fqn[i] == '.') {
             out += "__";
@@ -99,19 +99,22 @@ struct FqnParts {
 // -----------------------------------------------------------------------
 // emit_type_block — emit the per-TypeDecl section of the generated TU.
 //
+// Symbol names use the mangled FQN (<MangledFQN> = FQN with '.' → '__').
+// Example: "glibre.core.Transform" → "glibre__core__Transform".
+//
 // For a TypeDecl with migrations, emits:
 //   1. C++ namespace + forward-declarations of each provider with the correct
 //      signature per fory-codegen.md §"Migration Mechanic" point 2:
 //        std::expected<void, glibre::Error> migrate_<Type>_v<N>_to_v<N+1>(
 //            const <Type>V<N>&, <Type>V<N+1>&)
-//   2. A static per-type MigrationEntry table: k_migrations_<TypeName>[].
+//   2. A static per-type MigrationEntry table: k_migrations_<MangledFQN>[].
 //   3. Two extern "C" exported symbols:
-//        glibre_plugin_migrations_<TypeName>  (pointer to the table)
-//        glibre_plugin_migrations_<TypeName>_size  (count)
+//        glibre_plugin_migrations_<MangledFQN>  (pointer to the table)
+//        glibre_plugin_migrations_<MangledFQN>_size  (count)
 //
 // For a TypeDecl with no migrations, emits the empty-table form:
-//   extern "C" const MigrationEntry* glibre_plugin_migrations_<TypeName> = nullptr;
-//   extern "C" std::size_t glibre_plugin_migrations_<TypeName>_size = 0;
+//   extern "C" const MigrationEntry* glibre_plugin_migrations_<MangledFQN> = nullptr;
+//   extern "C" std::size_t glibre_plugin_migrations_<MangledFQN>_size = 0;
 //
 // fory-codegen.md §"Migration Mechanic" point 1:
 //   "Each generated type carries a static migrations table populated at
