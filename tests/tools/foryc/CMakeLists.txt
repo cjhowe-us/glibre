@@ -87,3 +87,6 @@ include(CTest)
 include(Catch)
 catch_discover_tests(foryc-parser-tests)
 catch_discover_tests(foryc-emit-header-tests)
+
+# Golden-output harness (plan #226)
+add_subdirectory(golden)
