@@ -11,6 +11,12 @@
 //
 // Generated TU structure (per fory-codegen.md §"Migration Mechanic"):
 //
+// NOTE: exported C symbol names use the mangled FQN (plan #1010,
+// fory-codegen.md §"ABI Stability Rules" point 4).  The dotted FQN is
+// mangled by replacing every '.' with '__' (double-underscore) to produce
+// a C-identifier suffix (<MangledFQN>).  Example:
+//   FQN "glibre.core.Transform" → <MangledFQN> = "glibre__core__Transform"
+//
 //   #include <cstddef>
 //   #include <cstdint>
 //   #include <expected>
@@ -46,23 +52,23 @@
 //   }
 //
 //   // 2. Per-type static table (point 1 of §"Migration Mechanic"):
-//   static const MigrationEntry k_migrations_<Type>[] = {
+//   static const MigrationEntry k_migrations_<MangledFQN>[] = {
 //       { <from>, <to>, reinterpret_cast<void*>(&<ns>::<fn>) },
 //   };
 //
 //   // 3. Per-type exported C-ABI symbols (emitted for every type, plan #978):
-//   extern "C" const std::uint32_t glibre_plugin_current_version_<Type> = <N>;
+//   extern "C" const std::uint32_t glibre_plugin_current_version_<MangledFQN> = <N>;
 //
 //   // 4. Migration table pointer + count:
-//   extern "C" const MigrationEntry* glibre_plugin_migrations_<Type> =
-//       k_migrations_<Type>;
-//   extern "C" std::size_t glibre_plugin_migrations_<Type>_size = <count>;
+//   extern "C" const MigrationEntry* glibre_plugin_migrations_<MangledFQN> =
+//       k_migrations_<MangledFQN>;
+//   extern "C" std::size_t glibre_plugin_migrations_<MangledFQN>_size = <count>;
 //
 // For types with no migration declarations the per-type block collapses to:
 //
-//   extern "C" const std::uint32_t glibre_plugin_current_version_<Type> = <N>;
-//   extern "C" const MigrationEntry* glibre_plugin_migrations_<Type> = nullptr;
-//   extern "C" std::size_t glibre_plugin_migrations_<Type>_size = 0;
+//   extern "C" const std::uint32_t glibre_plugin_current_version_<MangledFQN> = <N>;
+//   extern "C" const MigrationEntry* glibre_plugin_migrations_<MangledFQN> = nullptr;
+//   extern "C" std::size_t glibre_plugin_migrations_<MangledFQN>_size = 0;
 //
 // Design notes:
 //   - fory-codegen.md §"Migration Mechanic" point 1: each type carries its
@@ -110,15 +116,21 @@ namespace glibre::tools::foryc {
 
 // Emit a C++ migration-dispatcher translation unit for a Schema.
 //
+// Exported C symbol names use the mangled FQN (<MangledFQN>): each '.' in the
+// dotted FQN is replaced by '__' (double-underscore) — see fory-codegen.md
+// §"ABI Stability Rules" point 4 and plan #1010.
+//
 // Returns the complete text of a generated .cpp file that, for each TypeDecl:
-//   - Exports `extern "C" const std::uint32_t glibre_plugin_current_version_<Type>`
+//   - Exports `extern "C" const std::uint32_t
+//       glibre_plugin_current_version_<MangledFQN>`
 //     set to `td.version` so the plugin loader can dlsym it (plan #978;
 //     fory-codegen.md §"Migration Mechanic" point 1).
 //   - Forward-declares each provider as a C++ namespace function with the
 //     correct signature per fory-codegen.md §"Migration Mechanic" point 2.
-//   - Emits a static per-type MigrationEntry table (k_migrations_<Type>[]).
-//   - Exports `extern "C" glibre_plugin_migrations_<Type>` and
-//     `extern "C" glibre_plugin_migrations_<Type>_size`.
+//   - Emits a static per-type MigrationEntry table
+//     (k_migrations_<MangledFQN>[]).
+//   - Exports `extern "C" glibre_plugin_migrations_<MangledFQN>` and
+//     `extern "C" glibre_plugin_migrations_<MangledFQN>_size`.
 //
 // For types with no migration declarations the per-type table is omitted and
 // both exported symbols are set to the empty-table forms (nullptr / 0).
