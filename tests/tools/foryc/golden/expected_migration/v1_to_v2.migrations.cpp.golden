@@ -2,14 +2,18 @@
 // Source: v1_to_v2.fory
 // Generator: glibre-foryc (plan #221)
 //
-// Migration dispatcher table for plugin-loader use.
-// The plugin loader reads glibre_plugin_migrations[0..size-1] at
+// Per-type migration dispatcher tables for plugin-loader use.
+// The plugin loader reads glibre_plugin_migrations_<Type>[0..size-1] at
 // deserialization time and chains (from_version -> to_version) steps.
+// fory-codegen.md §"Migration Mechanic" points 1-2.
 
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 
-// MigrationEntry — ABI-stable entry in the dispatcher table.
+#include "glibre/error.hpp"
+
+// MigrationEntry — ABI-stable entry in the per-type dispatcher table.
 // Layout MUST match glibre::types::MigrationEntry in the plugin loader.
 struct MigrationEntry {
     std::uint32_t from_version;
@@ -17,22 +21,16 @@ struct MigrationEntry {
     void* provider;  // type-erased function pointer
 };
 
-// Provider forward declarations.
-// The owning context supplies the function bodies.
-//
-// TODO(#975): The line below — `extern "C" void test::migrate_Particle_v1_to_v2();`
-// — is invalid C++: extern "C" linkage specification cannot include a
-// namespace-qualified name.  This golden faithfully mirrors the bug in
-// emit_migration.cpp (PR #975).  Once #975 applies the namespace fix,
-// regenerate this file:
-//   GLIBRE_UPDATE_GOLDEN=1 ctest --preset macos-debug -R foryc_migration_golden_
-extern "C" void test::migrate_Particle_v1_to_v2();
+// ---- test.Particle ----
+namespace test { struct ParticleV1; struct ParticleV2; }  // namespace test
+namespace test {
+std::expected<void, glibre::Error> migrate_Particle_v1_to_v2(const test::ParticleV1&, test::ParticleV2&);
+}  // namespace test
 
-// clang-format off
-static const MigrationEntry k_migrations[] = {
+static const MigrationEntry k_migrations_Particle[] = {
     { 1, 2, reinterpret_cast<void*>(&test::migrate_Particle_v1_to_v2) },
 };
-// clang-format on
 
-extern "C" const MigrationEntry* glibre_plugin_migrations = k_migrations;
-extern "C" std::size_t glibre_plugin_migrations_size = 1;
+extern "C" const MigrationEntry* glibre_plugin_migrations_Particle = k_migrations_Particle;
+extern "C" std::size_t glibre_plugin_migrations_Particle_size = 1;
+
