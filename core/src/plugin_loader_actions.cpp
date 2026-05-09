@@ -191,13 +191,28 @@ Result<void> rebuild_schedule() noexcept {
 // ---------------------------------------------------------------------------
 // migrate_components — loader step 11 (plugin-abi.md §"Loader Sequence")
 //
-// MVP STUB: returns success unconditionally for any (from_version, to_version)
-// pair, including when they differ.
+// Two overloads; see plugin_loader_actions.hpp for the full contract.
 //
-// The real implementation walks glibre_plugin_migrations_<TypeName> export
-// tables emitted by glibre-foryc (plan #221) and dispatches each migration
-// step against the pre-swap archetype snapshot (fory-codegen.md §"Migration
-// Mechanic").
+// Overload (1): migrate_components(from_version, to_version)
+//   MVP STUB: returns success unconditionally for any (from_version,
+//   to_version) pair, including when they differ.
+//
+//   The real implementation walks glibre_plugin_migrations_<TypeName>
+//   export tables emitted by glibre-foryc (plan #221) and dispatches each
+//   migration step against the pre-swap archetype snapshot (fory-codegen.md
+//   §"Migration Mechanic").
+//
+// Overload (2): migrate_components(from_version, to_version, step_fn)
+//   Test-injectable path.  Calls step_fn() when from_version != to_version
+//   and propagates its result.  The no-op path (from == to) is handled
+//   before step_fn is invoked so a null step_fn is never dereferenced on the
+//   no-op path (the non-null precondition only applies when from != to).
+//
+//   Design note: the step_fn parameter is intentionally a plain function
+//   pointer rather than eastl::function<>.  eastl::function carries heap
+//   allocation and vtable overhead.  All test-injection scenarios supply
+//   file-scope or lambda-converted-to-function-pointer callables, so the
+//   plain pointer is sufficient and avoids the allocation.
 //
 // TODO(#221): walk per-type migration tables once glibre-foryc emits them.
 //   Table format per plan #221: glibre_plugin_migrations_<TypeName> is an
@@ -215,6 +230,41 @@ Result<void> migrate_components(
     // will dispatch the migration chain; the stub silently succeeds (acceptable
     // for MVP since no persistent archetype data exists yet).
     return {};
+}
+
+Result<void> migrate_components(
+    std::uint32_t from_version, std::uint32_t to_version, MigrationStepFn step_fn
+) noexcept {
+    // No migration needed when from == to (identity case).
+    // step_fn is not called: callers may pass a valid mock without it running.
+    if (from_version == to_version) {
+        return {};
+    }
+
+    // A non-null step_fn is required when from != to.
+    // A null step_fn indicates a caller logic error (the caller must supply
+    // the migration step when versions differ); map to SchemaMigrationFailed
+    // so the caller's error handling path sees the same arm regardless of
+    // whether the step was null or the step itself failed.
+    if (step_fn == nullptr) {
+        return std::unexpected(
+            glibre::Error{
+                core::Error::SchemaMigrationFailed,
+                ErrorContext{
+                    .file = __FILE__,
+                    .line = __LINE__,
+                    .detail = "step_fn is null — caller must supply a migration step when "
+                              "from_version != to_version",
+                },
+            }
+        );
+    }
+
+    // Invoke the migration step and propagate the result unchanged.
+    // In production (plan #221) this will be replaced by a per-type migration
+    // table walk; this overload exists solely to provide a test-injectable seam
+    // so that the SchemaMigrationFailed path is exercisable before #221 lands.
+    return step_fn();
 }
 
 // ---------------------------------------------------------------------------

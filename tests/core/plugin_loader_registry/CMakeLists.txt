@@ -2,9 +2,11 @@ cmake_minimum_required(VERSION 4.3.0)
 
 # ---------------------------------------------------------------------------
 # tests/core/plugin_loader_registry — unit tests for PluginLoaderRegistry
+#                                     and step-11 migrate_components failure.
 #
 # Plan: #230 — PluginLoader ABI hash + version + name + deps gates.
-# Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" steps 4–7.
+# Plan: #983 — SchemaMigrationFailed integration test (step 11 failure path).
+# Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" steps 4–7, 11.
 #
 # Named test cases (plan #230 Unit Test Plan + DoD):
 #   - plugin_loader_rejects_abi_hash_mismatch
@@ -12,6 +14,9 @@ cmake_minimum_required(VERSION 4.3.0)
 #   - plugin_loader_accepts_compatible_plugin
 #   - plugin_loader_rejects_duplicate_name
 #   - plugin_loader_rejects_incompatible_version
+#
+# Named test cases (plan #983 Unit Test Plan + DoD):
+#   - migrate_components_returns_failed_on_broken_migration_step
 # ---------------------------------------------------------------------------
 
 add_executable(glibre-core-plugin-loader-registry-tests
