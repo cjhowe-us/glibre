@@ -40,29 +40,14 @@
 #include <glibre/error.hpp>
 
 // ---------------------------------------------------------------------------
-// Minimal stub definitions for PluginContext's pending reference types.
+// Shell definitions for PluginContext's pending reference types.
 //
-// PluginContext holds references to World, TypeRegistry, SystemRegistry,
-// PassRegistry, PanelRegistry, and LogSink — all declared as 'class' in
-// glibre/core/plugin_api.hpp with no definition yet (each has a pending plan).
-//
-// We define empty shell classes here so the test TU can construct a real
-// PluginContext without UB.  These definitions live in namespace glibre::core
-// to match the forward-declarations in plugin_api.hpp.
-//
-// None of the stub dylibs used in these tests actually dereference the
-// PluginContext fields; they either return success unconditionally (noop) or
-// return unexpected immediately (stub_register_fails).
+// Pulled from the shared fixture header (MED-4, round-1 review).  All test
+// TUs in this directory that need PluginContext include this header rather
+// than re-defining the shells inline — single source of truth, no ODR risk.
 // ---------------------------------------------------------------------------
 
-namespace glibre::core {
-class World {};
-class TypeRegistry {};
-class SystemRegistry {};
-class PassRegistry {};
-class PanelRegistry {};
-class LogSink {};
-}  // namespace glibre::core
+#include "plugin_context_fixture.hpp"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -237,6 +222,13 @@ TEST_CASE("register_failure_cleans_up_dlopen", "[core][register]") {
     const auto* core_err = as_core_error(result.error());
     REQUIRE(core_err != nullptr);
     CHECK(*core_err == glibre::core::Error::PluginInitFailed);
+
+    // Assert that the inner error's stable enumerator name is carried in
+    // ErrorContext::detail (plugin-abi.md §"Loader Sequence" step 9 —
+    // "carrying the inner error in ErrorContext::detail").
+    // The stub returns core::Error::PluginInitFailed, so detail must be
+    // "PluginInitFailed" (the stable to_string value from log_error.hpp).
+    CHECK(result.error().where().detail == eastl::string_view{"PluginInitFailed"});
 
     // Step 5: loader goes out of scope at end of test — destructor calls
     // dlclose.  If the RAII cleanup crashes or double-frees, the test runner

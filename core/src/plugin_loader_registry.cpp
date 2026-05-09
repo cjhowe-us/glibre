@@ -16,6 +16,7 @@
 #include <cstdint>
 
 #include "glibre/core/plugin_api.hpp"  // PluginContext — required by call_register
+#include "glibre/log_error.hpp"        // glibre::variant_code_string — stable to_string for inner Error
 
 namespace glibre::core {
 
@@ -263,21 +264,27 @@ PluginLoaderRegistry::call_register(RegisterFn register_fn, PluginContext& ctx) 
 
     // Invoke the plugin entry-point.
     // glibre_plugin_register returns std::expected<void, glibre::Error>; on
-    // failure the inner error is the plugin's own diagnostic, not a loader
-    // error.  We wrap it in PluginInitFailed so the loader's error arm is
-    // stable regardless of which inner code the plugin emits.
-    // (plugin-abi.md §"Failure Modes" step 9 mandates PluginInitFailed.)
+    // failure the inner error is the plugin's own diagnostic.  We wrap it in
+    // PluginInitFailed so the loader's error arm is stable regardless of which
+    // inner code the plugin emits (plugin-abi.md §"Failure Modes" step 9
+    // mandates PluginInitFailed, *carrying the inner error in ErrorContext::detail*).
+    //
+    // glibre::variant_code_string() returns a const char* pointing to a
+    // string literal from the hand-written to_string() overloads in log_error.hpp.
+    // Those literals have static storage duration and are therefore safe to store
+    // in the eastl::string_view detail field — no pointer instability concern
+    // (contrast with dlerror() text per plugin-abi.md step 1 dlerror() note).
     if (auto r = register_fn(ctx); !r) {
+        const char* inner_detail = glibre::variant_code_string(r.error());
         return std::unexpected(
             glibre::Error{
                 core::Error::PluginInitFailed,
                 ErrorContext{
                     .file = __FILE__,
                     .line = __LINE__,
-                    // detail: best-effort stable literal; real structured error
-                    // is logged by the loader via glibre::log_error per
-                    // error-model.md §"Logging / Telemetry" rule 1.
-                    .detail = "glibre_plugin_register returned unexpected error",
+                    // detail carries the inner error's stable enumerator name
+                    // (plugin-abi.md §"Loader Sequence" step 9).
+                    .detail = eastl::string_view{inner_detail},
                 },
             }
         );
@@ -298,7 +305,7 @@ PluginLoaderRegistry::call_register(RegisterFn register_fn, PluginContext& ctx) 
 // TODO(#248): topological sort of SystemDecl ordering edges within each phase.
 // ---------------------------------------------------------------------------
 
-Result<void> PluginLoaderRegistry::rebuild_schedule() const noexcept {
+Result<void> PluginLoaderRegistry::rebuild_schedule() noexcept {
     // MVP stub — no topology to rebuild yet (SystemRegistry not landed).
     // When #247 / #248 land, replace this body with:
     //   return system_registry_.rebuild_schedule();  // → SystemScheduleCycle on cycle

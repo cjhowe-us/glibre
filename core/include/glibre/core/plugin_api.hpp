@@ -142,4 +142,29 @@ struct PluginContext {
     LogSink& log;
 };
 
+// ---------------------------------------------------------------------------
+// RegisterFn — loader-side function-pointer type for glibre_plugin_register.
+//
+// Placed in plugin_api.hpp (not plugin_entry.hpp) so that the engine loader
+// can obtain the typedef without pulling in the extern "C" prototype
+// declarations for glibre_plugin_register and glibre_plugin_unregister.
+// Those prototypes are plugin-author-facing and should not appear in engine
+// TUs (loader-side) that resolve the symbol via dlsym.  Including
+// plugin_entry.hpp from a loader header would contaminate every engine TU
+// that includes the loader with extern "C" plugin symbol declarations —
+// a layering violation per LOW-7 (round-1 review).
+//
+// noexcept is intentionally absent from the function type: since C++17,
+// noexcept is part of the function type.  A plugin compiled against a header
+// that omits noexcept would produce a different pointer type; omitting it
+// here keeps the cast from the raw dlsym void* valid without a noexcept
+// mismatch.
+//
+// Usage (loader side — plan #229):
+//   #include <glibre/core/plugin_api.hpp>   // RegisterFn lives here
+//   RegisterFn fn{nullptr};
+//   std::memcpy(&fn, &sym_register, sizeof(fn));
+// ---------------------------------------------------------------------------
+using RegisterFn = glibre::Result<void> (*)(glibre::core::PluginContext&);
+
 }  // namespace glibre::core

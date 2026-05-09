@@ -52,7 +52,7 @@
 #include <EASTL/string.h>
 #include <EASTL/string_view.h>
 #include <EASTL/vector.h>
-#include <glibre/core/plugin_entry.hpp>   // RegisterFn
+#include <glibre/core/plugin_api.hpp>     // RegisterFn (moved from plugin_entry.hpp, LOW-7)
 #include <glibre/core/plugin_manifest.hpp>
 #include <glibre/error.hpp>
 
@@ -267,7 +267,7 @@ public:
     // at the hot-reload story.  The MVP stub does not yet record ownership.
     // -----------------------------------------------------------------------
 
-    [[nodiscard]] Result<void> rebuild_schedule() const noexcept;
+    [[nodiscard]] Result<void> rebuild_schedule() noexcept;
 
     // -----------------------------------------------------------------------
     // migrate_components — loader step 11 (plugin-abi.md §"Loader Sequence").
@@ -294,6 +294,14 @@ public:
     //
     // @param from_version  Component schema version before this load.
     // @param to_version    Component schema version this plugin declares.
+    //
+    // PROVISIONAL SIGNATURE NOTE: The per-call (from_version, to_version)
+    // parameter pair is a placeholder for the MVP stub.  When plan #221 lands,
+    // the signature will likely change to accept a per-type migration table
+    // handle (e.g. a MigrationChain* or span<MigrationStep>) so that the
+    // caller passes the glibre_plugin_migrations_<TypeName> table pointer
+    // directly.  Do not build call sites that depend on the current parameter
+    // shape surviving unchanged across plan #221.
     // -----------------------------------------------------------------------
 
     [[nodiscard]] static Result<void>
