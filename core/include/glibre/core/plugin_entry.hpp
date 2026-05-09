@@ -61,9 +61,18 @@
 // Apply to the definitions of glibre_plugin_register and
 // glibre_plugin_unregister to ensure they are exported from the .dylib
 // regardless of the plugin's default symbol-visibility compiler flag.
+//
+// Guarded on GCC/Clang because [[gnu::visibility]] is a GCC extension.
+// On MSVC (future post-MVP Windows support) the equivalent would be
+// __declspec(dllexport) — tracked in reviews/decisions/build-portability.md
+// (post-MVP issue).
 // ---------------------------------------------------------------------------
 
-#define GLIBRE_PLUGIN_EXPORT [[gnu::visibility("default")]]
+#if defined(__GNUC__) || defined(__clang__)
+#  define GLIBRE_PLUGIN_EXPORT [[gnu::visibility("default")]]
+#else
+#  define GLIBRE_PLUGIN_EXPORT
+#endif
 
 // ---------------------------------------------------------------------------
 // glibre_plugin_register — prototype
