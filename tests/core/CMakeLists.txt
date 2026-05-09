@@ -6,8 +6,9 @@ cmake_minimum_required(VERSION 3.30)
 
 add_subdirectory(plugin_api)
 add_subdirectory(plugin_loader)
-add_subdirectory(plugin_loader_registry)  # plan #230 — ABI hash + version + name + deps gates
-add_subdirectory(error)                   # plan #235 — GLIBRE_TRY macro
+add_subdirectory(plugin_loader_registry)         # plan #230 — ABI hash + version + name + deps gates
+add_subdirectory(error)                          # plan #235 — GLIBRE_TRY macro
+add_subdirectory(plugin_loader_integration)      # plan #232 — end-to-end failure-mode coverage
 
 add_executable(glibre-core-tests
     frame_loop_test.cpp
