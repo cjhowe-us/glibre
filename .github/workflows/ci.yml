@@ -68,7 +68,14 @@ jobs:
         run: |
           cmake --preset macos-debug \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DVCPKG_INSTALLED_DIR="${{ github.workspace }}/vendor/vcpkg/installed"
+          # VCPKG_INSTALLED_DIR overrides the manifest-mode default which would
+          # point to ${CMAKE_BINARY_DIR}/vcpkg_installed (empty when
+          # VCPKG_MANIFEST_INSTALL=OFF).  The classic-mode `vcpkg install`
+          # step above places packages in vendor/vcpkg/installed/, so we
+          # redirect find_package() there.  See vcpkg.cmake line 421 for the
+          # elseif(VCPKG_MANIFEST_MODE) branch that causes the mismatch.
       - name: Build
         run: cmake --build --preset macos-debug
       - name: Test
