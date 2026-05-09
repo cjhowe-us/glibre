@@ -112,7 +112,9 @@ schema glibre.core.Transform {
     // Per-type exported symbols must use the mangled FQN suffix (plan #1010).
     // "glibre.core.Transform" → symbol suffix "glibre__core__Transform".
     CHECK(text.find("glibre_plugin_migrations_glibre__core__Transform") != eastl::string::npos);
-    CHECK(text.find("glibre_plugin_migrations_glibre__core__Transform_size") != eastl::string::npos);
+    CHECK(
+        text.find("glibre_plugin_migrations_glibre__core__Transform_size") != eastl::string::npos
+    );
 }
 
 TEST_CASE("foryc_emit_migration_handles_no_migrations", "[foryc][emit_migration]") {
@@ -180,7 +182,9 @@ schema glibre.physics.RigidBody {
     // Per-type symbol names — with mangled FQN suffix (plan #1010).
     // "glibre.physics.RigidBody" → symbol suffix "glibre__physics__RigidBody".
     CHECK(text.find("glibre_plugin_migrations_glibre__physics__RigidBody") != eastl::string::npos);
-    CHECK(text.find("glibre_plugin_migrations_glibre__physics__RigidBody_size") != eastl::string::npos);
+    CHECK(
+        text.find("glibre_plugin_migrations_glibre__physics__RigidBody_size") != eastl::string::npos
+    );
 
     // std::size_t used for the size (PHILOSOPHY §11: std:: for non-EASTL utilities).
     CHECK(text.find("std::size_t") != eastl::string::npos);
@@ -427,19 +431,23 @@ migrate_Widget_v1_to_v2(const WidgetV1&, WidgetV2&) {
 
     // Widget has 1 migration: table pointer should be non-null, size == 1.
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    const void** widget_ptr =
-        reinterpret_cast<const void**>(dlsym(handle, "glibre_plugin_migrations_glibre__test__Widget"));
+    const void** widget_ptr = reinterpret_cast<const void**>(
+        dlsym(handle, "glibre_plugin_migrations_glibre__test__Widget")
+    );
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    std::size_t* widget_size =
-        reinterpret_cast<std::size_t*>(dlsym(handle, "glibre_plugin_migrations_glibre__test__Widget_size"));
+    std::size_t* widget_size = reinterpret_cast<std::size_t*>(
+        dlsym(handle, "glibre_plugin_migrations_glibre__test__Widget_size")
+    );
 
     // Gadget has no migrations: table pointer should be nullptr, size == 0.
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    const void** gadget_ptr =
-        reinterpret_cast<const void**>(dlsym(handle, "glibre_plugin_migrations_glibre__test__Gadget"));
+    const void** gadget_ptr = reinterpret_cast<const void**>(
+        dlsym(handle, "glibre_plugin_migrations_glibre__test__Gadget")
+    );
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    std::size_t* gadget_size =
-        reinterpret_cast<std::size_t*>(dlsym(handle, "glibre_plugin_migrations_glibre__test__Gadget_size"));
+    std::size_t* gadget_size = reinterpret_cast<std::size_t*>(
+        dlsym(handle, "glibre_plugin_migrations_glibre__test__Gadget_size")
+    );
 
     // All four per-type symbols must resolve.
     CHECK(widget_ptr != nullptr);
@@ -603,8 +611,12 @@ schema glibre.test.Valve {
     // Mangled FQN suffix (plan #1010):
     //   "glibre.test.Turbo" → "glibre__test__Turbo"
     //   "glibre.test.Valve" → "glibre__test__Valve"
-    CHECK(gen_text.find("glibre_plugin_current_version_glibre__test__Turbo") != eastl::string::npos);
-    CHECK(gen_text.find("glibre_plugin_current_version_glibre__test__Valve") != eastl::string::npos);
+    CHECK(
+        gen_text.find("glibre_plugin_current_version_glibre__test__Turbo") != eastl::string::npos
+    );
+    CHECK(
+        gen_text.find("glibre_plugin_current_version_glibre__test__Valve") != eastl::string::npos
+    );
 
     // --- Set up temp dir. ---
     const fs::path tmp_base = fs::temp_directory_path() / "glibre_foryc_ver_test";
@@ -716,8 +728,7 @@ std::expected<void, glibre::Error> migrate_Turbo_v3_to_v4(const TurboV3&, TurboV
 // -----------------------------------------------------------------------
 
 TEST_CASE(
-    "foryc_emit_migration_fqn_mangle_same_unqualified_name",
-    "[foryc][emit_migration][fqn_mangle]"
+    "foryc_emit_migration_fqn_mangle_same_unqualified_name", "[foryc][emit_migration][fqn_mangle]"
 ) {
     // Two types with identical unqualified name "Particle" in different
     // namespaces: "glibre.core.Particle" and "glibre.fx.Particle".
@@ -774,8 +785,7 @@ schema glibre.fx.Particle {
 // -----------------------------------------------------------------------
 
 TEST_CASE(
-    "foryc_emit_migration_fqn_mangle_uses_double_underscore",
-    "[foryc][emit_migration][fqn_mangle]"
+    "foryc_emit_migration_fqn_mangle_uses_double_underscore", "[foryc][emit_migration][fqn_mangle]"
 ) {
     // Multi-segment FQN: dots become double-underscores.
     constexpr std::string_view src_multi = R"(
@@ -795,8 +805,13 @@ schema glibre.core.Transform {
     CHECK(text_multi.find("glibre__core__Transform") != eastl::string::npos);
 
     // The symbol families must all use the double-underscore mangled name.
-    CHECK(text_multi.find("glibre_plugin_current_version_glibre__core__Transform") != eastl::string::npos);
-    CHECK(text_multi.find("glibre_plugin_migrations_glibre__core__Transform") != eastl::string::npos);
+    CHECK(
+        text_multi.find("glibre_plugin_current_version_glibre__core__Transform") !=
+        eastl::string::npos
+    );
+    CHECK(
+        text_multi.find("glibre_plugin_migrations_glibre__core__Transform") != eastl::string::npos
+    );
 
     // Single-underscore separator must NOT appear between the FQN components.
     // (i.e. "glibre_core_Transform" is the wrong scheme.)
@@ -833,10 +848,7 @@ schema Widget {
 // Satisfies plan #1010 Unit Test Plan item 3.
 // -----------------------------------------------------------------------
 
-TEST_CASE(
-    "foryc_emit_migration_fqn_mangle_format",
-    "[foryc][emit_migration][fqn_mangle]"
-) {
+TEST_CASE("foryc_emit_migration_fqn_mangle_format", "[foryc][emit_migration][fqn_mangle]") {
     constexpr std::string_view src = R"(
 schema glibre.core.Transform {
   version 3
@@ -856,7 +868,11 @@ schema glibre.core.Transform {
     CHECK(text.find("glibre__core__Transform") != eastl::string::npos);
 
     // All three symbol families use the mangled suffix.
-    CHECK(text.find("glibre_plugin_current_version_glibre__core__Transform") != eastl::string::npos);
+    CHECK(
+        text.find("glibre_plugin_current_version_glibre__core__Transform") != eastl::string::npos
+    );
     CHECK(text.find("glibre_plugin_migrations_glibre__core__Transform") != eastl::string::npos);
-    CHECK(text.find("glibre_plugin_migrations_glibre__core__Transform_size") != eastl::string::npos);
+    CHECK(
+        text.find("glibre_plugin_migrations_glibre__core__Transform_size") != eastl::string::npos
+    );
 }
