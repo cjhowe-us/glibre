@@ -267,17 +267,18 @@ TEST_CASE("perf_budget_concurrent_heap_free_no_underflow", "[core][perf_budget]"
     constexpr int kOpsPerThread = 500;
     constexpr std::uint64_t kChunkBytes = 256u;
 
-    // Pre-seed the counter so the free threads always have bytes to subtract.
-    // Total pre-seeded = kHalf * kOpsPerThread * kChunkBytes.
-    // Total alloc-thread adds = same amount.
-    // Total free-thread subtracts = kHalf * kOpsPerThread * kChunkBytes * 2
-    //   (they free both the pre-seed and the concurrent alloc half).
-    //
-    // Simpler symmetric design: pre-seed zero; both alloc and free threads race.
+    // Symmetric design: no pre-seeding; kHalf alloc threads and kHalf free
+    // threads race concurrently.
     //   alloc threads add: kHalf * kOpsPerThread * kChunkBytes
     //   free  threads subtract: kHalf * kOpsPerThread * kChunkBytes
-    // Net = 0.  Saturating clamp prevents underflow wrapping when free threads
-    // win the race before alloc threads add.
+    //
+    // Because threads are not synchronised, free threads may fire before alloc
+    // threads have added anything.  The saturating clamp in record_heap_free
+    // absorbs those early free ops (clamping to 0 rather than wrapping), which
+    // means subsequent alloc ops may not have matching frees.  The final
+    // heap_bytes value is therefore non-deterministic, but it is bounded:
+    //   0 <= heap_bytes <= kHalf * kOpsPerThread * kChunkBytes.
+    // We verify the upper bound and the no-wrap invariant (see assertions below).
     std::array<std::thread, kThreads> workers;
 
     for (int t = 0; t < kHalf; ++t) {
@@ -301,14 +302,26 @@ TEST_CASE("perf_budget_concurrent_heap_free_no_underflow", "[core][perf_budget]"
 
     auto s = budget.sample(glibre::ContextTag::Content);
 
-    // Net-zero: alloc threads added exactly as many bytes as free threads
-    // removed.  Saturating clamp on free ensures the result is 0, never
-    // wrapped to near-UINT64_MAX.
-    CHECK(s.heap_bytes == 0u);
-
-    // Sanity: the value must not have wrapped (wrap would be > 2^63).
+    // The test goal is no wrap-around underflow: the saturating clamp in
+    // record_heap_free must prevent heap_bytes from wrapping to near-UINT64_MAX
+    // even when free threads race ahead of alloc threads.
+    //
+    // We do NOT assert heap_bytes == 0 because the symmetric design (equal alloc
+    // and free threads launched without pre-seeding) has an inherent race: if
+    // free threads execute before alloc threads have added anything, the clamp
+    // fires and "absorbs" some free ops, leaving the subsequent alloc ops
+    // unmatched.  The exact final value is non-deterministic — testing for 0
+    // would be a flaky assertion.
+    //
+    // The meaningful invariant is that the value has not wrapped (i.e., the
+    // saturating clamp is actually clamping rather than wrapping).
     constexpr std::uint64_t kWrapSentinel = UINT64_MAX / 2u;
     CHECK(s.heap_bytes < kWrapSentinel);
+
+    // The value must not exceed what alloc threads could have added at most.
+    constexpr std::uint64_t kMaxPossible =
+        static_cast<std::uint64_t>(kHalf) * kOpsPerThread * kChunkBytes;
+    CHECK(s.heap_bytes <= kMaxPossible);
 
     // CPU/GPU untouched.
     CHECK(s.cpu_ns == 0u);
