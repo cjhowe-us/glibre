@@ -252,9 +252,16 @@ private:
     }
 
     // Build a glibre::Error from a tools::Error enumerator.
+    // `detail` must be a string literal (or similarly immortal storage) because
+    // ErrorContext.detail is eastl::string_view — it does not own the bytes.
+    // Every call site in this file passes a string literal, satisfying the
+    // lifetime requirement.
     [[nodiscard]] static std::unexpected<glibre::Error>
-    err(tools::Error code, std::string_view /*detail*/ = {}) {
-        return std::unexpected<glibre::Error>{glibre::Error{code}};
+    err(tools::Error code, std::string_view detail = {}) {
+        return std::unexpected<glibre::Error>{glibre::Error{
+            code,
+            glibre::ErrorContext{__FILE__, __LINE__, eastl::string_view{detail.data(), detail.size()}},
+        }};
     }
 
     // Parse a dotted FQN: word ('.' word)* — may also consume as Ident+Dot tokens
@@ -323,14 +330,16 @@ private:
 
         // Track seen tags for duplicate detection.
         eastl::unordered_set<std::uint32_t> seen_tags;
-        // Track seen field names for uniqueness.
         bool version_seen = false;
+        bool since_seen   = false;
 
         while (current_.kind != TokenKind::RBrace && current_.kind != TokenKind::Eof) {
             if (current_.kind != TokenKind::Ident)
                 return err(tools::Error::ForycSyntaxError, "expected keyword inside schema");
 
             if (current_.text == "version") {
+                if (version_seen)
+                    return err(tools::Error::ForycSyntaxError, "duplicate 'version' key in schema block");
                 advance();
                 if (current_.kind != TokenKind::IntLit)
                     return err(tools::Error::ForycSyntaxError, "expected integer after 'version'");
@@ -344,12 +353,15 @@ private:
                 advance();
 
             } else if (current_.text == "since") {
+                if (since_seen)
+                    return err(tools::Error::ForycSyntaxError, "duplicate 'since' key in schema block");
                 advance();
                 if (current_.kind != TokenKind::StringLit)
                     return err(tools::Error::ForycSyntaxError, "expected string after 'since'");
                 // Strip surrounding quotes from the string literal.
                 const std::string_view raw = current_.text;
                 decl.since_version = eastl::string(raw.data() + 1, raw.size() - 2);
+                since_seen = true;
                 advance();
 
             } else if (current_.text == "field") {
