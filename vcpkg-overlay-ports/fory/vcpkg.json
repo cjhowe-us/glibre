@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "fory",
+  "version": "0.17.0",
+  "description": "Apache Fory — a blazingly fast multi-language serialization framework (C++ library)",
+  "homepage": "https://github.com/apache/fury",
+  "license": "Apache-2.0",
+  "supports": "osx & arm64",
+  "dependencies": [
+    "abseil",
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    }
+  ]
+}

@@ -53,6 +53,17 @@ jobs:
           max-size: 1G
       - name: Bootstrap vcpkg
         run: ./vendor/vcpkg/bootstrap-vcpkg.sh -disableMetrics
+      - name: vcpkg install test deps (fory_overlay_port_resolves)
+        # Install fory + catch2 in classic mode so the cmake configure step finds
+        # Fory::fory and Catch2 for the tests/data/pkg smoke test (refs #218).
+        # Classic mode is used because manifest mode would attempt to resolve all
+        # vcpkg.json deps including ports not yet authored (metal-cpp, etc.).
+        run: |
+          ./vendor/vcpkg/vcpkg install \
+            fory:arm64-osx \
+            catch2:arm64-osx \
+            --classic \
+            --overlay-ports=vcpkg-overlay-ports
       - name: Configure
         run: |
           cmake --preset macos-debug \
