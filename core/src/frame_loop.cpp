@@ -28,6 +28,10 @@ namespace glibre::core {
 // plan introduces a dynamic phase-body registration mechanism that might supply
 // phases out of order.  Keeping the check here means the registration path
 // must also pass through run_phase, where order violations are caught.
+// Specifically, sibling plan #245 (core/frame-loop: phase ownership +
+// register_system API) is the planned consumer that will route registered
+// system invocations through run_phase(); at that point the ordinal mismatch
+// becomes observable when a mis-ordered system registration slips through.
 //
 // In release builds the ordinal check is compiled out (NDEBUG defined).
 //
