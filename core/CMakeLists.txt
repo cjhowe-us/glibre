@@ -28,6 +28,7 @@ add_library(glibre-core STATIC
     src/plugin_loader.cpp            # PluginLoader: dlopen+dlsym+manifest read (plan #229)
     src/plugin_loader_registry.cpp   # PluginLoaderRegistry: ABI+version+name+deps gates (plan #230)
     src/plugin_loader_actions.cpp    # Loader-procedure free functions: steps 9–11 (plan #231)
+    src/context_tag_resolver.cpp     # Pure string→ContextTag map (SRP unit, plan #989, MED-2 round-2)
     src/log_error.cpp                # Structured error logging helper (plan #236)
     src/alloc/transient_arena.cpp    # Per-context transient bump-pointer arena (plan #239)
     src/alloc/per_context_allocator.cpp  # Tag-tracked ceiling-enforced heap allocator (plan #238)

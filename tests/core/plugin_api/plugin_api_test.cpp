@@ -182,7 +182,7 @@ TEST_CASE("plugin_context_is_pod_aggregate", "[core][plugin_api]") {
     );
     // Verify the AllocatorHandle is correctly stamped with the expected tag.
     CHECK(fixture.ctx.alloc.tag() == glibre::ContextTag::core);
-    CHECK(&fixture.ctx.alloc.underlying() == &fixture.test_alloc);
+    CHECK(fixture.ctx.alloc.wraps(fixture.test_alloc));
     CHECK(&fixture.ctx.log == reinterpret_cast<glibre::core::LogSink*>(&fixture.log));
 }
 
@@ -402,7 +402,7 @@ TEST_CASE("plugin_context_register_smoke", "[core][plugin_api]") {
     CHECK(&fixture.ctx.pass_registry != nullptr);
     CHECK(&fixture.ctx.panel_registry != nullptr);
     CHECK(&fixture.ctx.manifest != nullptr);
-    CHECK(&fixture.ctx.alloc.underlying() == &fixture.test_alloc);
+    CHECK(fixture.ctx.alloc.wraps(fixture.test_alloc));
     CHECK(&fixture.ctx.log != nullptr);
 }
 

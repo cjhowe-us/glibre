@@ -38,11 +38,65 @@
 
 #include <cstdint>
 
-#include <glibre/core/plugin_api.hpp>       // RegisterFn, PluginContext
-#include <glibre/core/plugin_manifest.hpp>  // PluginManifest, SemVer
+#include <glibre/alloc.hpp>                      // PerContextAllocator, AllocatorHandle
+#include <glibre/core/context_tag_resolver.hpp>  // derive_context_tag
+#include <glibre/core/plugin_api.hpp>            // RegisterFn, PluginContext
+#include <glibre/core/plugin_manifest.hpp>       // PluginManifest, SemVer
 #include <glibre/error.hpp>
 
 namespace glibre::core {
+
+// ---------------------------------------------------------------------------
+// call_register_stamped — production entry-point for loader step 9
+//                         with AllocatorHandle stamping.
+//
+// Authority: issue #989 §Scope: "Plugin loader (core/src/plugin_loader.cpp):
+//   stamp AllocatorHandle with the plugin's ContextTag at glibre_plugin_register
+//   step, pass handle into plugin init via the plugin ABI struct."
+//   perf-budget.md §Allocator Rules #1, plan #989.
+//
+// This is the PRODUCTION call site that closes the seam identified in round-2
+// review HIGH-1: derive_context_tag → AllocatorHandle → PluginContext → call_register.
+//
+// Steps performed in order:
+//   1. derive_context_tag(manifest.name)
+//        Maps the plugin manifest name to its bounded-context ContextTag.
+//        Failure → core::Error::PluginManifestInvalid (invalid or unknown context).
+//   2. AllocatorHandle{per_context_alloc, tag}
+//        Stamps the tag at handle-construction time so plugin call sites are
+//        tag-free (perf-budget.md §Allocator Rules #1).
+//   3. PluginContext{world, type_registry, system_registry, pass_registry,
+//                    panel_registry, manifest, log, alloc_handle}
+//        Aggregates all engine services into the stable PluginContext layout.
+//   4. call_register(register_fn, ctx)
+//        Invokes the plugin's glibre_plugin_register entry-point.
+//
+// On any failure the caller is responsible for cleanup (dlclose, partial
+// registry unwind) — this function does NOT call dlclose itself.
+//
+// @param register_fn        Resolved function pointer from dlsym (step 2 loader).
+// @param per_context_alloc  The bounded-context allocator for this plugin's context.
+//                           Must outlive the call (and any AllocatorHandle derived from it).
+// @param manifest           The loaded plugin's manifest (already validated by gate checks).
+// @param world              Engine ECS world reference.
+// @param type_registry      Component-type registry.
+// @param system_registry    System-schedule registry.
+// @param pass_registry      Render-graph pass registry.
+// @param panel_registry     Editor panel registry.
+// @param log                Plugin-scoped log sink.
+// ---------------------------------------------------------------------------
+
+[[nodiscard]] Result<void> call_register_stamped(
+    RegisterFn register_fn,
+    glibre::PerContextAllocator& per_context_alloc,
+    const PluginManifest& manifest,
+    World& world,
+    TypeRegistry& type_registry,
+    SystemRegistry& system_registry,
+    PassRegistry& pass_registry,
+    PanelRegistry& panel_registry,
+    LogSink& log
+) noexcept;
 
 // ---------------------------------------------------------------------------
 // call_register — loader step 9 (plugin-abi.md §"Loader Sequence").

@@ -327,6 +327,12 @@ public:
         : alloc_{alloc},
           tag_{tag} {}
 
+    // Rvalue constructor is deleted: AllocatorHandle(PerContextAllocator{...}, tag) would bind
+    // the handle's reference member to a temporary that is destroyed at the end of the full
+    // expression — a guaranteed dangling reference.  Deleting this overload makes the hazard a
+    // compile-time error rather than silent UB at runtime (MED-4, round-2 review).
+    explicit AllocatorHandle(PerContextAllocator&&, ContextTag) = delete;
+
     // Copy-constructible: multiple handles with the same tag and underlying
     // allocator are permitted.  Copying does not transfer ownership — the
     // handle is non-owning (holds a reference, not a pointer).
@@ -372,11 +378,20 @@ public:
     // tag() — the ContextTag stamped at construction.
     [[nodiscard]] ContextTag tag() const noexcept { return tag_; }
 
-    // underlying() — the PerContextAllocator this handle wraps.
+    // wraps(alloc) — identity check: returns true if this handle wraps the given allocator.
     //
-    // Provided for tests and diagnostic tooling.  Plugin code should use
-    // allocate() / deallocate() exclusively.
-    [[nodiscard]] PerContextAllocator& underlying() const noexcept { return alloc_; }
+    // Used in tests and diagnostic tooling to verify that the loader stamped the correct
+    // PerContextAllocator into a PluginContext without exposing a public mutable reference.
+    // Replacing the former underlying() accessor (which returned a non-const ref and allowed
+    // plugin code to bypass the tag stamp) with this predicate closes that bypass
+    // (MED-3, round-2 review).
+    //
+    // For test cases that need to inspect the byte counter of the wrapped allocator, declare
+    // the PerContextAllocator as a named local variable in the test body — test code already
+    // owns the allocator, so no accessor into the handle is needed.
+    [[nodiscard]] bool wraps(const PerContextAllocator& alloc) const noexcept {
+        return &alloc_ == &alloc;
+    }
 
 private:
     PerContextAllocator& alloc_;

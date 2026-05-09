@@ -111,8 +111,8 @@ TEST_CASE("allocator_handle_stamps_tag_at_construction", "[core][alloc][handle]"
         // The stamped tag must match what was passed at construction.
         CHECK(handle.tag() == tag);
 
-        // underlying() must refer to the same PerContextAllocator object.
-        CHECK(&handle.underlying() == &alloc);
+        // wraps() confirms the handle references the same PerContextAllocator object.
+        CHECK(handle.wraps(alloc));
     }
 }
 

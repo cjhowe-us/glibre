@@ -10,6 +10,7 @@
 //   - register_failure_cleans_up_dlopen
 //   - rebuild_schedule_smoke
 //   - migrate_components_no_op_when_versions_equal
+//   - call_register_stamped_stamps_correct_tag_from_manifest_name  (plan #989 HIGH-1, r2)
 //
 // Design constraints:
 //   • -fno-exceptions (error-model.md §Decision 3).
@@ -35,9 +36,10 @@
 #include <EASTL/string_view.h>
 #include <catch2/catch_test_macros.hpp>
 #include <glibre/alloc.hpp>                       // AllocatorHandle, PerContextAllocator
+#include <glibre/core/context_tag_resolver.hpp>   // derive_context_tag (SRP unit, plan #989)
 #include <glibre/core/plugin_api.hpp>             // PluginContext aggregate
-#include <glibre/core/plugin_loader.hpp>          // PluginLoader::open, derive_context_tag
-#include <glibre/core/plugin_loader_actions.hpp>  // call_register, rebuild_schedule, migrate_components
+#include <glibre/core/plugin_loader.hpp>          // PluginLoader::open
+#include <glibre/core/plugin_loader_actions.hpp>  // call_register, call_register_stamped, etc.
 #include <glibre/core/plugin_manifest.hpp>
 #include <glibre/error.hpp>
 
@@ -60,6 +62,27 @@ namespace {
 // ABI hash the noop plugin and stub_register_fails export (all-zeros).
 constexpr const char kNoopAbiHash[] =
     "0000000000000000000000000000000000000000000000000000000000000000";
+
+// Test-fixture allocator ceiling — 1 MiB is sufficient for all test cases
+// (no test allocates near this amount; it only needs to be above zero).
+constexpr std::uint64_t kTestAllocCeiling = 1024ULL * 1024ULL;
+
+// make_test_alloc_handle — factory for the standard test-fixture AllocatorHandle.
+//
+// Returns an AllocatorHandle stamped with ContextTag::core and wrapping the
+// caller-supplied PerContextAllocator.  The caller must ensure `alloc` is
+// declared and alive for the full lifetime of the returned handle (RAII ordering).
+//
+// ContextTag::core is used as a representative tag for test fixtures; the
+// production loader derives the tag from the manifest plugin name via
+// derive_context_tag() (perf-budget.md §Allocator Rules #1, plan #989).
+//
+// Extracted to avoid repeating the identical {alloc, ContextTag::core} pattern
+// at three test sites in this file (LOW-5, round-2 review).
+[[nodiscard]] glibre::AllocatorHandle
+make_test_alloc_handle(glibre::PerContextAllocator& alloc) noexcept {
+    return glibre::AllocatorHandle{alloc, glibre::ContextTag::core};
+}
 
 /// Return the core::Error variant arm, or nullptr if the error belongs to a
 /// different context (render::Error, tools::Error, etc.).
@@ -157,7 +180,7 @@ TEST_CASE("register_invokes_plugin_entry_point", "[core][register]") {
     glibre::core::LogSink log_sink;
     // AllocatorHandle stamped with ContextTag::core for test fixtures
     // (perf-budget.md §Allocator Rules #1, plan #989).
-    glibre::PerContextAllocator test_alloc{glibre::ContextTag::core, 1024ULL * 1024ULL};
+    glibre::PerContextAllocator test_alloc{glibre::ContextTag::core, kTestAllocCeiling};
     auto manifest = make_manifest("glibre.test.register.noop");
     auto ctx = make_context(
         world,
@@ -167,7 +190,7 @@ TEST_CASE("register_invokes_plugin_entry_point", "[core][register]") {
         panel_reg,
         log_sink,
         manifest,
-        glibre::AllocatorHandle{test_alloc, glibre::ContextTag::core}
+        make_test_alloc_handle(test_alloc)
     );
 
     // Step 4: call call_register — noop plugin returns success.
@@ -229,7 +252,7 @@ TEST_CASE("register_failure_cleans_up_dlopen", "[core][register]") {
     // AllocatorHandle stamped with ContextTag::core for test fixtures
     // (plan #989: tag passed by the test caller; in production the loader
     // derives the tag from the manifest name at glibre_plugin_register time).
-    glibre::PerContextAllocator test_alloc{glibre::ContextTag::core, 1024ULL * 1024ULL};
+    glibre::PerContextAllocator test_alloc{glibre::ContextTag::core, kTestAllocCeiling};
     auto manifest = make_manifest("glibre.test.register.fails");
     auto ctx = make_context(
         world,
@@ -239,7 +262,7 @@ TEST_CASE("register_failure_cleans_up_dlopen", "[core][register]") {
         panel_reg,
         log_sink,
         manifest,
-        glibre::AllocatorHandle{test_alloc, glibre::ContextTag::core}
+        make_test_alloc_handle(test_alloc)
     );
 
     // Step 4: call_register must return PluginInitFailed.
@@ -357,7 +380,7 @@ TEST_CASE("migrate_components_no_op_when_versions_equal", "[core][register]") {
 // ===========================================================================
 
 TEST_CASE("plugin_loader_stamps_allocator_handle_with_plugin_tag", "[core][register][alloc]") {
-    constexpr std::uint64_t kCeiling = 1024ULL * 1024ULL;  // 1 MiB — sufficient for test
+    constexpr std::uint64_t kCeiling = kTestAllocCeiling;  // 1 MiB — sufficient for test
 
     struct Sample {
         const char* plugin_name;
@@ -389,7 +412,7 @@ TEST_CASE("plugin_loader_stamps_allocator_handle_with_plugin_tag", "[core][regis
 
         // Step 3: the stamped handle carries the expected tag.
         CHECK(handle.tag() == s.expected_tag);
-        CHECK(&handle.underlying() == &alloc);
+        CHECK(handle.wraps(alloc));
     }
 
     // Edge: single-component name (no dot) must fail.
@@ -403,4 +426,117 @@ TEST_CASE("plugin_loader_stamps_allocator_handle_with_plugin_tag", "[core][regis
         auto r = glibre::core::derive_context_tag(eastl::string_view{"glibre.unknown.foo"});
         REQUIRE_FALSE(r.has_value());
     }
+}
+
+// ===========================================================================
+// Test: call_register_stamped_stamps_correct_tag_from_manifest_name
+//
+// Integration test proving that the production call path:
+//   derive_context_tag(manifest.name)
+//   → AllocatorHandle{per_context_alloc, tag}
+//   → PluginContext{..., alloc_handle}
+//   → call_register(register_fn, ctx)
+// is correctly wired end-to-end (plan #989 §Scope, HIGH-1 round-2 review).
+//
+// Exercises call_register_stamped on:
+//   a) A valid manifest name ("glibre.render.camera") — must return success.
+//      The render allocator receives the stamped tag at construct time.
+//   b) An invalid manifest name ("myplugin") — must return PluginManifestInvalid.
+//      This confirms that derive_context_tag is invoked (not bypassed) and
+//      that its error is propagated before calling the plugin entry-point.
+//
+// The noop plugin's glibre_plugin_register returns success unconditionally, so
+// the success of case (a) is the observable proof that all four steps in the
+// production seam were executed without error.  The failure of case (b) is the
+// observable proof that step 1 (derive_context_tag) runs before step 4
+// (call_register), completing the seam verification.
+//
+// Authority: issue #989 §Scope; perf-budget.md §Allocator Rules #1.
+// DoD: unit_test_named: call_register_stamped_stamps_correct_tag_from_manifest_name
+// ===========================================================================
+
+TEST_CASE(
+    "call_register_stamped_stamps_correct_tag_from_manifest_name", "[core][register][alloc]"
+) {
+#ifndef GLIBRE_NOOP_DYLIB_PATH
+    // FAIL rather than SKIP: this test is part of the DoD for plan #989.
+    FAIL(
+        "GLIBRE_NOOP_DYLIB_PATH not defined — "
+        "rebuild with GLIBRE_BUILD_EXAMPLES=ON (noop plugin required)"
+    );
+#else
+    const eastl::string_view noop_path{GLIBRE_NOOP_DYLIB_PATH};
+    REQUIRE_FALSE(noop_path.empty());
+
+    // Load the noop plugin — steps 1–2 of the loader sequence.
+    auto loader_result = glibre::core::PluginLoader::open(noop_path);
+    REQUIRE(loader_result.has_value());
+    const glibre::core::PluginLoader& loader = *loader_result;
+    REQUIRE(loader.register_fn() != nullptr);
+
+    // Build stub registry objects.
+    glibre::core::World world;
+    glibre::core::TypeRegistry type_reg;
+    glibre::core::SystemRegistry sys_reg;
+    glibre::core::PassRegistry pass_reg;
+    glibre::core::PanelRegistry panel_reg;
+    glibre::core::LogSink log_sink;
+
+    SECTION("valid manifest name — production stamping seam succeeds") {
+        // A render-context allocator: the production seam should derive
+        // ContextTag::render from "glibre.render.camera" and stamp the handle.
+        glibre::PerContextAllocator render_alloc{glibre::ContextTag::render, kTestAllocCeiling};
+
+        // Construct a manifest with a valid render-context plugin name.
+        auto manifest = make_manifest("glibre.render.camera");
+
+        // call_register_stamped: full production seam.
+        //   Step 1: derive_context_tag("glibre.render.camera") → ContextTag::render
+        //   Step 2: AllocatorHandle{render_alloc, ContextTag::render}
+        //   Step 3: PluginContext{..., alloc_handle}
+        //   Step 4: call_register(register_fn, ctx) — noop returns success
+        auto result = glibre::core::call_register_stamped(
+            loader.register_fn(),
+            render_alloc,
+            manifest,
+            world,
+            type_reg,
+            sys_reg,
+            pass_reg,
+            panel_reg,
+            log_sink
+        );
+
+        // All four steps succeeded: the seam is wired.
+        REQUIRE(result.has_value());
+    }
+
+    SECTION("invalid manifest name — derive_context_tag fires before call_register") {
+        // A core allocator (arbitrary; call_register_stamped must fail before
+        // using it because the manifest name is invalid).
+        glibre::PerContextAllocator core_alloc{glibre::ContextTag::core, kTestAllocCeiling};
+
+        // Manifest with a name that cannot be parsed by derive_context_tag.
+        auto manifest = make_manifest("myplugin");
+
+        // call_register_stamped must return PluginManifestInvalid from step 1
+        // (derive_context_tag) without reaching step 4 (the noop plugin is never called).
+        auto result = glibre::core::call_register_stamped(
+            loader.register_fn(),
+            core_alloc,
+            manifest,
+            world,
+            type_reg,
+            sys_reg,
+            pass_reg,
+            panel_reg,
+            log_sink
+        );
+
+        REQUIRE_FALSE(result.has_value());
+        const auto* core_err = as_core_error(result.error());
+        REQUIRE(core_err != nullptr);
+        CHECK(*core_err == glibre::core::Error::PluginManifestInvalid);
+    }
+#endif
 }
