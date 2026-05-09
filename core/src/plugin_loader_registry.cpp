@@ -41,16 +41,18 @@ PluginLoaderRegistry::PluginLoaderRegistry(SemVer host_engine_version) noexcept
 
 Result<void> PluginLoaderRegistry::validate_drain_phase(Phase current_phase) noexcept {
     if (current_phase != Phase::HotReload) {
-        return std::unexpected(glibre::Error{
-            core::Error::FramePhaseMisordered,
-            ErrorContext{
-                .file = __FILE__,
-                .line = __LINE__,
-                .detail = "registry mutation attempted outside phase 8 (HotReload); "
-                          "call_register, rebuild_schedule, and migrate_components "
-                          "are only permitted during the hot-reload barrier",
-            },
-        });
+        return std::unexpected(
+            glibre::Error{
+                core::Error::FramePhaseMisordered,
+                ErrorContext{
+                    .file = __FILE__,
+                    .line = __LINE__,
+                    .detail = "registry mutation attempted outside phase 8 (HotReload); "
+                              "call_register, rebuild_schedule, and migrate_components "
+                              "are only permitted during the hot-reload barrier",
+                },
+            }
+        );
     }
     return {};
 }

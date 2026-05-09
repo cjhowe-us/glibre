@@ -482,7 +482,9 @@ TEST_CASE("plugin_loader_accepts_multi_dependency_plugin", "[core][plugin_loader
 // query phase state (plans #247/#248 will supply the real FramePhaseTracker).
 // ===========================================================================
 
-TEST_CASE("validate_drain_phase_outside_hotreload_returns_error", "[core][plugin_loader_registry]") {
+TEST_CASE(
+    "validate_drain_phase_outside_hotreload_returns_error", "[core][plugin_loader_registry]"
+) {
     // Enumerate all non-HotReload phases and assert each returns the error.
     const glibre::core::Phase non_hotreload_phases[] = {
         glibre::core::Phase::Input,
@@ -513,9 +515,8 @@ TEST_CASE("validate_drain_phase_outside_hotreload_returns_error", "[core][plugin
 // ===========================================================================
 
 TEST_CASE("validate_drain_phase_at_phase_8_succeeds", "[core][plugin_loader_registry]") {
-    auto result = glibre::core::PluginLoaderRegistry::validate_drain_phase(
-        glibre::core::Phase::HotReload
-    );
+    auto result =
+        glibre::core::PluginLoaderRegistry::validate_drain_phase(glibre::core::Phase::HotReload);
     CHECK(result.has_value());
 }
 
