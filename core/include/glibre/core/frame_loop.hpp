@@ -78,16 +78,29 @@ public:
     [[nodiscard]] glibre::Result<void>
     register_transient_arena(glibre::TransientArena* arena) noexcept;
 
-    // set_perf_budget() — register a PerfBudget for phase-9 reset.
+    // set_perf_budget() — register (or replace, or detach) a PerfBudget for
+    // phase-9 reset.
     //
-    // The pointer may be null (default) to opt out of budget reset.
-    // When non-null, tick() calls perf_budget->reset() at the end of
-    // Phase::Present (9) before frame_index_ is incremented.
+    // Rebind contract:
+    //   - May be called any number of times provided no tick() is currently
+    //     executing on another thread.  The new pointer takes effect on the
+    //     next tick() call; the prior pointer is immediately ignored (not
+    //     deleted — lifetime is caller-managed).
+    //   - Passing nullptr detaches the budget: subsequent tick() calls skip
+    //     the phase-9 reset entirely.
+    //   - Rebinding between two non-null pointers is legal and useful in
+    //     tests that wish to swap budget fixtures between frames.
     //
-    // The budget pointer must remain valid for the lifetime of this FrameLoop.
-    // Callers are responsible for ensuring pointer validity.
+    // When non-null, tick() calls budget->reset() at the START of
+    // Phase::Present (9) bookkeeping — before transient-arena drain — so that
+    // counters are zeroed even if a leak error is returned.
     //
-    // Thread safety: must be called before tick() begins.
+    // The budget pointer must remain valid from the moment it is passed here
+    // until the next set_perf_budget() call (with null or another pointer) or
+    // until the FrameLoop is destroyed, whichever comes first.  Callers are
+    // responsible for ensuring pointer validity.
+    //
+    // Thread safety: must not be called concurrently with tick().
     void set_perf_budget(glibre::PerfBudget* budget) noexcept { perf_budget_ = budget; }
 
     // tick() — advance one engine frame.

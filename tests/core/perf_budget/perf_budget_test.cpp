@@ -15,10 +15,10 @@
 //   - No REQUIRE_THROWS usage.
 //   - std::thread and std::atomic are permitted carve-outs (PHILOSOPHY §11).
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <thread>
-#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -191,6 +191,10 @@ TEST_CASE("perf_budget_reset_at_phase_9", "[core][perf_budget]") {
 //   - Join all threads.
 //   - Assert sample(Physics).cpu_ns == N * M * delta.
 //
+// PHILOSOPHY §11: std::vector is not on the carve-out list.  kThreads is
+// constexpr so we use std::array<std::thread, kThreads> — no heap at all.
+// std::thread is on the carve-out list; EASTL does not own a thread primitive.
+//
 // The test does NOT race reset() with record_cpu — that ordering is
 // guaranteed by the FrameLoop's sequential phase walk in production.
 // The concurrent-recording path tested here is the common case: multiple
@@ -203,13 +207,12 @@ TEST_CASE("perf_budget_concurrent_records_thread_safe", "[core][perf_budget]") {
     constexpr int kRecordsPerThread = 1000;
     constexpr std::uint64_t kDeltaNs = 100u;
 
-    // Use std::thread (PHILOSOPHY §11 carve-out — std::thread retained for
-    // concurrency; EASTL does not own a thread primitive).
-    std::vector<std::thread> workers;
-    workers.reserve(kThreads);
+    // std::array<std::thread, kThreads>: PHILOSOPHY §11 compliant (no std::vector).
+    // std::thread is a PHILOSOPHY §11 carve-out; EASTL does not own a thread type.
+    std::array<std::thread, kThreads> workers;
 
     for (int t = 0; t < kThreads; ++t) {
-        workers.emplace_back([&budget]() {
+        workers[t] = std::thread([&budget]() {
             for (int i = 0; i < kRecordsPerThread; ++i) {
                 budget.record_cpu(glibre::ContextTag::Physics, kDeltaNs);
             }
@@ -231,4 +234,85 @@ TEST_CASE("perf_budget_concurrent_records_thread_safe", "[core][perf_budget]") {
     // Other contexts must be unaffected.
     CHECK(budget.sample(glibre::ContextTag::Core).cpu_ns == 0u);
     CHECK(budget.sample(glibre::ContextTag::Render).cpu_ns == 0u);
+}
+
+// ===========================================================================
+// Test: perf_budget_concurrent_heap_free_no_underflow
+//
+// Verifies that concurrent interleaved record_heap_alloc / record_heap_free
+// calls on the CAS-retry saturating-subtract path produce the correct net
+// heap count and never wrap (i.e. never return a value > initial allocation
+// when all frees equal all allocs).
+//
+// Approach:
+//   - Allocate a known total (N/2 threads * M allocs * B bytes) on the budget.
+//   - Spawn N threads split into two halves:
+//       threads [0, N/2)  — each calls record_heap_alloc(tag, B) M times.
+//       threads [N/2, N)  — each calls record_heap_free(tag, B)  M times.
+//   - Join all threads.
+//   - Assert sample(tag).heap_bytes == 0 (allocs == frees, net-zero).
+//   - Assert it did not wrap (sample <= initial_alloc, not > UINT64_MAX/2).
+//
+// This specifically exercises the CAS-retry loop in record_heap_free under
+// contention: threads in the free half race each other's CAS compare_exchange
+// while alloc threads simultaneously fetch_add, forcing CAS retries.
+//
+// Separate context (Content) used so heap state is isolated from the CPU
+// concurrent test above.
+// ===========================================================================
+TEST_CASE("perf_budget_concurrent_heap_free_no_underflow", "[core][perf_budget]") {
+    glibre::PerfBudget budget;
+
+    constexpr int kThreads = 8;
+    static_assert(kThreads % 2 == 0, "kThreads must be even for half/half split");
+    constexpr int kHalf = kThreads / 2;
+    constexpr int kOpsPerThread = 500;
+    constexpr std::uint64_t kChunkBytes = 256u;
+
+    // Pre-seed the counter so the free threads always have bytes to subtract.
+    // Total pre-seeded = kHalf * kOpsPerThread * kChunkBytes.
+    // Total alloc-thread adds = same amount.
+    // Total free-thread subtracts = kHalf * kOpsPerThread * kChunkBytes * 2
+    //   (they free both the pre-seed and the concurrent alloc half).
+    //
+    // Simpler symmetric design: pre-seed zero; both alloc and free threads race.
+    //   alloc threads add: kHalf * kOpsPerThread * kChunkBytes
+    //   free  threads subtract: kHalf * kOpsPerThread * kChunkBytes
+    // Net = 0.  Saturating clamp prevents underflow wrapping when free threads
+    // win the race before alloc threads add.
+    std::array<std::thread, kThreads> workers;
+
+    for (int t = 0; t < kHalf; ++t) {
+        workers[t] = std::thread([&budget]() {
+            for (int i = 0; i < kOpsPerThread; ++i) {
+                budget.record_heap_alloc(glibre::ContextTag::Content, kChunkBytes);
+            }
+        });
+    }
+    for (int t = kHalf; t < kThreads; ++t) {
+        workers[t] = std::thread([&budget]() {
+            for (int i = 0; i < kOpsPerThread; ++i) {
+                budget.record_heap_free(glibre::ContextTag::Content, kChunkBytes);
+            }
+        });
+    }
+
+    for (auto& w : workers) {
+        w.join();
+    }
+
+    auto s = budget.sample(glibre::ContextTag::Content);
+
+    // Net-zero: alloc threads added exactly as many bytes as free threads
+    // removed.  Saturating clamp on free ensures the result is 0, never
+    // wrapped to near-UINT64_MAX.
+    CHECK(s.heap_bytes == 0u);
+
+    // Sanity: the value must not have wrapped (wrap would be > 2^63).
+    constexpr std::uint64_t kWrapSentinel = UINT64_MAX / 2u;
+    CHECK(s.heap_bytes < kWrapSentinel);
+
+    // CPU/GPU untouched.
+    CHECK(s.cpu_ns == 0u);
+    CHECK(s.gpu_ns == 0u);
 }

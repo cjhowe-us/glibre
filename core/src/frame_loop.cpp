@@ -122,27 +122,34 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
     case Phase::HotReload: /* core (barrier) — MVP empty */
         break;
     case Phase::Present: /* platform — drains transient arenas at frame end */
-        // Drain all registered transient arenas at end of frame.
-        // perf-budget.md §Allocator Rules #4: transient arenas must be
-        // drained by phase 9 so they do not count against context ceilings.
-        // drain() is O(1) per arena; no heap allocation occurs.
-        //
-        // GLIBRE_ALLOC_STRICT gate (perf-budget.md §Allocator Rules #4):
-        //   assert_drained() is called BEFORE drain() (drain-then-aggregate
-        //   pattern): every arena is drained regardless of whether a leak is
-        //   detected, then the first encountered leak error is returned.
-        //   This ensures all arenas are in a clean state after each tick()
-        //   even when GLIBRE_ALLOC_STRICT is active, making the error
-        //   diagnostic rather than fatal to arena state.
-        //   The check is gated by GLIBRE_ALLOC_STRICT so it compiles to zero
-        //   cost in unstrict builds.  CI diagnostic builds define
-        //   -DGLIBRE_ALLOC_STRICT=1.
+        // Phase 9 bookkeeping order (perf-budget.md §CI Gate Spec, plan #241):
+        //   (1) Reset per-frame perf-budget counters UNCONDITIONALLY so that
+        //       counters do not carry over into the next frame regardless of
+        //       whether a transient-arena leak is detected below.  Resetting
+        //       first keeps the leak-detection path diagnostic: the caller
+        //       sees the error but the budget is already clean for frame N+1.
+        //   (2) Drain all registered transient arenas (perf-budget.md
+        //       §Allocator Rules #4).  drain() is O(1) per arena; no heap
+        //       allocation occurs.
+        //   (3) In GLIBRE_ALLOC_STRICT builds assert every arena was empty
+        //       before step (2) (drain-then-aggregate pattern).  Every arena
+        //       is drained regardless of whether a leak is detected, then the
+        //       first encountered leak error is returned.
+        //   The strict gate compiles to zero cost in non-strict builds.
+        //   CI diagnostic builds define -DGLIBRE_ALLOC_STRICT=1.
         //
         // NOTE: this is core-owned bookkeeping running inside the
         //   platform-owned Phase::Present slot.  This is a deliberate
         //   "core barrier carve-out" that must be documented and eventually
         //   formalised as a post_phase() hook or a frame-phases.md §Phase 9
         //   amendment.  See [SPIKE] iterate-frame-phases-core-barrier-carveout.
+
+        // (1) Reset perf-budget counters unconditionally before leak detection.
+        if (perf_budget_ != nullptr) {
+            perf_budget_->reset();
+        }
+
+        // (2) & (3) Drain arenas and aggregate any strict-mode leak errors.
         {
 #ifdef GLIBRE_ALLOC_STRICT
             glibre::Result<void> first_leak_error{};  // holds first leak error (if any)
@@ -162,14 +169,6 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
                 return std::unexpected(std::move(first_leak_error.error()));
             }
 #endif
-        }
-        // Reset per-frame perf-budget counters.
-        // perf-budget.md §CI Gate Spec (plan #241): counters are reset at the
-        // end of each frame so the next frame starts with zeroed accumulators.
-        // No-op when perf_budget_ is null (opt-out path for code that does not
-        // use the budget framework yet).
-        if (perf_budget_ != nullptr) {
-            perf_budget_->reset();
         }
         break;
     }
