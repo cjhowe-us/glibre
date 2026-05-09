@@ -22,10 +22,11 @@
 #include <format>
 #include <fstream>
 #include <iostream>
-#include <optional>
 #include <string>
 #include <string_view>
-#include <vector>
+
+#include <EASTL/optional.h>
+#include <EASTL/vector.h>
 
 #include "parser.hpp"
 
@@ -46,38 +47,38 @@ static void usage(std::string_view program) {
     std::cerr << "Usage: " << program << " --in <dir> --out <dir> --stamp <file>\n";
 }
 
-static std::optional<Args> parse_args(int argc, char** argv) {
+static eastl::optional<Args> parse_args(int argc, char** argv) {
     Args args;
-    std::vector<std::string_view> tokens(argv + 1, argv + argc);
+    eastl::vector<std::string_view> tokens(argv + 1, argv + argc);
     for (std::size_t i = 0; i < tokens.size(); ++i) {
         const auto tok = tokens[i];
-        auto next = [&]() -> std::optional<std::string_view> {
+        auto next = [&]() -> eastl::optional<std::string_view> {
             if (i + 1 >= tokens.size())
-                return std::nullopt;
+                return eastl::nullopt;
             return tokens[++i];
         };
         if (tok == "--in") {
             auto v = next();
             if (!v)
-                return std::nullopt;
+                return eastl::nullopt;
             args.in_dir = *v;
         } else if (tok == "--out") {
             auto v = next();
             if (!v)
-                return std::nullopt;
+                return eastl::nullopt;
             args.out_dir = *v;
         } else if (tok == "--stamp") {
             auto v = next();
             if (!v)
-                return std::nullopt;
+                return eastl::nullopt;
             args.stamp_file = *v;
         } else {
             std::cerr << "foryc: unknown flag: " << tok << "\n";
-            return std::nullopt;
+            return eastl::nullopt;
         }
     }
     if (args.in_dir.empty() || args.out_dir.empty() || args.stamp_file.empty())
-        return std::nullopt;
+        return eastl::nullopt;
     return args;
 }
 
@@ -99,6 +100,8 @@ static std::string_view error_name(const glibre::Error& e) noexcept {
             return "unknown type";
         case Error::ForycIOError:
             return "I/O error";
+        default:
+            __builtin_unreachable();
         }
     }
     return "unknown error";
@@ -117,7 +120,7 @@ int main(int argc, char** argv) {
     const auto& args = *args_opt;
 
     // Collect all .fory files under args.in_dir recursively.
-    std::vector<fs::path> schema_files;
+    eastl::vector<fs::path> schema_files;
     if (!fs::exists(args.in_dir) || !fs::is_directory(args.in_dir)) {
         std::cerr << "foryc: --in directory does not exist: " << args.in_dir << "\n";
         return EXIT_FAILURE;
