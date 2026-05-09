@@ -71,7 +71,6 @@
 #include <EASTL/array.h>
 #include <EASTL/string_view.h>
 #include <EASTL/variant.h>
-
 #include <glibre/error.hpp>
 
 namespace glibre {

@@ -21,9 +21,7 @@
 #include <type_traits>
 
 #include <EASTL/array.h>
-
 #include <catch2/catch_test_macros.hpp>
-
 #include <glibre/error_register.hpp>
 
 // ===========================================================================
@@ -104,10 +102,7 @@ constexpr eastl::array<std::underlying_type_t<glibre::render::Error>, 5> kRender
     static_cast<std::uint16_t>(glibre::render::Error::UnsupportedBackend),
 }};
 
-static_assert(
-    all_distinct(kRenderErrorValues),
-    "render::Error has duplicate enumerator values."
-);
+static_assert(all_distinct(kRenderErrorValues), "render::Error has duplicate enumerator values.");
 
 // ---------------------------------------------------------------------------
 // tools::Error — enumerator values
@@ -122,10 +117,7 @@ constexpr eastl::array<std::underlying_type_t<glibre::tools::Error>, 6> kToolsEr
     static_cast<std::uint16_t>(glibre::tools::Error::ForycEmptySchema),
 }};
 
-static_assert(
-    all_distinct(kToolsErrorValues),
-    "tools::Error has duplicate enumerator values."
-);
+static_assert(all_distinct(kToolsErrorValues), "tools::Error has duplicate enumerator values.");
 
 }  // anonymous namespace
 
@@ -193,8 +185,10 @@ TEST_CASE("error_register_lists_known_contexts", "[core][error_register]") {
     // The compile-time static_assert in error_register.hpp already guarantees
     // kAllErrorContexts.size() == kExpectedArmCount — this runtime REQUIRE
     // makes the same contract visible in the Catch2 report and OOB-safe.
-    static_assert(glibre::kExpectedArmCount >= 3,
-        "kExpectedArmCount must be >= 3 (core + render + tools are registered).");
+    static_assert(
+        glibre::kExpectedArmCount >= 3,
+        "kExpectedArmCount must be >= 3 (core + render + tools are registered)."
+    );
     REQUIRE(glibre::kAllErrorContexts.size() == glibre::kExpectedArmCount);
 
     // Index 0 corresponds to core::Error (first Variant arm).
