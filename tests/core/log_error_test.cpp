@@ -20,10 +20,9 @@
 #include <sstream>
 #include <string>
 
+#include <catch2/catch_test_macros.hpp>
 #include <spdlog/logger.h>
 #include <spdlog/sinks/ostream_sink.h>
-
-#include <catch2/catch_test_macros.hpp>
 
 #include "glibre/error.hpp"
 #include "glibre/log_error.hpp"
@@ -60,8 +59,8 @@ TEST_CASE("core/log_error: emits_structured_kv_for_core_error", "[core][log_erro
     auto logger = make_string_logger("test.log_error.kv", oss);
 
     const glibre::ErrorContext ctx{
-        .file   = "core/src/plugin_loader.cpp",
-        .line   = 87,
+        .file = "core/src/plugin_loader.cpp",
+        .line = 87,
         .detail = "dlopen failed",
     };
     const glibre::Error err{glibre::core::Error::PluginDlopenFailed, ctx};
@@ -98,8 +97,8 @@ TEST_CASE("core/log_error: hot_reload_refusal_logs_at_warn_level", "[core][log_e
         auto logger = make_string_logger("test.log_error.hot_reload.warn", oss_warn);
 
         const glibre::ErrorContext ctx{
-            .file   = "core/src/hot_reload.cpp",
-            .line   = 42,
+            .file = "core/src/hot_reload.cpp",
+            .line = 42,
             .detail = "abi hash mismatch",
         };
         const glibre::Error err{glibre::core::Error::HotReloadRefused, ctx};
@@ -117,10 +116,8 @@ TEST_CASE("core/log_error: hot_reload_refusal_logs_at_warn_level", "[core][log_e
         std::ostringstream oss_suppressed;
         auto sink = std::make_shared<spdlog::sinks::ostream_sink_st>(oss_suppressed, true);
         sink->set_pattern("%v");
-        auto logger = std::make_shared<spdlog::logger>(
-            "test.log_error.hot_reload.suppress",
-            std::move(sink)
-        );
+        auto logger =
+            std::make_shared<spdlog::logger>("test.log_error.hot_reload.suppress", std::move(sink));
         // Logger level set to err — warn is below threshold, so nothing is written.
         logger->set_level(spdlog::level::err);
 
@@ -147,7 +144,7 @@ TEST_CASE("core/log_error: tag_string_stable_for_core", "[core][log_error]") {
     // core::Error — variant index 0.
     {
         const glibre::Error err{glibre::core::Error::PluginAbiHashMismatch};
-        const char* tag = glibre::tag_string(err.code());
+        const char* tag = glibre::tag_string(err);
         REQUIRE(tag != nullptr);
         CHECK(std::string{tag} == "core::Error");
     }
@@ -155,7 +152,7 @@ TEST_CASE("core/log_error: tag_string_stable_for_core", "[core][log_error]") {
     // render::Error — variant index 1.
     {
         const glibre::Error err{glibre::render::Error::DeviceLost};
-        const char* tag = glibre::tag_string(err.code());
+        const char* tag = glibre::tag_string(err);
         REQUIRE(tag != nullptr);
         CHECK(std::string{tag} == "render::Error");
     }
@@ -163,7 +160,7 @@ TEST_CASE("core/log_error: tag_string_stable_for_core", "[core][log_error]") {
     // tools::Error — variant index 2.
     {
         const glibre::Error err{glibre::tools::Error::ForycSyntaxError};
-        const char* tag = glibre::tag_string(err.code());
+        const char* tag = glibre::tag_string(err);
         REQUIRE(tag != nullptr);
         CHECK(std::string{tag} == "tools::Error");
     }
@@ -172,8 +169,8 @@ TEST_CASE("core/log_error: tag_string_stable_for_core", "[core][log_error]") {
 // ---------------------------------------------------------------------------
 // Test: core/log_error: tostring_complete_for_core_error
 //
-// Verifies that glibre::to_string(core::Error) returns a non-null, non-empty
-// string for every enumerator in core::Error.
+// Verifies that glibre::core::to_string(core::Error) returns a non-null,
+// non-empty string for every enumerator in core::Error.
 //
 // If a new enumerator is added to core::Error without adding a matching arm
 // to to_string(core::Error), -Werror=switch (core/CMakeLists.txt) turns the
@@ -187,34 +184,34 @@ TEST_CASE("core/log_error: tostring_complete_for_core_error", "[core][log_error]
     // The expected string is checked against the enumerator name to guard
     // against copy-paste errors in the to_string arm bodies.
     const auto check = [](E e, const char* expected) {
-        const char* s = glibre::to_string(e);
+        const char* s = glibre::core::to_string(e);
         REQUIRE(s != nullptr);
         CHECK(*s != '\0');
         CHECK(std::string{s} == std::string{expected});
     };
 
-    check(E::PluginAbiHashMismatch,   "PluginAbiHashMismatch");
-    check(E::PluginInitFailed,        "PluginInitFailed");
-    check(E::SchemaMigrationFailed,   "SchemaMigrationFailed");
-    check(E::HotReloadRefused,        "HotReloadRefused");
-    check(E::FramePhaseMisordered,    "FramePhaseMisordered");
-    check(E::OutOfBudget,             "OutOfBudget");
-    check(E::SystemScheduleCycle,     "SystemScheduleCycle");
-    check(E::ScheduleAccessConflict,  "ScheduleAccessConflict");
-    check(E::PluginManifestNotFound,  "PluginManifestNotFound");
-    check(E::PluginManifestInvalid,   "PluginManifestInvalid");
-    check(E::PluginDlopenFailed,      "PluginDlopenFailed");
+    check(E::PluginAbiHashMismatch, "PluginAbiHashMismatch");
+    check(E::PluginInitFailed, "PluginInitFailed");
+    check(E::SchemaMigrationFailed, "SchemaMigrationFailed");
+    check(E::HotReloadRefused, "HotReloadRefused");
+    check(E::FramePhaseMisordered, "FramePhaseMisordered");
+    check(E::OutOfBudget, "OutOfBudget");
+    check(E::SystemScheduleCycle, "SystemScheduleCycle");
+    check(E::ScheduleAccessConflict, "ScheduleAccessConflict");
+    check(E::PluginManifestNotFound, "PluginManifestNotFound");
+    check(E::PluginManifestInvalid, "PluginManifestInvalid");
+    check(E::PluginDlopenFailed, "PluginDlopenFailed");
     check(E::PluginMissingEntryPoint, "PluginMissingEntryPoint");
-    check(E::PluginEngineTooOld,      "PluginEngineTooOld");
-    check(E::PluginNameCollision,     "PluginNameCollision");
+    check(E::PluginEngineTooOld, "PluginEngineTooOld");
+    check(E::PluginNameCollision, "PluginNameCollision");
     check(E::PluginDependencyMissing, "PluginDependencyMissing");
 }
 
 // ---------------------------------------------------------------------------
 // Test: core/log_error: tostring_complete_for_render_error
 //
-// Verifies that glibre::to_string(render::Error) returns a non-null, non-empty
-// string for every enumerator in render::Error.
+// Verifies that glibre::render::to_string(render::Error) returns a non-null,
+// non-empty string for every enumerator in render::Error.
 //
 // Symmetric to tostring_complete_for_core_error.  -Werror=switch catches
 // missing arms at build time; this test provides runtime string-value checks.
@@ -223,24 +220,24 @@ TEST_CASE("core/log_error: tostring_complete_for_render_error", "[core][log_erro
     using E = glibre::render::Error;
 
     const auto check = [](E e, const char* expected) {
-        const char* s = glibre::to_string(e);
+        const char* s = glibre::render::to_string(e);
         REQUIRE(s != nullptr);
         CHECK(*s != '\0');
         CHECK(std::string{s} == std::string{expected});
     };
 
-    check(E::DeviceLost,                "DeviceLost");
-    check(E::PipelineCompileFailed,     "PipelineCompileFailed");
+    check(E::DeviceLost, "DeviceLost");
+    check(E::PipelineCompileFailed, "PipelineCompileFailed");
     check(E::ResourceResidencyExceeded, "ResourceResidencyExceeded");
-    check(E::RenderGraphCycle,          "RenderGraphCycle");
-    check(E::UnsupportedBackend,        "UnsupportedBackend");
+    check(E::RenderGraphCycle, "RenderGraphCycle");
+    check(E::UnsupportedBackend, "UnsupportedBackend");
 }
 
 // ---------------------------------------------------------------------------
 // Test: core/log_error: tostring_complete_for_tools_error
 //
-// Verifies that glibre::to_string(tools::Error) returns a non-null, non-empty
-// string for every enumerator in tools::Error.
+// Verifies that glibre::tools::to_string(tools::Error) returns a non-null,
+// non-empty string for every enumerator in tools::Error.
 //
 // Symmetric to tostring_complete_for_core_error.
 // ---------------------------------------------------------------------------
@@ -248,16 +245,16 @@ TEST_CASE("core/log_error: tostring_complete_for_tools_error", "[core][log_error
     using E = glibre::tools::Error;
 
     const auto check = [](E e, const char* expected) {
-        const char* s = glibre::to_string(e);
+        const char* s = glibre::tools::to_string(e);
         REQUIRE(s != nullptr);
         CHECK(*s != '\0');
         CHECK(std::string{s} == std::string{expected});
     };
 
-    check(E::ForycSyntaxError,        "ForycSyntaxError");
-    check(E::ForycDuplicateTag,       "ForycDuplicateTag");
+    check(E::ForycSyntaxError, "ForycSyntaxError");
+    check(E::ForycDuplicateTag, "ForycDuplicateTag");
     check(E::ForycNonMonotoneVersion, "ForycNonMonotoneVersion");
-    check(E::ForycUnknownType,        "ForycUnknownType");
-    check(E::ForycIOError,            "ForycIOError");
-    check(E::ForycEmptySchema,        "ForycEmptySchema");
+    check(E::ForycUnknownType, "ForycUnknownType");
+    check(E::ForycIOError, "ForycIOError");
+    check(E::ForycEmptySchema, "ForycEmptySchema");
 }

@@ -29,80 +29,114 @@
 // that attempts to escape spdlog terminates the process via std::terminate —
 // the standard noexcept-on-throw behaviour.  See log_error.cpp for details.
 
+#include <utility>
+
+#include <spdlog/common.h>
 #include <spdlog/logger.h>
-#include <spdlog/spdlog.h>
 
 #include "glibre/error.hpp"
-
-namespace glibre {
 
 // ---------------------------------------------------------------------------
 // to_string overloads — hand-written per-enum (see §"to_string design choice")
 // ---------------------------------------------------------------------------
 //
-// Each overload returns a string literal.  The caller must never store this
-// pointer past the lifetime of the program; the literals have static storage
-// duration and are always valid.
-//
-// Namespace placement: all overloads live in namespace glibre — NOT in the
-// per-context namespaces (glibre::core, glibre::render, …).  ADL on a value
-// of type render::Error will NOT find glibre::to_string; call sites must
-// qualify: `glibre::to_string(e)`.  The implementation (variant_code_string)
-// already qualifies correctly; external callers must do the same.
+// Each overload lives in its per-context namespace so that ADL finds the
+// correct overload when the variant alternative is unwrapped by eastl::visit.
+// External callers can also qualify explicitly: glibre::core::to_string(e).
 //
 // Adding a new enumerator without adding a matching arm fires -Wswitch, which
 // glibre-core promotes to a build error via -Werror=switch (core/CMakeLists.txt).
 // This is the compile-time coverage guarantee referenced in plan #236.
 
-[[nodiscard]] constexpr const char* to_string(core::Error e) noexcept {
+namespace glibre::core {
+
+[[nodiscard]] constexpr const char* to_string(Error e) noexcept {
     switch (e) {
-        case core::Error::PluginAbiHashMismatch:   return "PluginAbiHashMismatch";
-        case core::Error::PluginInitFailed:        return "PluginInitFailed";
-        case core::Error::SchemaMigrationFailed:   return "SchemaMigrationFailed";
-        case core::Error::HotReloadRefused:        return "HotReloadRefused";
-        case core::Error::FramePhaseMisordered:    return "FramePhaseMisordered";
-        case core::Error::OutOfBudget:             return "OutOfBudget";
-        case core::Error::SystemScheduleCycle:     return "SystemScheduleCycle";
-        case core::Error::ScheduleAccessConflict:  return "ScheduleAccessConflict";
-        case core::Error::PluginManifestNotFound:  return "PluginManifestNotFound";
-        case core::Error::PluginManifestInvalid:   return "PluginManifestInvalid";
-        case core::Error::PluginDlopenFailed:      return "PluginDlopenFailed";
-        case core::Error::PluginMissingEntryPoint: return "PluginMissingEntryPoint";
-        case core::Error::PluginEngineTooOld:      return "PluginEngineTooOld";
-        case core::Error::PluginNameCollision:     return "PluginNameCollision";
-        case core::Error::PluginDependencyMissing: return "PluginDependencyMissing";
+    case Error::PluginAbiHashMismatch:
+        return "PluginAbiHashMismatch";
+    case Error::PluginInitFailed:
+        return "PluginInitFailed";
+    case Error::SchemaMigrationFailed:
+        return "SchemaMigrationFailed";
+    case Error::HotReloadRefused:
+        return "HotReloadRefused";
+    case Error::FramePhaseMisordered:
+        return "FramePhaseMisordered";
+    case Error::OutOfBudget:
+        return "OutOfBudget";
+    case Error::SystemScheduleCycle:
+        return "SystemScheduleCycle";
+    case Error::ScheduleAccessConflict:
+        return "ScheduleAccessConflict";
+    case Error::PluginManifestNotFound:
+        return "PluginManifestNotFound";
+    case Error::PluginManifestInvalid:
+        return "PluginManifestInvalid";
+    case Error::PluginDlopenFailed:
+        return "PluginDlopenFailed";
+    case Error::PluginMissingEntryPoint:
+        return "PluginMissingEntryPoint";
+    case Error::PluginEngineTooOld:
+        return "PluginEngineTooOld";
+    case Error::PluginNameCollision:
+        return "PluginNameCollision";
+    case Error::PluginDependencyMissing:
+        return "PluginDependencyMissing";
     }
     return "Unknown";
 }
 
-[[nodiscard]] constexpr const char* to_string(render::Error e) noexcept {
+}  // namespace glibre::core
+
+namespace glibre::render {
+
+[[nodiscard]] constexpr const char* to_string(Error e) noexcept {
     switch (e) {
-        case render::Error::DeviceLost:                  return "DeviceLost";
-        case render::Error::PipelineCompileFailed:       return "PipelineCompileFailed";
-        case render::Error::ResourceResidencyExceeded:   return "ResourceResidencyExceeded";
-        case render::Error::RenderGraphCycle:            return "RenderGraphCycle";
-        case render::Error::UnsupportedBackend:          return "UnsupportedBackend";
+    case Error::DeviceLost:
+        return "DeviceLost";
+    case Error::PipelineCompileFailed:
+        return "PipelineCompileFailed";
+    case Error::ResourceResidencyExceeded:
+        return "ResourceResidencyExceeded";
+    case Error::RenderGraphCycle:
+        return "RenderGraphCycle";
+    case Error::UnsupportedBackend:
+        return "UnsupportedBackend";
     }
     return "Unknown";
 }
 
-[[nodiscard]] constexpr const char* to_string(tools::Error e) noexcept {
+}  // namespace glibre::render
+
+namespace glibre::tools {
+
+[[nodiscard]] constexpr const char* to_string(Error e) noexcept {
     switch (e) {
-        case tools::Error::ForycSyntaxError:        return "ForycSyntaxError";
-        case tools::Error::ForycDuplicateTag:       return "ForycDuplicateTag";
-        case tools::Error::ForycNonMonotoneVersion: return "ForycNonMonotoneVersion";
-        case tools::Error::ForycUnknownType:        return "ForycUnknownType";
-        case tools::Error::ForycIOError:            return "ForycIOError";
-        case tools::Error::ForycEmptySchema:        return "ForycEmptySchema";
+    case Error::ForycSyntaxError:
+        return "ForycSyntaxError";
+    case Error::ForycDuplicateTag:
+        return "ForycDuplicateTag";
+    case Error::ForycNonMonotoneVersion:
+        return "ForycNonMonotoneVersion";
+    case Error::ForycUnknownType:
+        return "ForycUnknownType";
+    case Error::ForycIOError:
+        return "ForycIOError";
+    case Error::ForycEmptySchema:
+        return "ForycEmptySchema";
     }
     return "Unknown";
 }
+
+}  // namespace glibre::tools
+
+namespace glibre {
 
 // ---------------------------------------------------------------------------
-// tag_string — maps a glibre::Error::Variant index to the context name string
+// tag_string — maps a glibre::Error to its context name string
 // ---------------------------------------------------------------------------
 //
-// Returns the stable context name tag for a given Variant alternative index.
+// Returns the stable context name tag for the active alternative in err.code().
 // The index matches the order of alternating types in Error::Variant:
 //   0 → core::Error   → "core::Error"
 //   1 → render::Error → "render::Error"
@@ -122,30 +156,30 @@ static_assert(
     "the static_assert count in log_error.hpp)"
 );
 
-[[nodiscard]] inline const char* tag_string(const Error::Variant& v) noexcept {
-    switch (v.index()) {
-        case 0: return "core::Error";
-        case 1: return "render::Error";
-        case 2: return "tools::Error";
+[[nodiscard]] inline const char* tag_string(const Error& err) noexcept {
+    switch (err.code().index()) {
+    case 0:
+        return "core::Error";
+    case 1:
+        return "render::Error";
+    case 2:
+        return "tools::Error";
     }
-    // v.index() == eastl::variant_npos only when the variant holds
+    // err.code().index() == eastl::variant_npos only when the variant holds
     // valueless_by_exception state, which cannot occur in -fno-exceptions
-    // builds.  __builtin_unreachable() eliminates any dead-code warning and
+    // builds.  std::unreachable() (C++23) eliminates any dead-code warning and
     // asserts this path is logically impossible.
-    __builtin_unreachable();
+    std::unreachable();
 }
 
 // ---------------------------------------------------------------------------
 // variant_code_string — extract the enumerator name from the active alternative
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] inline const char* variant_code_string(const Error::Variant& v) noexcept {
-    // eastl::visit is the correct way to dispatch on an eastl::variant.
-    // We use a lambda that calls the overloaded to_string for each alternative.
-    return eastl::visit(
-        [](auto&& e) -> const char* { return glibre::to_string(e); },
-        v
-    );
+[[nodiscard]] inline const char* variant_code_string(const Error& err) noexcept {
+    // eastl::visit dispatches on the active alternative in err.code().
+    // ADL finds the correct to_string overload in each per-context namespace.
+    return eastl::visit([](auto&& e) -> const char* { return to_string(e); }, err.code());
 }
 
 // ---------------------------------------------------------------------------
@@ -153,8 +187,8 @@ static_assert(
 // ---------------------------------------------------------------------------
 //
 // Logs at the specified level (default: spdlog::level::err).
-// Output format:
-//   tag=<tag_string>  variant=<enumerator>  file=<file>  line=<line>  detail=<detail>
+// Output format (zero heap allocation — args passed directly to spdlog/fmtlib):
+//   [tag=<tag_string>  variant=<enumerator>  file=<file>  line=<line>  detail=<detail>]
 //
 // Per error-model.md §"Logging / Telemetry" rule 3:
 //   Hot-reload refusals (core::Error::HotReloadRefused) must be logged at
@@ -179,8 +213,7 @@ void log_error(
 // Same structured output as log_error(sink, err, level).
 
 void log_error_to_default(
-    const glibre::Error& err,
-    spdlog::level::level_enum level = spdlog::level::err
+    const glibre::Error& err, spdlog::level::level_enum level = spdlog::level::err
 ) noexcept;
 
 }  // namespace glibre
