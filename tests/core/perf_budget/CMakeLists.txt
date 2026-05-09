@@ -37,7 +37,7 @@ target_compile_options(glibre-core-perf-budget-tests PRIVATE
 )
 
 # GLIBRE_TESTING is propagated PUBLIC from glibre-core (core/CMakeLists.txt)
-# when GLIBRE_BUILD_TESTING=ON, so glibre-core-perf-budget-tests receives it
+# when GLIBRE_BUILD_TESTS=ON, so glibre-core-perf-budget-tests receives it
 # transitively via target_link_libraries(... glibre::core).
 # No PRIVATE definition needed here — see plan #997.
 
