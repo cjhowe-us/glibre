@@ -34,6 +34,19 @@
 //   Per error-model.md §"Logging / Telemetry" rule 1, structured error logging
 //   happens at the handling boundary (plan #230 caller), not at the raise site.
 //   The diagnostic output here is a low-level aide for development builds only.
+//
+// try_resolve_required() note (MED-A + MED-B, round-2, addressed):
+//   POSIX dlerror() disambiguation: dlsym() can return nullptr for two distinct
+//   reasons — (a) the symbol is absent from the dylib, or (b) the symbol is
+//   present but its value is legitimately null (e.g. a weak null data pointer).
+//   Clearing dlerror() before the call and then inspecting it after is the
+//   canonical POSIX way to distinguish these cases:
+//     dlerror() == non-null after call  → symbol absent
+//     dlerror() == null   after call    → symbol present (value may be null)
+//   For the four required symbols in the loader all four are non-optional so
+//   a post-call null value (however obtained) is treated as PluginMissingEntryPoint.
+//   This full disambiguation is encapsulated in try_resolve_required(), which also
+//   owns the dlclose+error-construction path, eliminating four 12-line duplicates.
 
 #include "glibre/core/plugin_loader.hpp"
 
@@ -66,13 +79,59 @@ namespace {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: dlsym wrapper that returns nullptr on failure and stores nothing.
-// dlsym itself does not set errno; callers must check the return value.
+// Helper: try_resolve_required
+//
+// Resolves a required dlsym symbol with full POSIX dlerror() disambiguation
+// (MED-A, round-2):
+//
+//   1. dlerror() is cleared before dlsym() so any prior error state cannot
+//      contaminate the post-call check.
+//   2. After dlsym(), dlerror() is called exactly once.
+//      - Non-null return → the symbol was absent; return PluginMissingEntryPoint.
+//      - Null return with null sym → the symbol is present but its value is null;
+//        for a required symbol this is also PluginMissingEntryPoint.
+//   3. On any failure path dlclose(handle) is called before returning, so the
+//      caller never holds a handle to a partially-loaded plugin.
+//
+// Callers use the returned Result directly; on success they receive the void*
+// and may proceed; on failure they propagate the error (MED-B, round-2).
 // ---------------------------------------------------------------------------
-[[nodiscard]] void* resolve_symbol(void* handle, const char* name) noexcept {
-    // Clear any prior dlerror state before the call.
-    (void)dlerror();
-    return dlsym(handle, name);
+[[nodiscard]] glibre::Result<void*>
+try_resolve_required(void* handle, const char* sym_name) noexcept {
+    (void)dlerror();  // clear prior state
+    void* const sym = dlsym(handle, sym_name);
+    const char* const dl_err = dlerror();  // consume once — invalidates pointer
+
+    // Two-branch POSIX disambiguation:
+    //   dl_err != nullptr  → symbol absent (dlsym set error text)
+    //   dl_err == nullptr and sym == nullptr → present but null value
+    // Both cases are fatal for required symbols.
+    if (dl_err != nullptr || sym == nullptr) {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+        (void)fprintf(
+            stderr,
+            "[glibre] dlsym(%s) failed: %s\n",
+            sym_name,
+            (dl_err != nullptr) ? dl_err : "symbol resolved to null"
+        );
+        dlclose(handle);
+        // Build a stable detail string in a char array on the stack.
+        // We cannot store dl_err — it is a thread-local pointer that may
+        // be invalidated by the dlclose() above.
+        // sym_name is a string literal at every call site so it outlives this
+        // stack frame; embedding it directly in detail is safe.
+        return std::unexpected(
+            glibre::Error{
+                core::Error::PluginMissingEntryPoint,
+                ErrorContext{
+                    .file   = __FILE__,
+                    .line   = __LINE__,
+                    .detail = sym_name,  // stable literal at all call sites
+                },
+            }
+        );
+    }
+    return sym;
 }
 
 }  // namespace
@@ -120,7 +179,7 @@ glibre::Result<PluginLoader> PluginLoader::open(eastl::string_view dylib_path) {
         );
     }
 
-    // Step 2: dlsym the four required symbols.
+    // Step 2: resolve the four required symbols via try_resolve_required().
     //
     // plugin-abi.md §"Plugin file shape" lists the canonical names:
     //   glibre_plugin_abi_hash          → const char*
@@ -128,72 +187,30 @@ glibre::Result<PluginLoader> PluginLoader::open(eastl::string_view dylib_path) {
     //   glibre_plugin_manifest_size     → std::size_t
     //   glibre_plugin_register          → RegisterFn
     //
-    // Any missing symbol is a loader refusal at step 2.  dlclose before
-    // returning so we do not hold a handle to an unusable plugin.
+    // try_resolve_required() performs full POSIX dlerror() disambiguation
+    // (MED-A, round-2) and calls dlclose(handle) before returning on failure
+    // (MED-B, round-2).  Each call site is a single propagation line; the
+    // 12-line Error+dlclose construction is not repeated.
 
     // glibre_plugin_abi_hash
-    void* const sym_abi_hash = resolve_symbol(handle, "glibre_plugin_abi_hash");
-    if (sym_abi_hash == nullptr) {
-        dlclose(handle);
-        return std::unexpected(
-            glibre::Error{
-                core::Error::PluginMissingEntryPoint,
-                ErrorContext{
-                    .file = __FILE__,
-                    .line = __LINE__,
-                    .detail = "missing symbol: glibre_plugin_abi_hash",
-                },
-            }
-        );
-    }
+    auto res_abi_hash = try_resolve_required(handle, "glibre_plugin_abi_hash");
+    if (!res_abi_hash) { return std::unexpected(res_abi_hash.error()); }
+    void* const sym_abi_hash = *res_abi_hash;
 
     // glibre_plugin_manifest
-    void* const sym_manifest = resolve_symbol(handle, "glibre_plugin_manifest");
-    if (sym_manifest == nullptr) {
-        dlclose(handle);
-        return std::unexpected(
-            glibre::Error{
-                core::Error::PluginMissingEntryPoint,
-                ErrorContext{
-                    .file = __FILE__,
-                    .line = __LINE__,
-                    .detail = "missing symbol: glibre_plugin_manifest",
-                },
-            }
-        );
-    }
+    auto res_manifest = try_resolve_required(handle, "glibre_plugin_manifest");
+    if (!res_manifest) { return std::unexpected(res_manifest.error()); }
+    void* const sym_manifest = *res_manifest;
 
     // glibre_plugin_manifest_size
-    void* const sym_manifest_size = resolve_symbol(handle, "glibre_plugin_manifest_size");
-    if (sym_manifest_size == nullptr) {
-        dlclose(handle);
-        return std::unexpected(
-            glibre::Error{
-                core::Error::PluginMissingEntryPoint,
-                ErrorContext{
-                    .file = __FILE__,
-                    .line = __LINE__,
-                    .detail = "missing symbol: glibre_plugin_manifest_size",
-                },
-            }
-        );
-    }
+    auto res_manifest_size = try_resolve_required(handle, "glibre_plugin_manifest_size");
+    if (!res_manifest_size) { return std::unexpected(res_manifest_size.error()); }
+    void* const sym_manifest_size = *res_manifest_size;
 
     // glibre_plugin_register
-    void* const sym_register = resolve_symbol(handle, "glibre_plugin_register");
-    if (sym_register == nullptr) {
-        dlclose(handle);
-        return std::unexpected(
-            glibre::Error{
-                core::Error::PluginMissingEntryPoint,
-                ErrorContext{
-                    .file = __FILE__,
-                    .line = __LINE__,
-                    .detail = "missing symbol: glibre_plugin_register",
-                },
-            }
-        );
-    }
+    auto res_register = try_resolve_required(handle, "glibre_plugin_register");
+    if (!res_register) { return std::unexpected(res_register.error()); }
+    void* const sym_register = *res_register;
 
     // Step 3: read sidecar manifest.
     //
