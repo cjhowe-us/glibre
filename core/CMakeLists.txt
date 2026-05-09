@@ -117,7 +117,7 @@ target_compile_definitions(glibre-core PUBLIC
 # GLIBRE_BUILD_TESTING=ON; the option defaults OFF so the instrumented code
 # paths are compiled out in all non-test configurations.
 #
-# Refs: plan #997, PR #999 (shouldfail workaround), perf-budget.md §4.
+# Refs: plan #997, PR #999 (shouldfail workaround), reviews/decisions/perf-budget.md §Allocator Rules #4.
 # ---------------------------------------------------------------------------
 option(GLIBRE_BUILD_TESTING "Compile GLIBRE_TESTING instrumentation into glibre-core" OFF)
 if(GLIBRE_BUILD_TESTING)

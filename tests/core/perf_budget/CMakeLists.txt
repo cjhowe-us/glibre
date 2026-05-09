@@ -36,9 +36,10 @@ target_compile_options(glibre-core-perf-budget-tests PRIVATE
     -Wno-c2y-extensions
 )
 
-# Enable GLIBRE_TESTING so that FrameLoop::last_tick_phase_ordinals() is
-# available in the reset_at_phase_9 test.
-target_compile_definitions(glibre-core-perf-budget-tests PRIVATE GLIBRE_TESTING)
+# GLIBRE_TESTING is propagated PUBLIC from glibre-core (core/CMakeLists.txt)
+# when GLIBRE_BUILD_TESTING=ON, so glibre-core-perf-budget-tests receives it
+# transitively via target_link_libraries(... glibre::core).
+# No PRIVATE definition needed here — see plan #997.
 
 include(CTest)
 include(Catch)

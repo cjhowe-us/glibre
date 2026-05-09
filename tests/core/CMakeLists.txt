@@ -4,6 +4,19 @@ cmake_minimum_required(VERSION 3.30)
 # tests/core — unit tests for glibre::core
 # ---------------------------------------------------------------------------
 
+# Configure-time guard: core tests require GLIBRE_TESTING instrumentation,
+# which is only compiled into glibre-core when GLIBRE_BUILD_TESTING=ON.
+# Without it, GLIBRE_TESTING-gated assertions silently degenerate to no-ops
+# and tests report PASS without exercising the instrumented code paths.
+# The macos-debug preset sets GLIBRE_BUILD_TESTING=ON; any other preset that
+# enables BUILD_TESTING must do the same.
+if(BUILD_TESTING AND NOT GLIBRE_BUILD_TESTING)
+    message(FATAL_ERROR
+        "core tests require GLIBRE_BUILD_TESTING=ON; configure with "
+        "-DGLIBRE_BUILD_TESTING=ON or use the macos-debug preset."
+    )
+endif()
+
 add_subdirectory(plugin_api)
 add_subdirectory(plugin_loader)
 add_subdirectory(plugin_loader_registry)         # plan #230 — ABI hash + version + name + deps gates
