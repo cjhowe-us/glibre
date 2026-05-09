@@ -19,6 +19,7 @@ set(_glibre_cmake_dir "${CMAKE_SOURCE_DIR}/cmake")
 # Reuse the host compiler and generator so fixtures inherit the same toolchain.
 set(_cmake_exe "${CMAKE_COMMAND}")
 set(_generator  "${CMAKE_GENERATOR}")
+set(_cxx_compiler "${CMAKE_CXX_COMPILER}")
 
 # ---------------------------------------------------------------------------
 # Test 1: fno_exceptions_set_on_core_targets
@@ -34,6 +35,7 @@ add_test(
         -S "${_fixture_dir}/core-target"
         -B "${CMAKE_CURRENT_BINARY_DIR}/cmake_test_core_target"
         "-DGLIBRE_CMAKE_DIR=${_glibre_cmake_dir}"
+        "-DCMAKE_CXX_COMPILER=${_cxx_compiler}"
 )
 set_tests_properties("ci/cmake: fno_exceptions_set_on_core_targets" PROPERTIES
     LABELS "cmake;infra"
@@ -56,6 +58,7 @@ add_test(
         -S "${_fixture_dir}/editor-ui-target"
         -B "${CMAKE_CURRENT_BINARY_DIR}/cmake_test_editor_ui_target"
         "-DGLIBRE_CMAKE_DIR=${_glibre_cmake_dir}"
+        "-DCMAKE_CXX_COMPILER=${_cxx_compiler}"
 )
 set_tests_properties("ci/cmake: editor_ui_target_opts_into_exceptions" PROPERTIES
     LABELS "cmake;infra"
@@ -77,10 +80,15 @@ add_test(
         -S "${_fixture_dir}/engine-reaches-exception-target"
         -B "${CMAKE_CURRENT_BINARY_DIR}/cmake_test_engine_exception_reach"
         "-DGLIBRE_CMAKE_DIR=${_glibre_cmake_dir}"
+        "-DCMAKE_CXX_COMPILER=${_cxx_compiler}"
 )
 set_tests_properties(
     "ci/cmake: configure_fails_if_engine_path_reaches_exception_target"
     PROPERTIES
         LABELS "cmake;infra"
         WILL_FAIL TRUE
+        # Require the specific [glibre] FATAL_ERROR message so that unrelated
+        # configure failures (missing compiler, bad generator, etc.) do not
+        # silently masquerade as a PASS.
+        FAIL_REGULAR_EXPRESSION "\\[glibre\\] Configure error: target '.*' has GLIBRE_USES_EXCEPTIONS=TRUE"
 )

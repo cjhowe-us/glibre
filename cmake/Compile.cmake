@@ -12,8 +12,11 @@
 
 # ---------------------------------------------------------------------------
 # 1. Interface target carrying the no-exceptions contract.
-#    All glibre targets link to this (transitively via glibre-core, or
-#    explicitly for standalone plugin stubs).
+#    All engine targets must link to this explicitly via
+#    target_link_libraries(<target> PRIVATE glibre::compile_contract).
+#    Plugins link glibre-types (not glibre-core) and must also link this
+#    contract explicitly per plugin-abi.md.  glibre-core does NOT propagate
+#    this contract transitively to plugin DSOs.
 # ---------------------------------------------------------------------------
 if(NOT TARGET glibre::compile_contract)
     add_library(glibre_compile_contract INTERFACE)
@@ -50,8 +53,12 @@ function(glibre_target_exceptions target)
     endif()
 
     # Re-enable exception handling and RTTI for this target specifically.
-    # The compiler sees -fexceptions after any inherited -fno-exceptions,
-    # so the last flag wins (clang / GCC both honour last-flag semantics).
+    # CMake has no remove API for inherited compile flags.  Instead, we rely
+    # on last-flag-wins precedence in the compiler's command-line generator
+    # order: -fexceptions/-frtti appended here appear after any -fno-exceptions
+    # inherited from glibre::compile_contract, causing the compiler to honour
+    # the latter flags.  This is documented clang/GCC behaviour for duplicate
+    # flags of the same family.
     target_compile_options("${target}" "${_scope}"
         -fexceptions
         -frtti
@@ -125,11 +132,25 @@ function(_glibre_check_exceptions_reachable_from_core root visited_var)
 endfunction()
 
 function(_glibre_run_core_exception_check)
-    if(NOT TARGET glibre-core)
-        return()
-    endif()
+    # Walk from every known engine root so that plugin DSOs (which link
+    # glibre-types, not glibre-core) and runtime are also covered.
+    # Tools/editor/ui are excluded — they are the permitted carve-out.
+    # glibre-foryc is a host tool (serialiser codegen) and is also excluded.
+    # Roots that do not exist yet (stubs not yet added_subdirectory) are
+    # silently skipped via the TARGET guard inside the walker.
+    set(_engine_roots
+        glibre-core
+        glibre-types
+        glibre-runtime
+        glibre-shader-plugin
+        # add further plugin / context targets here as subdirs land
+    )
     set(_visited "")
-    _glibre_check_exceptions_reachable_from_core(glibre-core _visited)
+    foreach(_root IN LISTS _engine_roots)
+        if(TARGET "${_root}")
+            _glibre_check_exceptions_reachable_from_core("${_root}" _visited)
+        endif()
+    endforeach()
 endfunction()
 
 # Defer until all CMakeLists have been processed so every target is defined.
