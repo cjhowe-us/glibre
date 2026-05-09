@@ -124,8 +124,8 @@ try_resolve_required(void* handle, const char* sym_name) noexcept {
             glibre::Error{
                 core::Error::PluginMissingEntryPoint,
                 ErrorContext{
-                    .file   = __FILE__,
-                    .line   = __LINE__,
+                    .file = __FILE__,
+                    .line = __LINE__,
                     .detail = sym_name,  // stable literal at all call sites
                 },
             }
@@ -194,22 +194,30 @@ glibre::Result<PluginLoader> PluginLoader::open(eastl::string_view dylib_path) {
 
     // glibre_plugin_abi_hash
     auto res_abi_hash = try_resolve_required(handle, "glibre_plugin_abi_hash");
-    if (!res_abi_hash) { return std::unexpected(res_abi_hash.error()); }
+    if (!res_abi_hash) {
+        return std::unexpected(res_abi_hash.error());
+    }
     void* const sym_abi_hash = *res_abi_hash;
 
     // glibre_plugin_manifest
     auto res_manifest = try_resolve_required(handle, "glibre_plugin_manifest");
-    if (!res_manifest) { return std::unexpected(res_manifest.error()); }
+    if (!res_manifest) {
+        return std::unexpected(res_manifest.error());
+    }
     void* const sym_manifest = *res_manifest;
 
     // glibre_plugin_manifest_size
     auto res_manifest_size = try_resolve_required(handle, "glibre_plugin_manifest_size");
-    if (!res_manifest_size) { return std::unexpected(res_manifest_size.error()); }
+    if (!res_manifest_size) {
+        return std::unexpected(res_manifest_size.error());
+    }
     void* const sym_manifest_size = *res_manifest_size;
 
     // glibre_plugin_register
     auto res_register = try_resolve_required(handle, "glibre_plugin_register");
-    if (!res_register) { return std::unexpected(res_register.error()); }
+    if (!res_register) {
+        return std::unexpected(res_register.error());
+    }
     void* const sym_register = *res_register;
 
     // Step 3: read sidecar manifest.
