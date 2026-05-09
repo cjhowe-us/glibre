@@ -173,17 +173,54 @@ std::uint64_t PerContextAllocator::bytes_used() const noexcept {
 
 // ---------------------------------------------------------------------------
 // register_allocator — MVP stub (plan #241 wires the real registry)
+//
+// GLIBRE_TESTING builds: increments testing_call_count_ so unit tests can
+// assert that the constructor call fires exactly once per construction
+// (plan #990).  The counter is intentionally TU-global so tests share the
+// same counter process-wide; callers reset via
+// testing_reset_register_allocator_call_count() before each assertion.
 // ---------------------------------------------------------------------------
+
+#ifdef GLIBRE_TESTING
+// TU-global atomic counter.  Incremented on every register_allocator() call.
+// Placed in an anonymous namespace to prevent external linkage — the symbol is
+// private to this TU and cannot be ODR-violated by other TUs.  The
+// glibre::testing_* getter/reset functions defined below reach it via
+// enclosing-scope name lookup (the anonymous namespace is nested inside
+// namespace glibre, so both the counter and the functions sharing that
+// enclosing scope can see it directly without qualification).
+namespace {
+std::atomic<std::uint64_t> testing_call_count_{0};
+}  // namespace
+#endif  // GLIBRE_TESTING
 
 void register_allocator([[maybe_unused]] PerContextAllocator& alloc) noexcept {
     // Intentional no-op in MVP.  Plan #241 (perf-budget framework) will
     // populate a global registry that the CI gate and perf HUD enumerate.
     // The stable call-site ABI means existing callers need no change when
     // plan #241 lands.
-    //
-    // Test observability (MED-7) is deferred: verifying this call fires
-    // requires a registry or hook whose design lives in plan #241.
-    // See alloc.hpp §register_allocator observability.
+#ifdef GLIBRE_TESTING
+    // Observability hook (plan #990): increment TU-global counter so tests can
+    // assert this function is called exactly once per PerContextAllocator
+    // construction without a full AllocatorRegistry.
+    testing_call_count_.fetch_add(1, std::memory_order_relaxed);
+#endif  // GLIBRE_TESTING
 }
+
+// ---------------------------------------------------------------------------
+// Testing observability API (GLIBRE_TESTING only — plan #990)
+// ---------------------------------------------------------------------------
+
+#ifdef GLIBRE_TESTING
+
+std::uint64_t testing_register_allocator_call_count() noexcept {
+    return testing_call_count_.load(std::memory_order_relaxed);
+}
+
+void testing_reset_register_allocator_call_count() noexcept {
+    testing_call_count_.store(0, std::memory_order_relaxed);
+}
+
+#endif  // GLIBRE_TESTING
 
 }  // namespace glibre

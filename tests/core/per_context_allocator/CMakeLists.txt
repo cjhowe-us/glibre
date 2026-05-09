@@ -4,23 +4,21 @@ cmake_minimum_required(VERSION 4.3.0)
 # tests/core/per_context_allocator — unit tests for glibre::PerContextAllocator
 #
 # Plan: #238 — feat(core): PerContextAllocator with per-tag heap ceiling
+# Plan: #990 — test(core): allocator registry observability (iterate #238)
 # Authority: core/include/glibre/alloc.hpp,
 #            reviews/decisions/perf-budget.md §Allocator Rules #1-3
 #
 # Two test targets:
 #   glibre-core-per-context-allocator-tests
-#       Compiled with GLIBRE_ALLOC_STRICT=1.  Verifies strict-mode ceiling
-#       enforcement (Rule #2): OutOfBudget on overrun, counter accuracy,
-#       dealloc, alignment, thread safety.
+#       Compiled with GLIBRE_ALLOC_STRICT=1 and GLIBRE_TESTING=1.
+#       Verifies strict-mode ceiling enforcement (Rule #2): OutOfBudget on
+#       overrun, counter accuracy, dealloc, alignment, thread safety, and
+#       register_allocator() observability (plan #990).
 #
 #   glibre-core-per-context-allocator-shipping-tests  (round-2 MED-5)
 #       Compiled with GLIBRE_ALLOC_STRICT=0.  Verifies the shipping-mode
 #       soft-warn path (Rule #3): overrun returns valid ptr, bytes_used()
 #       reflects above-ceiling, warn emitted exactly once per instance.
-#
-# Note: register_allocator() observability test (MED-7) is deferred.
-# See alloc.hpp §register_allocator observability and follow-up plan
-# [PLAN] test(core): allocator registry observability (iterate #238).
 # ---------------------------------------------------------------------------
 
 # ---- strict-mode suite (GLIBRE_ALLOC_STRICT=1) ----------------------------
@@ -46,6 +44,12 @@ set_target_properties(glibre-core-per-context-allocator-tests PROPERTIES CXX_MOD
 # perf-budget.md §Allocator Rules #2: "hard ceiling in diagnostic/debug builds
 # when GLIBRE_ALLOC_STRICT=1".  Unit tests exercise the strict-mode path so
 # that the ceiling contract is verified at CI time.
+#
+# GLIBRE_TESTING is NOT redefined here; it propagates transitively from the
+# PUBLIC target_compile_definitions on glibre-core (core/CMakeLists.txt:130-132)
+# via target_link_libraries(... glibre::core) above.  Redefining it PRIVATE
+# here would create a false impression that the test target is the source of
+# truth for the macro and would risk drift if GLIBRE_BUILD_TESTS semantics change.
 target_compile_definitions(glibre-core-per-context-allocator-tests PRIVATE
     GLIBRE_ALLOC_STRICT=1
 )

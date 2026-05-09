@@ -1,7 +1,7 @@
 // tests/core/per_context_allocator/per_context_allocator_test.cpp
 //
 // Catch2 unit tests for glibre::PerContextAllocator.
-// Authority: core/include/glibre/alloc.hpp, plan #238,
+// Authority: core/include/glibre/alloc.hpp, plan #238, plan #990,
 //            reviews/decisions/perf-budget.md §Allocator Rules #1-3.
 //
 // Named test cases (plan #238 Unit Test Plan):
@@ -11,11 +11,12 @@
 //   - per_context_allocator_alignment_respected
 //   - per_context_allocator_threadsafe_allocations
 //
-// Note: per_context_allocator_register_fires_on_construction is deferred.
-// Verifying register_allocator() fires on construction requires a registry or
-// test-hook whose design is in plan #241.  See alloc.hpp §register_allocator
-// observability.  Follow-up: [PLAN] test(core): allocator registry
-// observability (iterate #238).
+// Named test cases (plan #990 Unit Test Plan):
+//   - per_context_allocator_register_fires_on_construction
+//
+// The plan #990 test uses a GLIBRE_TESTING-gated call counter in
+// register_allocator() (option 1 from the plan — chosen because
+// AllocatorRegistry from plan #241 does not yet expose an enumeration API).
 //
 // Design constraints:
 //   - -fno-exceptions (error-model.md §Decision 3).
@@ -254,3 +255,66 @@ TEST_CASE("per_context_allocator_threadsafe_allocations", "[core][alloc]") {
     }
     CHECK(alloc.bytes_used() == 0);
 }
+
+// ===========================================================================
+// Test: per_context_allocator_register_fires_on_construction
+//
+// Plan #990: verifies that every PerContextAllocator constructor calls
+// register_allocator(*this) exactly once.
+//
+// Approach (option 1 from plan #990):  A GLIBRE_TESTING-gated atomic counter
+// is incremented inside register_allocator() for every call.  The test resets
+// the counter, constructs N instances, and asserts the count equals N.
+//
+// Both constructors are exercised:
+//   (a) PerContextAllocator(ContextTag, uint64_t) — explicit ceiling
+//   (b) PerContextAllocator(ContextTag)           — ceiling from kContextCeilings
+//
+// The two-tag variant is also included: three instances across two distinct
+// ContextTags must each increment the counter independently (the counter is
+// TU-global and tag-agnostic; the test is not asserting per-tag counts).
+//
+// GLIBRE_TESTING=1 is set by CMakeLists for the strict-mode test target that
+// includes this file.  The counter API is not available when GLIBRE_TESTING is
+// not defined so this section is compiled conditionally.
+// ===========================================================================
+
+#ifdef GLIBRE_TESTING
+
+TEST_CASE("per_context_allocator_register_fires_on_construction", "[core][alloc]") {
+    // Counter is TU-global; reset at the top of each SECTION so that prior
+    // constructions (from other sections or test cases) do not bleed in.
+
+    SECTION("explicit-ceiling ctor fires exactly once") {
+        glibre::testing_reset_register_allocator_call_count();
+        {
+            glibre::PerContextAllocator a{glibre::ContextTag::core, 1024ULL};
+        }
+        CHECK(glibre::testing_register_allocator_call_count() == 1u);
+    }
+
+    SECTION("tag-only ctor fires exactly once") {
+        glibre::testing_reset_register_allocator_call_count();
+        {
+            glibre::PerContextAllocator b{glibre::ContextTag::physics};
+        }
+        CHECK(glibre::testing_register_allocator_call_count() == 1u);
+    }
+
+    SECTION("N instances produce exactly N calls") {
+        // Construct kN instances across two distinct ContextTags; assert the
+        // counter equals kN (one call per instance, tag-agnostic).
+        constexpr int kN = 3;
+        glibre::testing_reset_register_allocator_call_count();
+        {
+            glibre::PerContextAllocator c0{glibre::ContextTag::render, 512ULL * 1024ULL * 1024ULL};
+            glibre::PerContextAllocator c1{
+                glibre::ContextTag::geometry, 256ULL * 1024ULL * 1024ULL
+            };
+            glibre::PerContextAllocator c2{glibre::ContextTag::tools};
+        }
+        CHECK(glibre::testing_register_allocator_call_count() == static_cast<std::uint64_t>(kN));
+    }
+}
+
+#endif  // GLIBRE_TESTING

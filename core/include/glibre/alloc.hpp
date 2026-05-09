@@ -236,15 +236,44 @@ private:
 void register_allocator(PerContextAllocator& alloc) noexcept;
 
 // ---------------------------------------------------------------------------
-// register_allocator observability (MED-7, deferred to plan #241)
+// Testing observability hooks (GLIBRE_TESTING only — plan #990)
 //
-// Verifying that the PerContextAllocator constructor calls register_allocator
-// requires an observable registry or a test-visible hook.  The design of that
-// hook depends on the AllocatorRegistry introduced in plan #241 (perf-budget
-// framework).  A test asserting the call is deferred to:
-//   [PLAN] test(core): allocator registry observability (iterate #238)
-// opened as a follow-up to this PR.
+// When GLIBRE_TESTING=1, register_allocator() increments a TU-global atomic
+// counter so that unit tests can assert the constructor call fires exactly
+// once per PerContextAllocator construction without a full AllocatorRegistry.
+//
+// These functions are NEVER available in production builds.  They are
+// intentionally omitted when GLIBRE_TESTING is not defined so that no
+// testing surface leaks into shipping code.
+//
+// Usage (in a GLIBRE_TESTING=1 test target):
+//   testing_reset_register_allocator_call_count();   // zero the counter
+//   glibre::PerContextAllocator alloc{...};
+//   REQUIRE(testing_register_allocator_call_count() == 1);
 // ---------------------------------------------------------------------------
+
+#ifdef GLIBRE_TESTING
+
+// Returns the number of times register_allocator() has been called since
+// the last testing_reset_register_allocator_call_count() or program start.
+//
+// Thread-safe: counter is std::atomic<std::uint64_t> with relaxed ordering
+// (sufficient for single-threaded tests; sequential-consistency not required
+// because the test observes the counter only after construction completes on
+// the same thread).
+[[nodiscard]] std::uint64_t testing_register_allocator_call_count() noexcept;
+
+// Resets the call counter to zero.  Call before each test assertion that
+// depends on a specific count so that prior constructions (e.g. from other
+// test cases or from construction of static/global allocators) do not bleed
+// into the assertion.
+void testing_reset_register_allocator_call_count() noexcept;
+
+#endif  // GLIBRE_TESTING
+
+// Note: register_allocator() call observability (the GLIBRE_TESTING counter
+// above) is shipped by plan #990.  AllocatorRegistry enumeration — the ability
+// to iterate all live allocators — remains deferred to plan #241.
 
 // ---------------------------------------------------------------------------
 // AllocatorHandle — tag-stamped allocator wrapper for plugin call sites
