@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.30)
 
 # ---------------------------------------------------------------------------
-# glibre-foryc — .fory schema compiler host tool (plans #219, #220, #225)
+# glibre-foryc — .fory schema compiler host tool (plans #219, #220, #221, #225)
 #
 # This target is a host-side tool only. glibre-core is linked for
 # glibre::Error; EASTL is propagated from core.
@@ -11,6 +11,11 @@ cmake_minimum_required(VERSION 3.30)
 #            Adds --emit=header flag to the CLI; outputs one .hpp per TypeDecl
 #            to <out>/include/glibre/types/<ctx>/<Type>.hpp per
 #            reviews/decisions/fory-codegen.md §Pipeline.
+# Plan #221: migration dispatcher emission (emit_migration.{hpp,cpp}).
+#            Adds --emit=migration flag; outputs <stem>_migrations.cpp
+#            exposing glibre_plugin_migrations + glibre_plugin_migrations_size.
+#            Parser extended with MigrationDecl stored in TypeDecl::migrations
+#            (inline syntax: migration from N to M calls "<provider>").
 # Plan #225: manifest emission pass (emit_manifest.{hpp,cpp}).
 #            Adds --emit=manifest flag to the CLI; outputs a manifest.cpp per
 #            plugin.fory to <out>/manifest.cpp embedding the four C-ABI symbols
@@ -18,11 +23,12 @@ cmake_minimum_required(VERSION 3.30)
 #
 # Fory::fory is NOT linked here yet — codegen uses a hand-written type
 # mapping table (fory-codegen.md §"Rules").  Fory reflection/serializer
-# APIs will be required for ABI hash export (plan #222) and migration
-# dispatcher (plan #221). Add back: find_package(Fory CONFIG REQUIRED) +
-# Fory::fory in target_link_libraries once those plans are implemented.
+# APIs will be required for ABI hash export (plan #222). Add back:
+# find_package(Fory CONFIG REQUIRED) + Fory::fory in target_link_libraries
+# once those plans are implemented.
 #
-# CLI: glibre-foryc --in <dir> --out <dir> --stamp <file> [--emit=header|manifest]
+# CLI: glibre-foryc --in <dir>|--file <path> --out <dir> --stamp <file>
+#                   [--emit=header|--emit=migration|--emit=manifest]
 #
 # Per reviews/decisions/fory-codegen.md §CMake Integration, the caller
 # (data/CMakeLists.txt) adds a custom_command that invokes
@@ -34,8 +40,9 @@ cmake_minimum_required(VERSION 3.30)
 add_executable(glibre-foryc
     src/main.cpp
     src/parser.cpp
-    src/emit_header.cpp   # plan #220: header emission pass
-    src/emit_manifest.cpp # plan #225: manifest emission pass
+    src/emit_header.cpp    # plan #220: header emission pass
+    src/emit_migration.cpp # plan #221: migration dispatcher emission pass
+    src/emit_manifest.cpp  # plan #225: manifest emission pass
 )
 
 target_include_directories(glibre-foryc

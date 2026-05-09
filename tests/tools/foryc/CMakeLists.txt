@@ -1,11 +1,12 @@
 cmake_minimum_required(VERSION 3.30)
 
 # ---------------------------------------------------------------------------
-# tests/tools/foryc — unit tests for glibre-foryc (plans #219, #220, #225)
+# tests/tools/foryc — unit tests for glibre-foryc (plans #219, #220, #221, #225)
 #
-# foryc-parser-tests:          parser IR tests (plan #219)
-# foryc-emit-header-tests:     header emission tests (plan #220)
-# foryc-emit-manifest-tests:   manifest emission tests (plan #225)
+# foryc-parser-tests:           parser IR tests (plan #219)
+# foryc-emit-header-tests:      header emission tests (plan #220)
+# foryc-emit-migration-tests:   migration dispatcher emission tests (plan #221)
+# foryc-emit-manifest-tests:    manifest emission tests (plan #225)
 #
 # All test binaries pull tool sources directly so tests run without a
 # shared-library boundary.
@@ -85,6 +86,59 @@ target_compile_options(foryc-emit-header-tests PRIVATE
 )
 
 # ---------------------------------------------------------------------------
+# foryc-emit-migration-tests — plan #221 migration dispatcher emission tests
+# ---------------------------------------------------------------------------
+
+add_executable(foryc-emit-migration-tests
+    foryc_emit_migration_test.cpp
+    # Pull parser and emit_migration sources directly into the test binary.
+    ${CMAKE_SOURCE_DIR}/tools/foryc/src/parser.cpp
+    ${CMAKE_SOURCE_DIR}/tools/foryc/src/emit_migration.cpp
+)
+
+target_include_directories(foryc-emit-migration-tests
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/tools/foryc/src
+)
+
+target_link_libraries(foryc-emit-migration-tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        glibre::core   # glibre::Error + EASTL
+)
+
+# Pass include paths to the round-trip compile test so it can supply
+# -I flags when invoking clang++ as a subprocess.
+# GLIBRE_CORE_INCLUDE_DIR: path to core/include (provides glibre/error.hpp).
+# GLIBRE_VCPKG_INCLUDE_DIR: vcpkg installed include dir (provides EASTL headers).
+#
+# find_package(EASTL) here ensures the EASTL target exists in this scope
+# before get_target_property queries it (the target is also pulled in via
+# glibre::core, but may not be visible at this CMakeLists evaluation time
+# if core/ is processed after tools/foryc in the cmake add_subdirectory order).
+find_package(EASTL CONFIG REQUIRED)
+get_target_property(_eastl_inc EASTL INTERFACE_INCLUDE_DIRECTORIES)
+target_compile_definitions(foryc-emit-migration-tests
+    PRIVATE
+        GLIBRE_CORE_INCLUDE_DIR="${CMAKE_SOURCE_DIR}/core/include"
+        GLIBRE_VCPKG_INCLUDE_DIR="${_eastl_inc}"
+)
+
+target_compile_features(foryc-emit-migration-tests PRIVATE cxx_std_23)
+
+set_target_properties(foryc-emit-migration-tests PROPERTIES CXX_MODULE_STD OFF)
+
+target_compile_options(foryc-emit-migration-tests PRIVATE
+    -fno-exceptions
+    -fno-rtti
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wno-unused-parameter
+    -Wno-c2y-extensions
+)
+
+# ---------------------------------------------------------------------------
 # foryc-emit-manifest-tests — plan #225 manifest emission unit tests
 # ---------------------------------------------------------------------------
 
@@ -124,6 +178,7 @@ include(CTest)
 include(Catch)
 catch_discover_tests(foryc-parser-tests)
 catch_discover_tests(foryc-emit-header-tests)
+catch_discover_tests(foryc-emit-migration-tests)
 catch_discover_tests(foryc-emit-manifest-tests)
 
 # Golden-output harness (plan #226)
