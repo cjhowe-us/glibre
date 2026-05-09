@@ -64,8 +64,7 @@ struct Args {
 };
 
 static void usage(std::string_view program) {
-    std::cerr << "Usage: " << program
-              << " --in <dir> --out <dir> --stamp <file> [--emit=header]\n";
+    std::cerr << "Usage: " << program << " --in <dir> --out <dir> --stamp <file> [--emit=header]\n";
 }
 
 static eastl::optional<Args> parse_args(int argc, char** argv) {
@@ -135,7 +134,8 @@ static std::string_view error_name(const glibre::Error& e) noexcept {
 // -----------------------------------------------------------------------
 // Header emission helper
 //
-// Emits one .hpp file per TypeDecl in the schema.
+// Emits one .hpp file per TypeDecl in the schema, calling
+// emit_header_for_type directly (canonical per-type entry, MED-3 r2).
 //
 // Output path per fory-codegen.md §Pipeline:
 //   <out_dir>/include/glibre/types/<rel_subdir>/<Type>.hpp
@@ -153,8 +153,15 @@ static bool emit_headers_for_schema(
     const Schema& schema,
     const fs::path& source_path,
     const fs::path& in_dir,
-    const fs::path& out_dir) noexcept
-{
+    const fs::path& out_dir
+) noexcept {
+    if (schema.types.empty()) {
+        std::cerr << std::format(
+            "foryc: {}: schema has zero TypeDecl blocks\n", source_path.native()
+        );
+        return false;
+    }
+
     // Compute the subdirectory relative to in_dir.
     // e.g. source_path = data/schemas/core/Transform.fory, in_dir = data/schemas
     //   → rel_subdir = "core"
@@ -163,8 +170,11 @@ static bool emit_headers_for_schema(
         std::error_code ec;
         const fs::path rel = fs::relative(source_path.parent_path(), in_dir, ec);
         if (ec) {
-            std::cerr << std::format("foryc: cannot compute relative path for {}: {}\n",
-                source_path.native(), ec.message());
+            std::cerr << std::format(
+                "foryc: cannot compute relative path for {}: {}\n",
+                source_path.native(),
+                ec.message()
+            );
             return false;
         }
         // rel may be "." if the file is directly under in_dir; use empty subdir.
@@ -172,14 +182,14 @@ static bool emit_headers_for_schema(
     }
 
     const fs::path include_base = out_dir / "include" / "glibre" / "types";
+    const std::string src_native = source_path.native();
 
     for (const auto& td : schema.types) {
         // Extract the type name (last FQN component).
         // FQN format: "glibre.core.Transform" — type name is "Transform".
         const eastl::string& fqn = td.fqn;
         const std::size_t dot = fqn.rfind('.');
-        const eastl::string type_name =
-            (dot == eastl::string::npos) ? fqn : fqn.substr(dot + 1);
+        const eastl::string type_name = (dot == eastl::string::npos) ? fqn : fqn.substr(dot + 1);
 
         // Build the per-type output directory.
         fs::path type_dir = include_base;
@@ -189,18 +199,14 @@ static bool emit_headers_for_schema(
         std::error_code ec;
         fs::create_directories(type_dir, ec);
         if (ec) {
-            std::cerr << std::format("foryc: cannot create directory {}: {}\n",
-                type_dir.native(), ec.message());
+            std::cerr << std::format(
+                "foryc: cannot create directory {}: {}\n", type_dir.native(), ec.message()
+            );
             return false;
         }
 
-        // Emit header for this single TypeDecl.
-        // We construct a single-type Schema to reuse emit_header().
-        Schema single;
-        single.source_path = schema.source_path;
-        single.types.push_back(td);
-
-        auto result = emit_header(single);
+        // Emit header for this TypeDecl via the canonical per-type entry point.
+        auto result = emit_header_for_type(td, src_native);
         if (!result) {
             std::cerr << std::format(
                 "foryc: {}: header emit failed for type {}: {}\n",
@@ -261,9 +267,7 @@ int main(int argc, char** argv) {
     for (const auto& path : schema_files) {
         auto result = parse_file(path);
         if (!result) {
-            std::cerr << std::format(
-                "foryc: {}: {}\n", path.native(), error_name(result.error())
-            );
+            std::cerr << std::format("foryc: {}: {}\n", path.native(), error_name(result.error()));
             return EXIT_FAILURE;
         }
         const auto& schema = *result;
