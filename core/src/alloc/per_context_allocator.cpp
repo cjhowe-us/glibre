@@ -183,8 +183,12 @@ std::uint64_t PerContextAllocator::bytes_used() const noexcept {
 
 #if defined(GLIBRE_TESTING) && GLIBRE_TESTING
 // TU-global atomic counter.  Incremented on every register_allocator() call.
-// Declared in anonymous namespace to avoid ODR concerns; accessed only through
-// the public testing_* API declared in alloc.hpp.
+// Placed in an anonymous namespace to prevent external linkage — the symbol is
+// private to this TU and cannot be ODR-violated by other TUs.  The
+// glibre::testing_* getter/reset functions defined below reach it via
+// enclosing-scope name lookup (the anonymous namespace is nested inside
+// namespace glibre, so both the counter and the functions sharing that
+// enclosing scope can see it directly without qualification).
 namespace {
 std::atomic<std::uint64_t> testing_call_count_{0};
 }  // namespace

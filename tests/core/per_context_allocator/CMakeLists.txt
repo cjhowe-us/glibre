@@ -45,13 +45,13 @@ set_target_properties(glibre-core-per-context-allocator-tests PROPERTIES CXX_MOD
 # when GLIBRE_ALLOC_STRICT=1".  Unit tests exercise the strict-mode path so
 # that the ceiling contract is verified at CI time.
 #
-# GLIBRE_TESTING=1: enables the register_allocator() call counter for the
-# per_context_allocator_register_fires_on_construction test (plan #990).
-# The counter and its reset/query API are gated behind this flag so they
-# never appear in production or shipping-mode builds.
+# GLIBRE_TESTING is NOT redefined here; it propagates transitively from the
+# PUBLIC target_compile_definitions on glibre-core (core/CMakeLists.txt:130-132)
+# via target_link_libraries(... glibre::core) above.  Redefining it PRIVATE
+# here would create a false impression that the test target is the source of
+# truth for the macro and would risk drift if GLIBRE_BUILD_TESTS semantics change.
 target_compile_definitions(glibre-core-per-context-allocator-tests PRIVATE
     GLIBRE_ALLOC_STRICT=1
-    GLIBRE_TESTING=1
 )
 
 # -fno-exceptions clean per reviews/decisions/error-model.md §Decision 3.

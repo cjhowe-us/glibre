@@ -271,16 +271,9 @@ void testing_reset_register_allocator_call_count() noexcept;
 
 #endif  // GLIBRE_TESTING
 
-// ---------------------------------------------------------------------------
-// register_allocator observability (MED-7, deferred to plan #241)
-//
-// Verifying that the PerContextAllocator constructor calls register_allocator
-// requires an observable registry or a test-visible hook.  The design of that
-// hook depends on the AllocatorRegistry introduced in plan #241 (perf-budget
-// framework).  A test asserting the call is deferred to:
-//   [PLAN] test(core): allocator registry observability (iterate #238)
-// opened as a follow-up to this PR.
-// ---------------------------------------------------------------------------
+// Note: register_allocator() call observability (the GLIBRE_TESTING counter
+// above) is shipped by plan #990.  AllocatorRegistry enumeration — the ability
+// to iterate all live allocators — remains deferred to plan #241.
 
 // ---------------------------------------------------------------------------
 // AllocatorHandle — tag-stamped allocator wrapper for plugin call sites
