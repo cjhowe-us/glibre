@@ -21,12 +21,15 @@
 //   3. Run with GLIBRE_UPDATE_GOLDEN=1 to generate the initial golden.
 //   4. Review the generated golden and commit both files.
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <fstream>
+#include <string>
+#include <string_view>
 
 #include <EASTL/string.h>
-
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
@@ -79,9 +82,7 @@ static bool splat(const fs::path& p, const eastl::string& content) {
 #error "GLIBRE_GOLDEN_DIR must be defined by CMakeLists.txt"
 #endif
 
-static fs::path golden_dir() {
-    return fs::path{GLIBRE_GOLDEN_DIR};
-}
+static fs::path golden_dir() { return fs::path{GLIBRE_GOLDEN_DIR}; }
 
 // Produce a simple diagnostic string describing where `actual` and `expected`
 // differ.  Not a true unified diff — used only in FAIL() messages.
@@ -111,13 +112,13 @@ static eastl::string simple_diff(const eastl::string& actual, const eastl::strin
             ++line;
     }
 
-    // Build diagnostic using std::format is acceptable (PHILOSOPHY §11
-    // retains std::format), but simple concatenation avoids the include cost.
-    msg += "First difference at byte offset ";
-    msg += eastl::string(std::to_string(first_diff).c_str());
-    msg += " (approx line ";
-    msg += eastl::string(std::to_string(line).c_str());
-    msg += ")\n";
+    // std::format is retained by PHILOSOPHY §11 (not an EASTL-owned utility).
+    // Convert via std::format into a std::string then wrap into eastl::string
+    // once — avoids the to_string -> c_str -> eastl::string triple bounce.
+    msg += eastl::string(
+        std::format("First difference at byte offset {} (approx line {})\n", first_diff, line)
+            .c_str()
+    );
 
     // Show a context window around the difference.
     const std::size_t ctx_start = (first_diff > 80) ? first_diff - 80 : 0;
@@ -131,12 +132,10 @@ static eastl::string simple_diff(const eastl::string& actual, const eastl::strin
     msg += expected.substr(ctx_start, ctx_end_e - ctx_start);
     msg += "]\n";
 
-    msg += "actual size:   ";
-    msg += eastl::string(std::to_string(actual.size()).c_str());
-    msg += "\n";
-    msg += "expected size: ";
-    msg += eastl::string(std::to_string(expected.size()).c_str());
-    msg += "\n";
+    msg += eastl::string(
+        std::format("actual size:   {}\nexpected size: {}\n", actual.size(), expected.size())
+            .c_str()
+    );
 
     return msg;
 }
@@ -164,7 +163,7 @@ TEST_CASE("foryc_golden_emit_header_matches_expected", "[foryc][golden]") {
     // Build std::filesystem paths from the eastl::string basename.
     const std::string basename_std{basename.c_str(), basename.size()};
     const fs::path fixture_path = golden_dir() / "fixtures" / (basename_std + ".fory");
-    const fs::path golden_path  = golden_dir() / "expected"  / (basename_std + ".hpp.golden");
+    const fs::path golden_path = golden_dir() / "expected" / (basename_std + ".hpp.golden");
 
     INFO("fixture: " << fixture_path.native());
     INFO("golden:  " << golden_path.native());
@@ -202,8 +201,10 @@ TEST_CASE("foryc_golden_emit_header_matches_expected", "[foryc][golden]") {
     // Step 4: read existing golden.
     const eastl::string expected = slurp(golden_path);
     {
-        INFO("golden file missing or empty: " << golden_path.native()
-             << "\nRun with GLIBRE_UPDATE_GOLDEN=1 to generate it.");
+        INFO(
+            "golden file missing or empty: " << golden_path.native()
+                                             << "\nRun with GLIBRE_UPDATE_GOLDEN=1 to generate it."
+        );
         CHECK(!expected.empty());
         if (expected.empty())
             return;
@@ -215,8 +216,11 @@ TEST_CASE("foryc_golden_emit_header_matches_expected", "[foryc][golden]") {
     // iterations after a mismatch.
     if (actual != expected) {
         const eastl::string diff = simple_diff(actual, expected);
-        INFO("Golden mismatch for '" << basename.c_str() << "':\n" << diff.c_str()
-             << "\nRun with GLIBRE_UPDATE_GOLDEN=1 to regenerate the golden.");
+        INFO(
+            "Golden mismatch for '" << basename.c_str() << "':\n"
+                                    << diff.c_str()
+                                    << "\nRun with GLIBRE_UPDATE_GOLDEN=1 to regenerate the golden."
+        );
         CHECK(actual == expected);
     }
 }
