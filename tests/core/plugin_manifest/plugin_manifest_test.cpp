@@ -16,7 +16,12 @@
 #include "glibre/core/plugin_manifest.hpp"
 #include "glibre/error.hpp"
 
-using namespace glibre::core;
+using glibre::core::ComponentDecl;
+using glibre::core::PanelDecl;
+using glibre::core::PassDecl;
+using glibre::core::PluginManifest;
+using glibre::core::SemVer;
+using glibre::core::SystemDecl;
 
 // ---------------------------------------------------------------------------
 // Helper: construct a fully-populated manifest for round-trip testing.
@@ -141,7 +146,7 @@ TEST_CASE("plugin_manifest_open_returns_not_found_on_missing_path", "[core][plug
     // The filename uses a UUID-like suffix to avoid collisions between parallel
     // test shards.
     const std::filesystem::path absent =
-        std::filesystem::temp_directory_path() / "glibre_nonexistent_manifest_test_r1.manifest";
+        std::filesystem::temp_directory_path() / "glibre_nonexistent_manifest_test.manifest";
     // Belt-and-suspenders: remove if somehow the file was left behind by a
     // previous run (error_code variant to stay -fno-exceptions compatible).
     std::error_code ec;

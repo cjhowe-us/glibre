@@ -7,9 +7,16 @@
 // Authority: reviews/decisions/plugin-abi.md §"Plugin Manifest Schema".
 // This header is the C++ mirror of the Fory schema authored in
 // data/schemas/core/PluginManifest.fory (plan #222 / #225).  Field names,
-// types, and ordering below must stay in sync with that schema.  The
-// generated POD from glibre-foryc will be byte-layout-compatible because
-// codegen sorts fields by tag number and all scalars here are fixed-width.
+// types, and ordering below must stay in sync with that schema.
+//
+// Wire-format stability: scalar fields (uint8_t, uint16_t) are fixed-width, so
+// the Fory tag-sorted layout is stable across builds on the same ABI.
+// eastl::string and eastl::vector members are pointer-indirected — they are NOT
+// part of the in-memory POD footprint.  The wire format (Fory blob) is stable;
+// the in-memory layout is not byte-transferable across address spaces.
+// Serialization / deserialization of these fields is the responsibility of the
+// glibre-foryc codegen pipeline (plan #225); the loader (plan #229..#231) reads
+// the Fory blob and populates these fields correctly.
 //
 // SCOPE — this header is SCHEMA ONLY:
 //   - No Fory codegen is invoked here (plans #225, #222).
@@ -80,9 +87,9 @@ struct SemVer {
 // ---------------------------------------------------------------------------
 
 struct ComponentDecl {
-    eastl::string fqn;          // tag 1
-    eastl::string schema_hash;  // tag 2 — 64-char blake3 hex
-    std::uint8_t storage_hint;  // tag 3 — archetype=0, sparse=1, singleton=2
+    eastl::string fqn;               // tag 1
+    eastl::string schema_hash;       // tag 2 — 64-char blake3 hex
+    std::uint8_t storage_hint{0};   // tag 3 — archetype=0, sparse=1, singleton=2
 
     [[nodiscard]] bool operator==(const ComponentDecl&) const noexcept = default;
 };
@@ -101,7 +108,7 @@ struct ComponentDecl {
 
 struct SystemDecl {
     eastl::string name;                   // tag 1
-    std::uint8_t phase;                   // tag 2 — 1..=9
+    std::uint8_t phase{0};               // tag 2 — 1..=9
     eastl::vector<eastl::string> reads;   // tag 3
     eastl::vector<eastl::string> writes;  // tag 4
     eastl::vector<eastl::string> after;   // tag 5
@@ -125,7 +132,7 @@ struct SystemDecl {
 
 struct PassDecl {
     eastl::string name;                    // tag 1
-    std::uint8_t render_phase;             // tag 2 — 6 or 7
+    std::uint8_t render_phase{0};         // tag 2 — 6 or 7
     eastl::vector<eastl::string> inputs;   // tag 3
     eastl::vector<eastl::string> outputs;  // tag 4
 
@@ -144,9 +151,9 @@ struct PassDecl {
 // ---------------------------------------------------------------------------
 
 struct PanelDecl {
-    eastl::string id;     // tag 1
-    eastl::string title;  // tag 2
-    std::uint8_t area;    // tag 3 — docked-area byte enum
+    eastl::string id;          // tag 1
+    eastl::string title;       // tag 2
+    std::uint8_t area{0};     // tag 3 — docked-area byte enum
 
     [[nodiscard]] bool operator==(const PanelDecl&) const noexcept = default;
 };
