@@ -13,6 +13,7 @@ add_subdirectory(plugin_loader_integration)      # plan #232 — end-to-end fail
 add_executable(glibre-core-tests
     frame_loop_test.cpp
     plugin_manifest/plugin_manifest_test.cpp
+    log_error_test.cpp  # structured error logging helper (plan #236)
 )
 
 target_link_libraries(glibre-core-tests

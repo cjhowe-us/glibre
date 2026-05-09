@@ -17,12 +17,18 @@ add_library(glibre-core STATIC
     src/plugin_manifest.cpp
     src/plugin_loader.cpp           # PluginLoader: dlopen+dlsym+manifest read (plan #229)
     src/plugin_loader_registry.cpp  # PluginLoaderRegistry: ABI+version+name+deps gates (plan #230)
+    src/log_error.cpp               # Structured error logging helper (plan #236)
 )
 
 # EASTL is the substrate container/string/variant library per PHILOSOPHY §11.
 # glibre/error.hpp uses eastl::variant and eastl::string_view; linking EASTL
 # PUBLIC so every consumer of glibre::core transitively gets the include path.
 find_package(EASTL CONFIG REQUIRED)
+
+# spdlog — structured logging.  Used by log_error.cpp (plan #236).
+# Linked PUBLIC so consumers of glibre::core can call log_error() without a
+# separate find_package(spdlog) in their own CMakeLists.txt.
+find_package(spdlog CONFIG REQUIRED)
 
 target_include_directories(glibre-core
     PUBLIC
@@ -33,6 +39,7 @@ target_include_directories(glibre-core
 target_link_libraries(glibre-core
     PUBLIC
         EASTL
+        spdlog::spdlog
 )
 
 target_compile_features(glibre-core PUBLIC cxx_std_23)
