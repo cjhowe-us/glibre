@@ -28,8 +28,17 @@
 //   - Migration dispatcher emit
 //
 // PHILOSOPHY §11: EASTL replaces std containers. This file uses
-//   eastl::string, eastl::vector. std:: is retained only for
-//   std::expected, std::filesystem, std::string_view (interop only).
+//   eastl::string, eastl::vector (IR storage).
+//   std:: is retained where EASTL has no equivalent:
+//     std::expected (no eastl::expected),
+//     std::filesystem (path type for parse_file API),
+//     std::string_view (zero-copy interop at API boundaries),
+//     std::string / std::ifstream / std::ostringstream (file I/O in
+//       parse_file — EASTL has no file-stream equivalent),
+//     std::array (k_builtins table — fixed-size compile-time array),
+//     std::isalpha / std::isdigit / std::from_chars (character classification
+//       and parsing, no EASTL equivalent).
+//   Container/string types in the IR are eastl::.
 
 #pragma once
 
