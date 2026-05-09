@@ -186,17 +186,17 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
     case Phase::RenderSubmit: /* render — MVP empty */
         break;
     case Phase::HotReload: /* core (barrier) — MVP empty */
-        // Phase 8: hot-reload drain barrier.
-        //
-        // In a live engine, plugin loader mutations (call_register,
-        // rebuild_schedule, migrate_components) run here, guarded by
-        // PluginLoaderRegistry::validate_drain_phase (plan #981 / PR #1012).
-        //
-        // GLIBRE_TESTING injection: when inject_phase8_failure_ is armed,
-        // simulate a drain-phase refusal so tests can verify that
-        // frame_counter_ and world_tick_ do not advance when Phase 8 fails.
-        // This exercises the "tick halts on phase failure" path from
-        // plan #247 Unit Test Plan without requiring a live plugin loader.
+                           // Phase 8: hot-reload drain barrier.
+                           //
+                           // In a live engine, plugin loader mutations (call_register,
+                           // rebuild_schedule, migrate_components) run here, guarded by
+                           // PluginLoaderRegistry::validate_drain_phase (plan #981 / PR #1012).
+                           //
+                           // GLIBRE_TESTING injection: when inject_phase8_failure_ is armed,
+                           // simulate a drain-phase refusal so tests can verify that
+                           // frame_counter_ and world_tick_ do not advance when Phase 8 fails.
+                           // This exercises the "tick halts on phase failure" path from
+                           // plan #247 Unit Test Plan without requiring a live plugin loader.
 #ifdef GLIBRE_TESTING
         if (inject_phase8_failure_) {
             return std::unexpected(glibre::Error{core::Error::FramePhaseMisordered});
@@ -246,8 +246,8 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
             !r) {
             return r;
         }
-        advance_world_tick(world_tick_);      // (4) tick N complete; N+1 may begin
-        ++frame_counter_;                     // (5) present-phase frame counter
+        advance_world_tick(world_tick_);  // (4) tick N complete; N+1 may begin
+        ++frame_counter_;                 // (5) present-phase frame counter
         break;
     }
 
