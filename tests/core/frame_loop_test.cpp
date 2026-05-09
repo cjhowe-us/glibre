@@ -88,13 +88,10 @@ TEST_CASE("core/frame_loop: phase_table_ids_are_1_through_9", "[core][frame_loop
 // (uint8_t) of the phase that ran at that position; the expected sequence is
 // 1, 2, 3, 4, 5, 6, 7, 8, 9.
 //
-// TODO: This test depends on GLIBRE_TESTING macro propagation to library TU,
-// which does not currently reach all compilation units. Marked [!shouldfail]
-// until cross-TU macro transmission is fixed.
+// GLIBRE_TESTING is propagated PUBLIC from glibre-core when GLIBRE_BUILD_TESTS
+// is ON (plan #997 fix), so last_tick_phase_ordinals() is available.
 // ---------------------------------------------------------------------------
-TEST_CASE(
-    "core/frame_loop: tick_invokes_phases_in_strict_order", "[core][frame_loop][!shouldfail]"
-) {
+TEST_CASE("core/frame_loop: tick_invokes_phases_in_strict_order", "[core][frame_loop]") {
     using namespace glibre::core;
 
     FrameLoop loop;

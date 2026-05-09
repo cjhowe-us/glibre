@@ -98,6 +98,33 @@ target_compile_definitions(glibre-core PUBLIC
 )
 
 # ---------------------------------------------------------------------------
+# GLIBRE_TESTING — propagate test-instrumentation macro to library TU
+#
+# The GLIBRE_TESTING macro gates instrumentation hooks in the library
+# (e.g. FrameLoop::last_tick_phase_ordinals_) that are required by unit
+# tests but must not ship in production binaries.  Instrumentation APIs
+# need to be compiled INTO the library (not just the test executable)
+# because the header declarations and implementation are in the library TU.
+#
+# GLIBRE_BUILD_TESTING (default OFF) is the explicit opt-in.  It is set ON
+# in the macos-debug CMake preset (CMakePresets.json) so that:
+#   (a) glibre-core itself compiles the instrumented paths when tests run, and
+#   (b) consumers that link glibre::core (i.e. the test executable) receive
+#       GLIBRE_TESTING=1 transitively — no PRIVATE definition needed on the
+#       test target.
+#
+# Shipping builds (macos-release, ios-*, ios-sim-*) do not set
+# GLIBRE_BUILD_TESTING=ON; the option defaults OFF so the instrumented code
+# paths are compiled out in all non-test configurations.
+#
+# Refs: plan #997, PR #999 (shouldfail workaround), perf-budget.md §4.
+# ---------------------------------------------------------------------------
+option(GLIBRE_BUILD_TESTING "Compile GLIBRE_TESTING instrumentation into glibre-core" OFF)
+if(GLIBRE_BUILD_TESTING)
+    target_compile_definitions(glibre-core PUBLIC GLIBRE_TESTING=1)
+endif()
+
+# ---------------------------------------------------------------------------
 # Alias for consistent glibre:: namespace usage by consumers
 # ---------------------------------------------------------------------------
 add_library(glibre::core ALIAS glibre-core)

@@ -52,10 +52,12 @@ target_compile_options(glibre-core-tests PRIVATE
     -Wno-c2y-extensions
 )
 
-# Enable test-only recording hooks in FrameLoop (MED-6 fix).
-# The GLIBRE_TESTING macro activates last_tick_phase_ordinals_ tracking
-# in FrameLoop so order-verification tests can observe execution order.
-target_compile_definitions(glibre-core-tests PRIVATE GLIBRE_TESTING)
+# GLIBRE_TESTING is now propagated PUBLIC from glibre-core (core/CMakeLists.txt)
+# when GLIBRE_BUILD_TESTING=ON (set in the macos-debug CMake preset), so
+# glibre-core-tests receives it transitively via target_link_libraries(glibre::core).
+# No PRIVATE definition needed here.
+# See plan #997 for the fix history (was previously PRIVATE-only on the test
+# executable, causing the library TU to compile without the instrumentation paths).
 
 include(CTest)
 include(Catch)
