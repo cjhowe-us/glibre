@@ -466,7 +466,9 @@ migrate_Widget_v1_to_v2(const WidgetV1&, WidgetV2&) {
 // symbol set to the schema's declared version (td.version).
 // -----------------------------------------------------------------------
 
-TEST_CASE("foryc_emit_migration_emits_current_version", "[foryc][emit_migration][current_version]") {
+TEST_CASE(
+    "foryc_emit_migration_emits_current_version", "[foryc][emit_migration][current_version]"
+) {
     // Schema with a specific version number — the emitter must use td.version.
     constexpr std::string_view src = R"(
 schema glibre.core.Sensor {
@@ -504,9 +506,7 @@ schema glibre.core.Sensor {
     // Grab the rest of the line (up to 120 chars).
     const eastl::string line(
         text.data() + sym_pos,
-        eastl::string::size_type(
-            std::min(std::size_t{120}, text.size() - sym_pos)
-        )
+        eastl::string::size_type(std::min(std::size_t{120}, text.size() - sym_pos))
     );
     CHECK(line.find("5") != eastl::string::npos);
 
@@ -595,18 +595,17 @@ schema glibre.test.Valve {
 
     // --- Set up temp dir. ---
     const fs::path tmp_base = fs::temp_directory_path() / "glibre_foryc_ver_test";
-    const auto unique_suffix = std::format(
-        "ver_rt_{}_{}", getpid(), reinterpret_cast<uintptr_t>(&gen_text)
-    );
+    const auto unique_suffix =
+        std::format("ver_rt_{}_{}", getpid(), reinterpret_cast<uintptr_t>(&gen_text));
     const fs::path tmp_dir = tmp_base / unique_suffix;
 
     std::error_code ec;
     fs::create_directories(tmp_dir, ec);
     REQUIRE(!ec);
 
-    const fs::path gen_path     = tmp_dir / "current_version_roundtrip.cpp";
+    const fs::path gen_path = tmp_dir / "current_version_roundtrip.cpp";
     const fs::path preamble_path = tmp_dir / "preamble_ver.cpp";
-    const fs::path dylib_path   = tmp_dir / "current_version_roundtrip.dylib";
+    const fs::path dylib_path = tmp_dir / "current_version_roundtrip.dylib";
 
     // Preamble: versioned struct stubs + provider bodies for Turbo migrations.
     constexpr std::string_view preamble = R"(
@@ -664,19 +663,17 @@ std::expected<void, glibre::Error> migrate_Turbo_v3_to_v4(const TurboV3&, TurboV
 
     // Turbo: schema version == 4.
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    const auto* turbo_ver =
-        reinterpret_cast<const std::uint32_t*>(
-            dlsym(handle, "glibre_plugin_current_version_Turbo")
-        );
+    const auto* turbo_ver = reinterpret_cast<const std::uint32_t*>(
+        dlsym(handle, "glibre_plugin_current_version_Turbo")
+    );
     REQUIRE(turbo_ver != nullptr);
     CHECK(*turbo_ver == 4u);
 
     // Valve: schema version == 1.
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    const auto* valve_ver =
-        reinterpret_cast<const std::uint32_t*>(
-            dlsym(handle, "glibre_plugin_current_version_Valve")
-        );
+    const auto* valve_ver = reinterpret_cast<const std::uint32_t*>(
+        dlsym(handle, "glibre_plugin_current_version_Valve")
+    );
     REQUIRE(valve_ver != nullptr);
     CHECK(*valve_ver == 1u);
 
