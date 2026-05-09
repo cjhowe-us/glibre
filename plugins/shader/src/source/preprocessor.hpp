@@ -15,16 +15,15 @@
 #include <EASTL/string.h>
 #include <EASTL/vector.h>
 #include <EASTL/vector_set.h>
-
 #include <glibre/shader/shader.hpp>
 
 namespace glibre::shader::detail {
 
 /// State passed through the recursive include resolution.
 struct PreprocessContext {
-    const std::filesystem::path&  project_root;
-    eastl::vector<IncludeNode>&   include_closure;  // accumulates as we expand
-    eastl::vector<eastl::string>  visit_stack;       // for cycle detection
+    const std::filesystem::path& project_root;
+    eastl::vector<IncludeNode>& include_closure;  // accumulates as we expand
+    eastl::vector<eastl::string> visit_stack;     // for cycle detection
 };
 
 /// Expand the contents of `source_bytes` by resolving all #include "..."
@@ -32,9 +31,10 @@ struct PreprocessContext {
 ///
 /// On success, returns the fully expanded text (UTF-8 bytes as eastl::string).
 /// On error, returns Error::IncludeEscape or Error::IncludeCycle.
-[[nodiscard]] std::expected<eastl::string, Error>
-expand_includes(const eastl::string&    source_bytes,
-                const std::filesystem::path& current_file,
-                PreprocessContext&      ctx);
+[[nodiscard]] std::expected<eastl::string, Error> expand_includes(
+    const eastl::string& source_bytes,
+    const std::filesystem::path& current_file,
+    PreprocessContext& ctx
+);
 
 }  // namespace glibre::shader::detail

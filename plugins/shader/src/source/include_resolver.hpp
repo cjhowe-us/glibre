@@ -15,7 +15,6 @@
 #include <filesystem>
 
 #include <EASTL/string_view.h>
-
 #include <glibre/shader/shader.hpp>
 
 namespace glibre::shader::detail {
@@ -26,9 +25,10 @@ namespace glibre::shader::detail {
 ///      (no ../ escapes) → Error::IncludeEscape.
 ///
 /// On success returns the canonical absolute path.
-[[nodiscard]] std::expected<std::filesystem::path, Error>
-resolve_include(const std::filesystem::path& include_path,
-                const std::filesystem::path& current_dir,
-                const std::filesystem::path& project_root);
+[[nodiscard]] std::expected<std::filesystem::path, Error> resolve_include(
+    const std::filesystem::path& include_path,
+    const std::filesystem::path& current_dir,
+    const std::filesystem::path& project_root
+);
 
 }  // namespace glibre::shader::detail

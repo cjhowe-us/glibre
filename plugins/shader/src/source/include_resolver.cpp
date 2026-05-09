@@ -11,18 +11,18 @@
 
 namespace glibre::shader::detail {
 
-std::expected<std::filesystem::path, Error>
-resolve_include(const std::filesystem::path& include_path,
-                const std::filesystem::path& current_dir,
-                const std::filesystem::path& project_root) {
+std::expected<std::filesystem::path, Error> resolve_include(
+    const std::filesystem::path& include_path,
+    const std::filesystem::path& current_dir,
+    const std::filesystem::path& project_root
+) {
     // Rule 1: absolute paths are forbidden (IncludeEscape).
     if (include_path.is_absolute()) {
         return std::unexpected(Error::IncludeEscape);
     }
 
     // Lexically resolve relative to the current file's directory.
-    std::filesystem::path resolved =
-        (current_dir / include_path).lexically_normal();
+    std::filesystem::path resolved = (current_dir / include_path).lexically_normal();
 
     // Rule 2: resolved path must remain within project_root.
     // lexically_relative returns an empty path or one starting with ".."

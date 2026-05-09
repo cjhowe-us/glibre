@@ -44,35 +44,46 @@ namespace glibre::shader {
 // ---------------------------------------------------------------------------
 
 enum class ShadingModel : std::uint8_t {
-    Standard, Skin, Hair, Cloth, Foliage, Eye, Water, ClearCoat,
+    Standard,
+    Skin,
+    Hair,
+    Cloth,
+    Foliage,
+    Eye,
+    Water,
+    ClearCoat,
 };
 inline constexpr std::size_t kShadingModelCount = 8;
 
 enum class FeatureBit : std::uint8_t {
-    Skinned        = 0,
-    MotionVectors  = 1,
-    AlphaTest      = 2,
-    Decal          = 3,
+    Skinned = 0,
+    MotionVectors = 1,
+    AlphaTest = 2,
+    Decal = 3,
     VirtualTexture = 4,
-    RT             = 5,
+    RT = 5,
 };
-inline constexpr std::size_t   kFeatureBitCount = 6;
+inline constexpr std::size_t kFeatureBitCount = 6;
 // Bit-mask covering all defined FeatureBit positions.
 // Used in from_bytes validation to reject reserved-bit usage.
 inline constexpr std::uint16_t kFeatureBitMask =
-    static_cast<std::uint16_t>((std::uint16_t{1} << kFeatureBitCount) - 1u);   // = 0x003F
+    static_cast<std::uint16_t>((std::uint16_t{1} << kFeatureBitCount) - 1u);  // = 0x003F
 
 class FeatureSet {
 public:
     constexpr FeatureSet() noexcept = default;
-    constexpr explicit FeatureSet(std::uint16_t bits) noexcept : bits_{bits} {}
+
+    constexpr explicit FeatureSet(std::uint16_t bits) noexcept
+        : bits_{bits} {}
 
     [[nodiscard]] constexpr bool test(FeatureBit b) const noexcept {
         return (bits_ & (std::uint16_t{1} << static_cast<std::uint8_t>(b))) != 0;
     }
+
     constexpr void set(FeatureBit b) noexcept {
         bits_ |= static_cast<std::uint16_t>(std::uint16_t{1} << static_cast<std::uint8_t>(b));
     }
+
     [[nodiscard]] constexpr std::uint16_t bits() const noexcept { return bits_; }
 
     friend constexpr bool operator==(FeatureSet, FeatureSet) noexcept = default;
@@ -82,7 +93,12 @@ private:
 };
 
 enum class RenderPath : std::uint8_t {
-    Forward, Deferred, DepthOnly, Shadow, Velocity, Probe,
+    Forward,
+    Deferred,
+    DepthOnly,
+    Shadow,
+    Velocity,
+    Probe,
 };
 inline constexpr std::size_t kRenderPathCount = 6;
 
@@ -95,9 +111,9 @@ inline constexpr std::size_t kLODTierCount = 4;
 
 struct PermutationKey {
     ShadingModel shading_model{ShadingModel::Standard};
-    FeatureSet   features{};
-    RenderPath   render_path{RenderPath::Forward};
-    LODTier      lod_tier{LODTier::Desktop};
+    FeatureSet features{};
+    RenderPath render_path{RenderPath::Forward};
+    LODTier lod_tier{LODTier::Desktop};
 
     friend constexpr bool operator==(PermutationKey, PermutationKey) noexcept = default;
 
@@ -118,23 +134,25 @@ struct PermutationIndex {
 // Total number of distinct well-formed permutations.
 // = kShadingModelCount x 2^kFeatureBitCount x kRenderPathCount x kLODTierCount = 12288.
 inline constexpr std::uint32_t kPermutationCrossProductCardinality =
-    static_cast<std::uint32_t>(kShadingModelCount)
-  * (1u << kFeatureBitCount)
-  * static_cast<std::uint32_t>(kRenderPathCount)
-  * static_cast<std::uint32_t>(kLODTierCount);
+    static_cast<std::uint32_t>(kShadingModelCount) * (1u << kFeatureBitCount) *
+    static_cast<std::uint32_t>(kRenderPathCount) * static_cast<std::uint32_t>(kLODTierCount);
 
-PermutationIndex                to_index(const PermutationKey&)     noexcept;
+PermutationIndex to_index(const PermutationKey&) noexcept;
 glibre::Result<PermutationKey> from_index(const PermutationIndex&) noexcept;
 
-bool permutation_key_byte_less(const PermutationKey& a,
-                               const PermutationKey& b) noexcept;
+bool permutation_key_byte_less(const PermutationKey& a, const PermutationKey& b) noexcept;
 
 // ---------------------------------------------------------------------------
 // Shader stages, targets, content hash
 // ---------------------------------------------------------------------------
 
 enum class Stage : std::uint8_t {
-    Vertex, Pixel, Compute, Mesh, Amplification, Library,
+    Vertex,
+    Pixel,
+    Compute,
+    Mesh,
+    Amplification,
+    Library,
 };
 
 // MVP target is MetalLib; DXIL added post-MVP for D3D12/Windows.
@@ -157,19 +175,19 @@ struct SourceId {
 
 struct EntryPoint {
     eastl::string name;
-    Stage         stage{Stage::Vertex};
+    Stage stage{Stage::Vertex};
     friend bool operator==(const EntryPoint&, const EntryPoint&) noexcept = default;
 };
 
 struct IncludeNode {
     eastl::string project_relative_path;
-    ShaderHash    content_hash{};
+    ShaderHash content_hash{};
 };
 
 struct PreprocessedSource {
-    eastl::vector<std::byte>   bytes;            // post-include byte stream
+    eastl::vector<std::byte> bytes;              // post-include byte stream
     eastl::vector<IncludeNode> include_closure;  // ordered, acyclic, project-rooted
-    ShaderHash                 total_hash{};
+    ShaderHash total_hash{};
 };
 
 // ---------------------------------------------------------------------------
@@ -193,19 +211,18 @@ public:
     /// The return type is glibre::Result<ShaderSource> = std::expected<ShaderSource,
     /// glibre::Error> per reviews/decisions/error-model.md §Decision 1.
     static glibre::Result<ShaderSource>
-    open(const std::filesystem::path& project_root,
-         const std::filesystem::path& project_relative);
+    open(const std::filesystem::path& project_root, const std::filesystem::path& project_relative);
 
-    [[nodiscard]] const SourceId&               id()           const noexcept;
+    [[nodiscard]] const SourceId& id() const noexcept;
     [[nodiscard]] eastl::span<const EntryPoint> entry_points() const noexcept;
-    [[nodiscard]] const PreprocessedSource&     preprocessed() const noexcept;
+    [[nodiscard]] const PreprocessedSource& preprocessed() const noexcept;
 
 private:
     ShaderSource() = default;
 
-    SourceId                    id_{};
-    eastl::vector<EntryPoint>   entry_points_{};
-    PreprocessedSource          preprocessed_{};
+    SourceId id_{};
+    eastl::vector<EntryPoint> entry_points_{};
+    PreprocessedSource preprocessed_{};
 };
 
 // ---------------------------------------------------------------------------
@@ -213,7 +230,10 @@ private:
 // ---------------------------------------------------------------------------
 
 enum class DescriptorFrequencyGroup : std::uint8_t {
-    PerFrame, PerPass, PerMaterial, PerDraw,
+    PerFrame,
+    PerPass,
+    PerMaterial,
+    PerDraw,
 };
 
 enum class BindingKind : std::uint8_t {
@@ -233,13 +253,13 @@ struct StageMask {
 };
 
 struct BindingSlot {
-    BindingKind              kind{BindingKind::ConstantBuffer};
-    std::uint32_t            register_space{0};
-    std::uint32_t            register_index{0};
-    std::uint32_t            array_size{1};
-    StageMask                stages{};
+    BindingKind kind{BindingKind::ConstantBuffer};
+    std::uint32_t register_space{0};
+    std::uint32_t register_index{0};
+    std::uint32_t array_size{1};
+    StageMask stages{};
     DescriptorFrequencyGroup frequency{DescriptorFrequencyGroup::PerDraw};
-    eastl::string            name;
+    eastl::string name;
 
     friend bool operator==(const BindingSlot&, const BindingSlot&) noexcept = default;
 };
@@ -248,7 +268,7 @@ struct VertexInputElement {
     eastl::string semantic;
     std::uint32_t semantic_index{0};
     std::uint32_t location{0};
-    std::uint32_t format_code{0};   // backend-neutral format ordinal
+    std::uint32_t format_code{0};  // backend-neutral format ordinal
 };
 
 struct VertexIOLayout {
@@ -258,13 +278,13 @@ struct VertexIOLayout {
 struct PushConstantRange {
     std::uint32_t offset{0};
     std::uint32_t size{0};
-    StageMask     stages{};
+    StageMask stages{};
     friend constexpr bool operator==(PushConstantRange, PushConstantRange) noexcept = default;
 };
 
 struct MaterialParameterBlock {
-    eastl::string              name;
-    std::uint32_t              size_bytes{0};
+    eastl::string name;
+    std::uint32_t size_bytes{0};
     eastl::vector<BindingSlot> members;
 };
 
@@ -275,13 +295,13 @@ struct SpecializationConstantSlot {
 };
 
 struct ReflectionBlob {
-    eastl::vector<EntryPoint>                  entry_points;
-    eastl::vector<BindingSlot>                 bindings;
-    VertexIOLayout                             vertex_io;
-    eastl::vector<PushConstantRange>           push_constants;
-    MaterialParameterBlock                     material_parameters;
-    eastl::vector<SpecializationConstantSlot>  spec_constants;
-    std::uint32_t                              rt_payload_bytes{0};
+    eastl::vector<EntryPoint> entry_points;
+    eastl::vector<BindingSlot> bindings;
+    VertexIOLayout vertex_io;
+    eastl::vector<PushConstantRange> push_constants;
+    MaterialParameterBlock material_parameters;
+    eastl::vector<SpecializationConstantSlot> spec_constants;
+    std::uint32_t rt_payload_bytes{0};
 };
 
 // ---------------------------------------------------------------------------
@@ -297,25 +317,25 @@ struct DescriptorTable {
 struct StaticSampler {
     std::uint32_t register_space{0};
     std::uint32_t register_index{0};
-    StageMask     stages{};
+    StageMask stages{};
     friend constexpr bool operator==(StaticSampler, StaticSampler) noexcept = default;
 };
 
 struct RootSignatureSchema {
-    DescriptorTable              per_frame;
-    DescriptorTable              per_pass;
-    DescriptorTable              per_material;
-    DescriptorTable              per_draw;
+    DescriptorTable per_frame;
+    DescriptorTable per_pass;
+    DescriptorTable per_material;
+    DescriptorTable per_draw;
     eastl::vector<StaticSampler> static_samplers;
     eastl::vector<PushConstantRange> push_constants;
 
-    friend bool operator==(const RootSignatureSchema&, const RootSignatureSchema&) noexcept = default;
+    friend bool
+    operator==(const RootSignatureSchema&, const RootSignatureSchema&) noexcept = default;
 };
 
 class DescriptorLayout {
 public:
-    static glibre::Result<DescriptorLayout>
-    derive(const ReflectionBlob&, CompileTarget) noexcept;
+    static glibre::Result<DescriptorLayout> derive(const ReflectionBlob&, CompileTarget) noexcept;
 
     [[nodiscard]] const DescriptorTable& table(DescriptorFrequencyGroup g) const noexcept;
     [[nodiscard]] const RootSignatureSchema& schema() const noexcept;

@@ -15,16 +15,15 @@
 //   6. Compute total BLAKE3 over expanded bytes.
 //   7. Assemble and return ShaderSource.
 
-#include <glibre/shader/shader.hpp>
-
-#include "entry_point_scanner.hpp"
-#include "preprocessor.hpp"
-
+#include <blake3.h>
 #include <fstream>
 #include <sstream>
 #include <string>
 
-#include <blake3.h>
+#include <glibre/shader/shader.hpp>
+
+#include "entry_point_scanner.hpp"
+#include "preprocessor.hpp"
 
 namespace glibre::shader {
 
@@ -39,8 +38,7 @@ namespace {
     return result;
 }
 
-[[nodiscard]] std::expected<eastl::string, Error>
-read_file(const std::filesystem::path& path) {
+[[nodiscard]] std::expected<eastl::string, Error> read_file(const std::filesystem::path& path) {
     std::ifstream ifs{path, std::ios::binary};
     if (!ifs.is_open()) {
         return std::unexpected(Error::SourceNotFound);
@@ -57,16 +55,15 @@ read_file(const std::filesystem::path& path) {
 // ShaderSource::open
 // ---------------------------------------------------------------------------
 
-glibre::Result<ShaderSource>
-ShaderSource::open(const std::filesystem::path& project_root,
-                   const std::filesystem::path& project_relative) {
+glibre::Result<ShaderSource> ShaderSource::open(
+    const std::filesystem::path& project_root, const std::filesystem::path& project_relative
+) {
     // Reject absolute project_relative (would escape the project root).
     if (project_relative.is_absolute()) {
         return std::unexpected(Error::IncludeEscape);
     }
 
-    std::filesystem::path abs_path =
-        (project_root / project_relative).lexically_normal();
+    std::filesystem::path abs_path = (project_root / project_relative).lexically_normal();
 
     // Validate abs_path is under project_root.
     auto rel_check = abs_path.lexically_relative(project_root);
@@ -84,15 +81,12 @@ ShaderSource::open(const std::filesystem::path& project_root,
     // Step 2: expand includes.
     eastl::vector<IncludeNode> include_closure;
     detail::PreprocessContext ctx{
-        project_root,
-        include_closure,
-        {}  // empty visit_stack
+        project_root, include_closure, {}  // empty visit_stack
     };
 
     // Push the root file onto the visit stack so it participates in cycle detection.
     auto proj_rel_norm = project_relative.lexically_normal();
-    eastl::string root_rel_str{proj_rel_norm.native().c_str(),
-                                proj_rel_norm.native().size()};
+    eastl::string root_rel_str{proj_rel_norm.native().c_str(), proj_rel_norm.native().size()};
     ctx.visit_stack.push_back(root_rel_str);
 
     auto expanded_result = detail::expand_includes(root_bytes, abs_path, ctx);
@@ -123,11 +117,8 @@ ShaderSource::open(const std::filesystem::path& project_root,
     ShaderSource src;
     src.id_ = SourceId{root_rel_str};
     src.entry_points_ = std::move(entry_points);
-    src.preprocessed_ = PreprocessedSource{
-        std::move(expanded_bytes),
-        std::move(include_closure),
-        total_hash
-    };
+    src.preprocessed_ =
+        PreprocessedSource{std::move(expanded_bytes), std::move(include_closure), total_hash};
 
     return src;
 }
@@ -136,16 +127,12 @@ ShaderSource::open(const std::filesystem::path& project_root,
 // ShaderSource accessors
 // ---------------------------------------------------------------------------
 
-const SourceId& ShaderSource::id() const noexcept {
-    return id_;
-}
+const SourceId& ShaderSource::id() const noexcept { return id_; }
 
 eastl::span<const EntryPoint> ShaderSource::entry_points() const noexcept {
     return eastl::span<const EntryPoint>{entry_points_.data(), entry_points_.size()};
 }
 
-const PreprocessedSource& ShaderSource::preprocessed() const noexcept {
-    return preprocessed_;
-}
+const PreprocessedSource& ShaderSource::preprocessed() const noexcept { return preprocessed_; }
 
 }  // namespace glibre::shader

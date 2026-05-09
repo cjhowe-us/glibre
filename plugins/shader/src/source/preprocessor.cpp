@@ -43,8 +43,7 @@ namespace {
 
 /// Read a file from disk into an eastl::string.
 /// Returns Error::SourceNotFound if the path does not exist or cannot be opened.
-[[nodiscard]] std::expected<eastl::string, Error>
-read_file(const std::filesystem::path& path) {
+[[nodiscard]] std::expected<eastl::string, Error> read_file(const std::filesystem::path& path) {
     // Use std::ifstream (EASTL does not own file I/O).
     std::ifstream ifs{path, std::ios::binary};
     if (!ifs.is_open()) {
@@ -60,10 +59,11 @@ read_file(const std::filesystem::path& path) {
 /// project_root after resolution from `current_dir`.
 ///
 /// Returns the canonical absolute path on success, or Error::IncludeEscape.
-[[nodiscard]] std::expected<std::filesystem::path, Error>
-validate_include(const std::filesystem::path& include_path,
-                 const std::filesystem::path& current_dir,
-                 const std::filesystem::path& project_root) {
+[[nodiscard]] std::expected<std::filesystem::path, Error> validate_include(
+    const std::filesystem::path& include_path,
+    const std::filesystem::path& current_dir,
+    const std::filesystem::path& project_root
+) {
     // Reject absolute paths outright (§4.1 invariant 3).
     if (include_path.is_absolute()) {
         return std::unexpected(Error::IncludeEscape);
@@ -86,16 +86,15 @@ validate_include(const std::filesystem::path& include_path,
 
 }  // namespace
 
-std::expected<eastl::string, Error>
-expand_includes(const eastl::string&         source_bytes,
-                const std::filesystem::path& current_file,
-                PreprocessContext&           ctx) {
+std::expected<eastl::string, Error> expand_includes(
+    const eastl::string& source_bytes,
+    const std::filesystem::path& current_file,
+    PreprocessContext& ctx
+) {
     // The regex matches: optional leading whitespace, #include, whitespace,
     // then a double-quoted path.  We only support #include "..." (project-relative),
     // never #include <...> (system headers are not relevant to Slang source).
-    static const std::regex kIncludePattern{
-        R"re(^[ \t]*#[ \t]*include[ \t]+"([^"]+)")re"
-    };
+    static const std::regex kIncludePattern{R"re(^[ \t]*#[ \t]*include[ \t]+"([^"]+)")re"};
 
     std::filesystem::path current_dir = current_file.parent_path();
     eastl::string expanded;
@@ -137,12 +136,8 @@ expand_includes(const eastl::string&         source_bytes,
             eastl::string included_bytes = std::move(*file_result);
 
             // Step 5: build include node with content hash.
-            ShaderHash content_hash = blake3_hash(
-                included_bytes.data(), included_bytes.size()
-            );
-            ctx.include_closure.push_back(
-                IncludeNode{proj_rel_str, content_hash}
-            );
+            ShaderHash content_hash = blake3_hash(included_bytes.data(), included_bytes.size());
+            ctx.include_closure.push_back(IncludeNode{proj_rel_str, content_hash});
 
             // Step 6: push onto visit stack and recurse.
             ctx.visit_stack.push_back(proj_rel_str);

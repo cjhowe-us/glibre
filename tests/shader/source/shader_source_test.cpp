@@ -25,7 +25,6 @@
 #include <string>
 
 #include <catch2/catch_test_macros.hpp>
-
 #include <glibre/shader/shader_source.hpp>
 
 // GLIBRE_SHADER_FIXTURE_DIR is defined by CMakeLists as a compile definition
@@ -51,8 +50,8 @@ const std::filesystem::path kFixtureDir{GLIBRE_SHADER_FIXTURE_DIR};
 
 TEST_CASE("shader_source_open_validates_entry_points", "[shader][shader_source]") {
     // project_root is the fixture directory itself for this test.
-    const auto project_root   = kFixtureDir;
-    const auto project_rel    = std::filesystem::path{"two_stage_shader.slang"};
+    const auto project_root = kFixtureDir;
+    const auto project_rel = std::filesystem::path{"two_stage_shader.slang"};
 
     auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
     REQUIRE(result.has_value());
@@ -65,10 +64,12 @@ TEST_CASE("shader_source_open_validates_entry_points", "[shader][shader_source]"
 
     // Both stages must be present (order may vary — scan is unordered map based).
     bool found_vertex = false;
-    bool found_pixel  = false;
+    bool found_pixel = false;
     for (const auto& ep : eps) {
-        if (ep.stage == glibre::shader::Stage::Vertex) found_vertex = true;
-        if (ep.stage == glibre::shader::Stage::Pixel)  found_pixel  = true;
+        if (ep.stage == glibre::shader::Stage::Vertex)
+            found_vertex = true;
+        if (ep.stage == glibre::shader::Stage::Pixel)
+            found_pixel = true;
     }
     CHECK(found_vertex);
     CHECK(found_pixel);
@@ -87,23 +88,20 @@ TEST_CASE("shader_source_open_validates_entry_points", "[shader][shader_source]"
 
 TEST_CASE("shader_source_resolves_includes", "[shader][shader_source]") {
     const auto project_root = kFixtureDir;
-    const auto project_rel  = std::filesystem::path{"root_a.slang"};
+    const auto project_rel = std::filesystem::path{"root_a.slang"};
 
     auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
     REQUIRE(result.has_value());
 
     const auto& src = *result;
-    const auto& pp  = src.preprocessed();
+    const auto& pp = src.preprocessed();
 
     // Include closure must record both middle_b.slang and leaf_c.slang.
     CHECK(pp.include_closure.size() >= 2u);
 
     // Expanded source must contain text from all three files.
     // Convert bytes to a string for substring search.
-    const std::string expanded{
-        reinterpret_cast<const char*>(pp.bytes.data()),
-        pp.bytes.size()
-    };
+    const std::string expanded{reinterpret_cast<const char*>(pp.bytes.data()), pp.bytes.size()};
 
     // Content from root_a.slang (a_pixel).
     CHECK(expanded.find("a_pixel") != std::string::npos);
@@ -124,16 +122,16 @@ TEST_CASE("shader_source_resolves_includes", "[shader][shader_source]") {
 
 TEST_CASE("shader_source_include_closure_rejects_escape_and_cycle", "[shader][shader_source]") {
     const auto project_root = kFixtureDir;
-    const auto project_rel  = std::filesystem::path{"cycle_a.slang"};
+    const auto project_rel = std::filesystem::path{"cycle_a.slang"};
 
     auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
     REQUIRE_FALSE(result.has_value());
 
     // eastl::variant holds glibre::shader::Error.
     const auto& err = result.error();
-    const bool is_cycle = eastl::holds_alternative<glibre::shader::Error>(err.code())
-                       && eastl::get<glibre::shader::Error>(err.code())
-                              == glibre::shader::Error::IncludeCycle;
+    const bool is_cycle =
+        eastl::holds_alternative<glibre::shader::Error>(err.code()) &&
+        eastl::get<glibre::shader::Error>(err.code()) == glibre::shader::Error::IncludeCycle;
     CHECK(is_cycle);
 }
 
@@ -145,15 +143,15 @@ TEST_CASE("shader_source_include_closure_rejects_escape_and_cycle", "[shader][sh
 
 TEST_CASE("shader_source_open_returns_SourceNotFound_for_missing_path", "[shader][shader_source]") {
     const auto project_root = kFixtureDir;
-    const auto project_rel  = std::filesystem::path{"does_not_exist.slang"};
+    const auto project_rel = std::filesystem::path{"does_not_exist.slang"};
 
     auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();
-    const bool is_not_found = eastl::holds_alternative<glibre::shader::Error>(err.code())
-                           && eastl::get<glibre::shader::Error>(err.code())
-                                  == glibre::shader::Error::SourceNotFound;
+    const bool is_not_found =
+        eastl::holds_alternative<glibre::shader::Error>(err.code()) &&
+        eastl::get<glibre::shader::Error>(err.code()) == glibre::shader::Error::SourceNotFound;
     CHECK(is_not_found);
 }
 
@@ -164,10 +162,11 @@ TEST_CASE("shader_source_open_returns_SourceNotFound_for_missing_path", "[shader
 // calls (deterministic hashing — §4.1 invariant 2).
 // ===========================================================================
 
-TEST_CASE("shader_source_preprocessed_total_hash_is_byte_stable_across_calls",
-          "[shader][shader_source]") {
+TEST_CASE(
+    "shader_source_preprocessed_total_hash_is_byte_stable_across_calls", "[shader][shader_source]"
+) {
     const auto project_root = kFixtureDir;
-    const auto project_rel  = std::filesystem::path{"two_stage_shader.slang"};
+    const auto project_rel = std::filesystem::path{"two_stage_shader.slang"};
 
     auto r1 = glibre::shader::ShaderSource::open(project_root, project_rel);
     auto r2 = glibre::shader::ShaderSource::open(project_root, project_rel);
@@ -190,18 +189,20 @@ TEST_CASE("shader_source_preprocessed_total_hash_is_byte_stable_across_calls",
 // Fixture: fixtures/dual_attr.slang
 // ===========================================================================
 
-TEST_CASE("shader_source_open_returns_EntryPointStageAmbiguous_on_dual_attributes",
-          "[shader][shader_source]") {
+TEST_CASE(
+    "shader_source_open_returns_EntryPointStageAmbiguous_on_dual_attributes",
+    "[shader][shader_source]"
+) {
     const auto project_root = kFixtureDir;
-    const auto project_rel  = std::filesystem::path{"dual_attr.slang"};
+    const auto project_rel = std::filesystem::path{"dual_attr.slang"};
 
     auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();
-    const bool is_ambiguous = eastl::holds_alternative<glibre::shader::Error>(err.code())
-                           && eastl::get<glibre::shader::Error>(err.code())
-                                  == glibre::shader::Error::EntryPointStageAmbiguous;
+    const bool is_ambiguous = eastl::holds_alternative<glibre::shader::Error>(err.code()) &&
+                              eastl::get<glibre::shader::Error>(err.code()) ==
+                                  glibre::shader::Error::EntryPointStageAmbiguous;
     CHECK(is_ambiguous);
 }
 
@@ -213,18 +214,19 @@ TEST_CASE("shader_source_open_returns_EntryPointStageAmbiguous_on_dual_attribute
 // Fixture: fixtures/escape_abs.slang
 // ===========================================================================
 
-TEST_CASE("include_resolver_rejects_absolute_path_with_IncludeEscape",
-          "[shader][include_resolver]") {
+TEST_CASE(
+    "include_resolver_rejects_absolute_path_with_IncludeEscape", "[shader][include_resolver]"
+) {
     const auto project_root = kFixtureDir;
-    const auto project_rel  = std::filesystem::path{"escape_abs.slang"};
+    const auto project_rel = std::filesystem::path{"escape_abs.slang"};
 
     auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();
-    const bool is_escape = eastl::holds_alternative<glibre::shader::Error>(err.code())
-                        && eastl::get<glibre::shader::Error>(err.code())
-                               == glibre::shader::Error::IncludeEscape;
+    const bool is_escape =
+        eastl::holds_alternative<glibre::shader::Error>(err.code()) &&
+        eastl::get<glibre::shader::Error>(err.code()) == glibre::shader::Error::IncludeEscape;
     CHECK(is_escape);
 }
 
@@ -236,18 +238,19 @@ TEST_CASE("include_resolver_rejects_absolute_path_with_IncludeEscape",
 // Fixture: fixtures/escape_dotdot.slang
 // ===========================================================================
 
-TEST_CASE("include_resolver_rejects_upward_traversal_with_IncludeEscape",
-          "[shader][include_resolver]") {
+TEST_CASE(
+    "include_resolver_rejects_upward_traversal_with_IncludeEscape", "[shader][include_resolver]"
+) {
     const auto project_root = kFixtureDir;
-    const auto project_rel  = std::filesystem::path{"escape_dotdot.slang"};
+    const auto project_rel = std::filesystem::path{"escape_dotdot.slang"};
 
     auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();
-    const bool is_escape = eastl::holds_alternative<glibre::shader::Error>(err.code())
-                        && eastl::get<glibre::shader::Error>(err.code())
-                               == glibre::shader::Error::IncludeEscape;
+    const bool is_escape =
+        eastl::holds_alternative<glibre::shader::Error>(err.code()) &&
+        eastl::get<glibre::shader::Error>(err.code()) == glibre::shader::Error::IncludeEscape;
     CHECK(is_escape);
 }
 
@@ -260,17 +263,16 @@ TEST_CASE("include_resolver_rejects_upward_traversal_with_IncludeEscape",
 // Fixture: fixtures/cycle_a.slang, cycle_b.slang
 // ===========================================================================
 
-TEST_CASE("include_resolver_detects_cycle_with_IncludeCycle",
-          "[shader][include_resolver]") {
+TEST_CASE("include_resolver_detects_cycle_with_IncludeCycle", "[shader][include_resolver]") {
     const auto project_root = kFixtureDir;
-    const auto project_rel  = std::filesystem::path{"cycle_a.slang"};
+    const auto project_rel = std::filesystem::path{"cycle_a.slang"};
 
     auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();
-    const bool is_cycle = eastl::holds_alternative<glibre::shader::Error>(err.code())
-                       && eastl::get<glibre::shader::Error>(err.code())
-                              == glibre::shader::Error::IncludeCycle;
+    const bool is_cycle =
+        eastl::holds_alternative<glibre::shader::Error>(err.code()) &&
+        eastl::get<glibre::shader::Error>(err.code()) == glibre::shader::Error::IncludeCycle;
     CHECK(is_cycle);
 }

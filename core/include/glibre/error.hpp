@@ -115,31 +115,31 @@ namespace shader {
 // Added by plan #508 (ShaderSource open + include resolver + entry-point scanner).
 // Authority: specs/shader/SPEC.md §10.
 enum class Error : std::uint16_t {
-    SourceNotFound,               // file does not exist or cannot be opened
-    SourceParseFailed,            // file exists but cannot be parsed
-    IncludeEscape,                // absolute or ../-escaping include path
-    IncludeCycle,                 // include graph contains a cycle
-    EncodingInvalid,              // non-UTF-8 or binary content in source
-    EntryPointMissing,            // no [shader("...")] attribute found
-    EntryPointStageAmbiguous,     // function bears more than one stage attribute
-    PermutationKeyMalformed,      // packed bytes fail invariant checks
-    PermutationKeyOutOfRange,     // index >= kPermutationCrossProductCardinality
-    CompilerInvocationFailed,     // slangc subprocess could not be launched
-    CompilerExitNonZero,          // slangc returned a non-zero exit code
-    CompilerTimedOut,             // slangc subprocess exceeded time limit
-    UnsupportedTarget,            // requested CompileTarget is not supported
-    MetalLibEmitFailed,           // slangc emitted metallib but file is invalid
-    ReflectionExtractionFailed,   // slangc reflection API returned an error
-    DescriptorFrequencyAmbiguous, // binding has conflicting frequency group tags
-    DescriptorFrequencyMissing,   // binding has no frequency group tag
-    LinkFailed,                   // artifact link step failed
-    SpecializationConstantMissing,// required specialization constant absent
-    CacheLookupMiss,              // ShaderHash not found in the cache
-    CacheCorrupt,                 // cache blob fails integrity check
-    CacheIntegrity,               // orphan or missing artifact in cooked library
-    CacheReadOnlyViolation,       // write attempted to a read-only cache
-    CapabilityNotSupported,       // backend lacks required capability
-    ShippingCompilationAttempted, // compile path invoked in a shipping build
+    SourceNotFound,                 // file does not exist or cannot be opened
+    SourceParseFailed,              // file exists but cannot be parsed
+    IncludeEscape,                  // absolute or ../-escaping include path
+    IncludeCycle,                   // include graph contains a cycle
+    EncodingInvalid,                // non-UTF-8 or binary content in source
+    EntryPointMissing,              // no [shader("...")] attribute found
+    EntryPointStageAmbiguous,       // function bears more than one stage attribute
+    PermutationKeyMalformed,        // packed bytes fail invariant checks
+    PermutationKeyOutOfRange,       // index >= kPermutationCrossProductCardinality
+    CompilerInvocationFailed,       // slangc subprocess could not be launched
+    CompilerExitNonZero,            // slangc returned a non-zero exit code
+    CompilerTimedOut,               // slangc subprocess exceeded time limit
+    UnsupportedTarget,              // requested CompileTarget is not supported
+    MetalLibEmitFailed,             // slangc emitted metallib but file is invalid
+    ReflectionExtractionFailed,     // slangc reflection API returned an error
+    DescriptorFrequencyAmbiguous,   // binding has conflicting frequency group tags
+    DescriptorFrequencyMissing,     // binding has no frequency group tag
+    LinkFailed,                     // artifact link step failed
+    SpecializationConstantMissing,  // required specialization constant absent
+    CacheLookupMiss,                // ShaderHash not found in the cache
+    CacheCorrupt,                   // cache blob fails integrity check
+    CacheIntegrity,                 // orphan or missing artifact in cooked library
+    CacheReadOnlyViolation,         // write attempted to a read-only cache
+    CapabilityNotSupported,         // backend lacks required capability
+    ShippingCompilationAttempted,   // compile path invoked in a shipping build
 };
 }  // namespace shader
 

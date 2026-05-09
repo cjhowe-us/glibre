@@ -13,7 +13,6 @@
 
 #include <EASTL/string.h>
 #include <EASTL/vector.h>
-
 #include <glibre/shader/shader.hpp>
 
 namespace glibre::shader::detail {

@@ -34,12 +34,18 @@ namespace {
 
 /// Map Slang stage attribute string to our Stage enum.
 std::optional<Stage> parse_stage(const std::string& stage_str) {
-    if (stage_str == "vertex")        return Stage::Vertex;
-    if (stage_str == "pixel")         return Stage::Pixel;
-    if (stage_str == "compute")       return Stage::Compute;
-    if (stage_str == "mesh")          return Stage::Mesh;
-    if (stage_str == "amplification") return Stage::Amplification;
-    if (stage_str == "library")       return Stage::Library;
+    if (stage_str == "vertex")
+        return Stage::Vertex;
+    if (stage_str == "pixel")
+        return Stage::Pixel;
+    if (stage_str == "compute")
+        return Stage::Compute;
+    if (stage_str == "mesh")
+        return Stage::Mesh;
+    if (stage_str == "amplification")
+        return Stage::Amplification;
+    if (stage_str == "library")
+        return Stage::Library;
     return std::nullopt;
 }
 
@@ -58,12 +64,9 @@ struct RawEntryPoint {
 ///   - Match whitespace.
 ///   - Capture the next identifier as the function name.
 ///   - Confirm it is followed by '('.
-std::vector<RawEntryPoint>
-extract_raw_entry_points(const std::string& source) {
+std::vector<RawEntryPoint> extract_raw_entry_points(const std::string& source) {
     // Match [shader("stage")] — captures stage string.
-    static const std::regex kAttrRe{
-        R"re(\[shader\("([a-zA-Z]+)"\)\])re"
-    };
+    static const std::regex kAttrRe{R"re(\[shader\("([a-zA-Z]+)"\)\])re"};
     // Match fn_decl: (return_type WS+ fn_name WS* '(')
     // The return_type is any identifier (incl. void).
     // fn_name is the SECOND identifier — the one immediately before '('.
@@ -71,21 +74,15 @@ extract_raw_entry_points(const std::string& source) {
     // We look for this pattern in the tail after all attribute blocks.
     // A simplified pattern that matches "word WS+ word WS* (" where the
     // second word is the function name.
-    static const std::regex kFnDeclRe{
-        R"re(([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*\()re"
-    };
+    static const std::regex kFnDeclRe{R"re(([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*\()re"};
     // Match a single attribute block [...] (any content, non-nested).
-    static const std::regex kAttrBlockRe{
-        R"re(\[[^\]]*\])re"
-    };
+    static const std::regex kAttrBlockRe{R"re(\[[^\]]*\])re"};
     // Match an identifier (for skip-return-type scanning).
-    static const std::regex kIdentRe{
-        R"re([A-Za-z_]\w*)re"
-    };
+    static const std::regex kIdentRe{R"re([A-Za-z_]\w*)re"};
 
     std::vector<RawEntryPoint> results;
 
-    auto it  = std::sregex_iterator{source.begin(), source.end(), kAttrRe};
+    auto it = std::sregex_iterator{source.begin(), source.end(), kAttrRe};
     auto end = std::sregex_iterator{};
 
     for (; it != end; ++it) {
@@ -99,8 +96,7 @@ extract_raw_entry_points(const std::string& source) {
         // Step A: skip whitespace + newlines.
         std::size_t pos = 0;
         while (pos < tail.size() &&
-               (tail[pos] == ' ' || tail[pos] == '\t' ||
-                tail[pos] == '\r' || tail[pos] == '\n')) {
+               (tail[pos] == ' ' || tail[pos] == '\t' || tail[pos] == '\r' || tail[pos] == '\n')) {
             ++pos;
         }
 
@@ -112,13 +108,11 @@ extract_raw_entry_points(const std::string& source) {
             std::string from_pos = tail.substr(pos);
             std::smatch ab;
             // Only match at the beginning of from_pos.
-            if (std::regex_search(from_pos, ab, kAttrBlockRe) &&
-                ab.position() == 0) {
+            if (std::regex_search(from_pos, ab, kAttrBlockRe) && ab.position() == 0) {
                 pos += static_cast<std::size_t>(ab.length());
                 // Skip trailing whitespace/newlines.
-                while (pos < tail.size() &&
-                       (tail[pos] == ' ' || tail[pos] == '\t' ||
-                        tail[pos] == '\r' || tail[pos] == '\n')) {
+                while (pos < tail.size() && (tail[pos] == ' ' || tail[pos] == '\t' ||
+                                             tail[pos] == '\r' || tail[pos] == '\n')) {
                     ++pos;
                 }
                 skipped = true;
@@ -151,8 +145,7 @@ extract_raw_entry_points(const std::string& source) {
 
 }  // namespace
 
-std::expected<eastl::vector<EntryPoint>, Error>
-scan_entry_points(const eastl::string& source) {
+std::expected<eastl::vector<EntryPoint>, Error> scan_entry_points(const eastl::string& source) {
     std::string std_source{source.c_str(), source.size()};
 
     std::vector<RawEntryPoint> raw = extract_raw_entry_points(std_source);
@@ -178,10 +171,7 @@ scan_entry_points(const eastl::string& source) {
         if (!maybe_stage) {
             continue;  // Unknown stage string — skip.
         }
-        result.push_back(EntryPoint{
-            eastl::string{name.c_str(), name.size()},
-            *maybe_stage
-        });
+        result.push_back(EntryPoint{eastl::string{name.c_str(), name.size()}, *maybe_stage});
     }
 
     return result;
