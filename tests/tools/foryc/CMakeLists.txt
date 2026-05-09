@@ -33,6 +33,7 @@ target_link_libraries(foryc-parser-tests
     PRIVATE
         Catch2::Catch2WithMain
         glibre::core   # glibre::Error + EASTL
+        glibre::compile_contract
 )
 
 target_compile_features(foryc-parser-tests PRIVATE cxx_std_23)
@@ -40,8 +41,6 @@ target_compile_features(foryc-parser-tests PRIVATE cxx_std_23)
 set_target_properties(foryc-parser-tests PROPERTIES CXX_MODULE_STD OFF)
 
 target_compile_options(foryc-parser-tests PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic
@@ -69,6 +68,7 @@ target_link_libraries(foryc-emit-header-tests
     PRIVATE
         Catch2::Catch2WithMain
         glibre::core   # glibre::Error + EASTL
+        glibre::compile_contract
 )
 
 target_compile_features(foryc-emit-header-tests PRIVATE cxx_std_23)
@@ -76,8 +76,6 @@ target_compile_features(foryc-emit-header-tests PRIVATE cxx_std_23)
 set_target_properties(foryc-emit-header-tests PROPERTIES CXX_MODULE_STD OFF)
 
 target_compile_options(foryc-emit-header-tests PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic
@@ -105,6 +103,7 @@ target_link_libraries(foryc-emit-migration-tests
     PRIVATE
         Catch2::Catch2WithMain
         glibre::core   # glibre::Error + EASTL
+        glibre::compile_contract
 )
 
 # Pass include paths to the round-trip compile test so it can supply
@@ -129,8 +128,6 @@ target_compile_features(foryc-emit-migration-tests PRIVATE cxx_std_23)
 set_target_properties(foryc-emit-migration-tests PROPERTIES CXX_MODULE_STD OFF)
 
 target_compile_options(foryc-emit-migration-tests PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic
@@ -158,6 +155,7 @@ target_link_libraries(foryc-emit-manifest-tests
     PRIVATE
         Catch2::Catch2WithMain
         glibre::core   # glibre::Error + EASTL
+        glibre::compile_contract
 )
 
 target_compile_features(foryc-emit-manifest-tests PRIVATE cxx_std_23)
@@ -165,8 +163,6 @@ target_compile_features(foryc-emit-manifest-tests PRIVATE cxx_std_23)
 set_target_properties(foryc-emit-manifest-tests PROPERTIES CXX_MODULE_STD OFF)
 
 target_compile_options(foryc-emit-manifest-tests PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic

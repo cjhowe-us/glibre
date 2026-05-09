@@ -27,6 +27,8 @@ add_library(glibre-plugin-stub-no-symbols MODULE
     stub_no_symbols.cpp
 )
 
+target_link_libraries(glibre-plugin-stub-no-symbols PRIVATE glibre::compile_contract)
+
 target_compile_features(glibre-plugin-stub-no-symbols PRIVATE cxx_std_23)
 
 set_target_properties(glibre-plugin-stub-no-symbols PROPERTIES
@@ -38,9 +40,6 @@ set_target_properties(glibre-plugin-stub-no-symbols PROPERTIES
 )
 
 target_compile_options(glibre-plugin-stub-no-symbols PRIVATE
-    -fno-exceptions
-    -fno-rtti
-    -fvisibility=hidden
     -Wall
     -Wextra
     -Wpedantic
@@ -60,16 +59,15 @@ target_link_libraries(glibre-core-plugin-loader-tests
     PRIVATE
         glibre::core
         Catch2::Catch2WithMain
+        glibre::compile_contract
 )
 
 target_compile_features(glibre-core-plugin-loader-tests PRIVATE cxx_std_23)
 
 set_target_properties(glibre-core-plugin-loader-tests PROPERTIES CXX_MODULE_STD OFF)
 
-# -fno-exceptions clean per reviews/decisions/error-model.md §Decision 3.
+# -fno-exceptions and -fno-rtti are provided via glibre::compile_contract.
 target_compile_options(glibre-core-plugin-loader-tests PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic

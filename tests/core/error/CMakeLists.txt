@@ -22,6 +22,7 @@ target_link_libraries(glibre-core-error-tests
     PRIVATE
         glibre::core
         Catch2::Catch2WithMain
+        glibre::compile_contract
 )
 
 target_compile_features(glibre-core-error-tests PRIVATE cxx_std_23)
@@ -32,8 +33,6 @@ set_target_properties(glibre-core-error-tests PROPERTIES CXX_MODULE_STD OFF)
 # Catch2 3.x supports -fno-exceptions when REQUIRE_THROWS is not used;
 # glibre-core-error-tests never uses REQUIRE_THROWS.
 target_compile_options(glibre-core-error-tests PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic

@@ -47,7 +47,13 @@ target_include_directories(glibre-plugin-noop
         ${CMAKE_SOURCE_DIR}/core/include
 )
 
-target_link_libraries(glibre-plugin-noop PRIVATE EASTL)
+target_link_libraries(glibre-plugin-noop
+    PRIVATE
+        EASTL
+        # Compile-flag contract: enforces -fno-exceptions, -fno-rtti,
+        # -fvisibility=hidden project-wide (cmake/Compile.cmake).
+        glibre::compile_contract
+)
 
 target_compile_features(glibre-plugin-noop PRIVATE cxx_std_23)
 
@@ -57,16 +63,19 @@ set_target_properties(glibre-plugin-noop PROPERTIES
     # Conventional plugin naming: no "lib" prefix.
     PREFIX ""
     # Hide all symbols by default; entry-points carry [[gnu::visibility("default")]].
+    # Note: -fvisibility=hidden is also applied via glibre::compile_contract; these
+    # target properties are the CMake-native way to set the same flags and are kept
+    # so that IDEs and tooling that reads target properties see the visibility setting.
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
     # Do not use `import std;` — plugin_noop.cpp uses #include-based C++23.
     CXX_MODULE_STD OFF
 )
 
+# Warning flags for glibre-plugin-noop.
+# -fno-exceptions, -fno-rtti, and -fvisibility=hidden are provided transitively
+# via glibre::compile_contract (cmake/Compile.cmake) — do not duplicate them here.
 target_compile_options(glibre-plugin-noop PRIVATE
-    -fno-exceptions
-    -fno-rtti
-    -fvisibility=hidden
     -Wall
     -Wextra
     -Wpedantic

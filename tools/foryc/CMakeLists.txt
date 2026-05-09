@@ -53,6 +53,9 @@ target_include_directories(glibre-foryc
 target_link_libraries(glibre-foryc
     PRIVATE
         glibre::core   # provides glibre::Error + EASTL transitively
+        # Compile-flag contract: enforces -fno-exceptions, -fno-rtti,
+        # -fvisibility=hidden project-wide (cmake/Compile.cmake).
+        glibre::compile_contract
 )
 
 target_compile_features(glibre-foryc PRIVATE cxx_std_23)
@@ -62,9 +65,10 @@ target_compile_features(glibre-foryc PRIVATE cxx_std_23)
 # However we still disable them for the parser code which uses std::expected.
 # The CLI entry point uses STL streams / std::format (C++23, no exceptions
 # path) so -fno-exceptions is safe for the full executable.
+#
+# -fno-exceptions, -fno-rtti, and -fvisibility=hidden are provided transitively
+# via glibre::compile_contract (cmake/Compile.cmake) — do not duplicate them here.
 target_compile_options(glibre-foryc PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic

@@ -47,7 +47,7 @@ target_compile_features(glibre-plugin-stub-wrong-abi PRIVATE cxx_std_23)
 
 # Link EASTL for EASTL headers included transitively via glibre/core/plugin_context.hpp.
 find_package(EASTL CONFIG REQUIRED)
-target_link_libraries(glibre-plugin-stub-wrong-abi PRIVATE EASTL)
+target_link_libraries(glibre-plugin-stub-wrong-abi PRIVATE EASTL glibre::compile_contract)
 
 set_target_properties(glibre-plugin-stub-wrong-abi PROPERTIES
     SUFFIX ".dylib"
@@ -58,9 +58,6 @@ set_target_properties(glibre-plugin-stub-wrong-abi PROPERTIES
 )
 
 target_compile_options(glibre-plugin-stub-wrong-abi PRIVATE
-    -fno-exceptions
-    -fno-rtti
-    -fvisibility=hidden
     -Wall
     -Wextra
     -Wpedantic
@@ -80,6 +77,7 @@ target_link_libraries(glibre-core-plugin-loader-integration-tests
     PRIVATE
         glibre::core
         Catch2::Catch2WithMain
+        glibre::compile_contract
 )
 
 target_compile_features(glibre-core-plugin-loader-integration-tests PRIVATE cxx_std_23)
@@ -88,12 +86,10 @@ set_target_properties(glibre-core-plugin-loader-integration-tests PROPERTIES
     CXX_MODULE_STD OFF
 )
 
-# -fno-exceptions clean per reviews/decisions/error-model.md §Decision 3.
+# -fno-exceptions and -fno-rtti are provided via glibre::compile_contract.
 # Catch2 3.x supports -fno-exceptions builds when CATCH_CONFIG_DISABLE_EXCEPTIONS
 # is defined.  These tests do not use REQUIRE_THROWS.
 target_compile_options(glibre-core-plugin-loader-integration-tests PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic

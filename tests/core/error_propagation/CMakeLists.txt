@@ -48,7 +48,7 @@ target_include_directories(glibre-stub-error-returns
         ${CMAKE_SOURCE_DIR}/core/include
 )
 
-target_link_libraries(glibre-stub-error-returns PRIVATE EASTL)
+target_link_libraries(glibre-stub-error-returns PRIVATE EASTL glibre::compile_contract)
 
 target_compile_features(glibre-stub-error-returns PRIVATE cxx_std_23)
 
@@ -61,9 +61,6 @@ set_target_properties(glibre-stub-error-returns PROPERTIES
 )
 
 target_compile_options(glibre-stub-error-returns PRIVATE
-    -fno-exceptions
-    -fno-rtti
-    -fvisibility=hidden
     -Wall
     -Wextra
     -Wpedantic
@@ -86,6 +83,7 @@ target_link_libraries(glibre-core-error-propagation-tests
     PRIVATE
         glibre::core
         Catch2::Catch2WithMain
+        glibre::compile_contract
 )
 
 target_compile_features(glibre-core-error-propagation-tests PRIVATE cxx_std_23)
@@ -94,12 +92,10 @@ set_target_properties(glibre-core-error-propagation-tests PROPERTIES
     CXX_MODULE_STD OFF
 )
 
-# -fno-exceptions clean per error-model.md §Decision 3.
+# -fno-exceptions and -fno-rtti are provided via glibre::compile_contract.
 # The terminating_exception_aborts_plugin_load test case audits at compile
 # time (static_assert) that this binary is built without exceptions.
 target_compile_options(glibre-core-error-propagation-tests PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic

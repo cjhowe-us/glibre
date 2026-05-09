@@ -33,6 +33,7 @@ target_link_libraries(glibre-core-per-context-allocator-tests
     PRIVATE
         glibre::core
         Catch2::Catch2WithMain
+        glibre::compile_contract
 )
 
 target_compile_features(glibre-core-per-context-allocator-tests PRIVATE cxx_std_23)
@@ -51,8 +52,6 @@ target_compile_definitions(glibre-core-per-context-allocator-tests PRIVATE
 # Catch2 3.x supports -fno-exceptions when REQUIRE_THROWS is not used;
 # this test file uses REQUIRE / CHECK only.
 target_compile_options(glibre-core-per-context-allocator-tests PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic
@@ -93,6 +92,7 @@ target_link_libraries(glibre-core-per-context-allocator-shipping-tests
     PRIVATE
         glibre::core
         Catch2::Catch2WithMain
+        glibre::compile_contract
 )
 
 target_compile_features(glibre-core-per-context-allocator-shipping-tests PRIVATE cxx_std_23)
@@ -109,8 +109,6 @@ target_compile_options(glibre-core-per-context-allocator-shipping-tests PRIVATE
     # -DGLIBRE_ALLOC_STRICT=0 redefinition below wins.
     -UGLIBRE_ALLOC_STRICT
     -DGLIBRE_ALLOC_STRICT=0
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic

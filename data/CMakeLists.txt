@@ -155,6 +155,10 @@ target_include_directories(glibre-types
 target_link_libraries(glibre-types
     PUBLIC
         EASTL
+    PRIVATE
+        # Compile-flag contract: enforces -fno-exceptions, -fno-rtti,
+        # -fvisibility=hidden project-wide (cmake/Compile.cmake).
+        glibre::compile_contract
     # Fory::fory and blake3::blake3 are PRIVATE (not exposed on the plugin
     # link surface): plugins must NOT link Fory or BLAKE3 directly — they
     # go through the generated wrapper functions in glibre-types.  These
@@ -167,13 +171,12 @@ target_link_libraries(glibre-types
 
 target_compile_features(glibre-types PUBLIC cxx_std_23)
 
-# -fvisibility=hidden: only symbols with explicit __attribute__((visibility("default")))
-# (or extern "C" with the attribute in types_anchor.cpp) are visible to dlsym.
-# This matches the engine-wide ABI discipline and prevents accidental symbol leakage.
+# Warning flags for glibre-types.
+# -fno-exceptions, -fno-rtti, and -fvisibility=hidden are provided transitively
+# via glibre::compile_contract (cmake/Compile.cmake) — do not duplicate them here.
+# Only symbols with explicit __attribute__((visibility("default"))) (or extern "C"
+# with the attribute in types_anchor.cpp) are visible to dlsym.
 target_compile_options(glibre-types PRIVATE
-    -fno-exceptions
-    -fno-rtti
-    -fvisibility=hidden
     -Wall
     -Wextra
     -Wpedantic

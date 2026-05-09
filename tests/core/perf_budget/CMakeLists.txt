@@ -18,6 +18,7 @@ target_link_libraries(glibre-core-perf-budget-tests
     PRIVATE
         glibre::core
         Catch2::Catch2WithMain
+        glibre::compile_contract
 )
 
 target_compile_features(glibre-core-perf-budget-tests PRIVATE cxx_std_23)
@@ -27,8 +28,6 @@ set_target_properties(glibre-core-perf-budget-tests PROPERTIES CXX_MODULE_STD OF
 # -fno-exceptions clean per reviews/decisions/error-model.md §Decision 3.
 # std::thread / std::atomic are permitted carve-outs per PHILOSOPHY §11.
 target_compile_options(glibre-core-perf-budget-tests PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic
