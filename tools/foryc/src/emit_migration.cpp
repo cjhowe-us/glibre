@@ -28,9 +28,8 @@ namespace {
 // across 4 call sites also keeps the intent unambiguous.
 // -----------------------------------------------------------------------
 
-template <class... Args>
-[[nodiscard]] static eastl::string
-fmt_e(std::format_string<Args...> fmt, Args&&... args) noexcept {
+template<class... Args>
+[[nodiscard]] static eastl::string fmt_e(std::format_string<Args...> fmt, Args&&... args) noexcept {
     const std::string s = std::format(fmt, std::forward<Args>(args)...);
     return eastl::string(s.data(), s.size());
 }
@@ -150,7 +149,7 @@ struct FqnParts {
         // generated headers are on the include path, but forward-
         // declarations make the TU independently well-formed.
         const eastl::string from_unq = type_name + fmt_e("V{}", mig.from_version);
-        const eastl::string to_unq   = type_name + fmt_e("V{}", mig.to_version);
+        const eastl::string to_unq = type_name + fmt_e("V{}", mig.to_version);
 
         // Emit struct forward-declarations in the type's namespace.
         if (!parts.ns.empty()) {
