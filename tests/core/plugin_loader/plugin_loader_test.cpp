@@ -26,10 +26,8 @@
 #include <cstdint>
 #include <type_traits>
 
-#include <catch2/catch_test_macros.hpp>
-
 #include <EASTL/string_view.h>
-
+#include <catch2/catch_test_macros.hpp>
 #include <glibre/core/plugin_loader.hpp>
 #include <glibre/error.hpp>
 
@@ -48,6 +46,31 @@ namespace {
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// Test: helpers_negative_holds_core_error
+//
+// (Covers LOW finding round-1: holds_core_error had no negative-arm test.)
+//
+// Verifies that holds_core_error returns false when the glibre::Error holds a
+// non-core variant arm (tools::Error).  Without this check a future variant
+// reordering that aliases discriminator indices could silently pass tests.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("helpers_negative_holds_core_error", "[core][plugin_loader]") {
+    // Construct an error from a different variant arm (tools::Error).
+    const glibre::Error tools_err{glibre::tools::Error::ForycIOError};
+
+    // holds_core_error must return false: the error is NOT a core::Error.
+    CHECK_FALSE(holds_core_error(tools_err, glibre::core::Error::PluginDlopenFailed));
+    CHECK_FALSE(holds_core_error(tools_err, glibre::core::Error::PluginMissingEntryPoint));
+    CHECK_FALSE(holds_core_error(tools_err, glibre::core::Error::PluginManifestNotFound));
+
+    // Construct a core::Error and confirm it IS recognized.
+    const glibre::Error core_err{glibre::core::Error::PluginDlopenFailed};
+    CHECK(holds_core_error(core_err, glibre::core::Error::PluginDlopenFailed));
+    CHECK_FALSE(holds_core_error(core_err, glibre::core::Error::PluginMissingEntryPoint));
+}
 
 // ---------------------------------------------------------------------------
 // Test: plugin_loader_open_loads_noop_plugin
@@ -176,10 +199,10 @@ TEST_CASE("missing_symbol_returns_plugin_missing_entry_point", "[core][plugin_lo
 }
 
 // ---------------------------------------------------------------------------
-// Test: success_reads_manifest_with_expected_fields
+// Test: success_manifest_result_is_populated_after_open
 //
 // (Satisfies issue #229 Unit Test Plan:
-//   success_reads_manifest_with_expected_fields)
+//   success_manifest_result_is_populated_after_open)
 //
 // Verifies that after a successful open() the manifest_result() accessor is
 // populated.  The noop plugin has no sidecar .manifest file, so we expect
@@ -187,9 +210,15 @@ TEST_CASE("missing_symbol_returns_plugin_missing_entry_point", "[core][plugin_lo
 // the correct stub behaviour documented in plugin_manifest.cpp.
 // This test confirms the step-3 data-collection semantics: the manifest read
 // is attempted and the result (success or error) is accessible via the loader.
+//
+// Renamed from "success_reads_manifest_with_expected_fields" (MED finding
+// round-1): the old name implied happy-path field assertions, but the body
+// checks PluginManifestNotFound (the correct result when no sidecar is present).
+// The field-assertion test lands in plan #230 once the in-dylib blob ships.
+// DoD on issue #229 updated to match.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("success_reads_manifest_with_expected_fields", "[core][plugin_loader]") {
+TEST_CASE("success_manifest_result_is_populated_after_open", "[core][plugin_loader]") {
 #ifndef GLIBRE_NOOP_DYLIB_PATH
     SKIP("GLIBRE_NOOP_DYLIB_PATH not defined; build with GLIBRE_BUILD_EXAMPLES=ON");
 #else

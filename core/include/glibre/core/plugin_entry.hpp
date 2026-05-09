@@ -127,3 +127,24 @@ glibre::Result<void> glibre_plugin_unregister(glibre::core::PluginContext& ctx) 
 }  // extern "C"
 
 #pragma clang diagnostic pop
+
+namespace glibre::core {
+
+// ---------------------------------------------------------------------------
+// RegisterFn — single source of truth for the loader-side function-pointer
+// type corresponding to glibre_plugin_register.
+//
+// noexcept is intentionally absent: since C++17, noexcept is part of the
+// function type.  A plugin compiled against a header that omits noexcept
+// would produce a different function pointer type, causing a silent mismatch.
+// The loader (plugin_loader.hpp) imports this alias; plugin_entry.hpp (this
+// file) is the canonical definition.
+//
+// Usage (loader side):
+//   #include <glibre/core/plugin_entry.hpp>
+//   RegisterFn fn{nullptr};
+//   std::memcpy(&fn, &sym_register, sizeof(fn));
+// ---------------------------------------------------------------------------
+using RegisterFn = glibre::Result<void> (*)(glibre::core::PluginContext&);
+
+}  // namespace glibre::core

@@ -9,8 +9,9 @@
 //           RTLD_NOW forces immediate symbol resolution so missing middleman
 //           symbols surface as a load failure rather than a later crash.
 //           RTLD_LOCAL keeps the plugin's symbols out of the global namespace.
-//           Failure → core::Error::PluginDlopenFailed; dlerror() text in
-//           ErrorContext::detail.
+//           Failure → core::Error::PluginDlopenFailed; dlerror() text
+//           emitted to stderr at the refusal site; ErrorContext::detail
+//           holds a stable string literal (HIGH-1 round-1, addressed).
 //
 //   Step 2: dlsym the four required export symbols.  Any missing symbol →
 //           core::Error::PluginMissingEntryPoint; dlclose and abort.
@@ -48,27 +49,18 @@
 
 #include <EASTL/string.h>
 #include <EASTL/string_view.h>
-
+#include <glibre/core/plugin_entry.hpp>  // RegisterFn — single source of truth (LOW-6)
 #include <glibre/core/plugin_manifest.hpp>
 #include <glibre/error.hpp>
 
-// Forward declaration of PluginContext to resolve the RegisterFn typedef
-// without pulling in all of plugin_api.hpp transitively in every consumer.
-// Full definition in glibre/core/plugin_api.hpp.
-namespace glibre::core {
-struct PluginContext;
-}
-
 namespace glibre::core {
 
-// ---------------------------------------------------------------------------
-// RegisterFn — type of the glibre_plugin_register symbol
-//
-// The plugin exports this function with C linkage.  The loader casts the raw
-// void* from dlsym() to this pointer type.  Matches the prototype declared in
-// plugin_entry.hpp and the definition shape in plugin_noop.cpp.
-// ---------------------------------------------------------------------------
-using RegisterFn = glibre::Result<void> (*)(glibre::core::PluginContext&) noexcept;
+// RegisterFn is the canonical function-pointer type for glibre_plugin_register.
+// It is defined in plugin_entry.hpp and imported here to avoid duplication.
+// Rationale (LOW finding round-1, addressed):
+//   plugin_loader.hpp previously re-declared the same typedef independently.
+//   Drift between the two would be silent.  plugin_entry.hpp is the C-ABI
+//   surface header and owns the single definition; the loader imports it.
 
 // ---------------------------------------------------------------------------
 // PluginLoader

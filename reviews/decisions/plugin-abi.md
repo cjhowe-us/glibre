@@ -238,9 +238,17 @@ component permitted to touch plugin dylibs.
    middleman symbols as a load failure rather than a later
    crash. `RTLD_LOCAL` keeps the plugin's symbols out of the global
    namespace.
-   - On `dlopen` failure → `core::Error::PluginDlopenFailed`,
-     attach `dlerror()` text to `ErrorContext::detail`. Abort
-     sequence; no further steps.
+   - On `dlopen` failure → `core::Error::PluginDlopenFailed`.
+     Abort sequence; no further steps.
+     **dlerror() note (plan #229, round-1, addressed)**: POSIX specifies
+     that `dlerror()` returns a thread-local pointer that may be
+     invalidated by the next `dlerror()` call.  Storing it in a non-owning
+     `eastl::string_view` inside `ErrorContext::detail` is therefore UB
+     once the `Error` escapes the refusal site.  The loader instead emits
+     the dlerror text to stderr at the refusal site and uses a stable
+     string literal (`"dlopen failed"`) for `ErrorContext::detail`.
+     Structured logging via `glibre::log_error` is the caller's
+     responsibility per error-model.md §"Logging / Telemetry" rule 1.
 2. **dlsym** the four required symbols: `glibre_plugin_abi_hash`,
    `glibre_plugin_manifest`, `glibre_plugin_manifest_size`,
    `glibre_plugin_register`. Any missing symbol →
@@ -249,6 +257,19 @@ component permitted to touch plugin dylibs.
    `glibre::types::deserialize<PluginManifest>(std::span{ptr,
    size})`. Failure → `core::Error::PluginManifestInvalid`,
    dlclose, abort.
+
+   **Step-3 deferral (plan #229, round-1, addressed)**: until plan #225
+   (`glibre-foryc` per-plugin manifest.cpp emission) lands, the
+   `glibre_plugin_manifest` / `glibre_plugin_manifest_size` blob symbols
+   are present in the dylib but may be null/zero (MVP stubs).  The loader
+   in plan #229 falls back to reading a sidecar `<dylib>.manifest` file
+   as a temporary measure, storing the result without aborting the load.
+   Plan #230 will enforce "manifest must be valid" and switch to the
+   blob path once #225 emits real blobs.  The sidecar approach is NOT the
+   canonical architecture; it is a bridge until the codegen pipeline is
+   complete.  When #225 lands and the blob is always non-null, delete the
+   sidecar fallback path in `plugin_loader.cpp` and enforce blob
+   deserialisation exclusively.
 4. **Hash check**: compare `manifest.abi_hash` (and the redundant
    `glibre_plugin_abi_hash` exported symbol — both must agree, both
    must equal the host's `glibre_types_abi_hash()`). Mismatch →
