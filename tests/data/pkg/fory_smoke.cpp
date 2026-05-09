@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-// Smoke link-test for the Fory::fory vcpkg overlay port (refs #218).
+// Fory vcpkg overlay port smoke tests (refs #218).
 //
-// This translation unit instantiates Fory symbols to confirm that:
+// Covers two concerns in one ctest target:
 //   1. find_package(Fory CONFIG REQUIRED) resolves the overlay port.
 //   2. target_link_libraries(... Fory::fory) satisfies the linker.
 //   3. Transitive absl symbols propagate through Fory::fory so that an

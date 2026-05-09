@@ -10,21 +10,21 @@ cmake_minimum_required(VERSION 3.30)
 find_package(Catch2 CONFIG REQUIRED)
 find_package(Fory CONFIG REQUIRED)
 
-add_executable(fory_target_links fory_target_links.cpp)
+add_executable(fory_smoke fory_smoke.cpp)
 
-target_link_libraries(fory_target_links
+target_link_libraries(fory_smoke
     PRIVATE
         Catch2::Catch2WithMain
         Fory::fory
 )
 
 # CXX_MODULE_STD OFF: Catch2's generated main calls std:: symbols via classical
-# headers.  Apple-Clang's std module and Catch2's catch_all.hpp are
-# incompatible at the version pinned in vcpkg.json — enabling std module
-# import causes duplicate symbol linker errors on this toolchain.  This
-# property must remain OFF until Catch2 ships explicit module support.
-set_target_properties(fory_target_links PROPERTIES CXX_MODULE_STD OFF)
+# headers.  Apple-Clang (Homebrew clang >= 21, currently 22.x on macOS 26
+# Apple Silicon) and Catch2's catch_all.hpp are incompatible with std module
+# import — enabling it causes duplicate symbol linker errors on this toolchain.
+# This property must remain OFF until Catch2 ships explicit module support.
+set_target_properties(fory_smoke PROPERTIES CXX_MODULE_STD OFF)
 
 include(CTest)
 include(Catch)
-catch_discover_tests(fory_target_links)
+catch_discover_tests(fory_smoke)
