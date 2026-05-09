@@ -62,6 +62,8 @@
 #include <EASTL/string.h>
 #include <EASTL/string_view.h>
 
+#include "glibre/alloc.hpp"
+#include "glibre/core/context_tag_resolver.hpp"  // derive_context_tag (moved to SRP unit, MED-2)
 #include "glibre/core/plugin_manifest.hpp"
 #include "glibre/error.hpp"
 

@@ -246,4 +246,156 @@ void register_allocator(PerContextAllocator& alloc) noexcept;
 // opened as a follow-up to this PR.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// AllocatorHandle — tag-stamped allocator wrapper for plugin call sites
+//
+// Authority: reviews/decisions/perf-budget.md §Allocator Rules #1, plan #989.
+//
+// ## Design
+//
+//   Plugin call sites obtain an AllocatorHandle once at glibre_plugin_register
+//   time (via PluginContext::alloc).  The handle carries a ContextTag stamped
+//   at construction so plugin code never needs to supply the tag explicitly
+//   on each allocate() / deallocate() call.
+//
+//   AllocatorHandle holds a non-owning reference to the engine's long-lived
+//   PerContextAllocator (owned by the bounded context, not by the plugin).
+//   The engine guarantees the allocator outlives any AllocatorHandle derived
+//   from it — handles must not be persisted past the plugin's lifetime.
+//
+//   AllocatorHandle forwards allocate() / deallocate() to the underlying
+//   PerContextAllocator, injecting the stamped tag.  No additional state
+//   is maintained; all ceiling enforcement and byte counting reside in the
+//   PerContextAllocator.
+//
+// ## Tag stamping
+//
+//   The tag is passed once at AllocatorHandle construction.  The engine's
+//   plugin loader stamps the ContextTag that corresponds to the registering
+//   plugin's bounded context, so the plugin binary has no tag-enum dependency.
+//
+// ## Thread safety
+//
+//   Thread safety is identical to the underlying PerContextAllocator.
+//   AllocatorHandle itself carries no mutable state; concurrent copies of the
+//   same handle forwarding to the same PerContextAllocator behave identically
+//   to concurrent direct callers of that allocator.
+//
+// ## Value-category contract
+//
+//   AllocatorHandle is copy-constructible and move-constructible (both are
+//   semantically equivalent — the "copy" is a bitwise copy of the reference
+//   and tag, not a deep clone).  Both copy-assignment and move-assignment are
+//   deleted because C++ does not permit assigning to reference members.
+//
+//   In short:
+//     AllocatorHandle h1{alloc, tag};   // construct
+//     AllocatorHandle h2 = h1;          // copy-construct — OK
+//     AllocatorHandle h3 = std::move(h1); // move-construct — OK (same as copy)
+//     h2 = h3;                          // ERROR: copy-assignment deleted
+//
+//   This contract is intentional: rebinding a handle to a different allocator
+//   would be a lifetime hazard (the old reference could dangle).  The caller
+//   must construct a new handle explicitly.
+//
+//   PluginContext::alloc holds an AllocatorHandle by value; the loader can
+//   copy-construct it into PluginContext during aggregate initialisation
+//   because AllocatorHandle is copy-constructible.  Plugins must not store
+//   the handle past their own lifetime (the underlying PerContextAllocator is
+//   owned by the engine, not by the plugin).
+//
+// ## Lifetime contract
+//
+//   The PerContextAllocator passed at construction MUST outlive every
+//   AllocatorHandle derived from it.  The engine guarantees this for
+//   plugin-lifetime handles (the allocator is a long-lived context singleton).
+//   Test code must ensure the allocator is declared before the handle and goes
+//   out of scope after it (RAII ordering).
+//
+// ## -fno-exceptions clean
+//   No exceptions thrown or propagated.  Error path uses std::unexpected.
+// ---------------------------------------------------------------------------
+
+class AllocatorHandle {
+public:
+    // Construct an AllocatorHandle that forwards all allocation calls to
+    // `alloc`, stamping every call with `tag`.
+    //
+    // Precondition: `alloc` must outlive all AllocatorHandle instances
+    // derived from it (the engine guarantees this for plugin lifetimes).
+    explicit AllocatorHandle(PerContextAllocator& alloc, ContextTag tag) noexcept
+        : alloc_{alloc},
+          tag_{tag} {}
+
+    // Rvalue constructor is deleted: AllocatorHandle(PerContextAllocator{...}, tag) would bind
+    // the handle's reference member to a temporary that is destroyed at the end of the full
+    // expression — a guaranteed dangling reference.  Deleting this overload makes the hazard a
+    // compile-time error rather than silent UB at runtime (MED-4, round-2 review).
+    explicit AllocatorHandle(PerContextAllocator&&, ContextTag) = delete;
+
+    // Copy-constructible: multiple handles with the same tag and underlying
+    // allocator are permitted.  Copying does not transfer ownership — the
+    // handle is non-owning (holds a reference, not a pointer).
+    AllocatorHandle(const AllocatorHandle&) noexcept = default;
+
+    // Copy assignment is deleted: C++ does not allow assigning to references,
+    // so a type holding a reference member cannot have an assignable copy.
+    // Use a new handle to rebind to a different allocator.
+    AllocatorHandle& operator=(const AllocatorHandle&) = delete;
+
+    // Move-constructible: semantically equivalent to copy for a non-owning
+    // handle (both the "source" and "destination" reference the same
+    // PerContextAllocator after the move).
+    AllocatorHandle(AllocatorHandle&&) noexcept = default;
+
+    // Move assignment is deleted for the same reason as copy assignment
+    // (reference member prevents rebinding via assignment).
+    AllocatorHandle& operator=(AllocatorHandle&&) = delete;
+
+    ~AllocatorHandle() noexcept = default;
+
+    // allocate(bytes, align) — allocate `bytes` aligned to `align` bytes.
+    //
+    // Forwards to alloc_.allocate(bytes, align) with no additional overhead.
+    // The tag is stamped by the PerContextAllocator's byte-counter bookkeeping,
+    // not by AllocatorHandle — the handle merely removes the per-call tag
+    // argument from plugin call sites.
+    //
+    // In GLIBRE_ALLOC_STRICT builds the ceiling check on the underlying
+    // PerContextAllocator may return std::unexpected{core::Error::OutOfBudget}.
+    [[nodiscard]] Result<void*>
+    allocate(std::size_t bytes, std::size_t align = alignof(std::max_align_t)) noexcept {
+        return alloc_.allocate(bytes, align);
+    }
+
+    // deallocate(p, bytes) — release memory previously returned by allocate().
+    //
+    // Forwards to alloc_.deallocate(p, bytes).  `bytes` must match the
+    // argument passed to allocate() for pointer p (same contract as the
+    // underlying PerContextAllocator).
+    void deallocate(void* p, std::size_t bytes) noexcept { alloc_.deallocate(p, bytes); }
+
+    // tag() — the ContextTag stamped at construction.
+    [[nodiscard]] ContextTag tag() const noexcept { return tag_; }
+
+    // wraps(alloc) — identity check: returns true if this handle wraps the given allocator.
+    //
+    // Used in tests and diagnostic tooling to verify that the loader stamped the correct
+    // PerContextAllocator into a PluginContext without exposing a public mutable reference.
+    // Replacing the former underlying() accessor (which returned a non-const ref and allowed
+    // plugin code to bypass the tag stamp) with this predicate closes that bypass
+    // (MED-3, round-2 review).
+    //
+    // For test cases that need to inspect the byte counter of the wrapped allocator, declare
+    // the PerContextAllocator as a named local variable in the test body — test code already
+    // owns the allocator, so no accessor into the handle is needed.
+    [[nodiscard]] bool wraps(const PerContextAllocator& alloc) const noexcept {
+        return &alloc_ == &alloc;
+    }
+
+private:
+    PerContextAllocator& alloc_;
+    ContextTag tag_;
+};
+
 }  // namespace glibre

@@ -106,6 +106,11 @@ struct PluginContextFixture {
     StubPassRegistry pass_reg;
     StubPanelRegistry panel_reg;
     StubPluginManifest manifest;
+    // Per-context allocator used to construct the AllocatorHandle in the
+    // PluginContext.  ContextTag::core is used here as a representative tag
+    // for test fixtures; a 1 MiB ceiling prevents OutOfBudget in strict-mode
+    // (GLIBRE_ALLOC_STRICT=1).
+    glibre::PerContextAllocator test_alloc{glibre::ContextTag::core, 1024ULL * 1024ULL};
     StubLogSink log;
 
     glibre::core::PluginContext ctx{
@@ -115,7 +120,8 @@ struct PluginContextFixture {
         reinterpret_cast<glibre::core::PassRegistry&>(pass_reg),
         reinterpret_cast<glibre::core::PanelRegistry&>(panel_reg),
         reinterpret_cast<const glibre::core::PluginManifest&>(manifest),
-        reinterpret_cast<glibre::core::LogSink&>(log)
+        reinterpret_cast<glibre::core::LogSink&>(log),
+        glibre::AllocatorHandle{test_alloc, glibre::ContextTag::core},
     };
 };
 
@@ -174,6 +180,9 @@ TEST_CASE("plugin_context_is_pod_aggregate", "[core][plugin_api]") {
     CHECK(
         &fixture.ctx.manifest == reinterpret_cast<glibre::core::PluginManifest*>(&fixture.manifest)
     );
+    // Verify the AllocatorHandle is correctly stamped with the expected tag.
+    CHECK(fixture.ctx.alloc.tag() == glibre::ContextTag::core);
+    CHECK(fixture.ctx.alloc.wraps(fixture.test_alloc));
     CHECK(&fixture.ctx.log == reinterpret_cast<glibre::core::LogSink*>(&fixture.log));
 }
 
@@ -393,6 +402,7 @@ TEST_CASE("plugin_context_register_smoke", "[core][plugin_api]") {
     CHECK(&fixture.ctx.pass_registry != nullptr);
     CHECK(&fixture.ctx.panel_registry != nullptr);
     CHECK(&fixture.ctx.manifest != nullptr);
+    CHECK(fixture.ctx.alloc.wraps(fixture.test_alloc));
     CHECK(&fixture.ctx.log != nullptr);
 }
 

@@ -49,6 +49,7 @@
 
 #include <EASTL/string.h>
 #include <EASTL/string_view.h>
+#include <glibre/alloc.hpp>              // AllocatorHandle, ContextTag
 #include <glibre/core/plugin_entry.hpp>  // RegisterFn — single source of truth (LOW-6)
 #include <glibre/core/plugin_manifest.hpp>
 #include <glibre/error.hpp>

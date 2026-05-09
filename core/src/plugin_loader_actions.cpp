@@ -18,10 +18,85 @@
 #include <cassert>
 #include <cstdint>
 
-#include "glibre/core/plugin_api.hpp"  // PluginContext, RegisterFn
-#include "glibre/log_error.hpp"        // glibre::variant_code_string
+#include "glibre/alloc.hpp"                      // PerContextAllocator, AllocatorHandle
+#include "glibre/core/context_tag_resolver.hpp"  // derive_context_tag
+#include "glibre/core/plugin_api.hpp"            // PluginContext, RegisterFn
+#include "glibre/log_error.hpp"                  // glibre::variant_code_string
 
 namespace glibre::core {
+
+// ---------------------------------------------------------------------------
+// call_register_stamped — production step 9 with AllocatorHandle stamping
+//
+// Implements the full seam described in issue #989 §Scope and in perf-budget.md
+// §Allocator Rules #1:
+//
+//   derive_context_tag(manifest.name)
+//     → AllocatorHandle{per_context_alloc, tag}
+//     → PluginContext{..., alloc_handle}
+//     → call_register(register_fn, ctx)
+//
+// This is the only production call path that invokes call_register.  The lower-
+// level call_register(RegisterFn, PluginContext&) overload is retained for unit
+// tests that need to supply a hand-crafted PluginContext (e.g. stub tests in
+// plan #231) while this function is the production-facing entry-point.
+//
+// Authority: issue #989 §Scope; perf-budget.md §Allocator Rules #1; plugin-abi.md
+//            §"Loader Sequence" step 9.
+// ---------------------------------------------------------------------------
+
+Result<void> call_register_stamped(
+    RegisterFn register_fn,
+    glibre::PerContextAllocator& per_context_alloc,
+    const PluginManifest& manifest,
+    World& world,
+    TypeRegistry& type_registry,
+    SystemRegistry& system_registry,
+    PassRegistry& pass_registry,
+    PanelRegistry& panel_registry,
+    LogSink& log
+) noexcept {
+    // Step 1: derive the ContextTag from the manifest plugin name.
+    //
+    // The manifest name follows the convention "glibre.<context>[.<sub>...]".
+    // derive_context_tag extracts the second dot-delimited component and maps it
+    // to the corresponding ContextTag enumerator.  An unknown or malformed name
+    // returns PluginManifestInvalid; the gates in plan #230 should have caught
+    // this earlier, but we propagate cleanly here rather than asserting.
+    auto tag_result = derive_context_tag(eastl::string_view{manifest.name.c_str()});
+    if (!tag_result) {
+        return std::unexpected(tag_result.error());
+    }
+
+    // Step 2: construct the stamped AllocatorHandle.
+    //
+    // The tag is stamped once at handle-construction time so the plugin's
+    // allocate() / deallocate() call sites are tag-free (perf-budget.md
+    // §Allocator Rules #1).  per_context_alloc is owned by the bounded context
+    // and outlives this call and the returned handle.
+    glibre::AllocatorHandle alloc_handle{per_context_alloc, *tag_result};
+
+    // Step 3: build the PluginContext aggregate.
+    //
+    // PluginContext is a POD-like mixed-storage aggregate (references + one value
+    // type: alloc).  The aggregate is built here on the stack and passed by
+    // reference to the plugin's glibre_plugin_register entry-point.  The context
+    // is destroyed when call_register returns; plugins must not stash pointers to
+    // it past the call (plugin-abi.md §"Registration Entry-Point Signature").
+    PluginContext ctx{
+        .world = world,
+        .type_registry = type_registry,
+        .system_registry = system_registry,
+        .pass_registry = pass_registry,
+        .panel_registry = panel_registry,
+        .manifest = manifest,
+        .log = log,
+        .alloc = alloc_handle,
+    };
+
+    // Step 4: invoke call_register with the fully-stamped context.
+    return call_register(register_fn, ctx);
+}
 
 // ---------------------------------------------------------------------------
 // call_register — loader step 9 (plugin-abi.md §"Loader Sequence")
