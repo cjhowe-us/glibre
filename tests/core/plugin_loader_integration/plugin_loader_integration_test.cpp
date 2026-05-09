@@ -491,6 +491,19 @@ TEST_CASE("integration_manifest_invalid_propagates", "[core][integration]") {
     const auto* core_err = as_core_error(manifest_res.error());
     REQUIRE(core_err != nullptr);
     CHECK(*core_err == glibre::core::Error::PluginManifestInvalid);
+
+    // Coverage note (refs #225): this test depends on PluginManifest::open()
+    // returning PluginManifestInvalid for ANY regular file, which is the current
+    // stub behaviour in core/src/plugin_manifest.cpp:41.  The empty sidecar
+    // created by `cmake -E touch` satisfies the gate trivially — we are not yet
+    // testing that garbage bytes fail Fory deserialization, only that the loader
+    // propagates the PluginManifestInvalid error correctly.
+    //
+    // Once plan #225 lands real Fory decoders, this test must be refreshed:
+    //   • write a non-empty garbage payload to the sidecar (or use the
+    //     kGarbageBlob already embedded in stub_invalid_manifest.cpp), and
+    //   • update the sidecar creation in CMakeLists.txt accordingly.
+    // At that point the test will verify the actual deserialise-failure path.
 #endif
 }
 
@@ -537,6 +550,13 @@ TEST_CASE("integration_engine_too_old_propagates", "[core][integration]") {
     // required symbols.
     auto loader_result = glibre::core::PluginLoader::open(noop_path);
     REQUIRE(loader_result.has_value());
+
+    // Anchor the dlopen: verify the ABI hash symbol resolved to the noop
+    // sentinel.  Without this check the open() call is performative; this
+    // assertion confirms dlsym reached the correct dylib before we feed the
+    // synthetic manifest into the registry gates below.
+    REQUIRE(loader_result->abi_hash() != nullptr);
+    CHECK(eastl::string_view{loader_result->abi_hash()} == eastl::string_view{kNoopAbiHash});
 
     // Registry with host engine version {1, 0, 0}.
     glibre::core::PluginLoaderRegistry registry{kHostVersion};
@@ -609,6 +629,13 @@ TEST_CASE("integration_dependency_missing_propagates", "[core][integration]") {
     // Step 1–2: dlopen + dlsym must succeed.
     auto loader_result = glibre::core::PluginLoader::open(noop_path);
     REQUIRE(loader_result.has_value());
+
+    // Anchor the dlopen: verify the ABI hash symbol resolved to the noop
+    // sentinel.  Without this check the open() call is performative; this
+    // assertion confirms dlsym reached the correct dylib before we feed the
+    // synthetic manifest into the registry gates below.
+    REQUIRE(loader_result->abi_hash() != nullptr);
+    CHECK(eastl::string_view{loader_result->abi_hash()} == eastl::string_view{kNoopAbiHash});
 
     // Registry is empty — "glibre.integration.missing_dep" is not registered.
     glibre::core::PluginLoaderRegistry registry{kHostVersion};

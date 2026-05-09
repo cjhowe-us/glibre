@@ -38,6 +38,8 @@
 namespace {
 
 // 8 bytes of garbage — not a valid Fory header.
+// Currently unused by the loader (sidecar path, not embedded-blob path);
+// will be consumed once plans #225/#230 switch to the embedded-blob decode path.
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays)
 constexpr std::byte kGarbageBlob[8]{
     std::byte{0xDE},
