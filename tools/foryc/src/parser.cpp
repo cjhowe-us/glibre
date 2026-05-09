@@ -14,6 +14,8 @@
 
 #include <EASTL/unordered_set.h>
 
+#include "fqn_mangle.hpp"
+
 namespace glibre::tools::foryc {
 
 namespace {
@@ -283,21 +285,6 @@ private:
         return true;
     }
 
-    // Validate that an identifier segment does not contain "__".
-    // "__" (double-underscore) is reserved by the codegen mangling scheme
-    // (fory-codegen.md §"ABI Stability Rules" point 4, plan #1010):
-    // dots in a dotted FQN are replaced by "__" to form C symbol suffixes.
-    // A segment that already contains "__" would alias a multi-segment FQN,
-    // making fqn_to_mangled non-injective and defeating collision-prevention.
-    [[nodiscard]] static bool segment_contains_double_underscore(std::string_view seg) noexcept {
-        const std::size_t sz = seg.size();
-        for (std::size_t i = 0; i + 1 < sz; ++i) {
-            if (seg[i] == '_' && seg[i + 1] == '_')
-                return true;
-        }
-        return false;
-    }
-
     // Parse a dotted FQN: word ('.' word)* — may also consume as Ident+Dot tokens
     // Returns the concatenated string.
     //
@@ -306,11 +293,13 @@ private:
     // fory-codegen.md §"ABI Stability Rules" point 4).  The rejection keeps
     // fqn_to_mangled injective: "glibre.core__Foo" and "glibre.core.Foo" would
     // otherwise both mangle to "glibre__core__Foo".
+    // Validation delegated to fqn_mangle::segment_contains_double_underscore
+    // (fqn_mangle.hpp) so the same rule is reusable from any emitter.
     [[nodiscard]] std::expected<eastl::string, glibre::Error> parse_fqn() {
         if (current_.kind != TokenKind::Ident)
             return FORYC_ERR(tools::Error::ForycSyntaxError, "expected schema FQN");
 
-        if (segment_contains_double_underscore(current_.text))
+        if (fqn_mangle::segment_contains_double_underscore(current_.text))
             return FORYC_ERR(
                 tools::Error::ForycInvalidIdentifier,
                 "FQN segment contains '__' which is reserved for codegen mangling"
@@ -323,7 +312,7 @@ private:
             advance();  // consume '.'
             if (current_.kind != TokenKind::Ident)
                 return FORYC_ERR(tools::Error::ForycSyntaxError, "expected identifier after '.'");
-            if (segment_contains_double_underscore(current_.text))
+            if (fqn_mangle::segment_contains_double_underscore(current_.text))
                 return FORYC_ERR(
                     tools::Error::ForycInvalidIdentifier,
                     "FQN segment contains '__' which is reserved for codegen mangling"

@@ -877,3 +877,61 @@ schema glibre.core.Transform {
         text.find("glibre_plugin_migrations_glibre__core__Transform_size") != eastl::string::npos
     );
 }
+
+// -----------------------------------------------------------------------
+// Test: foryc_emit_migration_rejects_synthetic_ir_with_invalid_segment
+//
+// Exercises the defensive re-validation added to emit_migration()'s
+// per-TypeDecl loop (plan #1010, R2 review MED-1 finding).
+//
+// The parser's parse_fqn() already rejects "__" segments at parse time, but
+// callers that build Schema IR directly (without the parser) could silently
+// bypass that guard.  emit_migration() now re-validates every segment of
+// td.fqn via fqn_mangle::segment_contains_double_underscore before passing
+// the FQN to fqn_to_mangled, and returns ForycInvalidIdentifier on any hit.
+//
+// This test constructs a synthetic Schema with a "__"-bearing FQN and
+// calls emit_migration() directly, asserting ForycInvalidIdentifier.
+// -----------------------------------------------------------------------
+
+TEST_CASE(
+    "foryc_emit_migration_rejects_synthetic_ir_with_invalid_segment",
+    "[foryc][emit_migration][fqn_mangle]"
+) {
+    // Build a synthetic Schema bypassing the parser.
+    // FQN "glibre.co__re.Foo" has a segment ("co__re") containing "__".
+    // The parser would have rejected this; emit_migration must also reject it.
+    Schema schema;
+    schema.source_path = eastl::string("<synthetic>");
+    TypeDecl td;
+    td.fqn = eastl::string("glibre.co__re.Foo");
+    td.version = 1;
+    schema.types.push_back(std::move(td));
+
+    auto result = emit_migration(schema, "<synthetic>");
+    REQUIRE_FALSE(result.has_value());
+    CHECK(has_tools_error(result.error(), glibre::tools::Error::ForycInvalidIdentifier));
+
+    // Also verify: a FQN whose *first* segment contains "__" is rejected.
+    Schema schema2;
+    schema2.source_path = eastl::string("<synthetic2>");
+    TypeDecl td2;
+    td2.fqn = eastl::string("gli__bre.core.Foo");
+    td2.version = 1;
+    schema2.types.push_back(std::move(td2));
+
+    auto result2 = emit_migration(schema2, "<synthetic2>");
+    REQUIRE_FALSE(result2.has_value());
+    CHECK(has_tools_error(result2.error(), glibre::tools::Error::ForycInvalidIdentifier));
+
+    // Sanity: a clean FQN passes through to a valid result.
+    Schema schema3;
+    schema3.source_path = eastl::string("<synthetic3>");
+    TypeDecl td3;
+    td3.fqn = eastl::string("glibre.core.Foo");
+    td3.version = 1;
+    schema3.types.push_back(std::move(td3));
+
+    auto result3 = emit_migration(schema3, "<synthetic3>");
+    REQUIRE(result3.has_value());
+}

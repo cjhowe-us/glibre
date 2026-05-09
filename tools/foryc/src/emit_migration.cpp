@@ -14,6 +14,8 @@
 #include <EASTL/string.h>
 #include <EASTL/vector.h>
 
+#include "fqn_mangle.hpp"
+
 namespace glibre::tools::foryc {
 
 namespace {
@@ -32,32 +34,6 @@ template<class... Args>
 [[nodiscard]] static eastl::string fmt_e(std::format_string<Args...> fmt, Args&&... args) noexcept {
     const std::string s = std::format(fmt, std::forward<Args>(args)...);
     return eastl::string(s.data(), s.size());
-}
-
-// -----------------------------------------------------------------------
-// fqn_to_mangled — mangle a dotted FQN into a C-symbol-safe string.
-//
-// Replaces every '.' with '__' (double-underscore) so that two types with
-// the same unqualified name but different FQNs produce distinct C symbols
-// (fory-codegen.md §"ABI Stability Rules" point 4, plan #1010).
-//
-// Examples:
-//   "glibre.core.Transform" → "glibre__core__Transform"
-//   "glibre.Transform"      → "glibre__Transform"
-//   "Transform"             → "Transform"   (single segment: no dots, no change)
-// -----------------------------------------------------------------------
-
-[[nodiscard]] static eastl::string fqn_to_mangled(const eastl::string& fqn) noexcept {
-    eastl::string out;
-    out.reserve(fqn.size() * 2);  // upper bound: each char emits at most 2 chars ('.' → "__")
-    for (std::size_t i = 0; i < fqn.size(); ++i) {
-        if (fqn[i] == '.') {
-            out += "__";
-        } else {
-            out += fqn[i];
-        }
-    }
-    return out;
 }
 
 // -----------------------------------------------------------------------
@@ -132,7 +108,8 @@ struct FqnParts {
     // unqualified name but live in different namespaces (e.g. glibre.core.Particle
     // and glibre.fx.Particle would collide without mangling).
     // fory-codegen.md §"ABI Stability Rules" point 4.
-    const eastl::string mangled = fqn_to_mangled(td.fqn);
+    // Shared helper from fqn_mangle.hpp — also reused by parser.cpp.
+    const eastl::string mangled = fqn_mangle::fqn_to_mangled(td.fqn);
 
     eastl::string out;
     out += "// ---- ";
@@ -309,10 +286,26 @@ emit_migration(const Schema& schema, std::string_view source_path) noexcept {
     if (schema.types.empty())
         return std::unexpected{glibre::Error{tools::Error::ForycEmptySchema}};
 
-    // Validate: every TypeDecl must have a non-empty FQN.
+    // Validate: every TypeDecl must have a non-empty FQN, and no segment of that
+    // FQN may contain "__" (double-underscore).  This defensive check mirrors the
+    // parse-time guard in parser.cpp::parse_fqn() so that callers who build IR
+    // directly (without going through the parser) cannot silently produce
+    // non-injective mangles (plan #1010, fory-codegen.md §"ABI Stability Rules"
+    // point 4).  Shared helper from fqn_mangle.hpp.
     for (const auto& td : schema.types) {
         if (td.fqn.empty())
             return std::unexpected{glibre::Error{tools::Error::ForycSyntaxError}};
+
+        // Walk segments (split on '.') and check each for "__".
+        std::string_view fqn_sv(td.fqn.data(), td.fqn.size());
+        while (!fqn_sv.empty()) {
+            const auto dot = fqn_sv.find('.');
+            const std::string_view seg =
+                (dot == std::string_view::npos) ? fqn_sv : fqn_sv.substr(0, dot);
+            if (fqn_mangle::segment_contains_double_underscore(seg))
+                return std::unexpected{glibre::Error{tools::Error::ForycInvalidIdentifier}};
+            fqn_sv = (dot == std::string_view::npos) ? std::string_view{} : fqn_sv.substr(dot + 1);
+        }
     }
 
     // -----------------------------------------------------------------------

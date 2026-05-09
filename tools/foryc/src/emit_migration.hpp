@@ -138,8 +138,13 @@ namespace glibre::tools::foryc {
 // `source_path` is embedded in the generated file's header comment.
 //
 // Error codes:
-//   tools::Error::ForycEmptySchema — schema.types is empty.
-//   tools::Error::ForycSyntaxError — malformed IR (empty FQN).
+//   tools::Error::ForycEmptySchema       — schema.types is empty.
+//   tools::Error::ForycSyntaxError       — malformed IR (empty FQN).
+//   tools::Error::ForycInvalidIdentifier — a FQN segment contains "__"; the
+//       "no __ in segment" invariant is enforced here as a defensive re-check
+//       so that callers building IR directly (without the parser) cannot
+//       silently produce non-injective mangles.  plan #1010,
+//       fory-codegen.md §"ABI Stability Rules" point 4.
 [[nodiscard]] glibre::Result<eastl::string>
 emit_migration(const Schema& schema, std::string_view source_path) noexcept;
 
