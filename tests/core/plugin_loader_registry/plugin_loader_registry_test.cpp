@@ -1,6 +1,6 @@
 // tests/core/plugin_loader_registry/plugin_loader_registry_test.cpp
 //
-// Catch2 unit tests for glibre::core::PluginLoaderRegistry (plan #230).
+// Catch2 unit tests for glibre::core::PluginLoaderRegistry (plan #230, #981).
 //
 // Named test cases (plan #230 Unit Test Plan + DoD):
 //   - plugin_loader_rejects_abi_hash_mismatch
@@ -8,6 +8,10 @@
 //   - plugin_loader_accepts_compatible_plugin
 //   - plugin_loader_rejects_duplicate_name
 //   - plugin_loader_rejects_incompatible_version
+//
+// Named test cases (plan #981 Unit Test Plan + DoD):
+//   - validate_drain_phase_outside_hotreload_returns_error
+//   - validate_drain_phase_at_phase_8_succeeds
 //
 // Design constraints:
 //   • -fno-exceptions (error-model.md §Decision 3).
@@ -22,6 +26,7 @@
 
 #include <EASTL/string_view.h>
 #include <catch2/catch_test_macros.hpp>
+#include <glibre/core/frame_phase.hpp>
 #include <glibre/core/plugin_loader_registry.hpp>
 #include <glibre/core/plugin_manifest.hpp>
 #include <glibre/error.hpp>
@@ -457,6 +462,59 @@ TEST_CASE("plugin_loader_accepts_multi_dependency_plugin", "[core][plugin_loader
 
     auto result = registry.validate_all(
         manifest, expected, expected, eastl::string_view{"/fake/consumer.dylib"}
+    );
+    CHECK(result.has_value());
+}
+
+// ===========================================================================
+// Test: validate_drain_phase_outside_hotreload_returns_error  (plan #981)
+//
+// Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" step 8 and
+//            reviews/decisions/frame-phases.md §8.
+//
+// The drain guard must return core::Error::FramePhaseMisordered for every
+// frame phase other than Phase::HotReload (phase 8).  Registry mutations
+// (call_register, rebuild_schedule, migrate_components) are forbidden outside
+// the hot-reload barrier.
+//
+// SRP validation: PluginLoaderRegistry::validate_drain_phase is a static
+// method — it accepts the phase by value so the registry does NOT own or
+// query phase state (plans #247/#248 will supply the real FramePhaseTracker).
+// ===========================================================================
+
+TEST_CASE("validate_drain_phase_outside_hotreload_returns_error", "[core][plugin_loader_registry]") {
+    // Enumerate all non-HotReload phases and assert each returns the error.
+    const glibre::core::Phase non_hotreload_phases[] = {
+        glibre::core::Phase::Input,
+        glibre::core::Phase::Logic,
+        glibre::core::Phase::PhysicsFixed,
+        glibre::core::Phase::Animation,
+        glibre::core::Phase::Transform,
+        glibre::core::Phase::CullExtract,
+        glibre::core::Phase::RenderSubmit,
+        glibre::core::Phase::Present,
+    };
+
+    for (const auto phase : non_hotreload_phases) {
+        INFO("phase = " << static_cast<int>(phase));
+        auto result = glibre::core::PluginLoaderRegistry::validate_drain_phase(phase);
+        REQUIRE_FALSE(result.has_value());
+        const auto* core_err = as_core_error(result.error());
+        REQUIRE(core_err != nullptr);
+        CHECK(*core_err == glibre::core::Error::FramePhaseMisordered);
+    }
+}
+
+// ===========================================================================
+// Test: validate_drain_phase_at_phase_8_succeeds  (plan #981 optional)
+//
+// Happy path: Phase::HotReload (phase 8) is the only permitted phase for
+// registry mutations.  validate_drain_phase must return success.
+// ===========================================================================
+
+TEST_CASE("validate_drain_phase_at_phase_8_succeeds", "[core][plugin_loader_registry]") {
+    auto result = glibre::core::PluginLoaderRegistry::validate_drain_phase(
+        glibre::core::Phase::HotReload
     );
     CHECK(result.has_value());
 }

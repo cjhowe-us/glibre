@@ -46,6 +46,7 @@
 #include <EASTL/string.h>
 #include <EASTL/string_view.h>
 #include <EASTL/vector.h>
+#include <glibre/core/frame_phase.hpp>
 #include <glibre/core/plugin_manifest.hpp>
 #include <glibre/error.hpp>
 
@@ -153,6 +154,33 @@ public:
     // -----------------------------------------------------------------------
 
     [[nodiscard]] Result<void> validate_dependencies(const PluginManifest& manifest) const noexcept;
+
+    // -----------------------------------------------------------------------
+    // validate_drain_phase — phase-8 precondition guard (plan #981).
+    //
+    // Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" step 8:
+    //   "at this point the world is already drained (frame-phases §8 guarantee).
+    //    The loader is free to mutate type registry, system schedule, pass
+    //    registry, panel registry."
+    //   reviews/decisions/frame-phases.md §8 — hot-reload is the ONLY phase
+    //   during which registry mutations (call_register, rebuild_schedule,
+    //   migrate_components) are permitted.
+    //
+    // SRP boundary: PluginLoaderRegistry does NOT own phase state.  The caller
+    // (PluginLoader in the phase-8 frame loop) supplies the current frame phase
+    // as a parameter.  Plans #247 and #248 will land the full FramePhaseTracker
+    // API; this guard is the minimal injection point they can replace.
+    //
+    // Returns success when current_phase == Phase::HotReload (phase 8).
+    // Returns std::unexpected(core::Error::FramePhaseMisordered) on any other
+    // phase — registry mutations outside the hot-reload barrier are forbidden.
+    //
+    // Call this BEFORE any registry mutation (validate_all, register_plugin,
+    // rebuild_schedule, migrate_components) to enforce the frame-phase invariant
+    // in debug and release builds alike.
+    // -----------------------------------------------------------------------
+
+    [[nodiscard]] static Result<void> validate_drain_phase(Phase current_phase) noexcept;
 
     // -----------------------------------------------------------------------
     // validate_all — run all four gates in order (steps 4–7).
