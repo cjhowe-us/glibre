@@ -1,20 +1,35 @@
 #pragma once
 // core/include/glibre/core/plugin_loader_actions.hpp
 //
-// Loader-procedure free functions — steps 9–11 of the plugin loader sequence.
+// Loader-procedure free functions — two axes of stateless loader-sequence work:
 //
-// Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" steps 9–11,
-//            §"Failure Modes → core::Error" rows 9, 10, 11.
+//   Axis 1 — Initial-load post-gate actions (steps 9–11 of the plugin loader
+//             sequence).  These run ONCE when a plugin is first loaded, after
+//             all four PluginLoaderRegistry gate checks (steps 4–7) pass.
+//             Authority: reviews/decisions/plugin-abi.md §"Loader Sequence"
+//             steps 9–11 and §"Failure Modes → core::Error" rows 9, 10, 11.
 //
-// These functions implement the post-gate actions that run after all four
-// PluginLoaderRegistry gate checks (steps 4–7) pass.  They are free functions
-// rather than PluginLoaderRegistry members because they do not read or mutate
-// the registry-of-records state (the loaded_ map and host_engine_version_).
-// Keeping them separate respects the SRP boundary that motivated splitting
-// PluginLoader (RAII handle + dlopen/dlsym, plan #229) from PluginLoaderRegistry
-// (gate validation + records, plan #230) in the first place.
+//   Axis 2 — Hot-reload pre-swap validation (hot-reload phase-8 step 2, plan
+//             #250).  This check runs EVERY reload cycle, after the drain step
+//             and before the vtable swap.  It inspects two loaded-plugin
+//             manifests and returns an error if the swap should be refused.
+//             Authority: reviews/decisions/hot-reload-protocol.md §"Step 2 —
+//             Swap" sub-steps 2.1 and 2.2.
 //
-// Callers: PluginLoader (plan #229) orchestrates steps 1–11; these free
+// SRP note: the two axes share this file because both expose stateless free
+// functions that do not read or mutate PluginLoaderRegistry state (the loaded_
+// map and host_engine_version_).  That "no-registry-state" boundary is the
+// single responsibility this file enforces.  The test directory split
+// (tests/core/plugin_loader/ for Axis 1, tests/core/hot_reload/ for Axis 2)
+// signals that the axes MAY be separated into parallel header/source pairs once
+// plans #251+ add type-superset checks and migration-arena work that would
+// further grow Axis 2's responsibility surface.
+//
+// TODO(#251): evaluate splitting hot_reload_validate (and its successors from
+// plans #251+) into core/include/glibre/core/hot_reload_actions.hpp + .cpp to
+// match the test directory structure and keep each file on a single axis.
+//
+// Callers: PluginLoader (plan #229) orchestrates steps 1–11; the Axis 1
 //          functions are called after validate_all() succeeds and before
 //          register_plugin() records the newly loaded plugin.
 //
@@ -23,7 +38,8 @@
 
 #include <cstdint>
 
-#include <glibre/core/plugin_api.hpp>  // RegisterFn, PluginContext
+#include <glibre/core/plugin_api.hpp>       // RegisterFn, PluginContext
+#include <glibre/core/plugin_manifest.hpp>  // PluginManifest, SemVer
 #include <glibre/error.hpp>
 
 namespace glibre::core {
@@ -116,5 +132,100 @@ namespace glibre::core {
 
 [[nodiscard]] Result<void>
 migrate_components(std::uint32_t from_version, std::uint32_t to_version) noexcept;
+
+// ---------------------------------------------------------------------------
+// hot_reload_validate — pre-swap compatibility check (plan #250).
+//
+// Authority: reviews/decisions/hot-reload-protocol.md §"Step 2 — Swap",
+//            sub-steps 2.1 and 2.2.
+//
+// Validates that an incoming plugin candidate (`incoming`) is a safe swap
+// for the currently-loaded plugin (`outgoing`).  This check runs during
+// phase 8 after the drain step and before the vtable swap (step 2.3).
+//
+// Three sequential checks, performed in the order below:
+//
+//   Check A — Name identity (plan #250 configuration-error guard; no parent
+//             step in hot-reload-protocol.md or plugin-abi.md):
+//     incoming.name == outgoing.name.  Swapping for a plugin with a different
+//     name is a configuration error — the operator loaded the wrong dylib.
+//     Failure → core::Error::PluginNameMismatch.
+//
+//   Check B — ABI hash (hot-reload-protocol §2.1):
+//     incoming.abi_hash == outgoing.abi_hash.
+//
+//     Protocol §2.1 specifies the check as `incoming == host_glibre_types_abi_hash`
+//     (incoming-vs-host).  Here we compare incoming-vs-outgoing instead.  This
+//     is semantically equivalent under the following precondition:
+//
+//       PRECONDITION: PluginLoaderRegistry::validate_all() confirmed that BOTH
+//       manifests equal the host hash before the loader ever called
+//       hot_reload_validate.  If that precondition holds, then:
+//         incoming.abi_hash == host   (guaranteed by validate_all)
+//         outgoing.abi_hash == host   (guaranteed by validate_all)
+//         → incoming.abi_hash == outgoing.abi_hash   (transitively)
+//
+//     Comparing the two manifests against each other rather than against the
+//     host hash surfaces one additional failure mode: a bug where the two
+//     loaded manifests disagree with each other despite both nominally passing
+//     validate_all (e.g. a race that replaced outgoing's manifest between
+//     validate_all and this call).  In practice that race cannot occur because
+//     the loader holds the exclusive phase-8 lock, but the belt-and-suspenders
+//     check is cheap and the error message is more specific.
+//
+//     The PRECONDITION is asserted in debug builds via #ifndef NDEBUG /
+//     assert() inside hot_reload_validate (see plugin_loader_actions.cpp).
+//     Call sites must not invoke this function without first calling
+//     validate_all.
+//
+//     Failure → core::Error::PluginAbiHashMismatch.
+//
+//   Check C — SemVer major version (plan #250 extension of protocol §2.2):
+//     The incoming plugin's semantic version major must equal the outgoing's.
+//     The minor/patch may advance (additive changes are safe); they may also
+//     stay the same (a patch rebuild).  A major-version change signals a
+//     breaking redesign that requires a fresh world, not a hot-reload.
+//
+//     DIVERGENCE NOTE: hot-reload-protocol §2.2 defines a component-type-set
+//     superset check on (fqn, schema_version) — it does NOT define a discrete
+//     SemVer-major equality check.  The phrase "major-version change" in the
+//     protocol is descriptive language about *why* the superset check fails
+//     when a plugin drops a registered type, not a separate criterion.
+//
+//     Plan #250 introduces SemVer-major equality as an additional,
+//     manifest-only precondition that is cheaper to evaluate than the full
+//     superset check (which requires archetype storage — deferred to plans
+//     #251+).  It is a plan-level extension that supersedes, but does not
+//     contradict, protocol §2.2: the superset check will still run in plans
+//     #251+ and the major-version check here is a fast-fail gate that catches
+//     the most obvious incompatible swap before touching ECS state.
+//
+//     Failure → core::Error::HotReloadRefused.
+//
+// Note on type-superset check (protocol §2.2 second bullet):
+//   The protocol requires that incoming's component set is a superset-or-equal
+//   of outgoing's surviving component storages.  That check depends on the
+//   archetype storage and migration arena (plans #251+); it is NOT performed
+//   here.  This function's scope is the manifest-only checks that can run
+//   without touching ECS state.
+//
+// Preconditions (unchecked — caller must ensure):
+//   • outgoing and incoming are valid PluginManifest values previously
+//     extracted from PluginLoader instances whose validate_all() returned
+//     success.
+//   • This function is called during phase 8, after drain.
+//
+// @param outgoing  Currently-loaded plugin's manifest.
+// @param incoming  Candidate replacement plugin's manifest.
+//
+// Returns:
+//   success (Result<void>{})                     — all checks passed; swap may proceed.
+//   core::Error::PluginNameMismatch              — check A failed.
+//   core::Error::PluginAbiHashMismatch           — check B failed.
+//   core::Error::HotReloadRefused                — check C failed (major version change).
+// ---------------------------------------------------------------------------
+
+[[nodiscard]] Result<void>
+hot_reload_validate(const PluginManifest& outgoing, const PluginManifest& incoming) noexcept;
 
 }  // namespace glibre::core

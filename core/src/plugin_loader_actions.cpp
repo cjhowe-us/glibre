@@ -1,17 +1,21 @@
 // core/src/plugin_loader_actions.cpp
 //
-// Loader-procedure free functions — steps 9–11 of the plugin loader sequence.
+// Loader-procedure free functions — steps 9–11 of the plugin loader sequence,
+// and hot-reload swap candidate validation (plan #250).
 //
 // Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" steps 9–11
 //            and §"Failure Modes → core::Error".
+//            reviews/decisions/hot-reload-protocol.md §"Step 2 — Swap" 2.1–2.2.
 //
 // Plans: #229 (dlopen/dlsym/manifest, steps 1–3).
 //        #230 (ABI hash + version + name + deps gates, steps 4–7).
 //        #231 (register call + rebuild + migrate stubs, steps 9–11).
+//        #250 (hot-reload manifest + ABI hash gate — hot_reload_validate).
 // Out of scope: dlopen/dlsym (plan #229); registry-of-records state (plan #230).
 
 #include "glibre/core/plugin_loader_actions.hpp"
 
+#include <cassert>
 #include <cstdint>
 
 #include "glibre/core/plugin_api.hpp"  // PluginContext, RegisterFn
@@ -135,6 +139,146 @@ Result<void> migrate_components(
     // handles that case correctly.  When they differ, the real implementation
     // will dispatch the migration chain; the stub silently succeeds (acceptable
     // for MVP since no persistent archetype data exists yet).
+    return {};
+}
+
+// ---------------------------------------------------------------------------
+// hot_reload_validate — pre-swap compatibility check (plan #250).
+//
+// Authority: reviews/decisions/hot-reload-protocol.md §"Step 2 — Swap" 2.1–2.2.
+//
+// Performs three manifest-only checks in order.  The checks do not touch ECS
+// state (archetype storage, migration arena) — those checks belong to plans
+// #251+.
+//
+// Check A — Plugin name identity:
+//   The incoming plugin must have the same name as the outgoing plugin.  A
+//   different name is a configuration error (wrong dylib).
+//   Failure → core::Error::PluginNameMismatch.
+//
+// Check B — ABI hash equality (protocol §2.1, incoming-vs-outgoing form):
+//   The incoming manifest's abi_hash must equal the outgoing manifest's
+//   abi_hash.
+//
+//   Protocol §2.1 specifies incoming == host_glibre_types_abi_hash
+//   (incoming-vs-host).  Here we compare incoming-vs-outgoing.  This is
+//   equivalent under the PRECONDITION that PluginLoaderRegistry::validate_all()
+//   confirmed BOTH manifests equal the host hash before this function is
+//   called.  Transitivity: both equal host → they equal each other.  The
+//   comparison of the two manifests also surfaces manifest-vs-manifest
+//   disagreement as a distinct diagnostic (see .hpp docstring for full
+//   rationale).
+//
+//   PRECONDITION ASSERTION: The #ifndef NDEBUG / assert() below fires in debug
+//   builds if outgoing.abi_hash is empty (a proxy for "validate_all not called"),
+//   catching the most common misuse without requiring a host_abi_hash parameter.
+//
+//   Failure → core::Error::PluginAbiHashMismatch.
+//
+// Check C — SemVer major version (plan #250 extension — NOT a verbatim
+//            derivation of protocol §2.2):
+//   The incoming plugin's major version must equal the outgoing's.  Minor and
+//   patch may advance.  A major bump signals a breaking change requiring a
+//   fresh world.
+//
+//   Protocol §2.2 defines a component-type-set superset check on
+//   (fqn, schema_version).  Check C here is a FASTER MANIFEST-ONLY GATE that
+//   plan #250 adds as a precondition: if the major versions differ, the swap
+//   is refused immediately without touching ECS state.  The full superset check
+//   from protocol §2.2 is deferred to plans #251+ and will supplement, not
+//   replace, this check.  See .hpp docstring for full divergence note.
+//
+//   Failure → core::Error::HotReloadRefused.
+// ---------------------------------------------------------------------------
+
+Result<void>
+hot_reload_validate(const PluginManifest& outgoing, const PluginManifest& incoming) noexcept {
+    // Check A — Name identity.
+    // Both plugins must declare the same name.  A different name means the
+    // operator supplied the wrong dylib as a swap candidate.
+    if (incoming.name != outgoing.name) {
+        return std::unexpected(
+            glibre::Error{
+                core::Error::PluginNameMismatch,
+                ErrorContext{
+                    .file = __FILE__,
+                    .line = __LINE__,
+                    .detail = "incoming plugin name does not match outgoing plugin name",
+                },
+            }
+        );
+    }
+
+    // Check B — ABI hash equality (hot-reload-protocol §2.1, incoming-vs-outgoing form).
+    //
+    // Protocol §2.1 requires incoming == host_glibre_types_abi_hash (incoming-vs-host).
+    // We compare incoming-vs-outgoing here, which is equivalent under the precondition
+    // that PluginLoaderRegistry::validate_all() confirmed BOTH manifests equal the host
+    // hash before this function is called.  See the function-level comment above (and
+    // the .hpp docstring) for the full equivalence proof and rationale.
+    //
+    // The assertion below fires in debug builds if outgoing.abi_hash is empty, which
+    // is a proxy for "validate_all() was never called for the outgoing plugin".  An
+    // empty hash string cannot be a valid 64-char blake3 hex string, so it indicates
+    // a caller-contract violation rather than a legitimate hash mismatch.
+#ifndef NDEBUG
+    assert(
+        !outgoing.abi_hash.empty() &&
+        "hot_reload_validate precondition: "
+        "outgoing must have been validated by PluginLoaderRegistry::validate_all() "
+        "before calling hot_reload_validate — outgoing.abi_hash is empty"
+    );
+    assert(
+        !incoming.abi_hash.empty() &&
+        "hot_reload_validate precondition: "
+        "incoming must have been validated by PluginLoaderRegistry::validate_all() "
+        "before calling hot_reload_validate — incoming.abi_hash is empty"
+    );
+#endif
+    if (incoming.abi_hash != outgoing.abi_hash) {
+        return std::unexpected(
+            glibre::Error{
+                core::Error::PluginAbiHashMismatch,
+                ErrorContext{
+                    .file = __FILE__,
+                    .line = __LINE__,
+                    .detail = "incoming plugin abi_hash does not match outgoing plugin abi_hash",
+                },
+            }
+        );
+    }
+
+    // Check C — SemVer major version (plan #250 extension of hot-reload-protocol §2.2).
+    //
+    // Protocol §2.2 defines a component-type-set superset check on (fqn, schema_version).
+    // This check is NOT a verbatim derivation of that rule.  It is an additional manifest-only
+    // precondition introduced by plan #250: if the incoming plugin's SemVer major differs from
+    // the outgoing plugin's, the swap is refused immediately without touching ECS state.  The
+    // full superset check from protocol §2.2 (which requires archetype storage access) is
+    // deferred to plans #251+.  When those plans land, both checks will run; this one fires
+    // first as an inexpensive fast-path gate.
+    //
+    // The protocol's descriptive phrase "major-version change" refers to a symptom of dropping
+    // a registered type (the superset check failing), not to a SemVer field comparison.  Plan
+    // #250 adopts SemVer-major equality as a stricter, observable proxy for that symptom.  Any
+    // plugin where major changed is presumed to have made breaking schema changes; it gets a
+    // clear, early refusal rather than waiting for the ECS-level check.
+    //
+    // See the .hpp docstring (Check C divergence note) for the full decision reasoning.
+    if (incoming.version.major != outgoing.version.major) {
+        return std::unexpected(
+            glibre::Error{
+                core::Error::HotReloadRefused,
+                ErrorContext{
+                    .file = __FILE__,
+                    .line = __LINE__,
+                    .detail = "incoming plugin major version differs from outgoing — "
+                              "major-version change requires a fresh world, not a hot-reload",
+                },
+            }
+        );
+    }
+
     return {};
 }
 

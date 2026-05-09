@@ -209,6 +209,8 @@ TEST_CASE("core/log_error: tostring_complete_for_core_error", "[core][log_error]
     check(E::TransientArenaExhausted, "TransientArenaExhausted");
     // plan #239 r2: NullArgument (renamed from InvalidArgument in round 2 LOW-3)
     check(E::NullArgument, "NullArgument");
+    // plan #250: PluginNameMismatch — hot-reload swap candidate has different name
+    check(E::PluginNameMismatch, "PluginNameMismatch");
 }
 
 // ---------------------------------------------------------------------------

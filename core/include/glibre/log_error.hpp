@@ -86,6 +86,8 @@ namespace glibre::core {
         return "TransientArenaExhausted";
     case Error::NullArgument:
         return "NullArgument";
+    case Error::PluginNameMismatch:
+        return "PluginNameMismatch";
     }
     return "Unknown";
 }

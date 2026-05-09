@@ -79,6 +79,11 @@ enum class Error : std::uint16_t {
     // Renamed NullArgument (was InvalidArgument) in review round 2 (LOW-3:
     // narrow the seam name so it is not a magnet for unrelated callers).
     NullArgument,
+    // Hot-reload validation: the incoming plugin's manifest name differs from
+    // the outgoing plugin's manifest name.  Swapping a plugin for one with a
+    // different identity is a configuration error, not an ABI issue.
+    // Detected by hot_reload_validate() in plugin_loader_actions (plan #250).
+    PluginNameMismatch,
 };
 }  // namespace core
 
