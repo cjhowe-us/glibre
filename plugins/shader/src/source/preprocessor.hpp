@@ -28,7 +28,16 @@
 namespace glibre::shader::detail {
 
 /// State passed through the recursive include resolution.
+///
+/// Lifetime contract: PreprocessContext is a call-scoped aggregate.
+/// It MUST NOT outlive the path and vector arguments passed at construction.
+///   - project_root  : borrowed; caller owns the path object for the full
+///                     duration of expand_includes (and any recursive calls).
+///                     Do NOT store a PreprocessContext in a member field or
+///                     return it from a function — that would dangle this ref.
+///   - include_closure: borrowed reference into the caller's accumulator.
 struct PreprocessContext {
+    // caller owns; do not extend lifetime beyond the enclosing expand_includes call.
     const std::filesystem::path& project_root;
     eastl::vector<IncludeNode>& include_closure;  // accumulates as we expand
     eastl::vector<eastl::string> visit_stack;     // for cycle detection

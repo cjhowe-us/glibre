@@ -346,3 +346,90 @@ TEST_CASE("shader_source_cycle_detection_is_case_insensitive", "[shader][include
         eastl::get<glibre::shader::Error>(err.code()) == glibre::shader::Error::IncludeCycle;
     CHECK(is_cycle);
 }
+
+// ===========================================================================
+// Test: shader_source_same_stage_dup_is_collapsed_not_ambiguous
+//
+// R2 MED-3: a function with the same name AND the same stage appearing twice
+// (e.g. via double-inclusion) must NOT produce EntryPointStageAmbiguous.
+// Instead the duplicate is silently collapsed and exactly one EntryPoint is
+// emitted for the function.
+//
+// Fixture: fixtures/same_stage_dup.slang
+//   Contains [shader("vertex")] void vs_main() {} declared twice.
+// ===========================================================================
+
+TEST_CASE(
+    "shader_source_same_stage_dup_is_collapsed_not_ambiguous", "[shader][shader_source]"
+) {
+    const auto project_root = kFixtureDir;
+    const auto project_rel = std::filesystem::path{"same_stage_dup.slang"};
+
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    REQUIRE(result.has_value());
+
+    const auto& src = *result;
+    auto eps = src.entry_points();
+
+    // Must collapse to exactly one entry point, not error.
+    REQUIRE(eps.size() == 1u);
+    CHECK(eps[0].name == eastl::string{"vs_main"});
+    CHECK(eps[0].stage == glibre::shader::Stage::Vertex);
+}
+
+// ===========================================================================
+// Test: shader_source_open_returns_EncodingInvalid_for_utf8_isolated_continuation
+//
+// R2 LOW-6: a file with an isolated UTF-8 continuation byte (0x80, not
+// preceded by a valid multi-byte lead) must produce EncodingInvalid.
+//
+// Fixture: fixtures/utf8_isolated_continuation.slang
+//   Bytes: "// ok\n" + 0x41 0x80 0x42
+// ===========================================================================
+
+TEST_CASE(
+    "shader_source_open_returns_EncodingInvalid_for_utf8_isolated_continuation",
+    "[shader][shader_source]"
+) {
+    const auto project_root = kFixtureDir;
+    const auto project_rel =
+        std::filesystem::path{"utf8_isolated_continuation.slang"};
+
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    REQUIRE_FALSE(result.has_value());
+
+    const auto& err = result.error();
+    const bool is_encoding_invalid =
+        eastl::holds_alternative<glibre::shader::Error>(err.code()) &&
+        eastl::get<glibre::shader::Error>(err.code()) ==
+            glibre::shader::Error::EncodingInvalid;
+    CHECK(is_encoding_invalid);
+}
+
+// ===========================================================================
+// Test: shader_source_open_returns_EncodingInvalid_for_utf8_overlong_nul
+//
+// R2 LOW-6: a file with an overlong NUL encoding (0xC0 0x80, forbidden by
+// RFC 3629 §3) must produce EncodingInvalid.
+//
+// Fixture: fixtures/utf8_overlong_nul.slang
+//   Bytes: "// ok\n" + 0xC0 0x80
+// ===========================================================================
+
+TEST_CASE(
+    "shader_source_open_returns_EncodingInvalid_for_utf8_overlong_nul",
+    "[shader][shader_source]"
+) {
+    const auto project_root = kFixtureDir;
+    const auto project_rel = std::filesystem::path{"utf8_overlong_nul.slang"};
+
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    REQUIRE_FALSE(result.has_value());
+
+    const auto& err = result.error();
+    const bool is_encoding_invalid =
+        eastl::holds_alternative<glibre::shader::Error>(err.code()) &&
+        eastl::get<glibre::shader::Error>(err.code()) ==
+            glibre::shader::Error::EncodingInvalid;
+    CHECK(is_encoding_invalid);
+}

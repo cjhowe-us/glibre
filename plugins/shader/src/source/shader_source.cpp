@@ -8,37 +8,26 @@
 // Algorithm of ShaderSource::open():
 //   1. Reject if project_relative is absolute.
 //   2. Construct abs_path = project_root / project_relative.
-//   3. Read + normalize the root file (UTF-8 BOM strip, encoding check,
+//   3. Validate abs_path is within project_root via detail::validate_in_project_root.
+//   4. Read + normalize the root file (UTF-8 BOM strip, encoding check,
 //      empty-file rejection).  Return Error::SourceNotFound if absent,
 //      Error::EncodingInvalid if malformed.
-//   4. Run include expansion (preprocessor.hpp) → PreprocessedSource bytes
+//   5. Run include expansion (preprocessor.hpp) → PreprocessedSource bytes
 //      plus include_closure accumulator.
-//   5. Run entry-point scanner → eastl::vector<EntryPoint>.
-//   6. Compute total BLAKE3 over expanded bytes.
-//   7. Assemble and return ShaderSource.
+//   6. Run entry-point scanner → eastl::vector<EntryPoint>.
+//   7. Compute total BLAKE3 over expanded bytes (detail::blake3_hash from shader_hash.hpp).
+//   8. Assemble and return ShaderSource.
 
-#include <blake3.h>
 #include <cstring>
 
 #include <glibre/shader/shader.hpp>
 
 #include "entry_point_scanner.hpp"
+#include "include_resolver.hpp"
 #include "preprocessor.hpp"
+#include "shader_hash.hpp"
 
 namespace glibre::shader {
-
-namespace {
-
-[[nodiscard]] ShaderHash blake3_hash(const void* data, std::size_t len) noexcept {
-    ShaderHash result{};
-    blake3_hasher hasher{};
-    blake3_hasher_init(&hasher);
-    blake3_hasher_update(&hasher, data, len);
-    blake3_hasher_finalize(&hasher, reinterpret_cast<uint8_t*>(result.bytes.data()), 32);
-    return result;
-}
-
-}  // namespace
 
 // ---------------------------------------------------------------------------
 // ShaderSource::open
@@ -54,9 +43,10 @@ glibre::Result<ShaderSource> ShaderSource::open(
 
     std::filesystem::path abs_path = (project_root / project_relative).lexically_normal();
 
-    // Validate abs_path is under project_root.
-    auto rel_check = abs_path.lexically_relative(project_root);
-    if (rel_check.empty() || rel_check.native().starts_with("..")) {
+    // Validate abs_path is within project_root using the shared containment
+    // helper (R2 HIGH-2: consolidates the duplicate inline predicate into a
+    // single SRP module — detail::validate_in_project_root in include_resolver.hpp).
+    if (!detail::validate_in_project_root(abs_path, project_root)) {
         return std::unexpected(Error::IncludeEscape);
     }
 
@@ -94,7 +84,7 @@ glibre::Result<ShaderSource> ShaderSource::open(
     eastl::vector<EntryPoint> entry_points = std::move(*ep_result);
 
     // Step 4: compute total hash over the expanded byte stream.
-    ShaderHash total_hash = blake3_hash(expanded.data(), expanded.size());
+    ShaderHash total_hash = detail::blake3_hash(expanded.data(), expanded.size());
 
     // Step 5: pack into bytes for PreprocessedSource.
     // LOW-1 fix: use memcpy instead of a manual byte-cast loop.

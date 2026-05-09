@@ -38,9 +38,8 @@
 #include <EASTL/string.h>
 
 #include "include_resolver.hpp"
-
-// BLAKE3 for per-include content hashing (specs/shader/SPEC.md §4.1).
-#include <blake3.h>
+// BLAKE3 per-include content hashing — shared helper (R2 HIGH-1).
+#include "shader_hash.hpp"
 
 namespace glibre::shader::detail {
 
@@ -242,16 +241,6 @@ scan_include_line(const char* line, std::size_t len) noexcept {
     return eastl::string{line + path_start, path_len};
 }
 
-/// Compute BLAKE3 over a raw byte buffer, return a ShaderHash.
-[[nodiscard]] ShaderHash blake3_hash(const void* data, std::size_t len) noexcept {
-    ShaderHash result{};
-    blake3_hasher hasher{};
-    blake3_hasher_init(&hasher);
-    blake3_hasher_update(&hasher, data, len);
-    blake3_hasher_finalize(&hasher, reinterpret_cast<uint8_t*>(result.bytes.data()), 32);
-    return result;
-}
-
 }  // namespace
 
 std::expected<eastl::string, Error> expand_includes(
@@ -325,7 +314,7 @@ std::expected<eastl::string, Error> expand_includes(
             }
             eastl::string included_bytes = std::move(*file_result);
 
-            // Step 5: build include node with content hash.
+            // Step 5: build include node with content hash (R2 HIGH-1: shared helper).
             ShaderHash content_hash = blake3_hash(included_bytes.data(), included_bytes.size());
             ctx.include_closure.push_back(IncludeNode{proj_rel_str, content_hash});
 

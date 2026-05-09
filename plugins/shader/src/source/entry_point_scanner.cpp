@@ -259,23 +259,43 @@ std::expected<eastl::vector<EntryPoint>, Error> scan_entry_points(const eastl::s
 
     eastl::vector<RawEntryPoint> raw = extract_raw_entry_points(src, len);
 
-    // Detect ambiguous entries using a linear search over the (small) result set.
-    // We keep insertion order intact — never use a hash map (PHILOSOPHY §7).
+    // Detect duplicate / ambiguous entries using a linear search over the (small)
+    // result set.  We keep insertion order intact — never use a hash map
+    // (PHILOSOPHY §7).
     //
-    // Strategy: for each entry in raw, check whether any later entry has the same
-    // fn_name but a different stage → EntryPointStageAmbiguous.
+    // Spec §4.1 invariant 1: "Every emitted EntryPoint has exactly one stage
+    // attribute."  Two distinct error arms apply (R2 MED-3 fix):
+    //
+    //   same fn_name + different stage → EntryPointStageAmbiguous
+    //     (the function is bound to two pipeline stages; the compiler would have
+    //      to pick one — ambiguous by spec).
+    //
+    //   same fn_name + same stage → treat as redefinition (e.g. duplicate include).
+    //     The duplicate occurrence is silently collapsed: only the first encounter
+    //     is emitted.  This is the correct behaviour because including the same
+    //     file twice is idiomatic and the two declarations are identical.
     for (std::size_t a = 0; a < raw.size(); ++a) {
         for (std::size_t b = a + 1; b < raw.size(); ++b) {
             if (raw[a].fn_name == raw[b].fn_name) {
-                return std::unexpected(Error::EntryPointStageAmbiguous);
+                if (raw[a].stage_str != raw[b].stage_str) {
+                    // Different stages on the same function name — ambiguous.
+                    return std::unexpected(Error::EntryPointStageAmbiguous);
+                }
+                // Same stage on the same function name — mark the duplicate
+                // for suppression (clear its fn_name so the build loop skips it).
+                raw[b].fn_name.clear();
             }
         }
     }
 
-    // Build result in source-encounter order, skipping unknown stage strings.
+    // Build result in source-encounter order, skipping unknown stage strings and
+    // suppressed (duplicate same-stage) entries.
     eastl::vector<EntryPoint> result;
     result.reserve(static_cast<eastl::vector<EntryPoint>::size_type>(raw.size()));
     for (const auto& rep : raw) {
+        if (rep.fn_name.empty()) {
+            continue;  // Suppressed duplicate same-stage entry.
+        }
         auto maybe_stage = parse_stage(rep.stage_str.c_str(), rep.stage_str.size());
         if (!maybe_stage) {
             continue;  // Unknown stage string — skip.
