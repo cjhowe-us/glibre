@@ -107,7 +107,7 @@ struct MigrationDecl {
 struct TypeDecl {
     eastl::string fqn;  // e.g. "glibre.core.Transform"
     std::uint32_t version{0};
-    eastl::string since_version;        // semver string, may be empty
+    eastl::string since_version;  // semver string, may be empty
     eastl::vector<FieldDecl> fields;
     eastl::vector<MigrationDecl> migrations;  // populated by plan #221 parser
 };

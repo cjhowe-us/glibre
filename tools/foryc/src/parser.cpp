@@ -497,6 +497,12 @@ private:
             );
         const std::string_view raw = current_.text;
         // StringLit includes the surrounding quotes: raw[0] == '"', raw[last] == '"'.
+        // Minimum valid StringLit is '""' (2 chars). A shorter token or an
+        // empty provider string ("") is a syntax error.
+        if (raw.size() < 3)
+            return FORYC_ERR(
+                tools::Error::ForycSyntaxError, "provider symbol must be a non-empty quoted string"
+            );
         eastl::string provider(raw.data() + 1, raw.size() - 2);
         advance();
 

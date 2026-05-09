@@ -19,58 +19,185 @@ namespace glibre::tools::foryc {
 namespace {
 
 // -----------------------------------------------------------------------
-// emit_migration_for_type — emit the dispatcher fragment for one TypeDecl
+// fqn_to_ns_and_type — split a dotted FQN into C++ namespace + type name
 //
-// If the TypeDecl has no migrations, emits nothing (empty string).
-// Otherwise emits:
-//   // Forward declarations
-//   extern void* <provider0>;
-//   ...
-//   // Static table
-//   static const MigrationEntry k_migrations_<type>[] = { ... };
-//
-// The per-type tables are later stitched together by emit_migration into
-// a single TU with the global exported symbols.
+// "glibre.core.Transform" -> ns="glibre::core"  type_name="Transform"
+// "glibre.Transform"      -> ns="glibre"         type_name="Transform"
+// "Transform"             -> ns=""               type_name="Transform"
 // -----------------------------------------------------------------------
 
-struct TypeMigrationFragment {
-    eastl::string forward_decls;  // extern declarations for provider symbols
-    eastl::string table_entry;    // one MigrationEntry initialiser list entry per step
-    std::size_t count{0};         // number of migration steps
+struct FqnParts {
+    eastl::string ns;         // C++ namespace ("::" separator), may be empty
+    eastl::string type_name;  // unqualified C++ class name
 };
 
-// Build the forward-declaration block and table entries for one TypeDecl.
-[[nodiscard]] static TypeMigrationFragment
-build_type_fragment(const TypeDecl& td) noexcept {
-    TypeMigrationFragment frag;
-    if (td.migrations.empty())
-        return frag;
+[[nodiscard]] static FqnParts split_fqn(const eastl::string& fqn) noexcept {
+    FqnParts parts;
+    // Find the last '.' separator.
+    const auto last_dot = fqn.rfind('.');
+    if (last_dot == eastl::string::npos) {
+        parts.type_name = fqn;
+        return parts;
+    }
+    // Everything before the last dot, with '.' replaced by '::'.
+    const eastl::string prefix(fqn.data(), last_dot);
+    eastl::string ns_str;
+    for (std::size_t i = 0; i < prefix.size(); ++i) {
+        if (prefix[i] == '.') {
+            ns_str += "::";
+        } else {
+            ns_str += prefix[i];
+        }
+    }
+    parts.ns = std::move(ns_str);
+    parts.type_name = eastl::string(fqn.data() + last_dot + 1, fqn.size() - last_dot - 1);
+    return parts;
+}
 
+// -----------------------------------------------------------------------
+// emit_type_block — emit the per-TypeDecl section of the generated TU.
+//
+// For a TypeDecl with migrations, emits:
+//   1. C++ namespace + forward-declarations of each provider with the correct
+//      signature per fory-codegen.md §"Migration Mechanic" point 2:
+//        std::expected<void, glibre::Error> migrate_<Type>_v<N>_to_v<N+1>(
+//            const <Type>V<N>&, <Type>V<N+1>&)
+//   2. A static per-type MigrationEntry table: k_migrations_<TypeName>[].
+//   3. Two extern "C" exported symbols:
+//        glibre_plugin_migrations_<TypeName>  (pointer to the table)
+//        glibre_plugin_migrations_<TypeName>_size  (count)
+//
+// For a TypeDecl with no migrations, emits the empty-table form:
+//   extern "C" const MigrationEntry* glibre_plugin_migrations_<TypeName> = nullptr;
+//   extern "C" std::size_t glibre_plugin_migrations_<TypeName>_size = 0;
+//
+// fory-codegen.md §"Migration Mechanic" point 1:
+//   "Each generated type carries a static migrations table populated at
+//   static-init time inside the glibre-types dylib via the
+//   codegen-emitted dispatcher."
+// -----------------------------------------------------------------------
+
+[[nodiscard]] static eastl::string emit_type_block(const TypeDecl& td) noexcept {
+    const FqnParts parts = split_fqn(td.fqn);
+    const eastl::string& type_name = parts.type_name;
+
+    eastl::string out;
+    out += "// ---- ";
+    out += td.fqn;
+    out += " ----\n";
+
+    if (td.migrations.empty()) {
+        // Empty-table form.
+        out += "extern \"C\" const MigrationEntry* glibre_plugin_migrations_";
+        out += type_name;
+        out += " = nullptr;\n";
+        out += "extern \"C\" std::size_t glibre_plugin_migrations_";
+        out += type_name;
+        out += "_size = 0;\n";
+        out += "\n";
+        return out;
+    }
+
+    // -----------------------------------------------------------------------
+    // Forward-declare each provider as a C++ function with the correct
+    // signature per fory-codegen.md §"Migration Mechanic" point 2.
+    //
+    // Signature: std::expected<void, glibre::Error>
+    //                migrate_<Type>_v<N>_to_v<M>(const <Type>V<N>&, <Type>V<M>&)
+    //
+    // These are C++ namespace-qualified declarations (NOT extern "C") because
+    // C linkage forbids namespace-qualified names (C++ [dcl.link] / ISO C++23
+    // [dcl.link]/6: "A name with C language linkage shall not be in a
+    // namespace").
+    // -----------------------------------------------------------------------
+
+    if (!parts.ns.empty()) {
+        out += "namespace ";
+        out += parts.ns;
+        out += " {\n";
+    }
     for (const auto& mig : td.migrations) {
-        const std::string_view prov(mig.provider.data(), mig.provider.size());
+        // Versioned argument type names: <TypeName>V<N>, <TypeName>V<M>
+        const eastl::string from_type =
+            type_name + eastl::string(std::format("V{}", mig.from_version).c_str());
+        const eastl::string to_type =
+            type_name + eastl::string(std::format("V{}", mig.to_version).c_str());
 
-        // Forward-declare the provider as an extern "C" function returning void*
-        // (type-erased; the owning context supplies the real signature).
-        // We use a void (*)(void) prototype as a minimal legal C function pointer
-        // type that can be cast to/from other function pointer types in C++.
-        frag.forward_decls += eastl::string(
-            std::format("extern \"C\" void {}();\n", prov).c_str()
+        // Derive the unqualified function name from the provider string.
+        // The provider is the fully-qualified name; strip the namespace prefix
+        // (everything up to and including the last "::").
+        eastl::string fn_name = mig.provider;
+        const auto last_sep = fn_name.rfind("::");
+        if (last_sep != eastl::string::npos) {
+            fn_name = eastl::string(fn_name.data() + last_sep + 2, fn_name.size() - last_sep - 2);
+        }
+
+        out += eastl::string(
+            std::format(
+                "std::expected<void, glibre::Error> {}(const {}&, {}&);\n",
+                std::string_view(fn_name.data(), fn_name.size()),
+                std::string_view(from_type.data(), from_type.size()),
+                std::string_view(to_type.data(), to_type.size())
+            )
+                .c_str()
         );
+    }
+    if (!parts.ns.empty()) {
+        out += "}  // namespace ";
+        out += parts.ns;
+        out += "\n";
+    }
+    out += "\n";
 
-        // One MigrationEntry initialiser:
-        //   { from_version, to_version, reinterpret_cast<void*>(<provider>) }
-        frag.table_entry += eastl::string(
+    // -----------------------------------------------------------------------
+    // Build the per-type migration function pointer type.
+    //
+    // Because each migration step has different concrete argument types
+    // (e.g. TransformV1 / TransformV2) the MigrationEntry stores the
+    // function pointer as void* (type-erased) identical to the layout
+    // declared in the MigrationEntry struct above.  The plugin loader
+    // recovers the real type via the registered deserialize path.
+    // -----------------------------------------------------------------------
+
+    // Static per-type migration table.
+    // Fully-qualified provider is used here so the reference links even if
+    // the forward decl above is in a different namespace.
+    const std::size_t count = td.migrations.size();
+    out += "// clang-format off\n";
+    out += "static const MigrationEntry k_migrations_";
+    out += type_name;
+    out += "[] = {\n";
+    for (const auto& mig : td.migrations) {
+        out += eastl::string(
             std::format(
                 "    {{ {}, {}, reinterpret_cast<void*>(&{}) }},\n",
                 mig.from_version,
                 mig.to_version,
-                prov
+                std::string_view(mig.provider.data(), mig.provider.size())
             )
                 .c_str()
         );
-        ++frag.count;
     }
-    return frag;
+    out += "};\n";
+    out += "// clang-format on\n";
+    out += "\n";
+
+    // Exported per-type symbols.
+    out += "extern \"C\" const MigrationEntry* glibre_plugin_migrations_";
+    out += type_name;
+    out += " = k_migrations_";
+    out += type_name;
+    out += ";\n";
+    out += eastl::string(
+        std::format(
+            "extern \"C\" std::size_t glibre_plugin_migrations_{}_size = {};\n",
+            std::string_view(type_name.data(), type_name.size()),
+            count
+        )
+            .c_str()
+    );
+    out += "\n";
+    return out;
 }
 
 }  // anonymous namespace
@@ -90,20 +217,6 @@ emit_migration(const Schema& schema, std::string_view source_path) noexcept {
             return std::unexpected{glibre::Error{tools::Error::ForycSyntaxError}};
     }
 
-    // Collect all migration steps across every TypeDecl.
-    // The plugin exposes a single flat migration table; the dispatcher looks up
-    // (from_version, to_version) pairs regardless of which TypeDecl they came from.
-    eastl::string all_forward_decls;
-    eastl::string all_entries;
-    std::size_t total_count = 0;
-
-    for (const auto& td : schema.types) {
-        auto frag = build_type_fragment(td);
-        all_forward_decls += frag.forward_decls;
-        all_entries += frag.table_entry;
-        total_count += frag.count;
-    }
-
     // -----------------------------------------------------------------------
     // Assemble the generated TU.
     // -----------------------------------------------------------------------
@@ -117,20 +230,28 @@ emit_migration(const Schema& schema, std::string_view source_path) noexcept {
     out += "\n";
     out += "// Generator: glibre-foryc (plan #221)\n";
     out += "//\n";
-    out += "// Migration dispatcher table for plugin-loader use.\n";
-    out += "// The plugin loader reads glibre_plugin_migrations[0..size-1] at\n";
+    out += "// Per-type migration dispatcher tables for plugin-loader use.\n";
+    out += "// The plugin loader reads glibre_plugin_migrations_<Type>[0..size-1] at\n";
     out += "// deserialization time and chains (from_version -> to_version) steps.\n";
+    out += "// fory-codegen.md §\"Migration Mechanic\" points 1-2.\n";
     out += "\n";
 
     // Mandatory includes.
     out += "#include <cstddef>\n";
     out += "#include <cstdint>\n";
+    out += "#include <expected>\n";
+    out += "\n";
+
+    // Bring glibre::Error into scope so the provider forward-declarations
+    // can name it without requiring a separate header in the generated TU.
+    out += "// Forward-declare glibre::Error so provider signatures compile\n";
+    out += "// without pulling in the full engine headers.\n";
+    out += "namespace glibre { struct Error; }\n";
     out += "\n";
 
     // MigrationEntry struct — must match glibre/types/migration_entry.hpp layout.
-    // Defined here to keep the generated TU self-contained and independent of
-    // the owning context's headers (no #include needed in the dispatcher TU).
-    out += "// MigrationEntry — ABI-stable entry in the dispatcher table.\n";
+    // Defined here to keep the generated TU self-contained.
+    out += "// MigrationEntry — ABI-stable entry in the per-type dispatcher table.\n";
     out += "// Layout MUST match glibre::types::MigrationEntry in the plugin loader.\n";
     out += "struct MigrationEntry {\n";
     out += "    std::uint32_t from_version;\n";
@@ -139,41 +260,9 @@ emit_migration(const Schema& schema, std::string_view source_path) noexcept {
     out += "};\n";
     out += "\n";
 
-    if (total_count == 0) {
-        // -----------------------------------------------------------------------
-        // No-migration path: export empty table.
-        // -----------------------------------------------------------------------
-        out += "// No migration steps declared for this schema.\n";
-        out += "extern \"C\" const MigrationEntry* glibre_plugin_migrations = nullptr;\n";
-        out += "extern \"C\" std::size_t glibre_plugin_migrations_size = 0;\n";
-    } else {
-        // -----------------------------------------------------------------------
-        // One or more migration steps.
-        // -----------------------------------------------------------------------
-
-        // Forward-declare provider symbols.
-        out += "// Provider forward declarations.\n";
-        out += "// The owning context supplies the function bodies.\n";
-        out += all_forward_decls;
-        out += "\n";
-
-        // Static migration table.
-        out += "// clang-format off\n";
-        out += "static const MigrationEntry k_migrations[] = {\n";
-        out += all_entries;
-        out += "};\n";
-        out += "// clang-format on\n";
-        out += "\n";
-
-        // Exported symbols.
-        out += "extern \"C\" const MigrationEntry* glibre_plugin_migrations = k_migrations;\n";
-        out += eastl::string(
-            std::format(
-                "extern \"C\" std::size_t glibre_plugin_migrations_size = {};\n",
-                total_count
-            )
-                .c_str()
-        );
+    // Per-type blocks.
+    for (const auto& td : schema.types) {
+        out += emit_type_block(td);
     }
 
     return out;
