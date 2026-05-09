@@ -212,7 +212,7 @@ TEST_CASE(
 // until cross-TU macro transmission is fixed.
 // ===========================================================================
 
-TEST_CASE("transient_arena_drained_at_phase_9 [!shouldfail]", "[core][transient_arena]") {
+TEST_CASE("transient_arena_drained_at_phase_9", "[core][transient_arena][!shouldfail]") {
     glibre::TransientArena arena{4096};
     glibre::core::FrameLoop loop;
 

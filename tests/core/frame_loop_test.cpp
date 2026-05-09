@@ -92,7 +92,9 @@ TEST_CASE("core/frame_loop: phase_table_ids_are_1_through_9", "[core][frame_loop
 // which does not currently reach all compilation units. Marked [!shouldfail]
 // until cross-TU macro transmission is fixed.
 // ---------------------------------------------------------------------------
-TEST_CASE("core/frame_loop: tick_invokes_phases_in_strict_order [!shouldfail]", "[core][frame_loop]") {
+TEST_CASE(
+    "core/frame_loop: tick_invokes_phases_in_strict_order", "[core][frame_loop][!shouldfail]"
+) {
     using namespace glibre::core;
 
     FrameLoop loop;
