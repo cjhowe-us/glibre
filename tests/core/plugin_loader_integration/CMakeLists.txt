@@ -5,21 +5,29 @@ cmake_minimum_required(VERSION 4.3.0)
 # + PluginLoaderRegistry end-to-end against real .dylib plugins.
 #
 # Plan: #232 — plugin loader integration — full failure-mode coverage.
+# Plan: #968 — plugin loader integration — manifest_invalid / engine_too_old /
+#              dependency_missing failure modes.
 # Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" steps 1–7,
 #            §"Failure Modes → core::Error" table.
 #
 # Named test cases:
-#   - integration_dlopen_failure_propagates     (step 1: dlopen failure)
-#   - integration_missing_symbol_propagates     (step 2: missing symbols)
-#   - integration_abi_hash_mismatch_propagates  (step 4: hash mismatch)
-#   - integration_name_collision_propagates     (step 6: duplicate name)
-#   - integration_happy_path_loads_and_validates (success path)
+#   - integration_dlopen_failure_propagates          (step 1: dlopen failure)
+#   - integration_missing_symbol_propagates          (step 2: missing symbols)
+#   - integration_abi_hash_mismatch_propagates       (step 4: hash mismatch)
+#   - integration_name_collision_propagates          (step 6: duplicate name)
+#   - integration_happy_path_loads_and_validates     (success path)
+#   - integration_manifest_invalid_propagates        (step 3: manifest deser fails)
+#   - integration_engine_too_old_propagates          (step 5: engine too old)
+#   - integration_dependency_missing_propagates      (step 7: dep not registered)
 #
 # Stub dylibs:
-#   glibre-plugin-stub-no-symbols — valid .dylib with NO required symbols
+#   glibre-plugin-stub-no-symbols       — valid .dylib with NO required symbols
 #     (reused from tests/core/plugin_loader, plan #229).
-#   glibre-plugin-stub-wrong-abi  — valid .dylib with wrong glibre_plugin_abi_hash
-#     (new for this plan; source: stub_wrong_abi_hash.cpp).
+#   glibre-plugin-stub-wrong-abi        — valid .dylib with wrong abi_hash
+#     (new for plan #232; source: stub_wrong_abi_hash.cpp).
+#   glibre-plugin-stub-invalid-manifest — valid .dylib with garbage manifest
+#     blob; paired with a .manifest sidecar so PluginManifest::open returns
+#     PluginManifestInvalid (new for plan #968; source: stub_invalid_manifest.cpp).
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -63,6 +71,69 @@ target_compile_options(glibre-plugin-stub-wrong-abi PRIVATE
     -Wpedantic
     -Wno-unused-parameter
     -Wno-c2y-extensions
+)
+
+# ---------------------------------------------------------------------------
+# glibre-plugin-stub-invalid-manifest — exports all four required symbols but
+# points glibre_plugin_manifest at garbage bytes so step 3 (Fory deserialize)
+# fires PluginManifestInvalid.
+#
+# A sidecar <stub>.manifest file is created at build time so that the loader's
+# sidecar-read path (plan #229 step 3 deferral) has a real file to attempt to
+# deserialize — PluginManifest::open() returns PluginManifestInvalid for any
+# file that exists but cannot be Fory-decoded (stub impl in
+# core/src/plugin_manifest.cpp).
+#
+# The stub's glibre_plugin_abi_hash uses the same all-zero sentinel as the
+# noop plugin so the ABI hash gate (step 4) does not interfere.
+# ---------------------------------------------------------------------------
+
+add_library(glibre-plugin-stub-invalid-manifest MODULE
+    stub_invalid_manifest.cpp
+)
+
+target_include_directories(glibre-plugin-stub-invalid-manifest
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/core/include
+)
+
+target_compile_features(glibre-plugin-stub-invalid-manifest PRIVATE cxx_std_23)
+
+find_package(EASTL CONFIG REQUIRED)
+target_link_libraries(glibre-plugin-stub-invalid-manifest PRIVATE EASTL glibre::compile_contract)
+
+set_target_properties(glibre-plugin-stub-invalid-manifest PROPERTIES
+    SUFFIX ".dylib"
+    PREFIX ""
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+    CXX_MODULE_STD OFF
+)
+
+target_compile_options(glibre-plugin-stub-invalid-manifest PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wno-unused-parameter
+    -Wno-c2y-extensions
+)
+
+# Create a sidecar <stub>.manifest file at build time so the loader's sidecar
+# read path finds a real file to attempt to parse.  Content is intentionally
+# empty — PluginManifest::open() returns PluginManifestInvalid for any regular
+# file whose bytes cannot be Fory-decoded (core/src/plugin_manifest.cpp stub).
+#
+# cmake -E touch creates an empty regular file without shell redirection
+# operators, making this portable across all CMake-supported generators.
+#
+# The sidecar must be created AFTER the stub dylib is built (its path depends
+# on TARGET_FILE), so we use add_custom_command(TARGET POST_BUILD).
+add_custom_command(
+    TARGET glibre-plugin-stub-invalid-manifest POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E touch
+        "$<TARGET_FILE:glibre-plugin-stub-invalid-manifest>.manifest"
+    COMMENT "Creating invalid sidecar manifest for glibre-plugin-stub-invalid-manifest"
+    VERBATIM
 )
 
 # ---------------------------------------------------------------------------
@@ -133,6 +204,16 @@ target_compile_definitions(glibre-core-plugin-loader-integration-tests PRIVATE
     GLIBRE_STUB_WRONG_ABI_DYLIB_PATH="$<TARGET_FILE:glibre-plugin-stub-wrong-abi>"
 )
 add_dependencies(glibre-core-plugin-loader-integration-tests glibre-plugin-stub-wrong-abi)
+
+# GLIBRE_STUB_INVALID_MANIFEST_DYLIB_PATH — stub with garbage manifest blob +
+# sidecar .manifest file.
+# Used by: integration_manifest_invalid_propagates.
+# Injected unconditionally — glibre-plugin-stub-invalid-manifest is defined
+# above and always built.
+target_compile_definitions(glibre-core-plugin-loader-integration-tests PRIVATE
+    GLIBRE_STUB_INVALID_MANIFEST_DYLIB_PATH="$<TARGET_FILE:glibre-plugin-stub-invalid-manifest>"
+)
+add_dependencies(glibre-core-plugin-loader-integration-tests glibre-plugin-stub-invalid-manifest)
 
 include(CTest)
 include(Catch)
