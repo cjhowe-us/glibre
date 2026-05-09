@@ -67,6 +67,11 @@
 // #229 onwards and avoid -Wmismatched-tags diagnostics.
 // ---------------------------------------------------------------------------
 
+// PluginManifest shipped in PR #952 (plan #223).  Include the canonical
+// header rather than forward-declaring to avoid -Wmismatched-tags when TUs
+// include both plugin_api.hpp and plugin_manifest.hpp.
+#include <glibre/core/plugin_manifest.hpp>
+
 namespace glibre::core {
 
 class World;           // ECS world — plan: #ECS-world (pending)
@@ -75,14 +80,6 @@ class SystemRegistry;  // system-schedule registry — plan: #system-registry (p
 class PassRegistry;    // render-graph pass registry — plan: #pass-registry (pending)
 class PanelRegistry;   // editor UI panel registry — plan: #panel-registry (pending)
 class LogSink;         // structured spdlog sink — plan: #log-sink (pending)
-
-// PluginManifest is defined in glibre/types/plugin_manifest.hpp (fory-codegen
-// plan #223/#225).  For MVP the forward declaration is sufficient to form the
-// reference in PluginContext.  The loader passes the deserialized manifest
-// back into register() so the plugin can iterate its declared items rather
-// than duplicating the list in code (plugin-abi.md §"Registration Entry-Point
-// Signature").
-class PluginManifest;  // Fory-generated — plan: #223 / #225 (in-flight)
 
 // ---------------------------------------------------------------------------
 // PluginContext — stable POD-like aggregate passed by reference to every
