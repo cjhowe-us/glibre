@@ -22,6 +22,8 @@ struct MigrationEntry {
 };
 
 // ---- test.Particle ----
+extern "C" const std::uint32_t glibre_plugin_current_version_Particle = 2;
+
 namespace test { struct ParticleV1; struct ParticleV2; }  // namespace test
 namespace test {
 std::expected<void, glibre::Error> migrate_Particle_v1_to_v2(const test::ParticleV1&, test::ParticleV2&);

@@ -458,3 +458,227 @@ migrate_Widget_v1_to_v2(const WidgetV1&, WidgetV2&) {
     // Cleanup (best effort).
     fs::remove_all(tmp_dir, ec);
 }
+
+// -----------------------------------------------------------------------
+// Test: foryc_emit_migration_emits_current_version (plan #978)
+//
+// The emitted TU must contain a `glibre_plugin_current_version_<TypeName>`
+// symbol set to the schema's declared version (td.version).
+// -----------------------------------------------------------------------
+
+TEST_CASE(
+    "foryc_emit_migration_emits_current_version", "[foryc][emit_migration][current_version]"
+) {
+    // Schema with a specific version number — the emitter must use td.version.
+    constexpr std::string_view src = R"(
+schema glibre.core.Sensor {
+  version 5
+  field reading : f32 tag 1
+  field flags   : u32 tag 2
+}
+)";
+
+    const auto schema = parse_ok(src, "core/Sensor.fory");
+    REQUIRE(schema.types.size() == 1);
+    CHECK(schema.types[0].version == 5);
+
+    auto result = emit_migration(schema, "core/Sensor.fory");
+    REQUIRE(result.has_value());
+
+    const eastl::string& text = *result;
+
+    // The current_version symbol must appear with the correct type.
+    CHECK(text.find("glibre_plugin_current_version_Sensor") != eastl::string::npos);
+
+    // Must use extern "C" linkage for dlsym-ability (fory-codegen.md §"ABI
+    // Stability Rules" — exported C entry points cross dylib boundaries as C ABI).
+    CHECK(text.find("extern \"C\"") != eastl::string::npos);
+
+    // Must use std::uint32_t (not int/uint32_t bare) per the plan spec.
+    CHECK(text.find("std::uint32_t") != eastl::string::npos);
+
+    // The value must equal the schema version (5).
+    // We look for "glibre_plugin_current_version_Sensor = 5" (spaces may vary
+    // slightly, so search for the symbol name and "5" in the same vicinity by
+    // checking the sub-string within a reasonable window).
+    const auto sym_pos = text.find("glibre_plugin_current_version_Sensor");
+    REQUIRE(sym_pos != eastl::string::npos);
+    // Grab the rest of the line (up to 120 chars).
+    const eastl::string line(
+        text.data() + sym_pos,
+        eastl::string::size_type(std::min(std::size_t{120}, text.size() - sym_pos))
+    );
+    CHECK(line.find("5") != eastl::string::npos);
+
+    // Also verify that a second type in the same schema gets its own symbol
+    // with its own version (multi-type schema case).
+    constexpr std::string_view multi_src = R"(
+schema glibre.core.Alpha {
+  version 2
+  field x : u32 tag 1
+}
+schema glibre.core.Beta {
+  version 7
+  field y : f32 tag 1
+}
+)";
+    const auto multi_schema = parse_ok(multi_src, "core/multi.fory");
+    REQUIRE(multi_schema.types.size() == 2);
+
+    auto multi_result = emit_migration(multi_schema, "core/multi.fory");
+    REQUIRE(multi_result.has_value());
+    const eastl::string& mt = *multi_result;
+
+    CHECK(mt.find("glibre_plugin_current_version_Alpha") != eastl::string::npos);
+    CHECK(mt.find("glibre_plugin_current_version_Beta") != eastl::string::npos);
+
+    // Each symbol carries its own version value.
+    const auto alpha_pos = mt.find("glibre_plugin_current_version_Alpha");
+    REQUIRE(alpha_pos != eastl::string::npos);
+    const eastl::string alpha_line(
+        mt.data() + alpha_pos,
+        eastl::string::size_type(std::min(std::size_t{120}, mt.size() - alpha_pos))
+    );
+    CHECK(alpha_line.find("2") != eastl::string::npos);
+
+    const auto beta_pos = mt.find("glibre_plugin_current_version_Beta");
+    REQUIRE(beta_pos != eastl::string::npos);
+    const eastl::string beta_line(
+        mt.data() + beta_pos,
+        eastl::string::size_type(std::min(std::size_t{120}, mt.size() - beta_pos))
+    );
+    CHECK(beta_line.find("7") != eastl::string::npos);
+}
+
+// -----------------------------------------------------------------------
+// Test: foryc_emit_migration_current_version_round_trip (plan #978)
+//
+// Round-trip compile the emitted TU into a stub .dylib with clang++, then
+// dlopen + dlsym `glibre_plugin_current_version_<TypeName>` and verify
+// the loaded value matches the schema's declared version.
+// -----------------------------------------------------------------------
+
+TEST_CASE(
+    "foryc_emit_migration_current_version_round_trip",
+    "[foryc][emit_migration][current_version][integration]"
+) {
+    // Schema: one type with a non-trivial version + one type with no migrations.
+    // Both must get their own current_version symbols.
+    constexpr std::string_view fory_src = R"(
+schema glibre.test.Turbo {
+  version 4
+  field power : f32 tag 1
+  migration from 1 to 2 calls "glibre::test::migrate_Turbo_v1_to_v2"
+  migration from 2 to 3 calls "glibre::test::migrate_Turbo_v2_to_v3"
+  migration from 3 to 4 calls "glibre::test::migrate_Turbo_v3_to_v4"
+}
+schema glibre.test.Valve {
+  version 1
+  field open : u32 tag 1
+}
+)";
+
+    auto parse_result = parse_string(fory_src, "test/Turbo.fory");
+    REQUIRE(parse_result.has_value());
+    CHECK(parse_result->types.size() == 2);
+    CHECK(parse_result->types[0].version == 4);
+    CHECK(parse_result->types[1].version == 1);
+
+    auto emit_result = emit_migration(*parse_result, "test/Turbo.fory");
+    REQUIRE(emit_result.has_value());
+
+    const eastl::string& gen_text = *emit_result;
+
+    // Confirm the symbols appear in the generated text before compiling.
+    CHECK(gen_text.find("glibre_plugin_current_version_Turbo") != eastl::string::npos);
+    CHECK(gen_text.find("glibre_plugin_current_version_Valve") != eastl::string::npos);
+
+    // --- Set up temp dir. ---
+    const fs::path tmp_base = fs::temp_directory_path() / "glibre_foryc_ver_test";
+    const auto unique_suffix =
+        std::format("ver_rt_{}_{}", getpid(), reinterpret_cast<uintptr_t>(&gen_text));
+    const fs::path tmp_dir = tmp_base / unique_suffix;
+
+    std::error_code ec;
+    fs::create_directories(tmp_dir, ec);
+    REQUIRE(!ec);
+
+    const fs::path gen_path = tmp_dir / "current_version_roundtrip.cpp";
+    const fs::path preamble_path = tmp_dir / "preamble_ver.cpp";
+    const fs::path dylib_path = tmp_dir / "current_version_roundtrip.dylib";
+
+    // Preamble: versioned struct stubs + provider bodies for Turbo migrations.
+    constexpr std::string_view preamble = R"(
+#include <expected>
+#include "glibre/error.hpp"
+
+namespace glibre::test {
+// Versioned struct stubs for Turbo migrations.
+struct TurboV1 { float power{}; };
+struct TurboV2 { float power{}; };
+struct TurboV3 { float power{}; };
+struct TurboV4 { float power{}; };
+
+std::expected<void, glibre::Error> migrate_Turbo_v1_to_v2(const TurboV1&, TurboV2&) { return {}; }
+std::expected<void, glibre::Error> migrate_Turbo_v2_to_v3(const TurboV2&, TurboV3&) { return {}; }
+std::expected<void, glibre::Error> migrate_Turbo_v3_to_v4(const TurboV3&, TurboV4&) { return {}; }
+}  // namespace glibre::test
+)";
+    {
+        std::ofstream ofs{preamble_path, std::ios::trunc};
+        REQUIRE(ofs.is_open());
+        ofs.write(preamble.data(), static_cast<std::streamsize>(preamble.size()));
+        REQUIRE(ofs.good());
+    }
+
+    // Write the generated TU verbatim.
+    {
+        std::ofstream ofs{gen_path, std::ios::trunc};
+        REQUIRE(ofs.is_open());
+        ofs.write(gen_text.data(), static_cast<std::streamsize>(gen_text.size()));
+        REQUIRE(ofs.good());
+    }
+
+    // --- Compile into a .dylib. ---
+    const auto compile_cmd = std::format(
+        "clang++ -std=c++23 -fno-exceptions -fno-rtti "
+        "-I\"" GLIBRE_CORE_INCLUDE_DIR "\" "
+        "-I\"" GLIBRE_VCPKG_INCLUDE_DIR "\" "
+        "-dynamiclib -o \"{}\" \"{}\" \"{}\" 2>&1",
+        dylib_path.native(),
+        preamble_path.native(),
+        gen_path.native()
+    );
+
+    const int compile_rc = std::system(compile_cmd.c_str());  // NOLINT(concurrency-mt-unsafe)
+    REQUIRE(compile_rc == 0);
+    REQUIRE(fs::exists(dylib_path));
+
+    // --- dlopen. ---
+    const std::string dylib_native = dylib_path.native();
+    void* handle = dlopen(dylib_native.c_str(), RTLD_NOW | RTLD_LOCAL);
+    REQUIRE(handle != nullptr);
+
+    // --- dlsym current_version symbols and verify values. ---
+
+    // Turbo: schema version == 4.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    const auto* turbo_ver = reinterpret_cast<const std::uint32_t*>(
+        dlsym(handle, "glibre_plugin_current_version_Turbo")
+    );
+    REQUIRE(turbo_ver != nullptr);
+    CHECK(*turbo_ver == 4u);
+
+    // Valve: schema version == 1.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    const auto* valve_ver = reinterpret_cast<const std::uint32_t*>(
+        dlsym(handle, "glibre_plugin_current_version_Valve")
+    );
+    REQUIRE(valve_ver != nullptr);
+    CHECK(*valve_ver == 1u);
+
+    dlclose(handle);
+
+    // Cleanup (best effort).
+    fs::remove_all(tmp_dir, ec);
+}

@@ -50,13 +50,17 @@
 //       { <from>, <to>, reinterpret_cast<void*>(&<ns>::<fn>) },
 //   };
 //
-//   // 3. Per-type exported C-ABI symbols:
+//   // 3. Per-type exported C-ABI symbols (emitted for every type, plan #978):
+//   extern "C" const std::uint32_t glibre_plugin_current_version_<Type> = <N>;
+//
+//   // 4. Migration table pointer + count:
 //   extern "C" const MigrationEntry* glibre_plugin_migrations_<Type> =
 //       k_migrations_<Type>;
 //   extern "C" std::size_t glibre_plugin_migrations_<Type>_size = <count>;
 //
 // For types with no migration declarations the per-type block collapses to:
 //
+//   extern "C" const std::uint32_t glibre_plugin_current_version_<Type> = <N>;
 //   extern "C" const MigrationEntry* glibre_plugin_migrations_<Type> = nullptr;
 //   extern "C" std::size_t glibre_plugin_migrations_<Type>_size = 0;
 //
@@ -107,6 +111,9 @@ namespace glibre::tools::foryc {
 // Emit a C++ migration-dispatcher translation unit for a Schema.
 //
 // Returns the complete text of a generated .cpp file that, for each TypeDecl:
+//   - Exports `extern "C" const std::uint32_t glibre_plugin_current_version_<Type>`
+//     set to `td.version` so the plugin loader can dlsym it (plan #978;
+//     fory-codegen.md §"Migration Mechanic" point 1).
 //   - Forward-declares each provider as a C++ namespace function with the
 //     correct signature per fory-codegen.md §"Migration Mechanic" point 2.
 //   - Emits a static per-type MigrationEntry table (k_migrations_<Type>[]).
