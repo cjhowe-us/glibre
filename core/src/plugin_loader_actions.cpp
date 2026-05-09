@@ -248,10 +248,9 @@ Result<void> migrate_components(
     // the codebase pattern (see hot_reload_validate precondition asserts above).
 #ifndef NDEBUG
     assert(
-        step_fn != nullptr &&
-        "migrate_components precondition: "
-        "step_fn must be non-null when from_version != to_version — "
-        "caller must supply a migration step for schema bumps"
+        step_fn != nullptr && "migrate_components precondition: "
+                              "step_fn must be non-null when from_version != to_version — "
+                              "caller must supply a migration step for schema bumps"
     );
 #endif
 

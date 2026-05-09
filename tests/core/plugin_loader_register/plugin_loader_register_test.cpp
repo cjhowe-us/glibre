@@ -461,7 +461,8 @@ TEST_CASE("plugin_loader_stamps_allocator_handle_with_plugin_tag", "[core][regis
 // file-scope helper so it can be used from a non-capturing function pointer).
 // Reset to 0 before each SECTION to avoid cross-section interference.
 namespace {
-static int g_broken_step_call_count = 0;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+static int g_broken_step_call_count =
+    0;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 glibre::Result<void> broken_step_fn() noexcept {
     ++g_broken_step_call_count;
@@ -470,8 +471,7 @@ glibre::Result<void> broken_step_fn() noexcept {
 }  // namespace
 
 TEST_CASE(
-    "migrate_components_returns_failed_on_broken_migration_step",
-    "[core][register][migrate]"
+    "migrate_components_returns_failed_on_broken_migration_step", "[core][register][migrate]"
 ) {
     SECTION("from!=to: step_fn invoked once, failure propagated") {
         // Reset invocation counter for this section.
