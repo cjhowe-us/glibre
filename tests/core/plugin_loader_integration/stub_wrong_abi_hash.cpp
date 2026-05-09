@@ -76,8 +76,7 @@ std::size_t glibre_plugin_manifest_size = 0u;
 #pragma clang diagnostic ignored "-Wreturn-type-c-linkage"
 
 extern "C" [[gnu::visibility("default")]]
-glibre::Result<void>
-glibre_plugin_register(glibre::core::PluginContext& /*ctx*/) noexcept {
+glibre::Result<void> glibre_plugin_register(glibre::core::PluginContext& /*ctx*/) noexcept {
     // No-op: the integration test never reaches this call site.
     // The ABI hash gate (step 4) fires before register (step 9).
     return {};
