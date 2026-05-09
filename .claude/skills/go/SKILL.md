@@ -237,9 +237,13 @@ After all PRs that close a leaf have merged into `main`:
 2. If the verifier posts `passed`-of-`total` with all green ticks and
    tags `dod:verified`, the leaf is done.
 3. If the verifier reopens the issue with `dod:failed`, treat it as a
-   live leaf again: pick the next agent (typically the same bucket
-   that produced the original deliverable) to address the failures
-   in a follow-up PR. Do not bypass the verifier or hand-close.
+   live leaf again. **Dispatch `go-planning` first** to read the
+   verifier diagnostic, decide whether to amend the plan body (DoD,
+   scope, depends_on), split the leaf, or open follow-up plans. Only
+   after the revised plan lands does the next `go-coding` (or
+   `go-chore` for clearly-mechanical fixes the existing plan already
+   covers — typo, lint, single-flag CMake) dispatch fire to satisfy
+   the new contract. Do not bypass the verifier or hand-close.
 
 The orchestrator MUST NOT close a leaf via `gh issue close` directly;
 closure happens by merging a PR whose body uses `closes #<N>`, which
