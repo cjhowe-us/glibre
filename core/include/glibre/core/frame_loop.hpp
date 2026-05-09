@@ -12,6 +12,8 @@
 //     is similarly empty at this skeleton stage).
 //   - At Phase::Present (9), drain all registered TransientArena instances
 //     (perf-budget.md §Allocator Rules #4, plan #239).
+//   - At Phase::Present (9), reset the registered PerfBudget if one has
+//     been set via set_perf_budget() (perf-budget.md §CI Gate Spec, plan #241).
 //   - No dynamic allocation inside tick().
 //   - -fno-exceptions clean; noexcept throughout the public surface.
 //
@@ -25,6 +27,7 @@
 
 #include "glibre/core/frame_phase.hpp"
 #include "glibre/error.hpp"
+#include "glibre/perf_budget.hpp"
 #include "glibre/transient_arena.hpp"
 
 namespace glibre::core {
@@ -75,6 +78,31 @@ public:
     [[nodiscard]] glibre::Result<void>
     register_transient_arena(glibre::TransientArena* arena) noexcept;
 
+    // set_perf_budget() — register (or replace, or detach) a PerfBudget for
+    // phase-9 reset.
+    //
+    // Rebind contract:
+    //   - May be called any number of times provided no tick() is currently
+    //     executing on another thread.  The new pointer takes effect on the
+    //     next tick() call; the prior pointer is immediately ignored (not
+    //     deleted — lifetime is caller-managed).
+    //   - Passing nullptr detaches the budget: subsequent tick() calls skip
+    //     the phase-9 reset entirely.
+    //   - Rebinding between two non-null pointers is legal and useful in
+    //     tests that wish to swap budget fixtures between frames.
+    //
+    // When non-null, tick() calls budget->reset() at the START of
+    // Phase::Present (9) bookkeeping — before transient-arena drain — so that
+    // counters are zeroed even if a leak error is returned.
+    //
+    // The budget pointer must remain valid from the moment it is passed here
+    // until the next set_perf_budget() call (with null or another pointer) or
+    // until the FrameLoop is destroyed, whichever comes first.  Callers are
+    // responsible for ensuring pointer validity.
+    //
+    // Thread safety: must not be called concurrently with tick().
+    void set_perf_budget(glibre::PerfBudget* budget) noexcept;
+
     // tick() — advance one engine frame.
     //
     // Walks all nine phases in numeric order.  In debug builds a
@@ -106,12 +134,27 @@ private:
     [[nodiscard]] glibre::Result<void>
     run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept;
 
+    // present_reset_perf_budget() — step (1) of Phase::Present bookkeeping.
+    // Resets per-frame perf-budget counters unconditionally if a budget is set.
+    // Extracted for SRP (perf-budget.md §CI Gate Spec, plan #241).
+    void present_reset_perf_budget() noexcept;
+
+    // present_drain_arenas() — steps (2) & (3) of Phase::Present bookkeeping.
+    // Drains all registered transient arenas; in GLIBRE_ALLOC_STRICT builds
+    // asserts each arena was empty before drain and returns the first leak error.
+    // Extracted for SRP (perf-budget.md §Allocator Rules #4, plan #239).
+    [[nodiscard]] glibre::Result<void> present_drain_arenas() noexcept;
+
     std::uint64_t frame_index_{0};
 
     // Registered transient arenas — drained at the end of Phase::Present (9).
     // Non-owning pointers; lifetimes are caller-managed.
     std::array<glibre::TransientArena*, kMaxTransientArenas> arenas_{};
     std::size_t arena_count_{0};
+
+    // Optional PerfBudget — reset() called at end of Phase::Present (9).
+    // Non-owning pointer; lifetime is caller-managed.  Null = no-op.
+    glibre::PerfBudget* perf_budget_{nullptr};
 
 #ifdef GLIBRE_TESTING
     // Under GLIBRE_TESTING builds the last tick's phase execution order is

@@ -10,13 +10,18 @@
 //
 // TransientArena drain at phase 9 (Phase::Present) is per
 // perf-budget.md §Allocator Rules #4 and plan #239.
+//
+// PerfBudget reset at phase 9 (Phase::Present) is per
+// perf-budget.md §CI Gate Spec and plan #241.
 
 #include "glibre/core/frame_loop.hpp"
 
 #include <cstdint>
+#include <optional>
 
 #include "glibre/core/frame_phase.hpp"
 #include "glibre/error.hpp"
+#include "glibre/perf_budget.hpp"
 #include "glibre/transient_arena.hpp"
 
 namespace glibre::core {
@@ -55,6 +60,72 @@ FrameLoop::register_transient_arena(glibre::TransientArena* arena) noexcept {
         );
     }
     arenas_[arena_count_++] = arena;
+    return {};
+}
+
+// ---------------------------------------------------------------------------
+// set_perf_budget — register (or replace, or detach) a PerfBudget.
+//
+// Out-of-line for seam consistency with register_transient_arena (both are
+// public mutators that touch FrameLoop internals).  The assignment is trivial;
+// the doc-comment in the header carries the full contract.
+// ---------------------------------------------------------------------------
+
+void FrameLoop::set_perf_budget(glibre::PerfBudget* budget) noexcept {
+    perf_budget_ = budget;
+}
+
+// ---------------------------------------------------------------------------
+// present_reset_perf_budget — Phase::Present step (1).
+//
+// Resets all perf-budget counters unconditionally when a budget is registered.
+// Called before present_drain_arenas() so that counters are zeroed for frame
+// N+1 even when a transient-arena leak is detected in the same phase.
+// ---------------------------------------------------------------------------
+
+void FrameLoop::present_reset_perf_budget() noexcept {
+    if (perf_budget_ != nullptr) {
+        perf_budget_->reset();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// present_drain_arenas — Phase::Present steps (2) & (3).
+//
+// Drains every registered TransientArena unconditionally.  In
+// GLIBRE_ALLOC_STRICT builds, asserts each arena was empty before draining
+// (drain-then-aggregate pattern: all arenas are drained regardless of leak
+// detection); returns the first leak error encountered, if any.
+//
+// The `leak_captured` flag makes the "no leak yet" state explicit rather than
+// relying on the default-success reading of Result<void>, which reads inverted
+// to human expectations when used as a sentinel.
+// ---------------------------------------------------------------------------
+
+[[nodiscard]] glibre::Result<void> FrameLoop::present_drain_arenas() noexcept {
+#ifdef GLIBRE_ALLOC_STRICT
+    bool leak_captured = false;
+    std::optional<glibre::Error> first_leak;
+#endif
+
+    for (std::size_t i = 0; i < arena_count_; ++i) {
+#ifdef GLIBRE_ALLOC_STRICT
+        auto check = arenas_[i]->assert_drained();
+        if (!check && !leak_captured) {
+            // Capture the first leak; subsequent arenas still get drained.
+            leak_captured = true;
+            first_leak.emplace(std::move(check.error()));
+        }
+#endif
+        arenas_[i]->drain();  // always drain, regardless of strict-mode result
+    }
+
+#ifdef GLIBRE_ALLOC_STRICT
+    if (leak_captured) {
+        return std::unexpected(std::move(*first_leak));
+    }
+#endif
+
     return {};
 }
 
@@ -118,46 +189,27 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
     case Phase::HotReload: /* core (barrier) — MVP empty */
         break;
     case Phase::Present: /* platform — drains transient arenas at frame end */
-        // Drain all registered transient arenas at end of frame.
-        // perf-budget.md §Allocator Rules #4: transient arenas must be
-        // drained by phase 9 so they do not count against context ceilings.
-        // drain() is O(1) per arena; no heap allocation occurs.
-        //
-        // GLIBRE_ALLOC_STRICT gate (perf-budget.md §Allocator Rules #4):
-        //   assert_drained() is called BEFORE drain() (drain-then-aggregate
-        //   pattern): every arena is drained regardless of whether a leak is
-        //   detected, then the first encountered leak error is returned.
-        //   This ensures all arenas are in a clean state after each tick()
-        //   even when GLIBRE_ALLOC_STRICT is active, making the error
-        //   diagnostic rather than fatal to arena state.
-        //   The check is gated by GLIBRE_ALLOC_STRICT so it compiles to zero
-        //   cost in unstrict builds.  CI diagnostic builds define
-        //   -DGLIBRE_ALLOC_STRICT=1.
+        // Phase 9 bookkeeping order (perf-budget.md §CI Gate Spec, plan #241):
+        //   (1) Reset per-frame perf-budget counters UNCONDITIONALLY so that
+        //       counters do not carry over into the next frame regardless of
+        //       whether a transient-arena leak is detected below.  Resetting
+        //       first keeps the leak-detection path diagnostic: the caller
+        //       sees the error but the budget is already clean for frame N+1.
+        //   (2) & (3) Drain all registered transient arenas; in
+        //       GLIBRE_ALLOC_STRICT builds assert each was empty before drain
+        //       and return the first leak error (perf-budget.md §Allocator
+        //       Rules #4).  The strict gate compiles to zero cost in non-strict
+        //       builds; CI diagnostic builds define -DGLIBRE_ALLOC_STRICT=1.
         //
         // NOTE: this is core-owned bookkeeping running inside the
         //   platform-owned Phase::Present slot.  This is a deliberate
         //   "core barrier carve-out" that must be documented and eventually
         //   formalised as a post_phase() hook or a frame-phases.md §Phase 9
         //   amendment.  See [SPIKE] iterate-frame-phases-core-barrier-carveout.
-        {
-#ifdef GLIBRE_ALLOC_STRICT
-            glibre::Result<void> first_leak_error{};  // holds first leak error (if any)
-#endif
-            for (std::size_t i = 0; i < arena_count_; ++i) {
-#ifdef GLIBRE_ALLOC_STRICT
-                auto check = arenas_[i]->assert_drained();
-                if (!check && first_leak_error.has_value()) {
-                    // Capture the first leak; subsequent arenas still get drained.
-                    first_leak_error = std::unexpected(std::move(check.error()));
-                }
-#endif
-                arenas_[i]->drain();  // always drain, regardless of strict-mode result
-            }
-#ifdef GLIBRE_ALLOC_STRICT
-            if (!first_leak_error.has_value()) {
-                return std::unexpected(std::move(first_leak_error.error()));
-            }
-#endif
+        present_reset_perf_budget();          // (1) zero counters before leak detect
+        if (auto r = present_drain_arenas();  // (2)+(3) drain + optional leak error
+            !r) {
+            return r;
         }
         break;
     }
