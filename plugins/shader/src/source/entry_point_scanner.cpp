@@ -10,134 +10,242 @@
 //   "Every emitted EntryPoint has exactly one stage attribute."
 //
 // Scanning strategy:
-//   Step 1. Find all [shader("stage")] occurrences and their end positions.
-//   Step 2. For each attribute occurrence, scan forward past any additional
-//           [...] attribute blocks to find the function name that follows.
-//           A "function name" is an identifier directly followed by '(' after
-//           skipping a return type (void or any identifier) and whitespace.
-//   Step 3. Group (stage_str, fn_name) pairs by fn_name.
-//           If any fn_name appears more than once → EntryPointStageAmbiguous.
+//   Step 1. Walk source bytes char-by-char looking for '[' characters.
+//   Step 2. At each '[', attempt to match [shader("stage")] literally.
+//   Step 3. Past the attribute, skip whitespace and additional [...] blocks,
+//           then match: <return_type> <ws> <fn_name> <ws>* '('.
+//   Step 4. Collect (fn_name, stage_str) pairs in source-encounter order
+//           using an eastl::vector (preserves deterministic first-occurrence
+//           order — PHILOSOPHY §7; fixes HIGH-1).
+//   Step 5. Detect duplicates: if any fn_name appears more than once with a
+//           different stage_str → EntryPointStageAmbiguous.
+//
+// No <regex>, <string>, <unordered_map>, or <vector> — PHILOSOPHY §11 (HIGH-2).
 //
 // Note: this scanner deliberately avoids full Slang parsing.  Full parsing
 // is slangc's job (§4.3).
 
 #include "entry_point_scanner.hpp"
 
-#include <regex>
-#include <string>
-#include <unordered_map>
-#include <vector>
+#include <cstring>
+
+#include <EASTL/optional.h>
 
 namespace glibre::shader::detail {
 
 namespace {
 
-/// Map Slang stage attribute string to our Stage enum.
-std::optional<Stage> parse_stage(const std::string& stage_str) {
-    if (stage_str == "vertex")
-        return Stage::Vertex;
-    if (stage_str == "pixel")
-        return Stage::Pixel;
-    if (stage_str == "compute")
-        return Stage::Compute;
-    if (stage_str == "mesh")
-        return Stage::Mesh;
-    if (stage_str == "amplification")
-        return Stage::Amplification;
-    if (stage_str == "library")
-        return Stage::Library;
-    return std::nullopt;
+// ---------------------------------------------------------------------------
+// Character-class helpers
+// ---------------------------------------------------------------------------
+
+[[nodiscard]] constexpr bool is_ws(char c) noexcept {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
+[[nodiscard]] constexpr bool is_ident_start(char c) noexcept {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+[[nodiscard]] constexpr bool is_ident_cont(char c) noexcept {
+    return is_ident_start(c) || (c >= '0' && c <= '9');
+}
+
+// ---------------------------------------------------------------------------
+// Hand-rolled token-scanning helpers that work on a [begin, end) range.
+// All functions advance *pos past the matched region and return true on match.
+// ---------------------------------------------------------------------------
+
+/// Skip any whitespace characters.  Always succeeds.
+void skip_ws(const char* base, std::size_t len, std::size_t& pos) noexcept {
+    while (pos < len && is_ws(base[pos])) {
+        ++pos;
+    }
+}
+
+/// Attempt to match a literal prefix at pos.
+/// Returns true and advances pos on success; leaves pos unchanged on failure.
+[[nodiscard]] bool
+match_literal(const char* base, std::size_t len, std::size_t& pos, const char* literal) noexcept {
+    std::size_t llen = std::strlen(literal);
+    if (pos + llen > len)
+        return false;
+    if (std::memcmp(base + pos, literal, llen) != 0)
+        return false;
+    pos += llen;
+    return true;
+}
+
+/// Attempt to read an identifier at pos.  On success, *out_begin and *out_len
+/// delimit the identifier.
+[[nodiscard]] bool scan_ident(
+    const char* base,
+    std::size_t len,
+    std::size_t& pos,
+    std::size_t* out_begin,
+    std::size_t* out_len
+) noexcept {
+    if (pos >= len || !is_ident_start(base[pos]))
+        return false;
+    std::size_t start = pos;
+    while (pos < len && is_ident_cont(base[pos])) {
+        ++pos;
+    }
+    *out_begin = start;
+    *out_len = pos - start;
+    return true;
+}
+
+/// Skip a single [...] block (no nesting support).  Returns true and advances
+/// pos past the closing ']' on success.
+[[nodiscard]] bool skip_attr_block(const char* base, std::size_t len, std::size_t& pos) noexcept {
+    if (pos >= len || base[pos] != '[')
+        return false;
+    ++pos;
+    while (pos < len && base[pos] != ']') {
+        ++pos;
+    }
+    if (pos >= len)
+        return false;
+    ++pos;  // consume ']'
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Stage-string → Stage enum mapping
+// ---------------------------------------------------------------------------
+
+[[nodiscard]] eastl::optional<Stage> parse_stage(const char* str, std::size_t len) noexcept {
+    auto eq = [&](const char* lit) noexcept {
+        std::size_t llen = std::strlen(lit);
+        return llen == len && std::memcmp(str, lit, len) == 0;
+    };
+    if (eq("vertex"))
+        return Stage::Vertex;
+    if (eq("pixel"))
+        return Stage::Pixel;
+    if (eq("compute"))
+        return Stage::Compute;
+    if (eq("mesh"))
+        return Stage::Mesh;
+    if (eq("amplification"))
+        return Stage::Amplification;
+    if (eq("library"))
+        return Stage::Library;
+    return eastl::nullopt;
+}
+
+// ---------------------------------------------------------------------------
+// RawEntryPoint — collected in source-encounter order
+// ---------------------------------------------------------------------------
+
 struct RawEntryPoint {
-    std::string stage_str;
-    std::string fn_name;
+    eastl::string stage_str;
+    eastl::string fn_name;
 };
 
-/// Scan source string for [shader("...")] attributes and the function names
-/// that follow them.
+/// Walk `source` and collect (stage_str, fn_name) pairs in the order they
+/// appear in the source (source-position order).
 ///
-/// For each attribute found, scan forward in the source:
-///   - Skip whitespace/newlines.
-///   - Skip additional [...] attribute blocks.
-///   - Match a return type (identifier or void).
-///   - Match whitespace.
-///   - Capture the next identifier as the function name.
-///   - Confirm it is followed by '('.
-std::vector<RawEntryPoint> extract_raw_entry_points(const std::string& source) {
-    // Match [shader("stage")] — captures stage string.
-    static const std::regex kAttrRe{R"re(\[shader\("([a-zA-Z]+)"\)\])re"};
-    // Match fn_decl: (return_type WS+ fn_name WS* '(')
-    // The return_type is any identifier (incl. void).
-    // fn_name is the SECOND identifier — the one immediately before '('.
-    //
-    // We look for this pattern in the tail after all attribute blocks.
-    // A simplified pattern that matches "word WS+ word WS* (" where the
-    // second word is the function name.
-    static const std::regex kFnDeclRe{R"re(([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*\()re"};
-    // Match a single attribute block [...] (any content, non-nested).
-    static const std::regex kAttrBlockRe{R"re(\[[^\]]*\])re"};
-    // Match an identifier (for skip-return-type scanning).
-    static const std::regex kIdentRe{R"re([A-Za-z_]\w*)re"};
+/// For each '[' in the source we attempt:
+///   [shader("<stage>")]
+/// then skip whitespace + additional [...] blocks, then match:
+///   <return_type_ident> <ws+> <fn_name_ident> <ws>* '('
+///
+/// Preserves first-occurrence source order (no hash maps) — PHILOSOPHY §7.
+eastl::vector<RawEntryPoint> extract_raw_entry_points(const char* src, std::size_t len) {
+    eastl::vector<RawEntryPoint> results;
 
-    std::vector<RawEntryPoint> results;
+    std::size_t i = 0;
+    while (i < len) {
+        // Fast-path: look for '['.
+        if (src[i] != '[') {
+            ++i;
+            continue;
+        }
 
-    auto it = std::sregex_iterator{source.begin(), source.end(), kAttrRe};
-    auto end = std::sregex_iterator{};
+        // Attempt to match [shader("<stage>")].
+        // Pattern: [shader("  <-- already at '[', match up through opening '"'
+        std::size_t pos = i;
+        if (!match_literal(src, len, pos, "[shader(\"")) {
+            ++i;
+            continue;
+        }
 
-    for (; it != end; ++it) {
-        const std::smatch& m = *it;
-        std::string stage_str = m[1].str();
-
-        // pos points to the character immediately after the matched attribute.
-        auto attr_end = static_cast<std::size_t>(m.position() + m.length());
-        std::string tail = source.substr(attr_end);
-
-        // Step A: skip whitespace + newlines.
-        std::size_t pos = 0;
-        while (pos < tail.size() &&
-               (tail[pos] == ' ' || tail[pos] == '\t' || tail[pos] == '\r' || tail[pos] == '\n')) {
+        // Read the stage string content (pos is now past the opening '"').
+        // Scan until we hit the closing '"'.
+        std::size_t stage_begin = pos;
+        while (pos < len && src[pos] != '"' && src[pos] != '\n') {
             ++pos;
         }
+        if (pos >= len || src[pos] != '"') {
+            ++i;
+            continue;
+        }
+        std::size_t stage_len = pos - stage_begin;
+        ++pos;  // consume closing '"'
 
-        // Step B: skip additional [...] attribute blocks (possibly multiple).
-        // Repeat until no more attribute blocks at the current position.
-        bool skipped = true;
-        while (skipped) {
-            skipped = false;
-            std::string from_pos = tail.substr(pos);
-            std::smatch ab;
-            // Only match at the beginning of from_pos.
-            if (std::regex_search(from_pos, ab, kAttrBlockRe) && ab.position() == 0) {
-                pos += static_cast<std::size_t>(ab.length());
-                // Skip trailing whitespace/newlines.
-                while (pos < tail.size() && (tail[pos] == ' ' || tail[pos] == '\t' ||
-                                             tail[pos] == '\r' || tail[pos] == '\n')) {
-                    ++pos;
-                }
-                skipped = true;
+        // Match the closing )] of the attribute.
+        if (!match_literal(src, len, pos, ")]")) {
+            ++i;
+            continue;
+        }
+
+        // We have a valid [shader("...")] attribute ending at pos.
+        // stage_begin..stage_begin+stage_len are the stage bytes.
+        eastl::string stage_str{src + stage_begin, stage_len};
+
+        // Step B: skip whitespace.
+        skip_ws(src, len, pos);
+
+        // Step C: skip additional [...] attribute blocks.
+        while (pos < len && src[pos] == '[') {
+            std::size_t saved = pos;
+            if (!skip_attr_block(src, len, pos)) {
+                pos = saved;
+                break;
             }
+            skip_ws(src, len, pos);
         }
 
-        // Step C: match the function declaration pattern in the remaining tail.
-        std::string decl_tail = tail.substr(pos);
-        std::smatch fn_m;
-        if (!std::regex_search(decl_tail, fn_m, kFnDeclRe)) {
-            // No function declaration found after this attribute — skip.
+        // Step D: match return_type_ident WS+ fn_name_ident WS* '('.
+        std::size_t rt_begin = 0, rt_len = 0;
+        if (!scan_ident(src, len, pos, &rt_begin, &rt_len)) {
+            // No identifier — not a function declaration.
+            i = pos;
             continue;
         }
 
-        // Verify the match starts at the beginning of decl_tail (after WS skip).
-        if (fn_m.position() != 0) {
-            // There is non-whitespace non-attribute content before the function —
-            // this attribute may not directly precede a function declaration.
+        // Must have at least one whitespace between return type and name.
+        if (pos >= len || !is_ws(src[pos])) {
+            i = pos;
+            continue;
+        }
+        skip_ws(src, len, pos);
+
+        std::size_t fn_begin = 0, fn_len = 0;
+        if (!scan_ident(src, len, pos, &fn_begin, &fn_len)) {
+            i = pos;
             continue;
         }
 
-        // fn_m[1] = return type, fn_m[2] = function name.
-        std::string fn_name = fn_m[2].str();
+        skip_ws(src, len, pos);
 
+        if (pos >= len || src[pos] != '(') {
+            i = pos;
+            continue;
+        }
+
+        // Valid entry point found.
+        eastl::string fn_name{src + fn_begin, fn_len};
         results.push_back(RawEntryPoint{std::move(stage_str), std::move(fn_name)});
+
+        // Advance main cursor past the '[shader("...")]' attribute only, NOT
+        // past the function name.  This allows a subsequent [shader("...")] on
+        // the next line (stacked attributes pattern) to be found and paired with
+        // the same function — which will then be flagged as EntryPointStageAmbiguous.
+        // If we advanced past the function we would miss stacked attributes.
+        ++i;
     }
 
     return results;
@@ -146,32 +254,33 @@ std::vector<RawEntryPoint> extract_raw_entry_points(const std::string& source) {
 }  // namespace
 
 std::expected<eastl::vector<EntryPoint>, Error> scan_entry_points(const eastl::string& source) {
-    std::string std_source{source.c_str(), source.size()};
+    const char* src = source.c_str();
+    std::size_t len = source.size();
 
-    std::vector<RawEntryPoint> raw = extract_raw_entry_points(std_source);
+    eastl::vector<RawEntryPoint> raw = extract_raw_entry_points(src, len);
 
-    // Group by function name.
-    std::unordered_map<std::string, std::vector<std::string>> seen;
-    for (auto& rep : raw) {
-        seen[rep.fn_name].push_back(rep.stage_str);
-    }
-
-    // Detect ambiguous entries (same function name with multiple [shader("...")] attrs).
-    for (const auto& [name, stages] : seen) {
-        if (stages.size() > 1u) {
-            return std::unexpected(Error::EntryPointStageAmbiguous);
+    // Detect ambiguous entries using a linear search over the (small) result set.
+    // We keep insertion order intact — never use a hash map (PHILOSOPHY §7).
+    //
+    // Strategy: for each entry in raw, check whether any later entry has the same
+    // fn_name but a different stage → EntryPointStageAmbiguous.
+    for (std::size_t a = 0; a < raw.size(); ++a) {
+        for (std::size_t b = a + 1; b < raw.size(); ++b) {
+            if (raw[a].fn_name == raw[b].fn_name) {
+                return std::unexpected(Error::EntryPointStageAmbiguous);
+            }
         }
     }
 
-    // Build result.
+    // Build result in source-encounter order, skipping unknown stage strings.
     eastl::vector<EntryPoint> result;
-    result.reserve(static_cast<eastl::vector<EntryPoint>::size_type>(seen.size()));
-    for (const auto& [name, stages] : seen) {
-        auto maybe_stage = parse_stage(stages[0]);
+    result.reserve(static_cast<eastl::vector<EntryPoint>::size_type>(raw.size()));
+    for (const auto& rep : raw) {
+        auto maybe_stage = parse_stage(rep.stage_str.c_str(), rep.stage_str.size());
         if (!maybe_stage) {
             continue;  // Unknown stage string — skip.
         }
-        result.push_back(EntryPoint{eastl::string{name.c_str(), name.size()}, *maybe_stage});
+        result.push_back(EntryPoint{rep.fn_name, *maybe_stage});
     }
 
     return result;

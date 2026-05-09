@@ -114,6 +114,20 @@ namespace shader {
 // Error codes for the shader bounded context.
 // Added by plan #508 (ShaderSource open + include resolver + entry-point scanner).
 // Authority: specs/shader/SPEC.md §10.
+//
+// MED-1 rationale (plan #508 review round 1):
+//   All 25 arms from SPEC §10 are registered here rather than introduced
+//   plan-by-plan.  Rationale: SPEC §10 is the closed sum for the shader
+//   context; the static_assert chain in error_register.hpp pin-checks the
+//   arm count to kExpectedArmCount so any future plan that removes or adds
+//   an arm must also update the SPEC.  Introducing arms incrementally would
+//   require editing this header in 4–5 subsequent PRs and risks arm-count
+//   drift between the SPEC and the enum.  The accepted cost is that plans
+//   that don't yet raise Compiler*/Cache*/Descriptor*/Shipping*/Reflection*
+//   arms carry them as forward-declared intent; they become reachable as
+//   later plans (CompilationPipeline, ShaderCache, ReflectionBlob) land.
+//   This is the §10 snapshot approach; the alternative would be to prune and
+//   re-amend the SPEC on each plan, which is more disruptive.
 enum class Error : std::uint16_t {
     SourceNotFound,                 // file does not exist or cannot be opened
     SourceParseFailed,              // file exists but cannot be parsed

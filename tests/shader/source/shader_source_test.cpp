@@ -62,17 +62,13 @@ TEST_CASE("shader_source_open_validates_entry_points", "[shader][shader_source]"
     auto eps = src.entry_points();
     REQUIRE(eps.size() == 2u);
 
-    // Both stages must be present (order may vary — scan is unordered map based).
-    bool found_vertex = false;
-    bool found_pixel = false;
-    for (const auto& ep : eps) {
-        if (ep.stage == glibre::shader::Stage::Vertex)
-            found_vertex = true;
-        if (ep.stage == glibre::shader::Stage::Pixel)
-            found_pixel = true;
-    }
-    CHECK(found_vertex);
-    CHECK(found_pixel);
+    // HIGH-1 regression: entry_points() must be in source-encounter order.
+    // two_stage_shader.slang declares [shader("vertex")] vs_main first,
+    // then [shader("pixel")] ps_main.  The scanner preserves source order.
+    CHECK(eps[0].name == eastl::string{"vs_main"});
+    CHECK(eps[0].stage == glibre::shader::Stage::Vertex);
+    CHECK(eps[1].name == eastl::string{"ps_main"});
+    CHECK(eps[1].stage == glibre::shader::Stage::Pixel);
 }
 
 // ===========================================================================
@@ -266,6 +262,80 @@ TEST_CASE(
 TEST_CASE("include_resolver_detects_cycle_with_IncludeCycle", "[shader][include_resolver]") {
     const auto project_root = kFixtureDir;
     const auto project_rel = std::filesystem::path{"cycle_a.slang"};
+
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    REQUIRE_FALSE(result.has_value());
+
+    const auto& err = result.error();
+    const bool is_cycle =
+        eastl::holds_alternative<glibre::shader::Error>(err.code()) &&
+        eastl::get<glibre::shader::Error>(err.code()) == glibre::shader::Error::IncludeCycle;
+    CHECK(is_cycle);
+}
+
+// ===========================================================================
+// Test: shader_source_open_returns_EncodingInvalid_for_non_utf8_content
+//
+// HIGH-4: read_and_normalize_file must reject files with non-UTF-8 bytes.
+//
+// Fixture: fixtures/binary_content.slang (contains \x80\xFF invalid bytes).
+// ===========================================================================
+
+TEST_CASE(
+    "shader_source_open_returns_EncodingInvalid_for_non_utf8_content", "[shader][shader_source]"
+) {
+    const auto project_root = kFixtureDir;
+    const auto project_rel = std::filesystem::path{"binary_content.slang"};
+
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    REQUIRE_FALSE(result.has_value());
+
+    const auto& err = result.error();
+    const bool is_encoding_invalid =
+        eastl::holds_alternative<glibre::shader::Error>(err.code()) &&
+        eastl::get<glibre::shader::Error>(err.code()) == glibre::shader::Error::EncodingInvalid;
+    CHECK(is_encoding_invalid);
+}
+
+// ===========================================================================
+// Test: shader_source_open_returns_EncodingInvalid_for_empty_file
+//
+// HIGH-4: read_and_normalize_file must reject empty files.
+//
+// Fixture: fixtures/empty_file.slang (zero bytes).
+// ===========================================================================
+
+TEST_CASE("shader_source_open_returns_EncodingInvalid_for_empty_file", "[shader][shader_source]") {
+    const auto project_root = kFixtureDir;
+    const auto project_rel = std::filesystem::path{"empty_file.slang"};
+
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    REQUIRE_FALSE(result.has_value());
+
+    const auto& err = result.error();
+    const bool is_encoding_invalid =
+        eastl::holds_alternative<glibre::shader::Error>(err.code()) &&
+        eastl::get<glibre::shader::Error>(err.code()) == glibre::shader::Error::EncodingInvalid;
+    CHECK(is_encoding_invalid);
+}
+
+// ===========================================================================
+// Test: shader_source_cycle_detection_is_case_insensitive
+//
+// MED-2 regression: a file that includes itself with a different-case path
+// must be detected as a cycle on macOS case-insensitive filesystems.
+//
+// The fixture cycle_self_caseinsensitive.slang includes
+// "CYCLE_SELF_CASEINSENSITIVE.slang" (uppercase) which is the same physical
+// file.  The preprocessor ASCII-lowercases paths before comparing against the
+// visit stack, so this produces IncludeCycle rather than looping forever.
+//
+// Fixture: fixtures/cycle_self_caseinsensitive.slang
+// ===========================================================================
+
+TEST_CASE("shader_source_cycle_detection_is_case_insensitive", "[shader][include_resolver]") {
+    const auto project_root = kFixtureDir;
+    const auto project_rel = std::filesystem::path{"cycle_self_caseinsensitive.slang"};
 
     auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
     REQUIRE_FALSE(result.has_value());

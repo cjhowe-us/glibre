@@ -8,7 +8,9 @@
 // Algorithm of ShaderSource::open():
 //   1. Reject if project_relative is absolute.
 //   2. Construct abs_path = project_root / project_relative.
-//   3. Read the root file. Return Error::SourceNotFound if absent.
+//   3. Read + normalize the root file (UTF-8 BOM strip, encoding check,
+//      empty-file rejection).  Return Error::SourceNotFound if absent,
+//      Error::EncodingInvalid if malformed.
 //   4. Run include expansion (preprocessor.hpp) → PreprocessedSource bytes
 //      plus include_closure accumulator.
 //   5. Run entry-point scanner → eastl::vector<EntryPoint>.
@@ -16,9 +18,7 @@
 //   7. Assemble and return ShaderSource.
 
 #include <blake3.h>
-#include <fstream>
-#include <sstream>
-#include <string>
+#include <cstring>
 
 #include <glibre/shader/shader.hpp>
 
@@ -36,17 +36,6 @@ namespace {
     blake3_hasher_update(&hasher, data, len);
     blake3_hasher_finalize(&hasher, reinterpret_cast<uint8_t*>(result.bytes.data()), 32);
     return result;
-}
-
-[[nodiscard]] std::expected<eastl::string, Error> read_file(const std::filesystem::path& path) {
-    std::ifstream ifs{path, std::ios::binary};
-    if (!ifs.is_open()) {
-        return std::unexpected(Error::SourceNotFound);
-    }
-    std::ostringstream buf;
-    buf << ifs.rdbuf();
-    std::string std_content = buf.str();
-    return eastl::string{std_content.data(), std_content.size()};
 }
 
 }  // namespace
@@ -71,8 +60,9 @@ glibre::Result<ShaderSource> ShaderSource::open(
         return std::unexpected(Error::IncludeEscape);
     }
 
-    // Step 1: read root file.
-    auto root_result = read_file(abs_path);
+    // Step 1: read + normalize root file (HIGH-4: BOM strip, UTF-8 check,
+    // empty-file rejection via read_and_normalize_file).
+    auto root_result = detail::read_and_normalize_file(abs_path);
     if (!root_result) {
         return std::unexpected(root_result.error());
     }
@@ -107,13 +97,14 @@ glibre::Result<ShaderSource> ShaderSource::open(
     ShaderHash total_hash = blake3_hash(expanded.data(), expanded.size());
 
     // Step 5: pack into bytes for PreprocessedSource.
+    // LOW-1 fix: use memcpy instead of a manual byte-cast loop.
     eastl::vector<std::byte> expanded_bytes;
     expanded_bytes.resize(expanded.size());
-    for (eastl::vector<std::byte>::size_type i = 0; i < expanded.size(); ++i) {
-        expanded_bytes[i] = static_cast<std::byte>(static_cast<unsigned char>(expanded[i]));
-    }
+    std::memcpy(expanded_bytes.data(), expanded.data(), expanded.size());
 
     // Step 6: assemble ShaderSource.
+    // MED-5: all fields are populated exactly here via move-only open().
+    // No public setters exist; post-construction mutation is closed off.
     ShaderSource src;
     src.id_ = SourceId{root_rel_str};
     src.entry_points_ = std::move(entry_points);
@@ -129,6 +120,10 @@ glibre::Result<ShaderSource> ShaderSource::open(
 
 const SourceId& ShaderSource::id() const noexcept { return id_; }
 
+// MED-5: entry_points() returns a span over entry_points_.  The ShaderSource
+// is populated only once (via open()) and has no public mutation path, so the
+// span lifetime matches the owning ShaderSource lifetime.  Callers must not
+// hold a span across a move of the ShaderSource.
 eastl::span<const EntryPoint> ShaderSource::entry_points() const noexcept {
     return eastl::span<const EntryPoint>{entry_points_.data(), entry_points_.size()};
 }
