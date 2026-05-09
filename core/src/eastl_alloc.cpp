@@ -16,8 +16,18 @@
 //
 // All overloads delegate to aligned_alloc / free (POSIX) which guarantees
 // 16-byte minimum alignment (matching EASTL_ALLOCATOR_MIN_ALIGNMENT).
-// No dependency on malloc/new — this is a low-level slab that every EASTL
-// container in the engine and tools ultimately calls.
+//
+// Deallocation note: EASTL's default allocator::deallocate (allocator.h:285)
+// calls plain `delete[](char*)p`, which routes through the global
+// `operator delete[](void*)` — NOT through any override defined here.
+// On macOS libc (libSystem), std::aligned_alloc results are free()-compatible
+// and the system `operator delete[]` releases them via free(), so this is
+// sound. If portability beyond macOS is ever needed, define matching
+// `operator delete[]` overrides and switch allocate/deallocate to use
+// std::malloc/std::free for symmetric pairing.
+//
+// This is a macOS-only engine (PHILOSOPHY §0: macOS-first baseline) so
+// the current deallocation path is accepted for the MVP.
 //
 // Threading: no lock needed — aligned_alloc is thread-safe on macOS.
 //
