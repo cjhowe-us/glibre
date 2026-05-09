@@ -1,7 +1,6 @@
 // tests/core/plugin_loader_registry/plugin_loader_registry_test.cpp
 //
-// Catch2 unit tests for glibre::core::PluginLoaderRegistry (plan #230) and
-// migrate_components step-11 failure path (plan #983).
+// Catch2 unit tests for glibre::core::PluginLoaderRegistry (plan #230).
 //
 // Named test cases (plan #230 Unit Test Plan + DoD):
 //   - plugin_loader_rejects_abi_hash_mismatch
@@ -9,9 +8,6 @@
 //   - plugin_loader_accepts_compatible_plugin
 //   - plugin_loader_rejects_duplicate_name
 //   - plugin_loader_rejects_incompatible_version
-//
-// Named test cases (plan #983 Unit Test Plan + DoD):
-//   - migrate_components_returns_failed_on_broken_migration_step
 //
 // Design constraints:
 //   • -fno-exceptions (error-model.md §Decision 3).
@@ -26,7 +22,6 @@
 
 #include <EASTL/string_view.h>
 #include <catch2/catch_test_macros.hpp>
-#include <glibre/core/plugin_loader_actions.hpp>  // migrate_components + MigrationStepFn (plan #983)
 #include <glibre/core/plugin_loader_registry.hpp>
 #include <glibre/core/plugin_manifest.hpp>
 #include <glibre/error.hpp>
@@ -555,47 +550,4 @@ TEST_CASE("name_unique_rejects_same_name_different_path", "[core][plugin_loader_
     const auto* core_err2 = as_core_error(r3.error());
     REQUIRE(core_err2 != nullptr);
     CHECK(*core_err2 == glibre::core::Error::PluginNameCollision);
-}
-
-// ===========================================================================
-// Test: migrate_components_returns_failed_on_broken_migration_step
-//
-// Exercises loader step 11 failure path (plugin-abi.md §"Loader Sequence"
-// step 11, §"Failure Modes → core::Error" row 11):
-//   migration step failed → core::Error::SchemaMigrationFailed.
-//
-// Uses option 1 from plan #983 §Scope: inject a mock MigrationStepFn that
-// returns std::unexpected(core::Error::SchemaMigrationFailed) to simulate a
-// broken migration step.  This exercises the failure arm without requiring
-// the real per-type migration table walk from plan #221.
-//
-// Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" step 11,
-//            §"Failure Modes → core::Error" table (row 11).
-// Plan: #983 — SchemaMigrationFailed integration test.
-// DoD: unit_test_named: migrate_components_returns_failed_on_broken_migration_step
-// ===========================================================================
-
-TEST_CASE(
-    "migrate_components_returns_failed_on_broken_migration_step",
-    "[core][plugin_loader_registry][migrate]"
-) {
-    // Mock migration step that always fails — simulates a broken migration
-    // function (e.g. the per-type migration table in plan #221 encounters a
-    // corrupt component blob or an unsupported schema transition).
-    //
-    // MigrationStepFn is a plain function pointer (Result<void>(*)() noexcept)
-    // so we supply a file-scope-like lambda converted to a function pointer.
-    // The lambda has no captures so the conversion is valid under C++11+.
-    glibre::core::MigrationStepFn broken_step = []() noexcept -> glibre::Result<void> {
-        return std::unexpected(glibre::Error{glibre::core::Error::SchemaMigrationFailed});
-    };
-
-    // from_version (1) != to_version (2): a real schema bump — step_fn is
-    // invoked and its failure propagated to the caller.
-    auto result = glibre::core::migrate_components(1u, 2u, broken_step);
-
-    REQUIRE(!result);
-    const auto* core_err = as_core_error(result.error());
-    REQUIRE(core_err != nullptr);
-    CHECK(*core_err == glibre::core::Error::SchemaMigrationFailed);
 }

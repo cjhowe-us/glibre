@@ -241,24 +241,19 @@ Result<void> migrate_components(
         return {};
     }
 
-    // A non-null step_fn is required when from != to.
-    // A null step_fn indicates a caller logic error (the caller must supply
-    // the migration step when versions differ); map to SchemaMigrationFailed
-    // so the caller's error handling path sees the same arm regardless of
-    // whether the step was null or the step itself failed.
-    if (step_fn == nullptr) {
-        return std::unexpected(
-            glibre::Error{
-                core::Error::SchemaMigrationFailed,
-                ErrorContext{
-                    .file = __FILE__,
-                    .line = __LINE__,
-                    .detail = "step_fn is null — caller must supply a migration step when "
-                              "from_version != to_version",
-                },
-            }
-        );
-    }
+    // Precondition: step_fn must be non-null when from != to (documented in
+    // plugin_loader_actions.hpp @param step_fn "Must be non-null").  A null
+    // pointer here is a caller logic error — the caller must supply a migration
+    // step when versions differ.  Fire a debug-build assertion consistent with
+    // the codebase pattern (see hot_reload_validate precondition asserts above).
+#ifndef NDEBUG
+    assert(
+        step_fn != nullptr &&
+        "migrate_components precondition: "
+        "step_fn must be non-null when from_version != to_version — "
+        "caller must supply a migration step for schema bumps"
+    );
+#endif
 
     // Invoke the migration step and propagate the result unchanged.
     // In production (plan #221) this will be replaced by a per-type migration
