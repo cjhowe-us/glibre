@@ -1,27 +1,35 @@
 #pragma once
 // core/include/glibre/core/plugin_loader_actions.hpp
 //
-// Loader-procedure free functions — steps 9–11 of the plugin loader sequence,
-// and hot-reload swap candidate validation.
+// Loader-procedure free functions — two axes of stateless loader-sequence work:
 //
-// Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" steps 9–11,
-//            §"Failure Modes → core::Error" rows 9, 10, 11.
-//            reviews/decisions/hot-reload-protocol.md §"Step 2 — Swap" steps 2.1, 2.2.
+//   Axis 1 — Initial-load post-gate actions (steps 9–11 of the plugin loader
+//             sequence).  These run ONCE when a plugin is first loaded, after
+//             all four PluginLoaderRegistry gate checks (steps 4–7) pass.
+//             Authority: reviews/decisions/plugin-abi.md §"Loader Sequence"
+//             steps 9–11 and §"Failure Modes → core::Error" rows 9, 10, 11.
 //
-// These functions implement the post-gate actions that run after all four
-// PluginLoaderRegistry gate checks (steps 4–7) pass.  They are free functions
-// rather than PluginLoaderRegistry members because they do not read or mutate
-// the registry-of-records state (the loaded_ map and host_engine_version_).
-// Keeping them separate respects the SRP boundary that motivated splitting
-// PluginLoader (RAII handle + dlopen/dlsym, plan #229) from PluginLoaderRegistry
-// (gate validation + records, plan #230) in the first place.
+//   Axis 2 — Hot-reload pre-swap validation (hot-reload phase-8 step 2, plan
+//             #250).  This check runs EVERY reload cycle, after the drain step
+//             and before the vtable swap.  It inspects two loaded-plugin
+//             manifests and returns an error if the swap should be refused.
+//             Authority: reviews/decisions/hot-reload-protocol.md §"Step 2 —
+//             Swap" sub-steps 2.1 and 2.2.
 //
-// hot_reload_validate (plan #250) is a free function that sits in this header
-// because it is a pre-swap check that does not mutate registry state; it
-// inspects two loaded-plugin manifests and returns an error if the swap should
-// be refused.
+// SRP note: the two axes share this file because both expose stateless free
+// functions that do not read or mutate PluginLoaderRegistry state (the loaded_
+// map and host_engine_version_).  That "no-registry-state" boundary is the
+// single responsibility this file enforces.  The test directory split
+// (tests/core/plugin_loader/ for Axis 1, tests/core/hot_reload/ for Axis 2)
+// signals that the axes MAY be separated into parallel header/source pairs once
+// plans #251+ add type-superset checks and migration-arena work that would
+// further grow Axis 2's responsibility surface.
 //
-// Callers: PluginLoader (plan #229) orchestrates steps 1–11; these free
+// TODO(#251): evaluate splitting hot_reload_validate (and its successors from
+// plans #251+) into core/include/glibre/core/hot_reload_actions.hpp + .cpp to
+// match the test directory structure and keep each file on a single axis.
+//
+// Callers: PluginLoader (plan #229) orchestrates steps 1–11; the Axis 1
 //          functions are called after validate_all() succeeds and before
 //          register_plugin() records the newly loaded plugin.
 //
@@ -137,8 +145,8 @@ migrate_components(std::uint32_t from_version, std::uint32_t to_version) noexcep
 //
 // Three sequential checks, performed in the order below:
 //
-//   Check A — Name identity (new in plan #250; not a hot-reload-protocol step
-//             number but derived from PHILOSOPHY §3 "one dylib per domain"):
+//   Check A — Name identity (plan #250 configuration-error guard; no parent
+//             step in hot-reload-protocol.md or plugin-abi.md):
 //     incoming.name == outgoing.name.  Swapping for a plugin with a different
 //     name is a configuration error — the operator loaded the wrong dylib.
 //     Failure → core::Error::PluginNameMismatch.
@@ -165,9 +173,10 @@ migrate_components(std::uint32_t from_version, std::uint32_t to_version) noexcep
 //     the loader holds the exclusive phase-8 lock, but the belt-and-suspenders
 //     check is cheap and the error message is more specific.
 //
-//     The PRECONDITION is asserted in debug builds via GLIBRE_DCHECK inside
-//     hot_reload_validate (see plugin_loader_actions.cpp).  Call sites must
-//     not invoke this function without first calling validate_all.
+//     The PRECONDITION is asserted in debug builds via #ifndef NDEBUG /
+//     assert() inside hot_reload_validate (see plugin_loader_actions.cpp).
+//     Call sites must not invoke this function without first calling
+//     validate_all.
 //
 //     Failure → core::Error::PluginAbiHashMismatch.
 //
@@ -201,12 +210,13 @@ migrate_components(std::uint32_t from_version, std::uint32_t to_version) noexcep
 //   without touching ECS state.
 //
 // Preconditions (unchecked — caller must ensure):
-//   • outgoing and incoming are fully loaded (PluginLoader::open() succeeded).
-//   • Both loaders have valid manifests (manifest_result().has_value() == true).
+//   • outgoing and incoming are valid PluginManifest values previously
+//     extracted from PluginLoader instances whose validate_all() returned
+//     success.
 //   • This function is called during phase 8, after drain.
 //
-// @param outgoing  Currently-loaded plugin loader.
-// @param incoming  Candidate replacement plugin loader.
+// @param outgoing  Currently-loaded plugin's manifest.
+// @param incoming  Candidate replacement plugin's manifest.
 //
 // Returns:
 //   success (Result<void>{})                     — all checks passed; swap may proceed.

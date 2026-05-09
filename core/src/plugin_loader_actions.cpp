@@ -169,9 +169,9 @@ Result<void> migrate_components(
 //   disagreement as a distinct diagnostic (see .hpp docstring for full
 //   rationale).
 //
-//   PRECONDITION ASSERTION: The GLIBRE_DCHECK below fires in debug builds if
-//   outgoing.abi_hash is empty (a proxy for "validate_all not called"), catching
-//   the most common misuse without requiring a host_abi_hash parameter.
+//   PRECONDITION ASSERTION: The #ifndef NDEBUG / assert() below fires in debug
+//   builds if outgoing.abi_hash is empty (a proxy for "validate_all not called"),
+//   catching the most common misuse without requiring a host_abi_hash parameter.
 //
 //   Failure → core::Error::PluginAbiHashMismatch.
 //
