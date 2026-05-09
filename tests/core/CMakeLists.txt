@@ -5,6 +5,7 @@ cmake_minimum_required(VERSION 3.30)
 # ---------------------------------------------------------------------------
 
 add_subdirectory(plugin_api)
+add_subdirectory(plugin_loader)
 
 add_executable(glibre-core-tests
     frame_loop_test.cpp

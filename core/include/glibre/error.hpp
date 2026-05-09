@@ -42,6 +42,14 @@ enum class Error : std::uint16_t {
     PluginManifestNotFound,  // path does not exist or is not a regular file
     PluginManifestInvalid,   // file exists but Fory deserialization failed
                              //   (corrupt, wrong schema version, truncated)
+    // Loader step 1: dlopen failure (plan #229 — PluginLoader dlopen+dlsym)
+    // Maps to plugin-abi.md §"Failure Modes" step 1: dlopen returns null.
+    // The dlerror() text is attached to ErrorContext::detail.
+    PluginDlopenFailed,
+    // Loader step 2: a required export symbol is missing from the dylib.
+    // Maps to plugin-abi.md §"Failure Modes" step 2: required symbol missing.
+    // After dlclose, the loader aborts without further steps.
+    PluginMissingEntryPoint,
 };
 }  // namespace core
 
