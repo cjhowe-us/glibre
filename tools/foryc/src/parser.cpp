@@ -165,6 +165,29 @@ private:
 // Parser
 // -----------------------------------------------------------------------
 
+// FORYC_ERR(code, detail_sv) — build a glibre::Error from a tools::Error
+// enumerator, capturing __FILE__ and __LINE__ at the *call site* (not here).
+// `detail_sv` must be a string literal (or similarly immortal storage)
+// because ErrorContext.detail is eastl::string_view — it does not own the bytes.
+// Every call site in this file passes a string literal, satisfying the
+// lifetime requirement.
+//
+// This is intentionally a macro (not a static member function) so that
+// __FILE__ / __LINE__ expand to the caller's location rather than to the
+// definition site — a static function would always report parser.cpp:NNN.
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define FORYC_ERR(code, detail_literal)                                                \
+    std::unexpected<glibre::Error> {                                                   \
+        glibre::Error {                                                                \
+            (code),                                                                    \
+            glibre::ErrorContext {                                                     \
+                __FILE__, __LINE__,                                                    \
+                eastl::string_view{std::string_view{detail_literal}.data(),           \
+                                   std::string_view{detail_literal}.size()}           \
+            }                                                                          \
+        }                                                                              \
+    }
+
 // Returns true if type_name is in the builtins set (prefix match for
 // generic types like list<T>, map<K,V>, option<T>).
 [[nodiscard]] static bool is_builtin(std::string_view type_name) noexcept {
@@ -209,10 +232,10 @@ public:
 
         while (current_.kind != TokenKind::Eof) {
             if (current_.kind == TokenKind::Error)
-                return err(tools::Error::ForycSyntaxError, "unexpected character");
+                return FORYC_ERR(tools::Error::ForycSyntaxError, "unexpected character");
 
             if (current_.kind != TokenKind::Ident)
-                return err(tools::Error::ForycSyntaxError, "expected keyword");
+                return FORYC_ERR(tools::Error::ForycSyntaxError, "expected keyword");
 
             if (current_.text == "schema") {
                 advance();
@@ -228,7 +251,7 @@ public:
                 if (!r)
                     return std::unexpected{r.error()};
             } else {
-                return err(
+                return FORYC_ERR(
                     tools::Error::ForycSyntaxError, "expected 'schema' or 'migration' at top level"
                 );
             }
@@ -251,24 +274,11 @@ private:
         return true;
     }
 
-    // Build a glibre::Error from a tools::Error enumerator.
-    // `detail` must be a string literal (or similarly immortal storage) because
-    // ErrorContext.detail is eastl::string_view — it does not own the bytes.
-    // Every call site in this file passes a string literal, satisfying the
-    // lifetime requirement.
-    [[nodiscard]] static std::unexpected<glibre::Error>
-    err(tools::Error code, std::string_view detail = {}) {
-        return std::unexpected<glibre::Error>{glibre::Error{
-            code,
-            glibre::ErrorContext{__FILE__, __LINE__, eastl::string_view{detail.data(), detail.size()}},
-        }};
-    }
-
     // Parse a dotted FQN: word ('.' word)* — may also consume as Ident+Dot tokens
     // Returns the concatenated string.
     [[nodiscard]] std::expected<eastl::string, glibre::Error> parse_fqn() {
         if (current_.kind != TokenKind::Ident)
-            return err(tools::Error::ForycSyntaxError, "expected schema FQN");
+            return FORYC_ERR(tools::Error::ForycSyntaxError, "expected schema FQN");
 
         eastl::string fqn(current_.text.data(), current_.text.size());
         advance();
@@ -276,7 +286,7 @@ private:
         while (current_.kind == TokenKind::Dot) {
             advance();  // consume '.'
             if (current_.kind != TokenKind::Ident)
-                return err(tools::Error::ForycSyntaxError, "expected identifier after '.'");
+                return FORYC_ERR(tools::Error::ForycSyntaxError, "expected identifier after '.'");
             fqn += '.';
             fqn += eastl::string(current_.text.data(), current_.text.size());
             advance();
@@ -287,7 +297,7 @@ private:
     // Parse a type name, which may include generic parameters: foo<bar,baz>
     [[nodiscard]] std::expected<eastl::string, glibre::Error> parse_type_name() {
         if (current_.kind != TokenKind::Ident)
-            return err(tools::Error::ForycSyntaxError, "expected type name");
+            return FORYC_ERR(tools::Error::ForycSyntaxError, "expected type name");
 
         eastl::string name(current_.text.data(), current_.text.size());
         advance();
@@ -304,11 +314,11 @@ private:
                     name += ',';
                     advance();
                 } else {
-                    return err(tools::Error::ForycSyntaxError, "malformed generic type");
+                    return FORYC_ERR(tools::Error::ForycSyntaxError, "malformed generic type");
                 }
             }
             if (current_.kind != TokenKind::Gt)
-                return err(tools::Error::ForycSyntaxError, "expected '>' to close generic");
+                return FORYC_ERR(tools::Error::ForycSyntaxError, "expected '>' to close generic");
             name += '>';
             advance();
         }
@@ -323,7 +333,7 @@ private:
             return std::unexpected{fqn_r.error()};
 
         if (!consume(TokenKind::LBrace))
-            return err(tools::Error::ForycSyntaxError, "expected '{' after schema FQN");
+            return FORYC_ERR(tools::Error::ForycSyntaxError, "expected '{' after schema FQN");
 
         TypeDecl decl;
         decl.fqn = std::move(*fqn_r);
@@ -335,29 +345,29 @@ private:
 
         while (current_.kind != TokenKind::RBrace && current_.kind != TokenKind::Eof) {
             if (current_.kind != TokenKind::Ident)
-                return err(tools::Error::ForycSyntaxError, "expected keyword inside schema");
+                return FORYC_ERR(tools::Error::ForycSyntaxError, "expected keyword inside schema");
 
             if (current_.text == "version") {
                 if (version_seen)
-                    return err(tools::Error::ForycSyntaxError, "duplicate 'version' key in schema block");
+                    return FORYC_ERR(tools::Error::ForycSyntaxError, "duplicate 'version' key in schema block");
                 advance();
                 if (current_.kind != TokenKind::IntLit)
-                    return err(tools::Error::ForycSyntaxError, "expected integer after 'version'");
+                    return FORYC_ERR(tools::Error::ForycSyntaxError, "expected integer after 'version'");
                 auto vr = parse_uint32(current_.text);
                 if (!vr)
-                    return err(tools::Error::ForycSyntaxError, "invalid version integer");
+                    return FORYC_ERR(tools::Error::ForycSyntaxError, "invalid version integer");
                 if (*vr == 0)
-                    return err(tools::Error::ForycNonMonotoneVersion, "version must be >= 1");
+                    return FORYC_ERR(tools::Error::ForycNonMonotoneVersion, "version must be >= 1");
                 decl.version = *vr;
                 version_seen = true;
                 advance();
 
             } else if (current_.text == "since") {
                 if (since_seen)
-                    return err(tools::Error::ForycSyntaxError, "duplicate 'since' key in schema block");
+                    return FORYC_ERR(tools::Error::ForycSyntaxError, "duplicate 'since' key in schema block");
                 advance();
                 if (current_.kind != TokenKind::StringLit)
-                    return err(tools::Error::ForycSyntaxError, "expected string after 'since'");
+                    return FORYC_ERR(tools::Error::ForycSyntaxError, "expected string after 'since'");
                 // Strip surrounding quotes from the string literal.
                 const std::string_view raw = current_.text;
                 decl.since_version = eastl::string(raw.data() + 1, raw.size() - 2);
@@ -371,12 +381,12 @@ private:
                     return std::unexpected{fr.error()};
                 // Validate: tag uniqueness
                 if (!seen_tags.insert(fr->tag).second)
-                    return err(tools::Error::ForycDuplicateTag, "duplicate tag number in schema");
+                    return FORYC_ERR(tools::Error::ForycDuplicateTag, "duplicate tag number in schema");
                 // Validate: type is a builtin (or a declared schema type).
                 // For this plan, only builtins are accepted.
                 const std::string_view tn(fr->type_name.data(), fr->type_name.size());
                 if (!is_builtin(tn))
-                    return err(
+                    return FORYC_ERR(
                         tools::Error::ForycUnknownType, "field type is not in the builtins set"
                     );
                 decl.fields.push_back(std::move(*fr));
@@ -385,19 +395,19 @@ private:
                 // reserved <tag-number> — legal but no IR representation needed yet.
                 advance();
                 if (current_.kind != TokenKind::IntLit)
-                    return err(tools::Error::ForycSyntaxError, "expected integer after 'reserved'");
+                    return FORYC_ERR(tools::Error::ForycSyntaxError, "expected integer after 'reserved'");
                 advance();
 
             } else {
-                return err(tools::Error::ForycSyntaxError, "unknown keyword inside schema block");
+                return FORYC_ERR(tools::Error::ForycSyntaxError, "unknown keyword inside schema block");
             }
         }
 
         if (!consume(TokenKind::RBrace))
-            return err(tools::Error::ForycSyntaxError, "expected '}' to close schema block");
+            return FORYC_ERR(tools::Error::ForycSyntaxError, "expected '}' to close schema block");
 
         if (!version_seen)
-            return err(tools::Error::ForycSyntaxError, "schema block is missing 'version'");
+            return FORYC_ERR(tools::Error::ForycSyntaxError, "schema block is missing 'version'");
 
         return decl;
     }
@@ -405,14 +415,14 @@ private:
     // Parse:  <name> : <type>   tag <integer>  [since <integer>]  [default {...}]
     [[nodiscard]] std::expected<FieldDecl, glibre::Error> parse_field_decl() {
         if (current_.kind != TokenKind::Ident)
-            return err(tools::Error::ForycSyntaxError, "expected field name");
+            return FORYC_ERR(tools::Error::ForycSyntaxError, "expected field name");
 
         FieldDecl fd;
         fd.name = eastl::string(current_.text.data(), current_.text.size());
         advance();
 
         if (!consume(TokenKind::Colon))
-            return err(tools::Error::ForycSyntaxError, "expected ':' after field name");
+            return FORYC_ERR(tools::Error::ForycSyntaxError, "expected ':' after field name");
 
         auto tn_r = parse_type_name();
         if (!tn_r)
@@ -421,14 +431,14 @@ private:
 
         // Expect "tag <integer>"
         if (current_.kind != TokenKind::Ident || current_.text != "tag")
-            return err(tools::Error::ForycSyntaxError, "expected 'tag' after field type");
+            return FORYC_ERR(tools::Error::ForycSyntaxError, "expected 'tag' after field type");
         advance();
 
         if (current_.kind != TokenKind::IntLit)
-            return err(tools::Error::ForycSyntaxError, "expected integer after 'tag'");
+            return FORYC_ERR(tools::Error::ForycSyntaxError, "expected integer after 'tag'");
         auto tag_r = parse_uint32(current_.text);
         if (!tag_r)
-            return err(tools::Error::ForycSyntaxError, "invalid tag integer");
+            return FORYC_ERR(tools::Error::ForycSyntaxError, "invalid tag integer");
         fd.tag = *tag_r;
         advance();
 
@@ -436,10 +446,10 @@ private:
         if (current_.kind == TokenKind::Ident && current_.text == "since") {
             advance();
             if (current_.kind != TokenKind::IntLit)
-                return err(tools::Error::ForycSyntaxError, "expected integer after field 'since'");
+                return FORYC_ERR(tools::Error::ForycSyntaxError, "expected integer after field 'since'");
             auto sr = parse_uint32(current_.text);
             if (!sr)
-                return err(tools::Error::ForycSyntaxError, "invalid since integer");
+                return FORYC_ERR(tools::Error::ForycSyntaxError, "invalid since integer");
             fd.since = *sr;
             advance();
         }
@@ -448,7 +458,7 @@ private:
         if (current_.kind == TokenKind::Ident && current_.text == "default") {
             advance();
             if (!consume(TokenKind::LBrace))
-                return err(tools::Error::ForycSyntaxError, "expected '{' after 'default'");
+                return FORYC_ERR(tools::Error::ForycSyntaxError, "expected '{' after 'default'");
             int depth = 1;
             while (depth > 0 && current_.kind != TokenKind::Eof) {
                 if (current_.kind == TokenKind::LBrace)
@@ -467,11 +477,11 @@ private:
     [[nodiscard]] std::expected<bool, glibre::Error> skip_migration_block() {
         // Consume migration name (e.g. "v2_to_v3")
         if (current_.kind != TokenKind::Ident)
-            return err(tools::Error::ForycSyntaxError, "expected migration name");
+            return FORYC_ERR(tools::Error::ForycSyntaxError, "expected migration name");
         advance();
 
         if (!consume(TokenKind::LBrace))
-            return err(tools::Error::ForycSyntaxError, "expected '{' after migration name");
+            return FORYC_ERR(tools::Error::ForycSyntaxError, "expected '{' after migration name");
 
         // Consume entire body with balanced braces.
         int depth = 1;
@@ -513,11 +523,13 @@ ParseResult parse_file(const std::filesystem::path& path) noexcept {
     const std::string content = buf.str();
 
     // Hold source in a local string; parse_string gets a view into it.
-    auto result = parse_string(content, path.native());
-    if (result) {
-        result->source_path = eastl::string(path.native().data(), path.native().size());
-    }
-    return result;
+    // Pass path.native() as virtual_path so Parser::parse() sets source_path
+    // exactly once (at line 208); no second assignment needed here.
+    return parse_string(content, path.native());
 }
 
 }  // namespace glibre::tools::foryc
+
+// FORYC_ERR is an implementation-only macro; undef to prevent leakage into
+// unity builds or precompiled-header contexts.
+#undef FORYC_ERR
