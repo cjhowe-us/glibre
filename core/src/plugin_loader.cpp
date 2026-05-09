@@ -153,19 +153,21 @@ try_resolve_required(void* handle, const char* sym_name) noexcept {
 // Authority: perf-budget.md §Allocator Rules #1, plan #989.
 // ---------------------------------------------------------------------------
 
-glibre::Result<glibre::ContextTag>
-derive_context_tag(eastl::string_view plugin_name) noexcept {
+glibre::Result<glibre::ContextTag> derive_context_tag(eastl::string_view plugin_name) noexcept {
     // Find the first dot — skips the leading namespace component (e.g. "glibre").
     const auto first_dot = plugin_name.find('.');
     if (first_dot == eastl::string_view::npos) {
-        return std::unexpected(glibre::Error{
-            core::Error::PluginManifestInvalid,
-            ErrorContext{
-                .file = __FILE__,
-                .line = __LINE__,
-                .detail = "plugin name has no dot separator (expected glibre.<context>[.<sub>...])",
-            },
-        });
+        return std::unexpected(
+            glibre::Error{
+                core::Error::PluginManifestInvalid,
+                ErrorContext{
+                    .file = __FILE__,
+                    .line = __LINE__,
+                    .detail =
+                        "plugin name has no dot separator (expected glibre.<context>[.<sub>...])",
+                },
+            }
+        );
     }
 
     // Remaining string after the first dot: "<context>[.<sub>...]"
@@ -178,14 +180,16 @@ derive_context_tag(eastl::string_view plugin_name) noexcept {
                              : after_prefix.substr(0, second_dot);
 
     if (context.empty()) {
-        return std::unexpected(glibre::Error{
-            core::Error::PluginManifestInvalid,
-            ErrorContext{
-                .file = __FILE__,
-                .line = __LINE__,
-                .detail = "plugin name has empty context component",
-            },
-        });
+        return std::unexpected(
+            glibre::Error{
+                core::Error::PluginManifestInvalid,
+                ErrorContext{
+                    .file = __FILE__,
+                    .line = __LINE__,
+                    .detail = "plugin name has empty context component",
+                },
+            }
+        );
     }
 
     // Map context string to ContextTag (perf-budget.md §Per-Context Budget Table).
@@ -193,24 +197,35 @@ derive_context_tag(eastl::string_view plugin_name) noexcept {
     // literals are char arrays; comparing via data()+size() avoids including
     // <string_view> for a trivial op.
     using eastl::string_view;
-    if (context == string_view{"core"})     return glibre::ContextTag::core;
-    if (context == string_view{"platform"}) return glibre::ContextTag::platform;
-    if (context == string_view{"data"})     return glibre::ContextTag::data;
-    if (context == string_view{"shader"})   return glibre::ContextTag::shader;
-    if (context == string_view{"render"})   return glibre::ContextTag::render;
-    if (context == string_view{"geometry"}) return glibre::ContextTag::geometry;
-    if (context == string_view{"physics"})  return glibre::ContextTag::physics;
-    if (context == string_view{"content"})  return glibre::ContextTag::content;
-    if (context == string_view{"tools"})    return glibre::ContextTag::tools;
+    if (context == string_view{"core"})
+        return glibre::ContextTag::core;
+    if (context == string_view{"platform"})
+        return glibre::ContextTag::platform;
+    if (context == string_view{"data"})
+        return glibre::ContextTag::data;
+    if (context == string_view{"shader"})
+        return glibre::ContextTag::shader;
+    if (context == string_view{"render"})
+        return glibre::ContextTag::render;
+    if (context == string_view{"geometry"})
+        return glibre::ContextTag::geometry;
+    if (context == string_view{"physics"})
+        return glibre::ContextTag::physics;
+    if (context == string_view{"content"})
+        return glibre::ContextTag::content;
+    if (context == string_view{"tools"})
+        return glibre::ContextTag::tools;
 
-    return std::unexpected(glibre::Error{
-        core::Error::PluginManifestInvalid,
-        ErrorContext{
-            .file = __FILE__,
-            .line = __LINE__,
-            .detail = "plugin name context component does not match any known ContextTag",
-        },
-    });
+    return std::unexpected(
+        glibre::Error{
+            core::Error::PluginManifestInvalid,
+            ErrorContext{
+                .file = __FILE__,
+                .line = __LINE__,
+                .detail = "plugin name context component does not match any known ContextTag",
+            },
+        }
+    );
 }
 
 // ---------------------------------------------------------------------------
