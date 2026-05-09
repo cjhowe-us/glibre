@@ -52,7 +52,7 @@ struct PhaseDesc {
                                         // PHILOSOPHY §11: eastl::string_view, not std::
     eastl::string_view owning_context;  // bounded-context owner per frame-phases.md
                                         // PHILOSOPHY §11: eastl::string_view, not std::
-    bool mvp_reserved;                // true → empty body in MVP (phases 2, 4)
+    bool mvp_reserved;                  // true → empty body in MVP (phases 2, 4)
 };
 
 // -----------------------------------------------------------------------
@@ -69,15 +69,15 @@ struct PhaseDesc {
 // an amendment spike against frame-phases.md — persisted profiler
 // traces, replay records, and e2e fixtures reference them by value.
 inline constexpr std::array<PhaseDesc, kPhaseCount> kPhaseTable{{
-    {Phase::Input,        "input",         "platform",           false},
-    {Phase::Logic,        "logic",         "gameplay/scripting", true},
-    {Phase::PhysicsFixed, "physics-fixed", "physics",            false},
-    {Phase::Animation,    "animation",     "animation",          true},
-    {Phase::Transform,    "transform",     "core",               false},
-    {Phase::CullExtract,  "cull-extract",  "render",             false},
-    {Phase::RenderSubmit, "render-submit", "render",             false},
-    {Phase::HotReload,    "hot-reload",    "core",               false},
-    {Phase::Present,      "present",       "platform",           false},
+    {Phase::Input, "input", "platform", false},
+    {Phase::Logic, "logic", "gameplay/scripting", true},
+    {Phase::PhysicsFixed, "physics-fixed", "physics", false},
+    {Phase::Animation, "animation", "animation", true},
+    {Phase::Transform, "transform", "core", false},
+    {Phase::CullExtract, "cull-extract", "render", false},
+    {Phase::RenderSubmit, "render-submit", "render", false},
+    {Phase::HotReload, "hot-reload", "core", false},
+    {Phase::Present, "present", "platform", false},
 }};
 
 // ---------------------------------------------------------------------------
@@ -88,13 +88,16 @@ inline constexpr std::array<PhaseDesc, kPhaseCount> kPhaseTable{{
 namespace detail {
 template<std::size_t... I>
 constexpr bool kPhaseTableOrdinalsAreSequential(std::index_sequence<I...>) {
-    return ((static_cast<std::uint8_t>(kPhaseTable[I].id) == static_cast<std::uint8_t>(I + 1u)) && ...);
+    return (
+        (static_cast<std::uint8_t>(kPhaseTable[I].id) == static_cast<std::uint8_t>(I + 1u)) && ...
+    );
 }
 }  // namespace detail
 
 static_assert(
     detail::kPhaseTableOrdinalsAreSequential(std::make_index_sequence<kPhaseCount>{}),
-    "kPhaseTable entries must appear in strict ordinal order 1..=9");
+    "kPhaseTable entries must appear in strict ordinal order 1..=9"
+);
 
 // -----------------------------------------------------------------------
 // Helper — look up a PhaseDesc by Phase ordinal (O(1), constexpr)
@@ -112,9 +115,11 @@ static_assert(
     // branch (NDEBUG defined).  The assert is kept as documentation even in
     // constexpr context — compilers evaluate it only in non-consteval paths.
     const auto ordinal = static_cast<std::uint8_t>(p);
-    assert(ordinal >= kPhaseMin && ordinal <= kPhaseMax &&
-           "phase_desc: Phase ordinal out of range [1,9]; caller supplied an "
-           "invalid raw-cast value — use the named Phase enumerators only");
+    assert(
+        ordinal >= kPhaseMin && ordinal <= kPhaseMax &&
+        "phase_desc: Phase ordinal out of range [1,9]; caller supplied an "
+        "invalid raw-cast value — use the named Phase enumerators only"
+    );
     // kPhaseTable is 0-indexed; Phase ordinals are 1..=9.
     return kPhaseTable[ordinal - 1u];
 }

@@ -8,10 +8,9 @@
 // frame-design.md §3.1 note: "Violation is a … debug-build runtime
 // assertion core::Error::FramePhaseMisordered."
 
-#include "glibre/core/frame_loop.hpp"
-
 #include <cstdint>
 
+#include "glibre/core/frame_loop.hpp"
 #include "glibre/core/frame_phase.hpp"
 #include "glibre/error.hpp"
 
@@ -105,8 +104,7 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
         }
 #ifdef GLIBRE_TESTING
         // Record the ordinal of each phase visited, in execution order.
-        last_tick_phase_ordinals_[last_tick_phase_count_++] =
-            static_cast<std::uint8_t>(desc.id);
+        last_tick_phase_ordinals_[last_tick_phase_count_++] = static_cast<std::uint8_t>(desc.id);
 #endif
         ++expected_ordinal;
     }
