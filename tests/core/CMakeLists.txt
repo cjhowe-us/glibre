@@ -20,6 +20,10 @@ target_compile_features(glibre-core-tests PRIVATE cxx_std_23)
 set_target_properties(glibre-core-tests PROPERTIES CXX_MODULE_STD OFF)
 
 # -fno-exceptions clean per reviews/decisions/error-model.md §Decision 3.
+# Catch2 3.x supports -fno-exceptions builds when CATCH_CONFIG_DISABLE_EXCEPTIONS
+# is defined (see Catch2 docs §"Compile-time configuration").
+# LOW-9 review finding: Catch2 internals are compatible with -fno-exceptions when
+# REQUIRE_THROWS is not used; glibre-core-tests never uses REQUIRE_THROWS.
 target_compile_options(glibre-core-tests PRIVATE
     -fno-exceptions
     -fno-rtti
@@ -31,6 +35,11 @@ target_compile_options(glibre-core-tests PRIVATE
     # extension warning with clang >= 22; suppress from third-party macro.
     -Wno-c2y-extensions
 )
+
+# Enable test-only recording hooks in FrameLoop (MED-6 fix).
+# The GLIBRE_TESTING macro activates last_tick_phase_ordinals_ tracking
+# in FrameLoop so order-verification tests can observe execution order.
+target_compile_definitions(glibre-core-tests PRIVATE GLIBRE_TESTING)
 
 include(CTest)
 include(Catch)

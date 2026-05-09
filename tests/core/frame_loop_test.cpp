@@ -79,11 +79,14 @@ TEST_CASE("core/frame_loop: phase_table_ids_are_1_through_9", "[core][frame_loop
 // ---------------------------------------------------------------------------
 // Test: tick_invokes_phases_in_strict_order
 //
-// Verifies that FrameLoop::tick() runs all phases in strict ordinal order
-// (1 through 9) and that the frame counter increments after a successful
-// tick.  In debug builds the FramePhaseMisordered check inside run_phase()
-// validates the ordering; in release builds the phase counter still
-// advances and the frame_index() post-condition confirms completion.
+// Verifies that FrameLoop::tick() runs all nine phases in strict ordinal
+// order (1 through 9) and that the frame counter increments after a
+// successful tick.
+//
+// The execution order is observed via FrameLoop::last_tick_phase_ordinals(),
+// available in GLIBRE_TESTING builds.  Each entry is the Phase ordinal
+// (uint8_t) of the phase that ran at that position; the expected sequence is
+// 1, 2, 3, 4, 5, 6, 7, 8, 9.
 // ---------------------------------------------------------------------------
 TEST_CASE("core/frame_loop: tick_invokes_phases_in_strict_order", "[core][frame_loop]") {
     using namespace glibre::core;
@@ -99,6 +102,31 @@ TEST_CASE("core/frame_loop: tick_invokes_phases_in_strict_order", "[core][frame_
 
     // Frame index must advance to 1 after a successful tick.
     CHECK(loop.frame_index() == 1u);
+
+#ifdef GLIBRE_TESTING
+    // Verify that all nine phases executed in strict ascending ordinal order.
+    auto recorded = loop.last_tick_phase_ordinals();
+    REQUIRE(recorded.size() == kPhaseCount);
+
+    for (std::uint8_t i = 0; i < kPhaseCount; ++i) {
+        const std::uint8_t expected_ordinal = static_cast<std::uint8_t>(i + 1u);
+        INFO("Phase at position " << static_cast<int>(i)
+             << ": expected ordinal " << static_cast<int>(expected_ordinal)
+             << " got " << static_cast<int>(recorded[i]));
+        CHECK(recorded[i] == expected_ordinal);
+    }
+
+    // Spot-check canonical ordinals against the Phase enum.
+    CHECK(recorded[0] == static_cast<std::uint8_t>(Phase::Input));
+    CHECK(recorded[1] == static_cast<std::uint8_t>(Phase::Logic));
+    CHECK(recorded[2] == static_cast<std::uint8_t>(Phase::PhysicsFixed));
+    CHECK(recorded[3] == static_cast<std::uint8_t>(Phase::Animation));
+    CHECK(recorded[4] == static_cast<std::uint8_t>(Phase::Transform));
+    CHECK(recorded[5] == static_cast<std::uint8_t>(Phase::CullExtract));
+    CHECK(recorded[6] == static_cast<std::uint8_t>(Phase::RenderSubmit));
+    CHECK(recorded[7] == static_cast<std::uint8_t>(Phase::HotReload));
+    CHECK(recorded[8] == static_cast<std::uint8_t>(Phase::Present));
+#endif
 
     // Execute a second tick; must also succeed.
     auto result2 = loop.tick();
