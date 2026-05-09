@@ -1,11 +1,14 @@
 // core/src/plugin_loader_registry.cpp
 //
-// PluginLoaderRegistry — gates 4–7 of the plugin loader sequence.
+// PluginLoaderRegistry — gates 4–7 of the plugin loader sequence,
+// plus the phase-8 drain guard (plan #981).
 //
-// Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" steps 4–7
+// Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" steps 4–7, 8
 //            and §"Failure Modes → core::Error".
+//            reviews/decisions/frame-phases.md §8.
 //
 // Plans: #230 (ABI hash + version + name + deps gates, steps 4–7).
+//        #981 (phase-8 drain guard — validate_drain_phase).
 // Out of scope: dlopen/dlsym (plan #229); post-gate actions 9–11
 //   (plugin_loader_actions.cpp, plan #231).
 
@@ -22,6 +25,37 @@ namespace glibre::core {
 
 PluginLoaderRegistry::PluginLoaderRegistry(SemVer host_engine_version) noexcept
     : host_engine_version_{host_engine_version} {}
+
+// ---------------------------------------------------------------------------
+// validate_drain_phase — phase-8 precondition guard (plan #981).
+//
+// Authority: plugin-abi.md §"Loader Sequence" step 8 and frame-phases.md §8.
+//
+// Returns success only when current_phase == Phase::HotReload (phase 8).
+// Any other phase returns core::Error::FramePhaseMisordered.
+//
+// SRP note: the caller injects current_phase; PluginLoaderRegistry does not
+// own or query phase state directly (plans #247/#248 will supply the real
+// FramePhaseTracker; this function is the minimal injection point).
+// ---------------------------------------------------------------------------
+
+Result<void> PluginLoaderRegistry::validate_drain_phase(Phase current_phase) noexcept {
+    if (current_phase != Phase::HotReload) {
+        return std::unexpected(
+            glibre::Error{
+                core::Error::FramePhaseMisordered,
+                ErrorContext{
+                    .file = __FILE__,
+                    .line = __LINE__,
+                    .detail = "registry mutation attempted outside phase 8 (HotReload); "
+                              "call_register, rebuild_schedule, and migrate_components "
+                              "are only permitted during the hot-reload barrier",
+                },
+            }
+        );
+    }
+    return {};
+}
 
 // ---------------------------------------------------------------------------
 // validate_manifest_abi_hash — gate 1a (plugin-abi.md step 4, manifest field)
