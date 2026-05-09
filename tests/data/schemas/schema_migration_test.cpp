@@ -37,7 +37,6 @@
 //   std::filesystem, std::system (subprocess invocation), dlfcn.h,
 //   std::format (no EASTL equivalent), std::memcmp.
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -54,8 +53,9 @@
 #include <EASTL/string.h>
 #include <catch2/catch_test_macros.hpp>
 
-#include "emit_migration.hpp"
 #include "glibre/error.hpp"
+
+#include "emit_migration.hpp"
 #include "parser.hpp"
 
 namespace fs = std::filesystem;
@@ -134,11 +134,16 @@ static std::expected<void, glibre::Error> chain_walk(
 // Compile failure is surfaced via REQUIRE inside this helper.
 struct DylibHandleGuard {
     void* handle{nullptr};
-    explicit DylibHandleGuard(void* h) noexcept : handle{h} {}
+
+    explicit DylibHandleGuard(void* h) noexcept
+        : handle{h} {}
+
     DylibHandleGuard(const DylibHandleGuard&) = delete;
     DylibHandleGuard& operator=(const DylibHandleGuard&) = delete;
+
     ~DylibHandleGuard() {
-        if (handle) dlclose(handle);
+        if (handle)
+            dlclose(handle);
     }
 };
 
@@ -177,17 +182,14 @@ schema glibre.test.Sample {
 
     // Confirm the chain entries appear in the generated TU.
     // Mangled FQN: "glibre.test.Sample" → "glibre__test__Sample"
-    CHECK(
-        gen_text.find("glibre_plugin_migrations_glibre__test__Sample") != eastl::string::npos
-    );
+    CHECK(gen_text.find("glibre_plugin_migrations_glibre__test__Sample") != eastl::string::npos);
     CHECK(gen_text.find("1, 2") != eastl::string::npos);
     CHECK(gen_text.find("2, 3") != eastl::string::npos);
 
     // --- Write and compile the stub dylib. ---
     const fs::path tmp_base = fs::temp_directory_path() / "glibre_schema_mig_test";
-    const auto unique_suffix = std::format(
-        "chain_{}_{}", getpid(), reinterpret_cast<uintptr_t>(gen_text.data())
-    );
+    const auto unique_suffix =
+        std::format("chain_{}_{}", getpid(), reinterpret_cast<uintptr_t>(gen_text.data()));
     const fs::path tmp_dir = tmp_base / unique_suffix;
     std::error_code ec;
     fs::create_directories(tmp_dir, ec);
@@ -280,8 +282,10 @@ migrate_Sample_v2_to_v3(const SampleV2& in, SampleV3& out) {
     bool has_v1_v2 = false;
     bool has_v2_v3 = false;
     for (std::size_t i = 0; i < table_size; ++i) {
-        if (table[i].from_version == 1 && table[i].to_version == 2) has_v1_v2 = true;
-        if (table[i].from_version == 2 && table[i].to_version == 3) has_v2_v3 = true;
+        if (table[i].from_version == 1 && table[i].to_version == 2)
+            has_v1_v2 = true;
+        if (table[i].from_version == 2 && table[i].to_version == 3)
+            has_v2_v3 = true;
     }
     CHECK(has_v1_v2);
     CHECK(has_v2_v3);
@@ -334,15 +338,13 @@ schema glibre.test.Stable {
 
     // Mangled FQN: "glibre.test.Stable" → "glibre__test__Stable"
     CHECK(
-        gen_text.find("glibre_plugin_current_version_glibre__test__Stable") !=
-        eastl::string::npos
+        gen_text.find("glibre_plugin_current_version_glibre__test__Stable") != eastl::string::npos
     );
 
     // --- Write and compile the stub dylib. ---
     const fs::path tmp_base = fs::temp_directory_path() / "glibre_schema_mig_test";
-    const auto unique_suffix = std::format(
-        "rtrip_{}_{}", getpid(), reinterpret_cast<uintptr_t>(gen_text.data())
-    );
+    const auto unique_suffix =
+        std::format("rtrip_{}_{}", getpid(), reinterpret_cast<uintptr_t>(gen_text.data()));
     const fs::path tmp_dir = tmp_base / unique_suffix;
     std::error_code ec;
     fs::create_directories(tmp_dir, ec);
@@ -352,7 +354,8 @@ schema glibre.test.Stable {
     const fs::path preamble_path = tmp_dir / "stable_preamble.cpp";
     const fs::path dylib_path = tmp_dir / "stable_migrations.dylib";
 
-    // Struct types + providers in glibre::test (the type's namespace from FQN "glibre.test.Stable").
+    // Struct types + providers in glibre::test (the type's namespace from FQN
+    // "glibre.test.Stable").
     constexpr std::string_view preamble = R"(
 #include <expected>
 #include "glibre/error.hpp"
@@ -427,22 +430,21 @@ migrate_Stable_v2_to_v3(const StableV2& in, StableV3& out) {
         unsigned alpha{};
         unsigned beta{};
     };
+
     static_assert(sizeof(StableV3Repr) == 8, "byte-level layout sanity");
 
     const StableV3Repr inst_a{};
     const StableV3Repr inst_b{};
 
     // Two identical default-constructed instances must be byte-equal.
-    const bool bytes_equal =
-        (std::memcmp(&inst_a, &inst_b, sizeof(StableV3Repr)) == 0);
+    const bool bytes_equal = (std::memcmp(&inst_a, &inst_b, sizeof(StableV3Repr)) == 0);
     CHECK(bytes_equal);
 
     // Additionally confirm that setting the same field values on two
     // independently constructed instances yields byte-equal results.
     const StableV3Repr inst_c{42, 7};
     const StableV3Repr inst_d{42, 7};
-    const bool values_equal =
-        (std::memcmp(&inst_c, &inst_d, sizeof(StableV3Repr)) == 0);
+    const bool values_equal = (std::memcmp(&inst_c, &inst_d, sizeof(StableV3Repr)) == 0);
     CHECK(values_equal);
 
     fs::remove_all(tmp_dir, ec);
@@ -492,9 +494,8 @@ schema glibre.test.Broken {
 
     // --- Write and compile the stub dylib. ---
     const fs::path tmp_base = fs::temp_directory_path() / "glibre_schema_mig_test";
-    const auto unique_suffix = std::format(
-        "broken_{}_{}", getpid(), reinterpret_cast<uintptr_t>(gen_text.data())
-    );
+    const auto unique_suffix =
+        std::format("broken_{}_{}", getpid(), reinterpret_cast<uintptr_t>(gen_text.data()));
     const fs::path tmp_dir = tmp_base / unique_suffix;
     std::error_code ec;
     fs::create_directories(tmp_dir, ec);
