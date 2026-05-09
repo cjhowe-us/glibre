@@ -65,6 +65,20 @@ enum class Error : std::uint16_t {
     // After dlclose, the loader aborts without further steps.
     // Added by plan #230.
     PluginDependencyMissing,
+    // Transient arena exhausted — allocate() was called when the arena had
+    // insufficient capacity for the requested (bytes, align) pair.
+    // Returned by TransientArena::allocate() (plan #239).
+    // Callers should fall back to a larger arena or defer the allocation.
+    TransientArenaExhausted,
+    // Null pointer supplied to a core API that requires a valid, non-null
+    // pointer.  Returned instead of asserting-only so that callers in release
+    // builds receive an actionable error rather than silent undefined behaviour.
+    // Kept narrow (null-pointer check only) so it does not become a catch-all
+    // for unrelated argument errors.  Added by plan #239 review round 1
+    // (MED-3 fix: null-pointer silent success in register_transient_arena).
+    // Renamed NullArgument (was InvalidArgument) in review round 2 (LOW-3:
+    // narrow the seam name so it is not a magnet for unrelated callers).
+    NullArgument,
 };
 }  // namespace core
 
