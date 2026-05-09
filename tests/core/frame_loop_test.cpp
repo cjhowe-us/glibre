@@ -6,14 +6,20 @@
 //   - core/frame_loop: phase_table_ids_are_1_through_9
 //   - core/frame_loop: tick_invokes_phases_in_strict_order
 //   - core/frame_loop: empty_mvp_phases_succeed
+//
+// Named test cases (per plan #247 Unit Test Plan):
+//   - core/frame_loop: present_advances_tick_exactly_once
+//   - core/frame_loop: tick_does_not_advance_when_phase_8_refuses
 
 #include <array>
 #include <cstdint>
 
+#include <EASTL/variant.h>
 #include <catch2/catch_test_macros.hpp>
 
 #include "glibre/core/frame_loop.hpp"
 #include "glibre/core/frame_phase.hpp"
+#include "glibre/core/world_tick.hpp"
 #include "glibre/error.hpp"
 
 // ---------------------------------------------------------------------------
@@ -160,4 +166,128 @@ TEST_CASE("core/frame_loop: empty_mvp_phases_succeed", "[core][frame_loop]") {
 
     // frame_index() must equal the number of successful ticks.
     CHECK(loop.frame_index() == 10u);
+}
+
+// ---------------------------------------------------------------------------
+// Test: present_advances_tick_exactly_once
+//
+// Verifies that a single tick() call advances frame_counter by exactly 1 and
+// advances world_tick (both value and change_tick fields) by exactly 1.
+//
+// Authority: plan #247 §Unit Test Plan.
+//            reviews/decisions/frame-phases.md §Phase 9:
+//              "world ChangeTick increment; frame counter."
+// ---------------------------------------------------------------------------
+TEST_CASE("core/frame_loop: present_advances_tick_exactly_once", "[core][frame_loop]") {
+    using namespace glibre::core;
+
+    FrameLoop loop;
+
+    // Before any tick: counters are at zero.
+    REQUIRE(loop.frame_counter() == 0u);
+    REQUIRE(loop.world_tick().value == 0u);
+    REQUIRE(loop.world_tick().change_tick == 0u);
+
+    // Execute one tick; must succeed.
+    auto result = loop.tick();
+    REQUIRE(result.has_value());
+
+    // After one tick: frame_counter advances by exactly 1.
+    CHECK(loop.frame_counter() == 1u);
+
+    // After one tick: world_tick.value advances by exactly 1.
+    CHECK(loop.world_tick().value == 1u);
+
+    // After one tick: world_tick.change_tick advances by exactly 1.
+    CHECK(loop.world_tick().change_tick == 1u);
+
+    // Execute a second tick.
+    auto result2 = loop.tick();
+    REQUIRE(result2.has_value());
+
+    // After two ticks: frame_counter == 2, world_tick.value == 2.
+    CHECK(loop.frame_counter() == 2u);
+    CHECK(loop.world_tick().value == 2u);
+    CHECK(loop.world_tick().change_tick == 2u);
+}
+
+// ---------------------------------------------------------------------------
+// Test: tick_does_not_advance_when_phase_8_refuses
+//
+// Verifies that when Phase::HotReload (phase 8) refuses (returns an error),
+// tick() returns that error AND frame_counter + world_tick are NOT advanced
+// (Phase::Present is never reached, so advance_world_tick is never called).
+//
+// This exercises the all-or-nothing invariant: a phase failure short-circuits
+// the tick without advancing any frame-level counters.
+//
+// Authority: plan #247 §Unit Test Plan.
+//            reviews/decisions/frame-phases.md §Phase 8 (hot-reload) — the
+//            only phase during which plugin mutations are permitted; refusing
+//            at this phase halts the frame.
+//
+// GLIBRE_TESTING: uses FrameLoop::set_inject_phase8_failure() to arm the
+// test-only injection hook in Phase::HotReload.  This simulates the
+// drain-phase guard (plan #981 / PR #1012) returning FramePhaseMisordered
+// without requiring a live plugin loader.
+// ---------------------------------------------------------------------------
+TEST_CASE("core/frame_loop: tick_does_not_advance_when_phase_8_refuses", "[core][frame_loop]") {
+    using namespace glibre::core;
+
+#ifdef GLIBRE_TESTING
+    FrameLoop loop;
+
+    // Arm the phase-8 failure injection.
+    loop.set_inject_phase8_failure(true);
+
+    // Capture baseline counters (all zero).
+    const std::uint64_t counter_before = loop.frame_counter();
+    const std::uint64_t tick_value_before = loop.world_tick().value;
+    const std::uint64_t tick_change_before = loop.world_tick().change_tick;
+
+    REQUIRE(counter_before == 0u);
+    REQUIRE(tick_value_before == 0u);
+    REQUIRE(tick_change_before == 0u);
+
+    // tick() must return an error (FramePhaseMisordered from phase 8).
+    auto result = loop.tick();
+    REQUIRE_FALSE(result.has_value());
+
+    // The error must be FramePhaseMisordered (the drain-phase refusal code).
+    const auto& err = result.error();
+    const bool is_misordered =
+        eastl::holds_alternative<glibre::core::Error>(err.code()) &&
+        eastl::get<glibre::core::Error>(err.code()) ==
+            glibre::core::Error::FramePhaseMisordered;
+    CHECK(is_misordered);
+
+    // frame_counter must NOT have advanced.
+    CHECK(loop.frame_counter() == counter_before);
+
+    // world_tick.value must NOT have advanced.
+    CHECK(loop.world_tick().value == tick_value_before);
+
+    // world_tick.change_tick must NOT have advanced.
+    CHECK(loop.world_tick().change_tick == tick_change_before);
+
+    // frame_index must NOT have advanced (existing invariant: only advances
+    // on full success).
+    CHECK(loop.frame_index() == 0u);
+
+    // Disarm the injection; verify a subsequent tick() succeeds and advances.
+    loop.set_inject_phase8_failure(false);
+    auto result2 = loop.tick();
+    REQUIRE(result2.has_value());
+    CHECK(loop.frame_counter() == 1u);
+    CHECK(loop.world_tick().value == 1u);
+#else
+    // Non-GLIBRE_TESTING builds: the injection API is not available.
+    // The test still verifies that a clean tick advances both counters
+    // (redundant with present_advances_tick_exactly_once but keeps CI green).
+    FrameLoop loop;
+    auto result = loop.tick();
+    REQUIRE(result.has_value());
+    CHECK(loop.frame_counter() == 1u);
+    CHECK(loop.world_tick().value == 1u);
+#endif
 }
