@@ -39,40 +39,19 @@
 #include <expected>
 
 #include <EASTL/variant.h>
-
 #include <glibre/error.hpp>
 
-// ---------------------------------------------------------------------------
-// GlibreTestContextTransfer — flat POD layout for cross-ABI ErrorContext data
-//
-// ErrorContext holds eastl::string_view members (non-owning pointer+size
-// references).  Transferring raw bytes of the struct across the ABI boundary
-// would produce dangling string_view pointers in the host.  Instead this
-// test-specific struct copies the string data into fixed-size char arrays,
-// making it safe to memcpy through the caller-supplied buffer.
-//
-// kFileMax / kDetailMax are generous; the sentinel strings in this stub are
-// well below these limits.
-// ---------------------------------------------------------------------------
+#include "transfer.hpp"
 
+// Pull shared types and constants into the anonymous namespace so the rest of
+// this file uses them unqualified, matching the original usage.
 namespace {
 
-inline constexpr std::size_t kFileMax   = 256;
-inline constexpr std::size_t kDetailMax = 256;
-
-// Keep in sync with the mirror definition in error_propagation_test.cpp.
-struct GlibreTestContextTransfer {
-    char   file[kFileMax];    // null-terminated
-    int    line;
-    char   detail[kDetailMax]; // null-terminated
-};
-
-// Sentinel string values baked into the stub so the host can check them.
-// There is no kSentinelLine constant — the line is captured via __LINE__ at
-// the ErrorContext construction site (see glibre_test_context_write below),
-// removing the fragile host-side magic number that required hand-mirroring.
-inline constexpr const char* kSentinelFile   = "stub_error_returns.cpp";
-inline constexpr const char* kSentinelDetail = "PluginInitFailed-context-sentinel";
+using glibre::test::error_propagation::GlibreTestContextTransfer;
+using glibre::test::error_propagation::kDetailMax;
+using glibre::test::error_propagation::kFileMax;
+using glibre::test::error_propagation::kSentinelDetail;
+using glibre::test::error_propagation::kSentinelFile;
 
 }  // namespace
 
@@ -93,9 +72,7 @@ inline constexpr const char* kSentinelDetail = "PluginInitFailed-context-sentine
 extern "C" [[gnu::visibility("default")]]
 int32_t glibre_test_error_discriminant() noexcept {
     // Construct a failed Result<void> with a core::Error arm.
-    glibre::Result<void> r = std::unexpected(
-        glibre::Error{glibre::core::Error::PluginInitFailed}
-    );
+    glibre::Result<void> r = std::unexpected(glibre::Error{glibre::core::Error::PluginInitFailed});
 
     // r is an error; extract the variant index of its error alternative.
     // eastl::variant::index() returns the zero-based position of the active
@@ -152,28 +129,27 @@ bool glibre_test_context_write(char* buf, std::size_t buf_size) noexcept {
     // Populate ErrorContext with sentinel values.
     // Line is __LINE__ at this exact call site — no hand-mirrored constant.
     glibre::ErrorContext ctx;
-    ctx.file   = eastl::string_view{kSentinelFile};
-    ctx.line   = __LINE__;  // captures the source line of this assignment
+    ctx.file = eastl::string_view{kSentinelFile};
+    ctx.line = __LINE__;  // captures the source line of this assignment
     ctx.detail = eastl::string_view{kSentinelDetail};
 
     // Round-trip through std::unexpected so the test verifies that
     // glibre::Result<void> carries ErrorContext through .error().where().
     // This is the actual contract under test (error-model.md §Decision 1).
-    glibre::Result<void> r = std::unexpected(
-        glibre::Error{glibre::core::Error::PluginInitFailed, ctx}
-    );
+    glibre::Result<void> r =
+        std::unexpected(glibre::Error{glibre::core::Error::PluginInitFailed, ctx});
 
     // Extract fields via .error().where() — the actual propagation path.
     GlibreTestContextTransfer transfer{};
     transfer.line = r.error().where().line;
 
-    const eastl::string_view file_view   = r.error().where().file;
+    const eastl::string_view file_view = r.error().where().file;
     const eastl::string_view detail_view = r.error().where().detail;
 
-    const std::size_t file_copy   = std::min(file_view.size(),   kFileMax - 1u);
+    const std::size_t file_copy = std::min(file_view.size(), kFileMax - 1u);
     const std::size_t detail_copy = std::min(detail_view.size(), kDetailMax - 1u);
 
-    std::memcpy(transfer.file,   file_view.data(),   file_copy);
+    std::memcpy(transfer.file, file_view.data(), file_copy);
     std::memcpy(transfer.detail, detail_view.data(), detail_copy);
     // Arrays are zero-initialised above; null terminators are already in place.
 

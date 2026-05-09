@@ -33,19 +33,19 @@
 //     into the caller's buffer.  The line field is __LINE__ at the construction
 //     site — no hard-coded sentinel constant on the host side.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <algorithm>
-#include <memory>
-
 #include <dlfcn.h>  // dlopen, dlsym, dlclose — macOS / POSIX
 
 #include <EASTL/string_view.h>
+#include <EASTL/unique_ptr.h>
 #include <EASTL/variant.h>
 #include <catch2/catch_test_macros.hpp>
-
 #include <glibre/error.hpp>
+
+#include "transfer.hpp"
 
 // ---------------------------------------------------------------------------
 // DlHandle — RAII wrapper for dlopen handles.
@@ -58,34 +58,24 @@ namespace {
 
 struct DlHandleDeleter {
     void operator()(void* h) const noexcept {
-        if (h) { ::dlclose(h); }
+        if (h) {
+            ::dlclose(h);
+        }
     }
 };
 
-using DlHandle = std::unique_ptr<void, DlHandleDeleter>;
+using DlHandle = eastl::unique_ptr<void, DlHandleDeleter>;
 
-// ---------------------------------------------------------------------------
-// GlibreTestContextTransfer — POD mirror of the stub's transfer struct.
-//
-// Must be kept in sync with the definition in stub_error_returns.cpp.
-// Both sides are compiled into the same test build, so the sizes must match.
-// ---------------------------------------------------------------------------
-
-inline constexpr std::size_t kFileMax   = 256;
-inline constexpr std::size_t kDetailMax = 256;
-
-struct GlibreTestContextTransfer {
-    char   file[kFileMax];     // null-terminated
-    int    line;
-    char   detail[kDetailMax]; // null-terminated
-};
-
-// Expected sentinel strings matching stub_error_returns.cpp.
-// There is no kExpectedSentinelLine constant: the stub sets line = __LINE__
-// at the ErrorContext construction site, so the host verifies transfer.line > 0
-// (a valid source location) rather than comparing to a hand-mirrored integer.
-inline constexpr const char* kExpectedSentinelFile   = "stub_error_returns.cpp";
-inline constexpr const char* kExpectedSentinelDetail = "PluginInitFailed-context-sentinel";
+// Shared POD layout and sentinel constants from transfer.hpp.
+// Extracted to remove the "keep in sync" manual hazard (SRP: one definition).
+using glibre::test::error_propagation::GlibreTestContextTransfer;
+using glibre::test::error_propagation::kDetailMax;
+using glibre::test::error_propagation::kFileMax;
+// Sentinel strings: host uses the canonical names from the shared header.
+// No kExpectedSentinelLine — the stub captures __LINE__ at construction;
+// the host checks transfer.line > 0 (a valid source location).
+using glibre::test::error_propagation::kSentinelDetail;
+using glibre::test::error_propagation::kSentinelFile;
 
 // Variant index for glibre::core::Error in glibre::Error::Variant.
 // core::Error is the FIRST arm → index == 0.
@@ -231,15 +221,12 @@ TEST_CASE("error_propagation_preserves_error_context", "[core][error_propagation
 
     // Provide the host buffer for the transfer struct.
     GlibreTestContextTransfer transfer{};
-    const bool wrote = fn(
-        reinterpret_cast<char*>(&transfer),
-        sizeof(transfer)
-    );
+    const bool wrote = fn(reinterpret_cast<char*>(&transfer), sizeof(transfer));
     REQUIRE(wrote);
 
     // Verify file and detail match the sentinels baked into the stub.
-    CHECK(eastl::string_view{transfer.file}   == eastl::string_view{kExpectedSentinelFile});
-    CHECK(eastl::string_view{transfer.detail} == eastl::string_view{kExpectedSentinelDetail});
+    CHECK(eastl::string_view{transfer.file} == eastl::string_view{kSentinelFile});
+    CHECK(eastl::string_view{transfer.detail} == eastl::string_view{kSentinelDetail});
 
     // Verify the line is a positive, non-zero source location.
     // The stub sets ctx.line = __LINE__ at the ErrorContext construction site;
@@ -289,9 +276,8 @@ TEST_CASE("error_propagation_preserves_error_context", "[core][error_propagation
 // If this #error fires, the test binary was misconfigured — the build must
 // pass -fno-exceptions for all engine / test TUs (error-model.md §Decision 3).
 #if defined(__EXCEPTIONS) && __EXCEPTIONS
-#error \
-    "test binary compiled with -fexceptions — " \
-    "error-model.md §Decision 3 requires -fno-exceptions for engine code"
+#error                                                                                             \
+    "test binary compiled with -fexceptions — error-model.md §Decision 3 requires -fno-exceptions"
 #endif
 
 TEST_CASE("terminating_exception_aborts_plugin_load", "[core][error_propagation][contract]") {

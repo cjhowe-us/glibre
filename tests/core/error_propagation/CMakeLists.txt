@@ -119,6 +119,10 @@ target_compile_options(glibre-core-error-propagation-tests PRIVATE
 
 target_compile_definitions(glibre-core-error-propagation-tests PRIVATE
     GLIBRE_STUB_ERROR_RETURNS_DYLIB_PATH="$<TARGET_FILE:glibre-stub-error-returns>"
+    # -fno-exceptions turns Catch2 throw-based failure into std::terminate.
+    # CATCH_CONFIG_DISABLE_EXCEPTIONS switches Catch2 to its longjmp-based
+    # failure path so REQUIRE failures are recorded rather than aborting the runner.
+    CATCH_CONFIG_DISABLE_EXCEPTIONS
 )
 
 add_dependencies(glibre-core-error-propagation-tests glibre-stub-error-returns)
