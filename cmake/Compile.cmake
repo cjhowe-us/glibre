@@ -59,14 +59,14 @@ endif()
 #
 #    Must be called AFTER add_library/add_executable so the target exists.
 # ---------------------------------------------------------------------------
-macro(glibre_register_engine_root target)
+function(glibre_register_engine_root target)
     if(NOT TARGET ${target})
         message(FATAL_ERROR
             "glibre_register_engine_root(${target}): target '${target}' is not yet "
             "defined; call after add_library/add_executable.")
     endif()
     set_property(GLOBAL APPEND PROPERTY GLIBRE_ENGINE_ROOTS "${target}")
-endmacro()
+endfunction()
 
 # ---------------------------------------------------------------------------
 # 3. Helper: glibre_target_exceptions(target)

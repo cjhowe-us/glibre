@@ -12,6 +12,11 @@ include(Compile)
 #
 # Also verifies that _glibre_run_core_exception_check reads the registered
 # roots (not a hardcoded list) and walks them via the deferred check.
+#
+# Distinct from engine-roots-property-rejects-exception-root: this fixture
+# covers the happy path (no exception-flagged roots); the sibling covers the
+# negative path (a root directly in GLIBRE_ENGINE_ROOTS carries
+# GLIBRE_USES_EXCEPTIONS=TRUE).
 # ---------------------------------------------------------------------------
 
 # Register two mock engine roots.

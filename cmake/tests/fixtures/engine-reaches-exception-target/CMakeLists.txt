@@ -7,6 +7,13 @@ include(Compile)
 # Deliberately-misconfigured fixture:
 # An exception-using target is linked into glibre-core's public interface.
 # CMake configure should FATAL_ERROR before returning.
+#
+# Distinct from engine-roots-property-rejects-exception-root: in that
+# fixture the exception-bearing target IS directly in GLIBRE_ENGINE_ROOTS
+# but NOT linked by any other registered root; here the exception-bearing
+# target (bad_exception_lib) is NOT in GLIBRE_ENGINE_ROOTS but IS reachable
+# via glibre-core's INTERFACE link.  The two fixtures together cover both
+# reachability axes of the deferred check.
 
 # Simulate an editor-UI-like target that opts into exceptions.
 add_library(bad_exception_lib INTERFACE)
