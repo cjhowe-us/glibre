@@ -787,9 +787,7 @@ schema glibre.fx.Particle {
 // (was shipped as _uses_double_underscore; renamed in R1 review to match plan).
 // -----------------------------------------------------------------------
 
-TEST_CASE(
-    "foryc_emit_migration_fqn_mangle_single_segment", "[foryc][emit_migration][fqn_mangle]"
-) {
+TEST_CASE("foryc_emit_migration_fqn_mangle_single_segment", "[foryc][emit_migration][fqn_mangle]") {
     // Multi-segment FQN: dots become double-underscores.
     constexpr std::string_view src_multi = R"(
 schema glibre.core.Transform {
