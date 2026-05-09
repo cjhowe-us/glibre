@@ -6,6 +6,7 @@ cmake_minimum_required(VERSION 3.30)
 
 add_executable(glibre-core-tests
     frame_loop_test.cpp
+    plugin_manifest/plugin_manifest_test.cpp
 )
 
 target_link_libraries(glibre-core-tests

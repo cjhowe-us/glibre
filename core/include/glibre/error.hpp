@@ -37,6 +37,11 @@ enum class Error : std::uint16_t {
     OutOfBudget,
     SystemScheduleCycle,
     ScheduleAccessConflict,
+    // Manifest-read errors (plan #223 — PluginManifest schema authored)
+    // Used by PluginManifest::open() and the loader (plans #229..#231).
+    PluginManifestNotFound,  // path does not exist or is not a regular file
+    PluginManifestInvalid,   // file exists but Fory deserialization failed
+                             //   (corrupt, wrong schema version, truncated)
 };
 }  // namespace core
 
