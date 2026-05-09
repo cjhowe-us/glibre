@@ -12,6 +12,12 @@
 //   - migrate_components_no_op_when_versions_equal
 //   - call_register_stamped_stamps_correct_tag_from_manifest_name  (plan #989 HIGH-1, r2)
 //
+// Named test cases (plan #982 Unit Test Plan):
+//   - rebuild_schedule_returns_cycle_on_conflicting_systems
+//
+// Named test cases (plan #983 Unit Test Plan):
+//   - migrate_components_returns_failed_on_broken_migration_step
+//
 // Design constraints:
 //   • -fno-exceptions (error-model.md §Decision 3).
 //   • EASTL for containers/strings per PHILOSOPHY §11.
@@ -504,6 +510,94 @@ TEST_CASE(
         CHECK(g_broken_step_call_count == 0);
 
         // The identity case always succeeds (nothing to migrate).
+        REQUIRE(result.has_value());
+    }
+}
+
+// ===========================================================================
+// Test: rebuild_schedule_returns_cycle_on_conflicting_systems
+//
+// Exercises loader step 10 failure path (plugin-abi.md §"Loader Sequence"
+// step 10, §"Failure Modes → core::Error" row 10):
+//   system schedule cycle detected → core::Error::SystemScheduleCycle.
+//
+// Uses option 1 from plan #982 §Scope: inject a mock ScheduleRebuildFn that
+// returns std::unexpected(core::Error::SystemScheduleCycle) to simulate a
+// cycle in the system schedule graph.  This exercises the failure arm without
+// requiring the real topology sort from plans #247/#248.
+//
+// Placed here (plugin_loader_register/) because the SUT is
+// plugin_loader_actions.hpp free functions — the same translation unit that
+// hosts rebuild_schedule_smoke and the other step 9–11 tests (cohesion: all
+// plugin_loader_actions.* tests live together).
+//
+// Sections:
+//   A. Injected rebuild_fn that returns SystemScheduleCycle → failure
+//      propagated, mock invocation counter == 1 (mock was called exactly once).
+//   B. Injected rebuild_fn that returns success → success propagated,
+//      mock invocation counter == 1 (mock was called, returned success).
+//
+// Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" step 10,
+//            §"Failure Modes → core::Error" table (row 10).
+// Plan: #982 — SystemScheduleCycle integration test.
+// DoD: unit_test_named: rebuild_schedule_returns_cycle_on_conflicting_systems
+// ===========================================================================
+
+// TU-local invocation counters for the rebuild mock functions (accessed via
+// file-scope helpers so they can be used from non-capturing function pointers).
+// Reset to 0 before each SECTION to avoid cross-section interference.
+namespace {
+int g_cycle_rebuild_call_count = 0;    // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+int g_success_rebuild_call_count = 0;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+
+/// Mock rebuild_fn that returns SystemScheduleCycle.
+/// Simulates a cycle detected in the system schedule graph (step 10 failure path).
+glibre::Result<void> cycle_rebuild_fn() noexcept {
+    ++g_cycle_rebuild_call_count;
+    return std::unexpected(glibre::Error{glibre::core::Error::SystemScheduleCycle});
+}
+
+/// Mock rebuild_fn that returns success.
+/// Simulates a cycle-free schedule rebuild (step 10 happy path via injection).
+glibre::Result<void> success_rebuild_fn() noexcept {
+    ++g_success_rebuild_call_count;
+    return {};
+}
+}  // namespace
+
+TEST_CASE("rebuild_schedule_returns_cycle_on_conflicting_systems", "[core][register][schedule]") {
+    SECTION("injected rebuild_fn returns cycle: failure propagated, mock called once") {
+        // Reset invocation counter for this section.
+        g_cycle_rebuild_call_count = 0;
+
+        // Inject a mock that simulates a cycle in the system schedule graph.
+        // plugin-abi.md §"Loader Sequence" step 10:
+        //   "A cycle → core::Error::SystemScheduleCycle."
+        auto result = glibre::core::rebuild_schedule(cycle_rebuild_fn);
+
+        // Mock must have been called exactly once.
+        CHECK(g_cycle_rebuild_call_count == 1);
+
+        // The SystemScheduleCycle failure must be propagated unchanged.
+        REQUIRE(!result);
+        const auto* core_err = as_core_error(result.error());
+        REQUIRE(core_err != nullptr);
+        CHECK(*core_err == glibre::core::Error::SystemScheduleCycle);
+    }
+
+    SECTION("injected rebuild_fn returns success: success propagated, mock called once") {
+        // Reset invocation counter for this section.
+        g_success_rebuild_call_count = 0;
+
+        // Inject a mock that simulates a cycle-free schedule rebuild (no cycle
+        // detected).  The injectable overload must call the mock and propagate
+        // success.
+        auto result = glibre::core::rebuild_schedule(success_rebuild_fn);
+
+        // Mock must have been called exactly once.
+        CHECK(g_success_rebuild_call_count == 1);
+
+        // Success from the mock must be propagated: the result is a value.
         REQUIRE(result.has_value());
     }
 }
