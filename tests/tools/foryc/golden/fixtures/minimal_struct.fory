@@ -4,6 +4,9 @@
 // Golden fixture: a single struct with one u32 field.
 // Exercises the simplest possible schema shape.
 
+// Note: `since` markers are parsed into the IR but not yet emitted by
+// emit_header (no planned emission in MVP scope).  They are retained here
+// to exercise parser coverage of those optional fields.
 schema test.MinimalStruct {
   version 1
   since   "0.0.1"

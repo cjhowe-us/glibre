@@ -4,6 +4,9 @@
 // Golden fixture: package with a 3-component FQN and multiple TypeDecls.
 // Exercises namespace nesting and multi-type file emission.
 
+// Note: `since` markers are parsed into the IR but not yet emitted by
+// emit_header (no planned emission in MVP scope).  They are retained here
+// to exercise parser coverage of those optional fields.
 schema data.shapes.Circle {
   version 1
   since   "0.1.0"

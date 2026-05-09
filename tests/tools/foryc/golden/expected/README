@@ -1,0 +1,22 @@
+Golden expected outputs for the glibre-foryc harness (plan #226).
+Each *.hpp.golden file is the byte-exact expected output from emit_header()
+for the corresponding fixture in ../fixtures/.  Do not edit by hand.
+
+REGENERATING
+  GLIBRE_UPDATE_GOLDEN=1 ctest --preset macos-debug -R foryc_golden_
+  Review `git diff tests/tools/foryc/golden/expected/` before committing.
+
+KNOWN LIMITATION — nested_namespace.hpp.golden
+  This golden captures the current emit_header() behavior for multi-type
+  .fory files.  emit_header() concatenates one full per-TypeDecl header
+  block for every type in the schema.  For a file with two schemas this
+  produces output that contains:
+
+    - two #pragma once guards
+    - two duplicate #include blocks
+    - two separate open/close namespace blocks for the same namespace
+
+  This is intentional faithful capture of the current implementation.
+  Do NOT regenerate nested_namespace.hpp.golden to hide the limitation.
+  The correct fix is a restructured merge strategy in emit_header().
+  Tracked by #965 ([SPIKE] iterate-data-foryc-multitype-emit).
