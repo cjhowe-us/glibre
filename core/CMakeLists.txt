@@ -15,10 +15,20 @@ add_library(glibre-core STATIC
     src/frame_loop.cpp
 )
 
+# EASTL is the substrate container/string/variant library per PHILOSOPHY §11.
+# glibre/error.hpp uses eastl::variant and eastl::string_view; linking EASTL
+# PUBLIC so every consumer of glibre::core transitively gets the include path.
+find_package(EASTL CONFIG REQUIRED)
+
 target_include_directories(glibre-core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(glibre-core
+    PUBLIC
+        EASTL
 )
 
 target_compile_features(glibre-core PUBLIC cxx_std_23)
