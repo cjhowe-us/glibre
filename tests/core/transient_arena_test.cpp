@@ -217,7 +217,9 @@ TEST_CASE(
 // undrained_allocation_through_tick_returns_out_of_budget below.
 // ===========================================================================
 
-TEST_CASE("transient_arena_present_drain_idempotent_after_caller_drain", "[core][transient_arena]") {
+TEST_CASE(
+    "transient_arena_present_drain_idempotent_after_caller_drain", "[core][transient_arena]"
+) {
     glibre::TransientArena arena{4096};
     glibre::core::FrameLoop loop;
 
