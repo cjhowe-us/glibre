@@ -9,9 +9,13 @@
 //   - BENCHMARK_CELL_render_phase_under_budget
 //
 // Design:
-//   Each BENCHMARK_CELL expands to a TEST_CASE that runs:
+//   Each TEST_CASE uses BENCHMARK_CELL_BODY which runs:
 //     (a) A Catch2 BENCHMARK block for statistical reporting.
 //     (b) A chrono-timed single run + REQUIRE(elapsed < ceiling_ns).
+//
+//   Test case names use the literal "BENCHMARK_CELL_<ctx>_<desc>" convention
+//   so that the DoD verifier grep (TEST_CASE|SCENARIO)\("BENCHMARK_CELL_..."
+//   finds each case in source.
 //
 //   This scaffolding plan ships trivial no-op workloads demonstrating the
 //   contract.  Real S1 workloads (plan #243) will replace the no-op bodies.
@@ -37,13 +41,11 @@
 // No-op workload: a no-op always satisfies the budget.
 // Plan #243 replaces the body with a real transform-propagation fixture.
 // ---------------------------------------------------------------------------
-BENCHMARK_CELL(
-    core_phase_under_budget,
-    glibre::perf_bench::kCoreCpuBudgetNs,
-    glibre::perf_bench::ContextTag::Core,
-    [perf][core],
-    (void)0
-)
+TEST_CASE("BENCHMARK_CELL_core_phase_under_budget", "[perf][core]") {
+    BENCHMARK_CELL_BODY(
+        glibre::perf_bench::kCoreCpuBudgetNs, glibre::perf_bench::ContextTag::Core, (void)0
+    );
+}
 
 // ---------------------------------------------------------------------------
 // BENCHMARK_CELL_render_phase_under_budget
@@ -55,10 +57,8 @@ BENCHMARK_CELL(
 // No-op workload: a no-op always satisfies the budget.
 // Plan #243 replaces the body with a real cull-extract / render-submit stub.
 // ---------------------------------------------------------------------------
-BENCHMARK_CELL(
-    render_phase_under_budget,
-    glibre::perf_bench::kRenderCpuBudgetNs,
-    glibre::perf_bench::ContextTag::Render,
-    [perf][render],
-    (void)0
-)
+TEST_CASE("BENCHMARK_CELL_render_phase_under_budget", "[perf][render]") {
+    BENCHMARK_CELL_BODY(
+        glibre::perf_bench::kRenderCpuBudgetNs, glibre::perf_bench::ContextTag::Render, (void)0
+    );
+}

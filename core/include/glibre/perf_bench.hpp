@@ -1,7 +1,7 @@
 #pragma once
 // core/include/glibre/perf_bench.hpp
 //
-// BENCHMARK_CELL — per-context CI gate macro for Catch2 benchmark tests.
+// Per-context CI gate macro and constants for Catch2 benchmark tests.
 //
 // Design (perf-budget.md §CI Gate Spec #1, plan #242):
 //   Each bounded context's SPEC §9 lists at least one micro-benchmark that
@@ -9,26 +9,19 @@
 //   `time <= cell_budget_ns` (perf-budget.md §CI Gate Spec #1).  PR fails
 //   if any assertion fails.
 //
-//   BENCHMARK_CELL expands to a complete Catch2 TEST_CASE named
-//   "BENCHMARK_CELL_<tag_name>".  The test case:
-//     1. Runs a Catch2 BENCHMARK block (statistical reporting — visible in
-//        CI output for headroom trend tracking, CI Gate Spec #5).
-//     2. Runs one chrono-timed single iteration and REQUIREs it stays under
-//        `ceiling_ns`.  This is the hard gate that rejects a PR.
-//     3. Accepts a `context_tag` annotation that will be wired to a live
-//        PerfBudget::record_cpu call in plan #243 (S1 sample-scene fixture).
+//   BENCHMARK_CELL_BODY is the inner assertion macro used inside a named
+//   TEST_CASE.  Test files write the TEST_CASE with a literal name so that
+//   the DoD verifier's grep can find "BENCHMARK_CELL_<tag>" as a literal
+//   string inside a TEST_CASE call:
 //
-// Usage:
-//   // In tests/perf/perf_budget_gate_test.cpp (or any perf test file):
+//     TEST_CASE("BENCHMARK_CELL_core_phase_under_budget", "[perf][core]") {
+//         BENCHMARK_CELL_BODY(glibre::perf_bench::kCoreCpuBudgetNs,
+//                             glibre::perf_bench::ContextTag::Core,
+//                             (void)0);
+//     }
 //
-//   BENCHMARK_CELL(core_phase_under_budget,
-//                  glibre::perf_bench::kCoreCpuBudgetNs,
-//                  glibre::perf_bench::ContextTag::Core,
-//                  [perf][core],
-//                  /* body: */ (void)0)
-//
-//   // Expands to:
-//   //   TEST_CASE("BENCHMARK_CELL_core_phase_under_budget", "[perf][core]") { ... }
+//   The naming convention "BENCHMARK_CELL_<context>_<description>" ties
+//   each test case to its context's budget cell in perf-budget.md.
 //
 // Budget constants (perf-budget.md §Per-Context Budget Table):
 //   CPU sim ceilings converted to nanoseconds.  Single-phase micro-
@@ -37,7 +30,7 @@
 // Dependency note (plan #241 / PR #988):
 //   This header is intentionally standalone.  It does NOT include
 //   glibre/perf_budget.hpp so it can land before plan #241 merges.
-//   The ContextTag enum below mirrors the definition in perf_budget.hpp;
+//   The local ContextTag enum mirrors the definition in perf_budget.hpp;
 //   when plan #243 wires a live PerfBudget, it will replace this copy
 //   with a single include and remove the local definition.
 //
@@ -144,52 +137,54 @@ template<typename F>
 }  // namespace glibre::perf_bench
 
 // ---------------------------------------------------------------------------
-// BENCHMARK_CELL(tag_name, ceiling_ns, context_tag, catch_tags, body_expr)
+// BENCHMARK_CELL_BODY(ceiling_ns, context_tag, ...)
 //
-// Expands to a TEST_CASE named "BENCHMARK_CELL_<tag_name>".
+// Inner assertion body for a per-context CI gate benchmark.  Used INSIDE a
+// TEST_CASE whose name follows the "BENCHMARK_CELL_<tag>" convention so that
+// the DoD verifier can grep for the literal test-case name.
 //
 // Parameters:
-//   tag_name    — identifier token; test name = "BENCHMARK_CELL_<tag_name>".
-//                 Must match the DoD unit_test_named entry exactly.
 //   ceiling_ns  — ceiling in nanoseconds (use kCoreCpuBudgetNs etc.).
 //   context_tag — glibre::perf_bench::ContextTag value; reserved for plan
 //                 #243 PerfBudget wiring.  Not used in this scaffolding.
-//   catch_tags  — Catch2 tag string tokens, e.g. [perf][core].
-//   body_expr   — expression forming the workload; must be void-evaluatable.
-//                 Passed verbatim to both the BENCHMARK lambda and the
-//                 chrono-timed lambda.
+//   ...         — body expression(s) forming the workload; must be void-
+//                 evaluatable (e.g. a function call, `(void)0`).
 //
-// The expanded TEST_CASE:
-//   1. Calls BENCHMARK(#tag_name) with a lambda wrapping `body_expr`.
+// The macro:
+//   1. Calls BENCHMARK with a lambda wrapping `body`.
 //      Catch2 runs the lambda many times and reports mean/median/SD.
-//   2. Times one call to `body_expr` with steady_clock and REQUIREs the
+//   2. Times one call to `body` with steady_clock and REQUIREs the
 //      result is < ceiling_ns.  This REQUIRE is the CI gate assertion.
 //
-// Contract: a trivial no-op body (e.g. `(void)0`) always satisfies the
-// budget.  Real S1 workloads (plan #243) will fire the gate if they are
-// too slow.
+// Usage:
+//   // The TEST_CASE name is a literal so the DoD verifier grep succeeds:
+//   TEST_CASE("BENCHMARK_CELL_core_phase_under_budget", "[perf][core]") {
+//       BENCHMARK_CELL_BODY(glibre::perf_bench::kCoreCpuBudgetNs,
+//                           glibre::perf_bench::ContextTag::Core,
+//                           (void)0);
+//   }
 // ---------------------------------------------------------------------------
 
 // NOLINTBEGIN(bugprone-macro-parentheses)
-#define BENCHMARK_CELL(tag_name, ceiling_ns, context_tag, catch_tags, ...)                         \
-    TEST_CASE("BENCHMARK_CELL_" #tag_name, #catch_tags) {                                          \
+#define BENCHMARK_CELL_BODY(ceiling_ns, context_tag, ...)                                          \
+    do {                                                                                           \
         /* context_tag reserved for plan #243 PerfBudget wiring. */                                \
-        [[maybe_unused]] constexpr glibre::perf_bench::ContextTag GLIBRE_BENCH_CTX_##tag_name =    \
+        [[maybe_unused]] constexpr glibre::perf_bench::ContextTag GLIBRE_BENCH_CTX_ =              \
             (context_tag);                                                                         \
                                                                                                    \
         /* 1. Catch2 BENCHMARK block — statistical reporting. */                                   \
-        BENCHMARK(#tag_name) {                                                                     \
+        BENCHMARK("workload") {                                                                    \
             __VA_ARGS__;                                                                           \
             return 0;                                                                              \
         };                                                                                         \
                                                                                                    \
         /* 2. Chrono-timed single run — hard CI gate assertion. */                                 \
-        const auto GLIBRE_BENCH_NS_##tag_name = glibre::perf_bench::detail::time_body_ns([] {      \
+        const auto GLIBRE_BENCH_NS_ = glibre::perf_bench::detail::time_body_ns([] {                \
             __VA_ARGS__;                                                                           \
             return 0;                                                                              \
         });                                                                                        \
-        REQUIRE(GLIBRE_BENCH_NS_##tag_name < static_cast<std::uint64_t>(ceiling_ns));              \
-    }
+        REQUIRE(GLIBRE_BENCH_NS_ < static_cast<std::uint64_t>(ceiling_ns));                        \
+    } while (false)
 // NOLINTEND(bugprone-macro-parentheses)
 
 // NOLINTEND(cppcoreguidelines-macro-usage)
