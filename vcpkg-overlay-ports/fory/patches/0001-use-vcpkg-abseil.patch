@@ -1,0 +1,23 @@
+--- a/cpp/CMakeLists.txt
++++ b/cpp/CMakeLists.txt
+@@ -67,18 +67,8 @@
+ # Set Fory root directory for include paths (important when used as subdirectory)
+ set(FORY_CPP_ROOT ${CMAKE_CURRENT_SOURCE_DIR} CACHE PATH "Fory C++ root directory")
+ 
+-# Fetch Abseil (required for debugging support)
+-message(STATUS "Fetching Abseil via FetchContent")
+-include(FetchContent)
+-set(ABSL_PROPAGATE_CXX_STD ON)
+-set(ABSL_BUILD_TESTING OFF)
+-set(ABSL_ENABLE_INSTALL ON)
+-FetchContent_Declare(
+-    abseil-cpp
+-    GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
+-    GIT_TAG 20240722.0
+-)
+-FetchContent_MakeAvailable(abseil-cpp)
++# Use Abseil provided by vcpkg (overlay port replaces FetchContent with find_package)
++find_package(absl CONFIG REQUIRED)
+ 
+ # Add subdirectories
+ add_subdirectory(fory/thirdparty)

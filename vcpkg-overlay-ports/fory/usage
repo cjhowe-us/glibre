@@ -1,0 +1,11 @@
+fory provides CMake targets. Link against Fory::fory to pull in the full
+Apache Fory C++ serialization and row-format libraries:
+
+    find_package(Fory CONFIG REQUIRED)
+    target_link_libraries(my_target PRIVATE Fory::fory)
+
+Fine-grained component targets are also available: Fory::serialization
+(binary serialization only) and Fory::row_format (row format + encoder).
+
+This is a glibre overlay port. The canonical upstream port in
+microsoft/vcpkg should be preferred once it ships.
