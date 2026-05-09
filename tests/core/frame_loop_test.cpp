@@ -110,9 +110,11 @@ TEST_CASE("core/frame_loop: tick_invokes_phases_in_strict_order", "[core][frame_
 
     for (std::uint8_t i = 0; i < kPhaseCount; ++i) {
         const std::uint8_t expected_ordinal = static_cast<std::uint8_t>(i + 1u);
-        INFO("Phase at position " << static_cast<int>(i)
-             << ": expected ordinal " << static_cast<int>(expected_ordinal)
-             << " got " << static_cast<int>(recorded[i]));
+        INFO(
+            "Phase at position " << static_cast<int>(i) << ": expected ordinal "
+                                 << static_cast<int>(expected_ordinal) << " got "
+                                 << static_cast<int>(recorded[i])
+        );
         CHECK(recorded[i] == expected_ordinal);
     }
 
