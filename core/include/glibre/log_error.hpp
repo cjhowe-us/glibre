@@ -130,6 +130,8 @@ namespace glibre::tools {
         return "ForycIOError";
     case Error::ForycEmptySchema:
         return "ForycEmptySchema";
+    case Error::ForycInvalidIdentifier:
+        return "ForycInvalidIdentifier";
     }
     return "Unknown";
 }

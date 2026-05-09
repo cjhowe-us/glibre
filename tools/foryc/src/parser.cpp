@@ -283,11 +283,38 @@ private:
         return true;
     }
 
+    // Validate that an identifier segment does not contain "__".
+    // "__" (double-underscore) is reserved by the codegen mangling scheme
+    // (fory-codegen.md §"ABI Stability Rules" point 4, plan #1010):
+    // dots in a dotted FQN are replaced by "__" to form C symbol suffixes.
+    // A segment that already contains "__" would alias a multi-segment FQN,
+    // making fqn_to_mangled non-injective and defeating collision-prevention.
+    [[nodiscard]] static bool segment_contains_double_underscore(std::string_view seg) noexcept {
+        const std::size_t sz = seg.size();
+        for (std::size_t i = 0; i + 1 < sz; ++i) {
+            if (seg[i] == '_' && seg[i + 1] == '_')
+                return true;
+        }
+        return false;
+    }
+
     // Parse a dotted FQN: word ('.' word)* — may also consume as Ident+Dot tokens
     // Returns the concatenated string.
+    //
+    // Rejects identifier segments containing "__" (double-underscore) because
+    // that sequence is reserved by the codegen mangling scheme (plan #1010,
+    // fory-codegen.md §"ABI Stability Rules" point 4).  The rejection keeps
+    // fqn_to_mangled injective: "glibre.core__Foo" and "glibre.core.Foo" would
+    // otherwise both mangle to "glibre__core__Foo".
     [[nodiscard]] std::expected<eastl::string, glibre::Error> parse_fqn() {
         if (current_.kind != TokenKind::Ident)
             return FORYC_ERR(tools::Error::ForycSyntaxError, "expected schema FQN");
+
+        if (segment_contains_double_underscore(current_.text))
+            return FORYC_ERR(
+                tools::Error::ForycInvalidIdentifier,
+                "FQN segment contains '__' which is reserved for codegen mangling"
+            );
 
         eastl::string fqn(current_.text.data(), current_.text.size());
         advance();
@@ -296,6 +323,11 @@ private:
             advance();  // consume '.'
             if (current_.kind != TokenKind::Ident)
                 return FORYC_ERR(tools::Error::ForycSyntaxError, "expected identifier after '.'");
+            if (segment_contains_double_underscore(current_.text))
+                return FORYC_ERR(
+                    tools::Error::ForycInvalidIdentifier,
+                    "FQN segment contains '__' which is reserved for codegen mangling"
+                );
             fqn += '.';
             fqn += eastl::string(current_.text.data(), current_.text.size());
             advance();
