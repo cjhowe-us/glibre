@@ -517,7 +517,12 @@ TEST_CASE(
 TEST_CASE("validate_drain_phase_at_phase_8_succeeds", "[core][plugin_loader_registry]") {
     auto result =
         glibre::core::PluginLoaderRegistry::validate_drain_phase(glibre::core::Phase::HotReload);
-    CHECK(result.has_value());
+    // REQUIRE hard-fails so the operator-bool check below does not UB on an error payload.
+    REQUIRE(result.has_value());
+    // Exercise operator bool — confirms no spurious glibre::Error was constructed.
+    // Result<void> success returns {} (empty expected); there is no value to dereference
+    // further, but operator bool must be true iff has_value() is true.
+    CHECK(result);
 }
 
 // ===========================================================================
