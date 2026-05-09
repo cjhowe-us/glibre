@@ -1273,7 +1273,7 @@ Lives under `tests/core/world/`.
 | `world: archetype_graph_o1_amortized`                     | First add of T to archetype A computes the destination; second add is a single hash lookup.| §3.4           | #324  |
 | `world: hierarchy_refuses_cycle`                          | `set_component(child, ChildOf, child)` → `HierarchyCycle`.                                   | §3.5, §4.1 inv 2 | #338  |
 | `world: hierarchy_refuses_depth_overflow`                 | A 257-deep `ChildOf` chain → `HierarchyCycle`.                                              | §3.5           | #338  |
-| `world: lifecycle_on_add_fires_once`                      | `set_component(e, T, b)` fires `OnAdd` exactly once when `T` was absent.                    | §3.6, §4.1 inv 7 | #329  |
+| `core/lifecycle_hook: on_add_fires_after_archetype_transition` | `set_component(e, T, b)` fires `OnAdd` exactly once when `T` was absent (plan #579). | §3.6, §4.1 inv 7 | #329  |
 | `world: lifecycle_on_set_fires_only_when_present`         | `set_component(e, T, b)` fires `OnSet` (not `OnAdd`) when `T` was already present.          | §3.6, §4.1 inv 7 | #329  |
 | `world: lifecycle_on_remove_fires_in_column_order`         | `despawn(e)` fires `OnRemove` for each component in archetype-column order.                 | §3.6, §4.1 inv 7 | #329  |
 | `world: query_with_filter_excludes_archetypes`            | A query with `Without<T>` returns no rows from archetypes containing T.                     | §3.7, R-1.1.18 | #326  |
@@ -1404,3 +1404,28 @@ Resolution of any `[OPEN]` lands the decision into
 `reviews/decisions/` (when cross-aggregate) or amends §3 / §9 / §11
 in place (when local to `World`); per the workflow no `[OPEN]` is
 discharged silently.
+
+## 13. Plan Backlog Delta
+
+This table records only the `[PLAN]` issues added **after** the
+primary per-aggregate backlog already cited in the SPEC
+(#557, #562, #565, #567, #572, #574, #577, #579, #589, #591,
+#597, #601, #923–#933). It is not a complete cross-reference of
+all per-§ owners; use the issue tracker label `domain:core` +
+`type:plan` for a full view.
+
+| Plan | Scope                                                                               | Design ref            |
+|------|-------------------------------------------------------------------------------------|-----------------------|
+| #935 | `world: hierarchy_refuses_depth_overflow` unit test                                 | §3.5, §11.1           |
+| #936 | Lifecycle hook present/absent + column-order discrimination tests                   | §3.6, §11.1           |
+| #937 | World migration row-addressing API for HotReloadBarrier (per-row byte span exposure) | §8.2 #1–3, §3.2      |
+| #938 | Archetype-iter L1-D miss-rate alarm (≤5%) on archetype iteration hot loop (core)    | §5.3, §9.5            |
+| #939 | `ResourceSlot::last_modified` tick + `Changed<Res<T>>` readback                     | §3.9, §3.7, §3.8      |
+| #940 | `EntityForeignWorld` refusal-shape contract (post-MVP arm placeholder)              | §10.1, §11.4          |
+| #941 | `ChangeTick` relaxed-atomic upgrade-path scaffold (`TickStorage` alias)             | §6.4                  |
+| #942 | Archetype forward/reverse map debug invariant cross-check                           | §3.2 #5, §5.3         |
+| #944 | macOS PMC sampler helper (`pmc_sampler.{hpp,cpp}`) + CI artifact-upload gate (infra) | §5.3, §9.5            |
+
+Authorship rule: any further `[PLAN]` decomposing this design (e.g.
+once an `[OPEN]` resolves) appends to this table in the same PR
+that opens the plan.
