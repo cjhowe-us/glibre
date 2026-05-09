@@ -252,7 +252,7 @@ void register_allocator(PerContextAllocator& alloc) noexcept;
 //   REQUIRE(testing_register_allocator_call_count() == 1);
 // ---------------------------------------------------------------------------
 
-#if defined(GLIBRE_TESTING) && GLIBRE_TESTING
+#ifdef GLIBRE_TESTING
 
 // Returns the number of times register_allocator() has been called since
 // the last testing_reset_register_allocator_call_count() or program start.

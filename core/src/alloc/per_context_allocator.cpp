@@ -181,7 +181,7 @@ std::uint64_t PerContextAllocator::bytes_used() const noexcept {
 // testing_reset_register_allocator_call_count() before each assertion.
 // ---------------------------------------------------------------------------
 
-#if defined(GLIBRE_TESTING) && GLIBRE_TESTING
+#ifdef GLIBRE_TESTING
 // TU-global atomic counter.  Incremented on every register_allocator() call.
 // Placed in an anonymous namespace to prevent external linkage — the symbol is
 // private to this TU and cannot be ODR-violated by other TUs.  The
@@ -199,7 +199,7 @@ void register_allocator([[maybe_unused]] PerContextAllocator& alloc) noexcept {
     // populate a global registry that the CI gate and perf HUD enumerate.
     // The stable call-site ABI means existing callers need no change when
     // plan #241 lands.
-#if defined(GLIBRE_TESTING) && GLIBRE_TESTING
+#ifdef GLIBRE_TESTING
     // Observability hook (plan #990): increment TU-global counter so tests can
     // assert this function is called exactly once per PerContextAllocator
     // construction without a full AllocatorRegistry.
@@ -211,7 +211,7 @@ void register_allocator([[maybe_unused]] PerContextAllocator& alloc) noexcept {
 // Testing observability API (GLIBRE_TESTING only — plan #990)
 // ---------------------------------------------------------------------------
 
-#if defined(GLIBRE_TESTING) && GLIBRE_TESTING
+#ifdef GLIBRE_TESTING
 
 std::uint64_t testing_register_allocator_call_count() noexcept {
     return testing_call_count_.load(std::memory_order_relaxed);

@@ -279,38 +279,42 @@ TEST_CASE("per_context_allocator_threadsafe_allocations", "[core][alloc]") {
 // not defined so this section is compiled conditionally.
 // ===========================================================================
 
-#if defined(GLIBRE_TESTING) && GLIBRE_TESTING
+#ifdef GLIBRE_TESTING
 
 TEST_CASE("per_context_allocator_register_fires_on_construction", "[core][alloc]") {
-    // --- Scenario A: explicit-ceiling constructor fires exactly once ----------
-    //
-    // Reset the counter before constructing to isolate this assertion from
-    // prior test-case constructions (the counter is TU-global).
-    glibre::testing_reset_register_allocator_call_count();
-    {
-        glibre::PerContextAllocator a{glibre::ContextTag::core, 1024ULL};
-    }
-    CHECK(glibre::testing_register_allocator_call_count() == 1u);
+    // Counter is TU-global; reset at the top of each SECTION so that prior
+    // constructions (from other sections or test cases) do not bleed in.
 
-    // --- Scenario B: convenience constructor (tag-only) fires exactly once ---
-    glibre::testing_reset_register_allocator_call_count();
-    {
-        glibre::PerContextAllocator b{glibre::ContextTag::physics};
+    SECTION("explicit-ceiling ctor fires exactly once") {
+        glibre::testing_reset_register_allocator_call_count();
+        {
+            glibre::PerContextAllocator a{glibre::ContextTag::core, 1024ULL};
+        }
+        CHECK(glibre::testing_register_allocator_call_count() == 1u);
     }
-    CHECK(glibre::testing_register_allocator_call_count() == 1u);
 
-    // --- Scenario C: N instances produce exactly N calls --------------------
-    //
-    // Construct kN instances across two distinct ContextTags; assert the
-    // counter equals kN (one call per instance, tag-agnostic).
-    constexpr int kN = 3;
-    glibre::testing_reset_register_allocator_call_count();
-    {
-        glibre::PerContextAllocator c0{glibre::ContextTag::render, 512ULL * 1024ULL * 1024ULL};
-        glibre::PerContextAllocator c1{glibre::ContextTag::geometry, 256ULL * 1024ULL * 1024ULL};
-        glibre::PerContextAllocator c2{glibre::ContextTag::tools};
+    SECTION("tag-only ctor fires exactly once") {
+        glibre::testing_reset_register_allocator_call_count();
+        {
+            glibre::PerContextAllocator b{glibre::ContextTag::physics};
+        }
+        CHECK(glibre::testing_register_allocator_call_count() == 1u);
     }
-    CHECK(glibre::testing_register_allocator_call_count() == static_cast<std::uint64_t>(kN));
+
+    SECTION("N instances produce exactly N calls") {
+        // Construct kN instances across two distinct ContextTags; assert the
+        // counter equals kN (one call per instance, tag-agnostic).
+        constexpr int kN = 3;
+        glibre::testing_reset_register_allocator_call_count();
+        {
+            glibre::PerContextAllocator c0{glibre::ContextTag::render, 512ULL * 1024ULL * 1024ULL};
+            glibre::PerContextAllocator c1{glibre::ContextTag::geometry,
+                                           256ULL * 1024ULL * 1024ULL};
+            glibre::PerContextAllocator c2{glibre::ContextTag::tools};
+        }
+        CHECK(glibre::testing_register_allocator_call_count() ==
+              static_cast<std::uint64_t>(kN));
+    }
 }
 
 #endif  // GLIBRE_TESTING
