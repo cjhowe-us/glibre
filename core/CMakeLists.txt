@@ -9,7 +9,17 @@ cmake_minimum_required(VERSION 3.30)
 #
 # This initial CMakeLists.txt wires the frame-loop skeleton (plan #244).
 # Additional source files are added as subsequent plans land.
+#
+# NOTE: glibre-core is a macOS-host library only. On iOS subproject builds
+# (CMAKE_SYSTEM_NAME=iOS), this entire target is skipped. iOS frameworks
+# link statically against the iOS-built static libs (glibre_ios_libs target
+# from cmake/AppleApps.cmake) without requiring core/CMakeLists.txt to run.
+# See PR #948 for the iOS skip pattern precedent.
 # ---------------------------------------------------------------------------
+
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    return()
+endif()
 
 add_library(glibre-core STATIC
     src/frame_loop.cpp
