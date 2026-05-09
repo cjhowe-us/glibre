@@ -141,18 +141,18 @@ TEST_CASE("perf_budget_reset_at_phase_9", "[core][perf_budget]") {
     loop.set_perf_budget(&budget);
 
     // Record values across multiple contexts.
-    budget.record_cpu(glibre::ContextTag::Core,     400'000u);   // 0.4 ms
-    budget.record_cpu(glibre::ContextTag::Physics,  2'000'000u); // 2 ms
-    budget.record_cpu(glibre::ContextTag::Tools,    800'000u);   // 0.8 ms
+    budget.record_cpu(glibre::ContextTag::Core, 400'000u);       // 0.4 ms
+    budget.record_cpu(glibre::ContextTag::Physics, 2'000'000u);  // 2 ms
+    budget.record_cpu(glibre::ContextTag::Tools, 800'000u);      // 0.8 ms
     budget.record_heap_alloc(glibre::ContextTag::Render, 512u * 1024u * 1024u);
-    budget.record_gpu(glibre::ContextTag::Render,   8'000'000u); // 8 ms
+    budget.record_gpu(glibre::ContextTag::Render, 8'000'000u);  // 8 ms
 
     // Verify values are non-zero before tick.
-    REQUIRE(budget.sample(glibre::ContextTag::Core).cpu_ns     == 400'000u);
-    REQUIRE(budget.sample(glibre::ContextTag::Physics).cpu_ns  == 2'000'000u);
-    REQUIRE(budget.sample(glibre::ContextTag::Tools).cpu_ns    == 800'000u);
+    REQUIRE(budget.sample(glibre::ContextTag::Core).cpu_ns == 400'000u);
+    REQUIRE(budget.sample(glibre::ContextTag::Physics).cpu_ns == 2'000'000u);
+    REQUIRE(budget.sample(glibre::ContextTag::Tools).cpu_ns == 800'000u);
     REQUIRE(budget.sample(glibre::ContextTag::Render).heap_bytes > 0u);
-    REQUIRE(budget.sample(glibre::ContextTag::Render).gpu_ns   == 8'000'000u);
+    REQUIRE(budget.sample(glibre::ContextTag::Render).gpu_ns == 8'000'000u);
 
     // Run one frame tick — phase 9 calls budget.reset().
     const auto result = loop.tick();
@@ -160,13 +160,13 @@ TEST_CASE("perf_budget_reset_at_phase_9", "[core][perf_budget]") {
     CHECK(loop.frame_index() == 1u);
 
     // All counters must be zero after reset.
-    CHECK(budget.sample(glibre::ContextTag::Core).cpu_ns     == 0u);
-    CHECK(budget.sample(glibre::ContextTag::Core).gpu_ns     == 0u);
+    CHECK(budget.sample(glibre::ContextTag::Core).cpu_ns == 0u);
+    CHECK(budget.sample(glibre::ContextTag::Core).gpu_ns == 0u);
     CHECK(budget.sample(glibre::ContextTag::Core).heap_bytes == 0u);
 
-    CHECK(budget.sample(glibre::ContextTag::Physics).cpu_ns  == 0u);
-    CHECK(budget.sample(glibre::ContextTag::Tools).cpu_ns    == 0u);
-    CHECK(budget.sample(glibre::ContextTag::Render).gpu_ns   == 0u);
+    CHECK(budget.sample(glibre::ContextTag::Physics).cpu_ns == 0u);
+    CHECK(budget.sample(glibre::ContextTag::Tools).cpu_ns == 0u);
+    CHECK(budget.sample(glibre::ContextTag::Render).gpu_ns == 0u);
     CHECK(budget.sample(glibre::ContextTag::Render).heap_bytes == 0u);
 
     // All 10 contexts must be zeroed.
@@ -174,8 +174,8 @@ TEST_CASE("perf_budget_reset_at_phase_9", "[core][perf_budget]") {
         const auto tag = static_cast<glibre::ContextTag>(i);
         auto s = budget.sample(tag);
         INFO("Context tag " << i << " cpu_ns = " << s.cpu_ns);
-        CHECK(s.cpu_ns     == 0u);
-        CHECK(s.gpu_ns     == 0u);
+        CHECK(s.cpu_ns == 0u);
+        CHECK(s.gpu_ns == 0u);
         CHECK(s.heap_bytes == 0u);
     }
 }
@@ -223,10 +223,8 @@ TEST_CASE("perf_budget_concurrent_records_thread_safe", "[core][perf_budget]") {
         w.join();
     }
 
-    const std::uint64_t expected =
-        static_cast<std::uint64_t>(kThreads) *
-        static_cast<std::uint64_t>(kRecordsPerThread) *
-        kDeltaNs;
+    const std::uint64_t expected = static_cast<std::uint64_t>(kThreads) *
+                                   static_cast<std::uint64_t>(kRecordsPerThread) * kDeltaNs;
 
     auto s = budget.sample(glibre::ContextTag::Physics);
     REQUIRE(s.cpu_ns == expected);
