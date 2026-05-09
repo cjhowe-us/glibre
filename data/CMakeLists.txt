@@ -57,10 +57,13 @@ if(TARGET glibre-foryc AND EXISTS "${CMAKE_SOURCE_DIR}/data/schemas")
         "${CMAKE_SOURCE_DIR}/data/schemas/*.fory"
     )
 
-    # glibre-foryc is built by tools/foryc/CMakeLists.txt (plan #219).
-    # It accepts --in <schema-dir> --out <gen-dir> --stamp <stamp-file>.
-    # The stamp file is the single output CMake tracks; glibre-foryc touches
-    # it after successfully writing all generated files.
+    # glibre-foryc is built by tools/foryc/CMakeLists.txt (plans #219, #220).
+    # It accepts --in <schema-dir> --out <gen-dir> --stamp <stamp-file>
+    # and optionally --emit=header (plan #220).
+    #
+    # --emit=header: writes <GEN_DIR>/include/glibre/types/<stem>.fory.h
+    # for each .fory file.  These headers are the foundation for the
+    # glibre-types middleman dylib (fory-codegen.md §"Pipeline" step 1).
     #
     # Use $<TARGET_FILE:glibre-foryc> (a generator expression) so the full path
     # to the binary is resolved at build time regardless of the working directory
@@ -72,8 +75,9 @@ if(TARGET glibre-foryc AND EXISTS "${CMAKE_SOURCE_DIR}/data/schemas")
                 --in    "${CMAKE_SOURCE_DIR}/data/schemas"
                 --out   "${GEN_DIR}"
                 --stamp "${GEN_DIR}/.stamp"
+                --emit=header
         DEPENDS glibre-foryc ${GLIBRE_SCHEMAS}
-        COMMENT "glibre-foryc: regenerating middleman types"
+        COMMENT "glibre-foryc: regenerating middleman types (--emit=header)"
         VERBATIM
     )
 

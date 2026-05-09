@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: Apache-2.0
+// data/schemas/example.fory
+//
+// Illustrative .fory schema used in CI to exercise the glibre-foryc
+// --emit=header codegen path (plan #220).
+//
+// This schema intentionally covers a range of builtin scalar types so
+// that CI confirms the full mapping table is exercised.
+
+schema glibre.example.Widget {
+  version 1
+  since   "0.1.0"
+
+  field id       : u32    tag 1 since 1
+  field weight   : f32    tag 2 since 1
+  field name     : string tag 3 since 1
+  field active   : bool   tag 4 since 1
+}
