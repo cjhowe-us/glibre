@@ -12,10 +12,13 @@
 //   viewport      : 1920x1080 (descriptor constant matching perf-budget.md §S1)
 //
 // The workloads here are intentionally synthetic — they exercise the BENCHMARK_CELL_BODY
-// contract and produce non-trivial, not-dead-code-eliminated execution paths while
-// staying strictly within their per-context CPU sim ceilings on Apple M1 at -O2.
-// Real ECS transform propagation and render cull-extract land once those subsystems
-// are built; the fixture invariants (entity/archetype/system counts) survive intact.
+// contract while staying strictly within their per-context CPU sim ceilings on Apple M1
+// at -O2.  DCE protection: workload functions carry [[gnu::noinline]] so their bodies
+// survive even though BENCHMARK_CELL_BODY currently discards the return value
+// (__VA_ARGS__; return 0; in perf_bench.hpp); macro-level volatile-sink-of-workload-result
+// is deferred to #1003.  Real ECS transform propagation and render cull-extract land once
+// those subsystems are built; the fixture invariants (entity/archetype/system counts)
+// survive intact.
 //
 // Scope note (plan #243 amended after PR #1000 round-1 review):
 //   This file ships two BENCHMARK_CELL tests against 100 placeholder entities to
@@ -73,12 +76,13 @@ inline constexpr std::uint32_t kS1ViewportHeight = 1080u;
 // Complexity: O(entity_count * archetype_count) with small constant -- well
 // under the 400 µs (400_000 ns) core CPU sim ceiling on M1 at -O2.
 // ---------------------------------------------------------------------------
-[[nodiscard]] std::uint64_t run_s1_core_phase() noexcept {
+[[nodiscard]] [[gnu::noinline]] std::uint64_t run_s1_core_phase() noexcept {
     // Each archetype group holds entity_count / archetype_count entities.
     constexpr std::uint32_t kGroupSize = kS1EntityCount / kS1ArchetypeCount;
 
     // Simulate per-archetype transform storage: 4x4 integer matrix (4*4 = 16 cells).
-    // std::array is permitted per PHILOSOPHY §11 (no allocator, language aggregate).
+    // std::array used informally in tests (no allocator, language aggregate);
+    // eastl::array is the §11-principled choice — collapse with #1003 macro/header refactor.
     using Mat4i = std::array<std::int32_t, 16>;
 
     std::uint64_t acc = 0u;
@@ -147,9 +151,9 @@ inline constexpr std::uint32_t kS1ViewportHeight = 1080u;
         }
     }
 
-    // Simulate draw-list build: accumulate visibility mask per archetype group
-    // (models the per-archetype instance-count write that feeds mesh-shader
-    //  indirect argument buffers).
+    // Synthetic OR-fold: keeps the function body alive under DCE by producing a
+    // data-dependent result from visible_count.  This is not a real per-archetype
+    // instance-count write; canonical draw-list build lands in #1003.
     std::uint64_t draw_mask = 0u;
     for (std::uint32_t arch = 0u; arch < kS1ArchetypeCount; ++arch) {
         draw_mask |= (visible_count >> arch) & 0xFFu;
