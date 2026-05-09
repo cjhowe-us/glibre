@@ -6,7 +6,8 @@
 // Test names match the Unit Test Plan in issue #219:
 //   - parses_minimal_schema
 //   - rejects_duplicate_tag
-//   - rejects_zero_version          (was: rejects_non_monotone_version — renamed to match assertion)
+//   - rejects_zero_version          (was: rejects_non_monotone_version — renamed to match
+//   assertion)
 //   - rejects_duplicate_version_key
 //   - walks_input_directory_recursively
 //

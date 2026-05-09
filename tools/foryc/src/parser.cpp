@@ -176,16 +176,16 @@ private:
 // __FILE__ / __LINE__ expand to the caller's location rather than to the
 // definition site — a static function would always report parser.cpp:NNN.
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define FORYC_ERR(code, detail_literal)                                                \
-    std::unexpected<glibre::Error> {                                                   \
-        glibre::Error {                                                                \
-            (code),                                                                    \
-            glibre::ErrorContext {                                                     \
-                __FILE__, __LINE__,                                                    \
-                eastl::string_view{std::string_view{detail_literal}.data(),           \
-                                   std::string_view{detail_literal}.size()}           \
-            }                                                                          \
-        }                                                                              \
+#define FORYC_ERR(code, detail_literal)                                                            \
+    std::unexpected<glibre::Error> {                                                               \
+        glibre::Error {                                                                            \
+            (code), glibre::ErrorContext {                                                         \
+                __FILE__, __LINE__, eastl::string_view {                                           \
+                    std::string_view{detail_literal}.data(),                                       \
+                        std::string_view{detail_literal}.size()                                    \
+                }                                                                                  \
+            }                                                                                      \
+        }                                                                                          \
     }
 
 // Returns true if type_name is in the builtins set (prefix match for
@@ -341,7 +341,7 @@ private:
         // Track seen tags for duplicate detection.
         eastl::unordered_set<std::uint32_t> seen_tags;
         bool version_seen = false;
-        bool since_seen   = false;
+        bool since_seen = false;
 
         while (current_.kind != TokenKind::RBrace && current_.kind != TokenKind::Eof) {
             if (current_.kind != TokenKind::Ident)
@@ -349,10 +349,14 @@ private:
 
             if (current_.text == "version") {
                 if (version_seen)
-                    return FORYC_ERR(tools::Error::ForycSyntaxError, "duplicate 'version' key in schema block");
+                    return FORYC_ERR(
+                        tools::Error::ForycSyntaxError, "duplicate 'version' key in schema block"
+                    );
                 advance();
                 if (current_.kind != TokenKind::IntLit)
-                    return FORYC_ERR(tools::Error::ForycSyntaxError, "expected integer after 'version'");
+                    return FORYC_ERR(
+                        tools::Error::ForycSyntaxError, "expected integer after 'version'"
+                    );
                 auto vr = parse_uint32(current_.text);
                 if (!vr)
                     return FORYC_ERR(tools::Error::ForycSyntaxError, "invalid version integer");
@@ -364,10 +368,14 @@ private:
 
             } else if (current_.text == "since") {
                 if (since_seen)
-                    return FORYC_ERR(tools::Error::ForycSyntaxError, "duplicate 'since' key in schema block");
+                    return FORYC_ERR(
+                        tools::Error::ForycSyntaxError, "duplicate 'since' key in schema block"
+                    );
                 advance();
                 if (current_.kind != TokenKind::StringLit)
-                    return FORYC_ERR(tools::Error::ForycSyntaxError, "expected string after 'since'");
+                    return FORYC_ERR(
+                        tools::Error::ForycSyntaxError, "expected string after 'since'"
+                    );
                 // Strip surrounding quotes from the string literal.
                 const std::string_view raw = current_.text;
                 decl.since_version = eastl::string(raw.data() + 1, raw.size() - 2);
@@ -381,7 +389,9 @@ private:
                     return std::unexpected{fr.error()};
                 // Validate: tag uniqueness
                 if (!seen_tags.insert(fr->tag).second)
-                    return FORYC_ERR(tools::Error::ForycDuplicateTag, "duplicate tag number in schema");
+                    return FORYC_ERR(
+                        tools::Error::ForycDuplicateTag, "duplicate tag number in schema"
+                    );
                 // Validate: type is a builtin (or a declared schema type).
                 // For this plan, only builtins are accepted.
                 const std::string_view tn(fr->type_name.data(), fr->type_name.size());
@@ -395,11 +405,15 @@ private:
                 // reserved <tag-number> — legal but no IR representation needed yet.
                 advance();
                 if (current_.kind != TokenKind::IntLit)
-                    return FORYC_ERR(tools::Error::ForycSyntaxError, "expected integer after 'reserved'");
+                    return FORYC_ERR(
+                        tools::Error::ForycSyntaxError, "expected integer after 'reserved'"
+                    );
                 advance();
 
             } else {
-                return FORYC_ERR(tools::Error::ForycSyntaxError, "unknown keyword inside schema block");
+                return FORYC_ERR(
+                    tools::Error::ForycSyntaxError, "unknown keyword inside schema block"
+                );
             }
         }
 
@@ -446,7 +460,9 @@ private:
         if (current_.kind == TokenKind::Ident && current_.text == "since") {
             advance();
             if (current_.kind != TokenKind::IntLit)
-                return FORYC_ERR(tools::Error::ForycSyntaxError, "expected integer after field 'since'");
+                return FORYC_ERR(
+                    tools::Error::ForycSyntaxError, "expected integer after field 'since'"
+                );
             auto sr = parse_uint32(current_.text);
             if (!sr)
                 return FORYC_ERR(tools::Error::ForycSyntaxError, "invalid since integer");
