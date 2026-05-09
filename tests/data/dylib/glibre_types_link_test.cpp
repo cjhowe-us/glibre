@@ -75,8 +75,10 @@ TEST_CASE("glibre_types_dylib_links_minimal_consumer", "[data][dylib][abi]") {
 
 TEST_CASE("glibre_types_dylib_excludes_fory_and_blake3_symbols", "[data][dylib][abi]") {
 #ifndef GLIBRE_TYPES_DYLIB_PATH
-    FAIL("GLIBRE_TYPES_DYLIB_PATH compile definition not set — "
-         "check tests/data/dylib/CMakeLists.txt");
+    FAIL(
+        "GLIBRE_TYPES_DYLIB_PATH compile definition not set — "
+        "check tests/data/dylib/CMakeLists.txt"
+    );
 #else
     // Build the nm command. The path is a string literal injected at compile
     // time; no shell-escaping is needed for well-formed CMake build paths.
@@ -101,7 +103,7 @@ TEST_CASE("glibre_types_dylib_excludes_fory_and_blake3_symbols", "[data][dylib][
     // until plans #220/#222 land AND explicitly choose to re-export them
     // (which they must not: they are PRIVATE per plugin-abi.md).
     REQUIRE_FALSE(nm_output.find("__ZN4fory") != std::string::npos);
-    REQUIRE_FALSE(nm_output.find("_fory_")    != std::string::npos);
-    REQUIRE_FALSE(nm_output.find("_blake3_")  != std::string::npos);
+    REQUIRE_FALSE(nm_output.find("_fory_") != std::string::npos);
+    REQUIRE_FALSE(nm_output.find("_blake3_") != std::string::npos);
 #endif
 }
