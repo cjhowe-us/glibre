@@ -80,12 +80,9 @@ static bool splat(const fs::path& p, const eastl::string& content) {
 #error "GLIBRE_GOLDEN_DIR must be defined by CMakeLists.txt"
 #endif
 
-static fs::path golden_dir() {
-    return fs::path{GLIBRE_GOLDEN_DIR};
-}
+static fs::path golden_dir() { return fs::path{GLIBRE_GOLDEN_DIR}; }
 
-static eastl::string simple_diff(const eastl::string& actual,
-                                  const eastl::string& expected) {
+static eastl::string simple_diff(const eastl::string& actual, const eastl::string& expected) {
     eastl::string msg;
 
     const std::size_t n = std::min(actual.size(), expected.size());
@@ -110,11 +107,7 @@ static eastl::string simple_diff(const eastl::string& actual,
 
     // std::format retained per PHILOSOPHY §11 (not an EASTL-owned utility).
     msg += eastl::string(
-        std::format(
-            "First difference at byte offset {} (approx line {})\n",
-            first_diff,
-            line
-        )
+        std::format("First difference at byte offset {} (approx line {})\n", first_diff, line)
             .c_str()
     );
 
@@ -130,8 +123,7 @@ static eastl::string simple_diff(const eastl::string& actual,
     msg += "]\n";
 
     msg += eastl::string(
-        std::format("actual size:   {}\nexpected size: {}\n",
-                    actual.size(), expected.size())
+        std::format("actual size:   {}\nexpected size: {}\n", actual.size(), expected.size())
             .c_str()
     );
 
@@ -153,10 +145,8 @@ static eastl::string simple_diff(const eastl::string& actual,
 // does not drift silently.  Cited as a DoD assertion on issue #227.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("foryc_migration_golden_v1_to_v2_matches_expected",
-          "[foryc][golden][migration]") {
-    const fs::path fixture_path =
-        golden_dir() / "fixtures_migration" / "v1_to_v2.fory";
+TEST_CASE("foryc_migration_golden_v1_to_v2_matches_expected", "[foryc][golden][migration]") {
+    const fs::path fixture_path = golden_dir() / "fixtures_migration" / "v1_to_v2.fory";
     const fs::path golden_path =
         golden_dir() / "expected_migration" / "v1_to_v2.migrations.cpp.golden";
 
@@ -192,9 +182,10 @@ TEST_CASE("foryc_migration_golden_v1_to_v2_matches_expected",
     // Step 4: read existing golden.
     const eastl::string expected = slurp(golden_path);
     {
-        INFO("golden file missing or empty: "
-             << golden_path.native()
-             << "\nRun with GLIBRE_UPDATE_GOLDEN=1 to generate it.");
+        INFO(
+            "golden file missing or empty: " << golden_path.native()
+                                             << "\nRun with GLIBRE_UPDATE_GOLDEN=1 to generate it."
+        );
         CHECK(!expected.empty());
         if (expected.empty())
             return;
@@ -203,9 +194,10 @@ TEST_CASE("foryc_migration_golden_v1_to_v2_matches_expected",
     // Step 5: byte-equality check with diagnostic diff on failure.
     if (actual != expected) {
         const eastl::string diff = simple_diff(actual, expected);
-        INFO("Golden mismatch for 'v1_to_v2':\n"
-             << diff.c_str()
-             << "\nRun with GLIBRE_UPDATE_GOLDEN=1 to regenerate the golden.");
+        INFO(
+            "Golden mismatch for 'v1_to_v2':\n"
+            << diff.c_str() << "\nRun with GLIBRE_UPDATE_GOLDEN=1 to regenerate the golden."
+        );
         CHECK(actual == expected);
     }
 }
