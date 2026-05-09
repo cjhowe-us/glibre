@@ -20,6 +20,7 @@ add_library(glibre-core STATIC
     src/plugin_loader_actions.cpp    # Loader-procedure free functions: steps 9–11 (plan #231)
     src/log_error.cpp                # Structured error logging helper (plan #236)
     src/alloc/transient_arena.cpp    # Per-context transient bump-pointer arena (plan #239)
+    src/perf_budget.cpp              # Per-context perf-budget counters (plan #241)
 )
 
 # EASTL is the substrate container/string/variant library per PHILOSOPHY §11.

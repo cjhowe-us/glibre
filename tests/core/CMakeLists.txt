@@ -13,6 +13,7 @@ add_subdirectory(plugin_loader_integration)      # plan #232 — end-to-end fail
 add_subdirectory(error_register)                 # plan #234 — per-context Error enum registration convention
 add_subdirectory(error_propagation)             # plan #240 — C-ABI error-propagation contract tests
 add_subdirectory(error_variant)                 # plan #233 — Error variant shape + Result<T> alias contract
+add_subdirectory(perf_budget)                   # plan #241 — per-context perf-budget counters
 
 add_executable(glibre-core-tests
     frame_loop_test.cpp
