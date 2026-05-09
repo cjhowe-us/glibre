@@ -43,6 +43,14 @@ target_compile_options(glibre-types-dylib-tests PRIVATE
     -Wno-c2y-extensions   # Catch2 uses __COUNTER__; suppress clang pedantic warning
 )
 
+# Inject the path to libglibre-types.dylib so the nm/otool regression test
+# (glibre_types_dylib_excludes_fory_and_blake3_symbols) can inspect the
+# dylib's public symbol table without depending on a hard-coded build path.
+# $<TARGET_FILE:glibre-types> expands to the full path of the built dylib.
+target_compile_definitions(glibre-types-dylib-tests PRIVATE
+    GLIBRE_TYPES_DYLIB_PATH="$<TARGET_FILE:glibre-types>"
+)
+
 include(CTest)
 include(Catch)
 catch_discover_tests(glibre-types-dylib-tests)
