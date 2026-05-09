@@ -31,6 +31,17 @@
 //   4. Add a per-context enum uniqueness check to the Catch2 test suite under
 //      `tests/core/error_register/` (test `error_register_per_context_arms_unique`).
 //
+//   5. When adding a **new enumerator** to an *existing* per-context enum (not
+//      a brand-new context), update the corresponding hand-written value array
+//      in `tests/core/error_register/error_register_test.cpp`
+//      (e.g. `kCoreErrorValues`, `kRenderErrorValues`, `kToolsErrorValues`):
+//        a. Append the new enumerator cast to the array initialiser.
+//        b. Increment the array's compile-time size template argument by 1.
+//      Without this step `error_register_per_context_arms_unique` silently
+//      omits the new enumerator from its uniqueness check.  This maintenance
+//      burden is intentional and temporary — it will be eliminated when
+//      magic_enum is adopted (error-model.md §Open Questions #1).
+//
 // ## Rules that must hold at all times (enforced by static_assert below)
 //
 //   R1. The total number of Variant arms equals `kExpectedArmCount`.
@@ -55,9 +66,9 @@
 //
 // --------------------------------------------------------------------------
 
-#include <array>
 #include <cstddef>
 
+#include <EASTL/array.h>
 #include <EASTL/string_view.h>
 #include <EASTL/variant.h>
 

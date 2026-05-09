@@ -16,10 +16,11 @@
 //     runtime-mirrored via CHECK — the enums are fixed at compile time so
 //     there is no need for dynamic introspection.
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
+
+#include <EASTL/array.h>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -46,7 +47,7 @@ namespace {
 /// Returns true if all elements in the array are distinct.
 /// Uses an O(n^2) pairwise comparison — arrays are small (< 20 entries).
 template<typename T, std::size_t N>
-constexpr bool all_distinct(const std::array<T, N>& arr) noexcept {
+constexpr bool all_distinct(const eastl::array<T, N>& arr) noexcept {
     for (std::size_t i = 0; i < N; ++i) {
         for (std::size_t j = i + 1; j < N; ++j) {
             if (arr[i] == arr[j]) {
@@ -63,7 +64,7 @@ constexpr bool all_distinct(const std::array<T, N>& arr) noexcept {
 
 /// All core::Error enumerator values, listed in declaration order.
 /// When a new enumerator is added to core::Error, add it here too.
-constexpr std::array<std::underlying_type_t<glibre::core::Error>, 15> kCoreErrorValues{{
+constexpr eastl::array<std::underlying_type_t<glibre::core::Error>, 15> kCoreErrorValues{{
     static_cast<std::uint16_t>(glibre::core::Error::PluginAbiHashMismatch),
     static_cast<std::uint16_t>(glibre::core::Error::PluginInitFailed),
     static_cast<std::uint16_t>(glibre::core::Error::SchemaMigrationFailed),
@@ -95,7 +96,7 @@ static_assert(
 // render::Error — enumerator values
 // ---------------------------------------------------------------------------
 
-constexpr std::array<std::underlying_type_t<glibre::render::Error>, 5> kRenderErrorValues{{
+constexpr eastl::array<std::underlying_type_t<glibre::render::Error>, 5> kRenderErrorValues{{
     static_cast<std::uint16_t>(glibre::render::Error::DeviceLost),
     static_cast<std::uint16_t>(glibre::render::Error::PipelineCompileFailed),
     static_cast<std::uint16_t>(glibre::render::Error::ResourceResidencyExceeded),
@@ -112,7 +113,7 @@ static_assert(
 // tools::Error — enumerator values
 // ---------------------------------------------------------------------------
 
-constexpr std::array<std::underlying_type_t<glibre::tools::Error>, 6> kToolsErrorValues{{
+constexpr eastl::array<std::underlying_type_t<glibre::tools::Error>, 6> kToolsErrorValues{{
     static_cast<std::uint16_t>(glibre::tools::Error::ForycSyntaxError),
     static_cast<std::uint16_t>(glibre::tools::Error::ForycDuplicateTag),
     static_cast<std::uint16_t>(glibre::tools::Error::ForycNonMonotoneVersion),
@@ -189,7 +190,12 @@ TEST_CASE("error_register_lists_known_contexts", "[core][error_register]") {
     // Order must match Variant arm indices so that variant_index maps
     // correctly to a log tag (error-model.md §Logging).
 
-    REQUIRE(glibre::kAllErrorContexts.size() >= 2);
+    // The compile-time static_assert in error_register.hpp already guarantees
+    // kAllErrorContexts.size() == kExpectedArmCount — this runtime REQUIRE
+    // makes the same contract visible in the Catch2 report and OOB-safe.
+    static_assert(glibre::kExpectedArmCount >= 3,
+        "kExpectedArmCount must be >= 3 (core + render + tools are registered).");
+    REQUIRE(glibre::kAllErrorContexts.size() == glibre::kExpectedArmCount);
 
     // Index 0 corresponds to core::Error (first Variant arm).
     CHECK(glibre::kAllErrorContexts[0] == eastl::string_view{"core"});
