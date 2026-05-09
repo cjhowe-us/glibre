@@ -13,6 +13,7 @@
 #include <array>
 #include <cstdint>
 #include <string_view>
+#include <utility>
 
 namespace glibre::core {
 
@@ -42,7 +43,8 @@ inline constexpr std::uint8_t kPhaseMax = 9;
 
 struct PhaseDesc {
     Phase id;                         // numeric ordinal (1..=9)
-    std::string_view name;            // canonical lower_snake_case name
+    std::string_view name;            // canonical kebab-case name (telemetry/replay-stable
+                                      // per frame-phases.md §Consequence #2)
     std::string_view owning_context;  // bounded-context owner per frame-phases.md
     bool mvp_reserved;                // true → empty body in MVP (phases 2, 4)
 };
@@ -56,17 +58,37 @@ struct PhaseDesc {
 // record wins and this file must be updated.
 // -----------------------------------------------------------------------
 
+// Phase names are kebab-case, telemetry/replay-stable per
+// frame-phases.md §Consequence #2.  Do NOT change these strings without
+// an amendment spike against frame-phases.md — persisted profiler
+// traces, replay records, and e2e fixtures reference them by value.
 inline constexpr std::array<PhaseDesc, kPhaseCount> kPhaseTable{{
-    {Phase::Input, "input", "platform", false},
-    {Phase::Logic, "logic", "gameplay/scripting", true},
-    {Phase::PhysicsFixed, "physics_fixed", "physics", false},
-    {Phase::Animation, "animation", "animation", true},
-    {Phase::Transform, "transform", "core", false},
-    {Phase::CullExtract, "cull_extract", "render", false},
-    {Phase::RenderSubmit, "render_submit", "render", false},
-    {Phase::HotReload, "hot_reload", "core", false},
-    {Phase::Present, "present", "platform", false},
+    {Phase::Input,        "input",         "platform",           false},
+    {Phase::Logic,        "logic",         "gameplay/scripting", true},
+    {Phase::PhysicsFixed, "physics-fixed", "physics",            false},
+    {Phase::Animation,    "animation",     "animation",          true},
+    {Phase::Transform,    "transform",     "core",               false},
+    {Phase::CullExtract,  "cull-extract",  "render",             false},
+    {Phase::RenderSubmit, "render-submit", "render",             false},
+    {Phase::HotReload,    "hot-reload",    "core",               false},
+    {Phase::Present,      "present",       "platform",           false},
 }};
+
+// ---------------------------------------------------------------------------
+// Compile-time ordinal invariant — enforce that kPhaseTable[i].id == i+1
+// for all i in [0, kPhaseCount).  This guards against accidental misordering
+// in the table initialiser; it fires at compile time, not runtime.
+// ---------------------------------------------------------------------------
+namespace detail {
+template<std::size_t... I>
+constexpr bool kPhaseTableOrdinalsAreSequential(std::index_sequence<I...>) {
+    return ((static_cast<std::uint8_t>(kPhaseTable[I].id) == static_cast<std::uint8_t>(I + 1u)) && ...);
+}
+}  // namespace detail
+
+static_assert(
+    detail::kPhaseTableOrdinalsAreSequential(std::make_index_sequence<kPhaseCount>{}),
+    "kPhaseTable entries must appear in strict ordinal order 1..=9");
 
 // -----------------------------------------------------------------------
 // Helper — look up a PhaseDesc by Phase ordinal (O(1), constexpr)
