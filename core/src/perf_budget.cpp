@@ -34,9 +34,8 @@ namespace {
 [[nodiscard]] std::size_t tag_index(ContextTag tag) noexcept {
     const auto idx = static_cast<std::size_t>(tag);
     assert(
-        idx < kContextTagCount &&
-        "PerfBudget: ContextTag is out-of-range; "
-        "caller supplied a raw cast value beyond kContextTagCount"
+        idx < kContextTagCount && "PerfBudget: ContextTag is out-of-range; "
+                                  "caller supplied a raw cast value beyond kContextTagCount"
     );
     return idx;
 }
@@ -92,8 +91,8 @@ void PerfBudget::record_heap_free(ContextTag tag, std::uint64_t bytes) noexcept 
 PerfBudgetSample PerfBudget::sample(ContextTag tag) const noexcept {
     const auto& row = rows_[tag_index(tag)];
     return PerfBudgetSample{
-        .cpu_ns     = row.cpu_ns.load(std::memory_order_relaxed),
-        .gpu_ns     = row.gpu_ns.load(std::memory_order_relaxed),
+        .cpu_ns = row.cpu_ns.load(std::memory_order_relaxed),
+        .gpu_ns = row.gpu_ns.load(std::memory_order_relaxed),
         .heap_bytes = row.heap_bytes.load(std::memory_order_relaxed),
     };
 }
