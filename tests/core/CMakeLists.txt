@@ -4,6 +4,8 @@ cmake_minimum_required(VERSION 3.30)
 # tests/core — unit tests for glibre::core
 # ---------------------------------------------------------------------------
 
+add_subdirectory(plugin_api)
+
 add_executable(glibre-core-tests
     frame_loop_test.cpp
     plugin_manifest/plugin_manifest_test.cpp
