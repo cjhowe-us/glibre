@@ -66,7 +66,8 @@ public:
     // Callers are responsible for ensuring pointer validity.
     //
     // Returns:
-    //   glibre::Result<void> — success if registered; failure with
+    //   glibre::Result<void> — success if registered;
+    //   core::Error::InvalidArgument if arena is null;
     //   core::Error::OutOfBudget when kMaxTransientArenas slots are full.
     //
     // Thread safety: must be called before tick() begins (not safe to call

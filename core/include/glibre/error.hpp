@@ -70,6 +70,12 @@ enum class Error : std::uint16_t {
     // Returned by TransientArena::allocate() (plan #239).
     // Callers should fall back to a larger arena or defer the allocation.
     TransientArenaExhausted,
+    // Invalid argument supplied to a core API (e.g. null pointer where a valid
+    // pointer is required).  Returned instead of asserting-only so that
+    // callers in release builds receive an actionable error rather than silent
+    // undefined behaviour.  Added by plan #239 review round 1 (MED-3 fix:
+    // null-pointer silent success in register_transient_arena).
+    InvalidArgument,
 };
 }  // namespace core
 

@@ -84,6 +84,8 @@ namespace glibre::core {
         return "PluginDependencyMissing";
     case Error::TransientArenaExhausted:
         return "TransientArenaExhausted";
+    case Error::InvalidArgument:
+        return "InvalidArgument";
     }
     return "Unknown";
 }

@@ -207,6 +207,8 @@ TEST_CASE("core/log_error: tostring_complete_for_core_error", "[core][log_error]
     check(E::PluginDependencyMissing, "PluginDependencyMissing");
     // plan #239: transient arena exhaustion error
     check(E::TransientArenaExhausted, "TransientArenaExhausted");
+    // plan #239 r1: invalid argument (null pointer to core API)
+    check(E::InvalidArgument, "InvalidArgument");
 }
 
 // ---------------------------------------------------------------------------

@@ -13,7 +13,6 @@
 
 #include "glibre/core/frame_loop.hpp"
 
-#include <cassert>
 #include <cstdint>
 
 #include "glibre/core/frame_phase.hpp"
@@ -28,12 +27,18 @@ namespace glibre::core {
 
 [[nodiscard]] glibre::Result<void>
 FrameLoop::register_transient_arena(glibre::TransientArena* arena) noexcept {
-    // Null pointer is a precondition violation; assert in debug builds.
-    // In release builds we skip silently rather than crash, to avoid undefined
-    // behaviour at phase 9 drain.  Callers must ensure the pointer is valid.
-    assert(arena != nullptr && "register_transient_arena: null arena pointer");
+    // Null pointer is a precondition violation.  Return InvalidArgument so
+    // callers can distinguish "null" from "registry full" without depending
+    // on a debug assert that disappears in release builds.
     if (arena == nullptr) {
-        return {};  // skip silently in release; debug assert fires above
+        return std::unexpected(glibre::Error{
+            core::Error::InvalidArgument,
+            glibre::ErrorContext{
+                .file = "core/src/frame_loop.cpp",
+                .line = __LINE__,
+                .detail = "register_transient_arena: null arena pointer",
+            },
+        });
     }
     if (arena_count_ >= kMaxTransientArenas) {
         return std::unexpected(glibre::Error{
@@ -113,7 +118,26 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
         // perf-budget.md §Allocator Rules #4: transient arenas must be
         // drained by phase 9 so they do not count against context ceilings.
         // drain() is O(1) per arena; no heap allocation occurs.
+        //
+        // GLIBRE_ALLOC_STRICT gate (perf-budget.md §Allocator Rules #4):
+        //   assert_drained() is called BEFORE drain() so that undrained
+        //   allocations (leaks past phase 9) are surfaced as
+        //   core::Error::OutOfBudget.  The check is gated by
+        //   GLIBRE_ALLOC_STRICT so it compiles to zero cost in unstrict builds.
+        //   CI diagnostic builds define -DGLIBRE_ALLOC_STRICT=1.
+        //
+        // NOTE: this is core-owned bookkeeping running inside the
+        //   platform-owned Phase::Present slot.  This is a deliberate
+        //   "core barrier carve-out" that must be documented and eventually
+        //   formalised as a post_phase() hook or a frame-phases.md §Phase 9
+        //   amendment.  See [SPIKE] iterate-frame-phases-core-barrier-carveout.
         for (std::size_t i = 0; i < arena_count_; ++i) {
+#ifdef GLIBRE_ALLOC_STRICT
+            auto check = arenas_[i]->assert_drained();
+            if (!check) {
+                return std::unexpected(std::move(check.error()));
+            }
+#endif
             arenas_[i]->drain();
         }
         break;
