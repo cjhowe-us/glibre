@@ -1,37 +1,42 @@
 cmake_minimum_required(VERSION 3.30)
 
 # ---------------------------------------------------------------------------
-# glibre-foryc — .fory schema compiler host tool (plan #219)
+# glibre-foryc — .fory schema compiler host tool (plan #219 skeleton,
+#                plan #222 adds abi_hash)
 #
 # This target is a host-side tool only. glibre-core is linked for
 # glibre::Error; EASTL is propagated from core.
 #
-# Fory::fory is NOT linked here yet — this skeleton only parses .fory
-# files into an IR (parser-only, SRP). Fory reflection/serializer APIs
-# will be required when codegen emission lands (plans #220–#222).
-# Add back: find_package(Fory CONFIG REQUIRED) + Fory::fory in
-# target_link_libraries once those plans are implemented.
+# blake3::blake3 is linked for schema source-hash and ABI hash computation
+# (plan #222). Fory::fory is NOT linked here yet — Fory reflection/
+# serializer APIs will be required when codegen emission fully lands
+# (plan #220 and beyond).
 #
 # CLI: glibre-foryc --in <dir> --out <dir> --stamp <file>
+#      glibre-foryc --in <dir> --emit=abi-hash
 #
 # Per reviews/decisions/fory-codegen.md §CMake Integration, the caller
 # (data/CMakeLists.txt, future plan) adds a custom_command that invokes
 # glibre-foryc --in ... --out ... --stamp ... to trigger codegen.
 # ---------------------------------------------------------------------------
 
+find_package(blake3 CONFIG REQUIRED)
+
 add_executable(glibre-foryc
     src/main.cpp
     src/parser.cpp
+    src/abi_hash.cpp
 )
 
 target_include_directories(glibre-foryc
     PRIVATE
-        src   # local parser.hpp is picked up here
+        src   # local parser.hpp + abi_hash.hpp are picked up here
 )
 
 target_link_libraries(glibre-foryc
     PRIVATE
         glibre::core   # provides glibre::Error + EASTL transitively
+        BLAKE3::blake3 # vcpkg blake3 port — blake3_hasher_* C API
 )
 
 target_compile_features(glibre-foryc PRIVATE cxx_std_23)
