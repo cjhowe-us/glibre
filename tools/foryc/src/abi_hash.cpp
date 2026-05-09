@@ -186,26 +186,26 @@ Result<Blake3Digest> compute_canonical_source_hash(std::string_view raw_source) 
 // -----------------------------------------------------------------------
 Result<Blake3Digest>
 compute_collection_abi_hash(
-    const eastl::vector<Schema>& schemas,
-    const eastl::vector<Blake3Digest>& source_digests
+    const eastl::vector<SchemaWithDigest>& entries
 ) noexcept {
     // Flatten all TypeDecls, each paired with the source digest of its
-    // containing schema.
+    // containing schema.  SchemaWithDigest keeps the pairing structural —
+    // impossible to mis-pair unlike two parallel vectors.
     struct TypeEntry {
-        const TypeDecl* decl;
+        const TypeDecl*    decl;
         const Blake3Digest* src_digest;
     };
-    eastl::vector<TypeEntry> entries;
-    for (eastl::vector<Schema>::size_type si = 0; si < schemas.size(); ++si) {
-        const Blake3Digest& dig = source_digests[si];
-        for (const TypeDecl& td : schemas[si].types)
-            entries.push_back({&td, &dig});
+    eastl::vector<TypeEntry> type_entries;
+    for (const SchemaWithDigest& e : entries) {
+        for (const TypeDecl& td : e.schema.types)
+            type_entries.push_back({&td, &e.source_digest});
     }
 
     // Sort by fqn in Unicode code-point (byte) order.
-    eastl::sort(entries.begin(), entries.end(), [](const TypeEntry& a, const TypeEntry& b) {
-        return a.decl->fqn < b.decl->fqn;
-    });
+    eastl::sort(type_entries.begin(), type_entries.end(),
+        [](const TypeEntry& a, const TypeEntry& b) {
+            return a.decl->fqn < b.decl->fqn;
+        });
 
     // Stream entries into a single blake3 hasher.
     // Format per entry: fqn || ":" || version_le(4) || ":" || src_digest(32)
@@ -217,7 +217,7 @@ compute_collection_abi_hash(
     static constexpr uint8_t kNewline = static_cast<uint8_t>('\n');
 
     bool first_entry = true;
-    for (const TypeEntry& e : entries) {
+    for (const TypeEntry& e : type_entries) {
         if (!first_entry)
             blake3_hasher_update(&hasher, &kNewline, 1);
         first_entry = false;

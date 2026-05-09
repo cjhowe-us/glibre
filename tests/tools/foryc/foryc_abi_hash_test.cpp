@@ -9,7 +9,7 @@
 //     foryc_abi_hash_is_deterministic
 //     foryc_abi_hash_changes_on_field_rename
 //     foryc_abi_hash_changes_on_field_reorder_by_tag
-//     foryc_abi_hash_unchanged_on_whitespace
+//     foryc_abi_hash_changes_on_whitespace
 //     foryc_abi_hash_changes_on_version_bump
 //     foryc_collection_abi_hash_zero_schemas
 //     foryc_collection_abi_hash_one_type_zero_fields
@@ -49,14 +49,11 @@ static Schema parse_ok(std::string_view src) {
 // Compute collection ABI hash from a single .fory source string.
 // Convenience wrapper: creates a single-schema collection.
 static Blake3Digest abi_hash_of(std::string_view src) {
-    const Schema schema = parse_ok(src);
     auto src_hash_r = compute_source_hash(src);
     REQUIRE(src_hash_r.has_value());
-    eastl::vector<Schema> schemas;
-    schemas.push_back(schema);
-    eastl::vector<Blake3Digest> digests;
-    digests.push_back(*src_hash_r);
-    auto r = compute_collection_abi_hash(schemas, digests);
+    eastl::vector<SchemaWithDigest> entries;
+    entries.push_back({parse_ok(src), *src_hash_r});
+    auto r = compute_collection_abi_hash(entries);
     REQUIRE(r.has_value());
     return *r;
 }
@@ -82,17 +79,14 @@ schema glibre.test.Foo {
   field y : f32 tag 2
 }
 )";
-    const Schema schema = parse_ok(src);
     auto src_hash_r = compute_source_hash(src);
     REQUIRE(src_hash_r.has_value());
 
-    eastl::vector<Schema> schemas;
-    schemas.push_back(schema);
-    eastl::vector<Blake3Digest> digests;
-    digests.push_back(*src_hash_r);
+    eastl::vector<SchemaWithDigest> entries;
+    entries.push_back({parse_ok(src), *src_hash_r});
 
-    auto r1 = compute_collection_abi_hash(schemas, digests);
-    auto r2 = compute_collection_abi_hash(schemas, digests);
+    auto r1 = compute_collection_abi_hash(entries);
+    auto r2 = compute_collection_abi_hash(entries);
     REQUIRE(r1.has_value());
     REQUIRE(r2.has_value());
     CHECK(*r1 == *r2);
@@ -182,7 +176,7 @@ schema glibre.test.Versioned {
     CHECK(abi_hash_of(src_v1) != abi_hash_of(src_v2));
 }
 
-TEST_CASE("foryc_abi_hash_unchanged_on_whitespace", "[foryc][abi_hash]") {
+TEST_CASE("foryc_abi_hash_changes_on_whitespace", "[foryc][abi_hash]") {
     // The collection ABI hash recipe includes the raw source hash, so two
     // .fory files differing only in whitespace will produce DIFFERENT
     // collection hashes (because raw source bytes differ).
@@ -209,10 +203,9 @@ schema glibre.test.Ws {
 
 TEST_CASE("foryc_collection_abi_hash_zero_schemas", "[foryc][abi_hash]") {
     // Empty collection produces the blake3 of an empty input — deterministic.
-    eastl::vector<Schema> empty_schemas;
-    eastl::vector<Blake3Digest> empty_digests;
-    auto r1 = compute_collection_abi_hash(empty_schemas, empty_digests);
-    auto r2 = compute_collection_abi_hash(empty_schemas, empty_digests);
+    eastl::vector<SchemaWithDigest> empty_entries;
+    auto r1 = compute_collection_abi_hash(empty_entries);
+    auto r2 = compute_collection_abi_hash(empty_entries);
     REQUIRE(r1.has_value());
     REQUIRE(r2.has_value());
     CHECK(*r1 == *r2);
@@ -250,30 +243,22 @@ schema glibre.test.Beta {
 )";
 
     // Build collection [Alpha, Beta].
-    Schema schema_alpha = parse_ok(src_alpha);
-    Schema schema_beta  = parse_ok(src_beta);
     auto dig_alpha_r = compute_source_hash(src_alpha);
     auto dig_beta_r  = compute_source_hash(src_beta);
     REQUIRE(dig_alpha_r.has_value());
     REQUIRE(dig_beta_r.has_value());
 
-    eastl::vector<Schema> schemas_ab;
-    schemas_ab.push_back(schema_alpha);
-    schemas_ab.push_back(schema_beta);
-    eastl::vector<Blake3Digest> digests_ab;
-    digests_ab.push_back(*dig_alpha_r);
-    digests_ab.push_back(*dig_beta_r);
+    eastl::vector<SchemaWithDigest> entries_ab;
+    entries_ab.push_back({parse_ok(src_alpha), *dig_alpha_r});
+    entries_ab.push_back({parse_ok(src_beta),  *dig_beta_r});
 
     // Build collection [Beta, Alpha].
-    eastl::vector<Schema> schemas_ba;
-    schemas_ba.push_back(schema_beta);
-    schemas_ba.push_back(schema_alpha);
-    eastl::vector<Blake3Digest> digests_ba;
-    digests_ba.push_back(*dig_beta_r);
-    digests_ba.push_back(*dig_alpha_r);
+    eastl::vector<SchemaWithDigest> entries_ba;
+    entries_ba.push_back({parse_ok(src_beta),  *dig_beta_r});
+    entries_ba.push_back({parse_ok(src_alpha), *dig_alpha_r});
 
-    auto h_ab = compute_collection_abi_hash(schemas_ab, digests_ab);
-    auto h_ba = compute_collection_abi_hash(schemas_ba, digests_ba);
+    auto h_ab = compute_collection_abi_hash(entries_ab);
+    auto h_ba = compute_collection_abi_hash(entries_ba);
     REQUIRE(h_ab.has_value());
     REQUIRE(h_ba.has_value());
     CHECK(*h_ab == *h_ba);

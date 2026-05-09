@@ -103,6 +103,18 @@ compute_source_hash(std::string_view raw_source) noexcept;
 compute_canonical_source_hash(std::string_view raw_source) noexcept;
 
 // -----------------------------------------------------------------------
+// SchemaWithDigest
+//
+// Pairs a parsed Schema with its raw-source blake3 digest so callers
+// cannot accidentally pass mismatched parallel vectors.  The pairing
+// is structural — impossible to mis-order or mis-size.
+// -----------------------------------------------------------------------
+struct SchemaWithDigest {
+    Schema       schema;
+    Blake3Digest source_digest;
+};
+
+// -----------------------------------------------------------------------
 // compute_collection_abi_hash
 //
 // Compute the engine-wide ABI hash over a collection of (Schema, source
@@ -110,7 +122,7 @@ compute_canonical_source_hash(std::string_view raw_source) noexcept;
 // Function" point 1.
 //
 // Recipe:
-//   1. Collect all TypeDecls from all schemas in `schemas`.
+//   1. Collect all TypeDecls from all entries.
 //   2. Sort TypeDecls by fqn in Unicode code-point (byte) order.
 //   3. For each TypeDecl in that order, feed into blake3:
 //        fqn_bytes || ":" || version_le_bytes(4) || ":" || source_digest_bytes(32)
@@ -120,15 +132,12 @@ compute_canonical_source_hash(std::string_view raw_source) noexcept;
 //   4. Between entries feed "\n" (single byte); no trailing newline.
 //   5. Finalize the hasher → 32-byte digest.
 //
-// `source_digests` must be parallel to `schemas` (same size, same order).
-//
 // Return value: always succeeds for non-empty input.  Empty collection
 // returns the blake3 of an empty input.
 // -----------------------------------------------------------------------
 [[nodiscard]] Result<Blake3Digest>
 compute_collection_abi_hash(
-    const eastl::vector<Schema>& schemas,
-    const eastl::vector<Blake3Digest>& source_digests
+    const eastl::vector<SchemaWithDigest>& entries
 ) noexcept;
 
 // -----------------------------------------------------------------------

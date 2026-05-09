@@ -15,11 +15,13 @@
 //   one-line summary to stdout per file, touches <stamp> on success.
 //
 // --in <dir> --emit=abi-hash:
-//   Walks <in>/**/*.fory, computes the per-file source-hash, prints one
-//   tab-separated line per schema file:
-//     <schema_path>\t<source_hash_hex_64>
-//   (hex is 64-char lowercase full blake3 digest, per plugin-abi.md §2.)
-//   Useful for populating ComponentDecl.schema_hash in the manifest (#225).
+//   Walks <in>/**/*.fory, parses each file, emits one tab-separated row
+//   per TypeDecl (one row per fqn, NOT one row per file):
+//     <schema_path>\t<fqn>\t<source_hash_hex_64>\t<abi_hash_hex_64>
+//   (source_hash = 64-char blake3 of raw file bytes; abi_hash = 64-char
+//    single-type collection ABI hash, per plugin-abi.md §"ABI Hash Function".)
+//   Designed for direct use by #225 (ComponentDecl.schema_hash) without
+//   requiring re-parsing.
 //
 // --in <dir> --emit=collection-abi-hash:
 //   Walks <in>/**/*.fory, computes the engine-wide ABI hash over ALL schemas
@@ -179,8 +181,20 @@ collect_schema_files(const fs::path& in_dir) {
 }
 
 // -----------------------------------------------------------------------
-// abi-hash emit mode: per-file source hashes (64-char full hex).
-// Useful for ComponentDecl.schema_hash in the plugin manifest (#225).
+// abi-hash emit mode: per-TypeDecl rows.
+//
+// For each TypeDecl in every .fory file, emits one tab-separated line:
+//   <schema_path>\t<fqn>\t<source_hash_hex_64>\t<abi_hash_hex_64>
+//
+// where:
+//   source_hash_hex_64 — 64-char lowercase blake3 hex of the raw file
+//                        bytes (plugin-abi.md §"ABI Hash Function" pt 1)
+//   abi_hash_hex_64    — 64-char lowercase blake3 hex of the single-type
+//                        collection ABI hash for this TypeDecl
+//
+// One row per fqn (not per file) so #225 ComponentDecl.schema_hash can
+// be populated without re-parsing.  Multiple `schema <fqn>` blocks in
+// a single .fory file yield multiple rows (one per TypeDecl).
 // -----------------------------------------------------------------------
 
 static int run_abi_hash(const fs::path& in_dir) {
@@ -205,7 +219,7 @@ static int run_abi_hash(const fs::path& in_dir) {
         buf << ifs.rdbuf();
         const std::string raw_source = buf.str();
 
-        // Compute source-hash (raw bytes, no canonicalization).
+        // Compute per-file source-hash (raw bytes, no canonicalization).
         auto src_hash_r = compute_source_hash(raw_source);
         if (!src_hash_r) {
             std::cerr << std::format(
@@ -214,12 +228,43 @@ static int run_abi_hash(const fs::path& in_dir) {
             );
             return EXIT_FAILURE;
         }
-        // 64-char wire-format hex (plugin-abi.md §2).
+
+        // Parse schema IR to enumerate TypeDecls.
+        auto parse_r = parse_file(path);
+        if (!parse_r) {
+            std::cerr << std::format(
+                "foryc: {}: {}\n", path.native(), error_name(parse_r.error())
+            );
+            return EXIT_FAILURE;
+        }
+
         const eastl::string src_hex = format_as_full_hex(*src_hash_r);
 
-        // Print tab-separated: path, source_hash_64.
-        std::cout << path.native() << "\t"
-                  << std::string_view(src_hex.data(), src_hex.size()) << "\n";
+        // Emit one row per TypeDecl: path \t fqn \t source_hash \t abi_hash
+        for (const TypeDecl& td : parse_r->types) {
+            // Compute single-type collection ABI hash for this TypeDecl.
+            // Build a single-entry collection for this one TypeDecl.
+            eastl::vector<SchemaWithDigest> single_entry;
+            Schema single_schema;
+            single_schema.types.push_back(td);
+            single_entry.push_back({std::move(single_schema), *src_hash_r});
+            auto abi_hash_r = compute_collection_abi_hash(single_entry);
+            if (!abi_hash_r) {
+                std::cerr << std::format(
+                    "foryc: abi-hash failed for {}/{}: {}\n",
+                    path.native(),
+                    std::string_view(td.fqn.data(), td.fqn.size()),
+                    error_name(abi_hash_r.error())
+                );
+                return EXIT_FAILURE;
+            }
+            const eastl::string abi_hex = format_as_full_hex(*abi_hash_r);
+
+            std::cout << path.native() << "\t"
+                      << std::string_view(td.fqn.data(), td.fqn.size()) << "\t"
+                      << std::string_view(src_hex.data(), src_hex.size()) << "\t"
+                      << std::string_view(abi_hex.data(), abi_hex.size()) << "\n";
+        }
     }
 
     return EXIT_SUCCESS;
@@ -242,10 +287,8 @@ static int run_collection_abi_hash(const fs::path& in_dir) {
         return EXIT_SUCCESS;
     }
 
-    eastl::vector<Schema> schemas;
-    eastl::vector<Blake3Digest> source_digests;
-    schemas.reserve(schema_files.size());
-    source_digests.reserve(schema_files.size());
+    eastl::vector<SchemaWithDigest> schema_entries;
+    schema_entries.reserve(schema_files.size());
 
     for (const auto& path : schema_files) {
         // Read raw source.
@@ -277,12 +320,11 @@ static int run_collection_abi_hash(const fs::path& in_dir) {
             return EXIT_FAILURE;
         }
 
-        source_digests.push_back(*src_hash_r);
-        schemas.push_back(std::move(*parse_r));
+        schema_entries.push_back({std::move(*parse_r), *src_hash_r});
     }
 
     // Compute collection ABI hash over all schemas.
-    auto coll_hash_r = compute_collection_abi_hash(schemas, source_digests);
+    auto coll_hash_r = compute_collection_abi_hash(schema_entries);
     if (!coll_hash_r) {
         std::cerr << "foryc: collection-abi-hash computation failed\n";
         return EXIT_FAILURE;
