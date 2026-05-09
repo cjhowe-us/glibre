@@ -222,19 +222,21 @@ using Result = std::expected<T, Error>;
 #define GLIBRE_TRY_DETAIL_CONCAT2(a, b) a##b
 #define GLIBRE_TRY_DETAIL_CONCAT(a, b) GLIBRE_TRY_DETAIL_CONCAT2(a, b)
 
-#define GLIBRE_TRY_DETAIL(name, expr, cnt)                                              \
-    auto GLIBRE_TRY_DETAIL_CONCAT(glibre_try_result_, cnt) = (expr);                   \
-    if (!GLIBRE_TRY_DETAIL_CONCAT(glibre_try_result_, cnt))                            \
-        return std::unexpected(                                                         \
-            std::move(GLIBRE_TRY_DETAIL_CONCAT(glibre_try_result_, cnt).error()));     \
+#define GLIBRE_TRY_DETAIL(name, expr, cnt)                                                         \
+    auto GLIBRE_TRY_DETAIL_CONCAT(glibre_try_result_, cnt) = (expr);                               \
+    if (!GLIBRE_TRY_DETAIL_CONCAT(glibre_try_result_, cnt))                                        \
+        return std::unexpected(                                                                    \
+            std::move(GLIBRE_TRY_DETAIL_CONCAT(glibre_try_result_, cnt).error())                   \
+        );                                                                                         \
     auto name = std::move(*GLIBRE_TRY_DETAIL_CONCAT(glibre_try_result_, cnt))
 
-#define GLIBRE_TRY_VOID_DETAIL(expr, cnt)                                               \
-    do {                                                                                \
-        auto GLIBRE_TRY_DETAIL_CONCAT(glibre_try_void_result_, cnt) = (expr);          \
-        if (!GLIBRE_TRY_DETAIL_CONCAT(glibre_try_void_result_, cnt))                   \
-            return std::unexpected(std::move(                                           \
-                GLIBRE_TRY_DETAIL_CONCAT(glibre_try_void_result_, cnt).error()));      \
+#define GLIBRE_TRY_VOID_DETAIL(expr, cnt)                                                          \
+    do {                                                                                           \
+        auto GLIBRE_TRY_DETAIL_CONCAT(glibre_try_void_result_, cnt) = (expr);                      \
+        if (!GLIBRE_TRY_DETAIL_CONCAT(glibre_try_void_result_, cnt))                               \
+            return std::unexpected(                                                                \
+                std::move(GLIBRE_TRY_DETAIL_CONCAT(glibre_try_void_result_, cnt).error())          \
+            );                                                                                     \
     } while (false)
 
 /// GLIBRE_TRY(name, expr)

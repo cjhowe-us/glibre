@@ -30,17 +30,13 @@ namespace {
 // unlikely to be renamed (OutOfBudget, SystemScheduleCycle, ScheduleAccessConflict).
 // These are real production values, not sentinel placeholders.
 
-[[nodiscard]] glibre::Result<int> returns_value(int v) {
-    return v;
-}
+[[nodiscard]] glibre::Result<int> returns_value(int v) { return v; }
 
 [[nodiscard]] glibre::Result<int> returns_error(glibre::core::Error e) {
     return std::unexpected(glibre::Error{e});
 }
 
-[[nodiscard]] glibre::Result<void> returns_void_ok() {
-    return {};
-}
+[[nodiscard]] glibre::Result<void> returns_void_ok() { return {}; }
 
 [[nodiscard]] glibre::Result<void> returns_void_error(glibre::core::Error e) {
     return std::unexpected(glibre::Error{e});
@@ -78,7 +74,8 @@ namespace {
 }
 
 /// Chain of two GLIBRE_TRY calls, each on its own line.
-/// Verifies that the __LINE__-mangled temporaries do not collide.
+/// Verifies that the __COUNTER__-mangled temporaries do not collide: each
+/// call receives a distinct counter value captured once at the call site.
 [[nodiscard]] glibre::Result<int> caller_chained(int a, int b) {
     GLIBRE_TRY(x, returns_value(a));
     GLIBRE_TRY(y, returns_value(b));
@@ -90,6 +87,30 @@ namespace {
     GLIBRE_TRY(x, returns_value(10));
     GLIBRE_TRY(y, returns_error(e));
     // x is in scope but y failed: the expression below is unreachable.
+    return x + y;
+}
+
+// ---------------------------------------------------------------------------
+// __COUNTER__ same-line collision stress helper
+//
+// GLIBRE_TRY_TWICE is a test-only macro that expands two GLIBRE_TRY calls on
+// the same physical source line.  Because GLIBRE_TRY captures __COUNTER__
+// once per outer-macro call site (not per inner-helper expansion), the two
+// invocations receive different counter values even though __LINE__ is
+// identical.  A __LINE__-based scheme would produce the same mangled name
+// for both temporaries and fail to compile.
+// NOLINTBEGIN(cppcoreguidelines-macro-usage)
+#define GLIBRE_TRY_TWICE(na, ea, nb, eb)                                                           \
+    GLIBRE_TRY(na, ea);                                                                            \
+    GLIBRE_TRY(nb, eb)
+
+// NOLINTEND(cppcoreguidelines-macro-usage)
+
+/// Uses GLIBRE_TRY_TWICE to place two GLIBRE_TRY expansions on the same
+/// source line, proving __COUNTER__ produces distinct temporaries even
+/// when __LINE__ is identical.
+[[nodiscard]] glibre::Result<int> caller_same_line(int a, int b) {
+    GLIBRE_TRY_TWICE(x, returns_value(a), y, returns_value(b));
     return x + y;
 }
 
@@ -160,7 +181,8 @@ TEST_CASE("glibre_try_works_with_void_result", "[core][error][glibre_try]") {
 // TEST: glibre_try_in_nested_calls
 //
 // Multiple GLIBRE_TRY calls on separate lines in the same function must not
-// cause name collisions (the __LINE__ mangling keeps temporaries distinct).
+// cause name collisions (the __COUNTER__ capture-and-forward pattern keeps
+// temporaries distinct even when two calls share a source line).
 // Also verifies that failure at the second call propagates correctly.
 // ---------------------------------------------------------------------------
 
@@ -181,6 +203,17 @@ TEST_CASE("glibre_try_in_nested_calls", "[core][error][glibre_try]") {
         const auto* arm = eastl::get_if<glibre::core::Error>(&result.error().code());
         REQUIRE(arm != nullptr);
         REQUIRE(*arm == sentinel);
+    }
+
+    SECTION("same source line — __COUNTER__ keeps temporaries distinct") {
+        // GLIBRE_TRY_TWICE expands two GLIBRE_TRY calls on the same physical
+        // line inside caller_same_line.  If the macro used __LINE__ instead of
+        // __COUNTER__ the two glibre_try_result_<N> variables would share the
+        // same name and this would fail to compile.
+        auto result = caller_same_line(6, 7);
+
+        REQUIRE(result.has_value());
+        REQUIRE(*result == 13);
     }
 }
 
@@ -205,11 +238,12 @@ TEST_CASE("result_marked_nodiscard", "[core][error][nodiscard]") {
     // Compile-time audit: glibre::Result<T> must be an alias for
     // std::expected<T, glibre::Error>.  std::expected is [[nodiscard]] in
     // libc++ (clang), so a discarded glibre::Result produces -Wunused-result.
-    static_assert(std::is_same_v<glibre::Result<int>,
-                                  std::expected<int, glibre::Error>>,
-                  "glibre::Result<T> must remain an alias for "
-                  "std::expected<T, glibre::Error> so that [[nodiscard]] "
-                  "semantics from std::expected are inherited.");
+    static_assert(
+        std::is_same_v<glibre::Result<int>, std::expected<int, glibre::Error>>,
+        "glibre::Result<T> must remain an alias for "
+        "std::expected<T, glibre::Error> so that [[nodiscard]] "
+        "semantics from std::expected are inherited."
+    );
 
     // Runtime no-op: this TEST_CASE exists so dod-verify can find it by name.
     SUCCEED("nodiscard audit passed (compile-time static_assert above)");
