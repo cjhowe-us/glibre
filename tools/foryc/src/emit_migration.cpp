@@ -35,6 +35,32 @@ template<class... Args>
 }
 
 // -----------------------------------------------------------------------
+// fqn_to_mangled — mangle a dotted FQN into a C-symbol-safe string.
+//
+// Replaces every '.' with '__' (double-underscore) so that two types with
+// the same unqualified name but different FQNs produce distinct C symbols
+// (fory-codegen.md §"ABI Stability Rules" point 4, plan #1010).
+//
+// Examples:
+//   "glibre.core.Transform" → "glibre__core__Transform"
+//   "glibre.Transform"      → "glibre__Transform"
+//   "Transform"             → "Transform"   (single segment: no dots, no change)
+// -----------------------------------------------------------------------
+
+[[nodiscard]] static eastl::string fqn_to_mangled(const eastl::string& fqn) noexcept {
+    eastl::string out;
+    out.reserve(fqn.size() + 4);  // pessimistic: each '.' expands to '__'
+    for (std::size_t i = 0; i < fqn.size(); ++i) {
+        if (fqn[i] == '.') {
+            out += "__";
+        } else {
+            out += fqn[i];
+        }
+    }
+    return out;
+}
+
+// -----------------------------------------------------------------------
 // fqn_to_ns_and_type — split a dotted FQN into C++ namespace + type name
 //
 // "glibre.core.Transform" -> ns="glibre::core"  type_name="Transform"
@@ -97,6 +123,14 @@ struct FqnParts {
     const FqnParts parts = split_fqn(td.fqn);
     const eastl::string& type_name = parts.type_name;
 
+    // Mangle the full FQN into the C symbol suffix (plan #1010).
+    // "glibre.core.Transform" → "glibre__core__Transform"
+    // This prevents symbol collisions when two schema types share the same
+    // unqualified name but live in different namespaces (e.g. glibre.core.Particle
+    // and glibre.fx.Particle would collide without mangling).
+    // fory-codegen.md §"ABI Stability Rules" point 4.
+    const eastl::string mangled = fqn_to_mangled(td.fqn);
+
     eastl::string out;
     out += "// ---- ";
     out += td.fqn;
@@ -108,7 +142,7 @@ struct FqnParts {
     // and to detect payloads from future schema versions (plan #978).
     out += fmt_e(
         "extern \"C\" const std::uint32_t glibre_plugin_current_version_{} = {};\n",
-        std::string_view(type_name.data(), type_name.size()),
+        std::string_view(mangled.data(), mangled.size()),
         td.version
     );
     out += "\n";
@@ -116,10 +150,10 @@ struct FqnParts {
     if (td.migrations.empty()) {
         // Empty-table form.
         out += "extern \"C\" const MigrationEntry* glibre_plugin_migrations_";
-        out += type_name;
+        out += mangled;
         out += " = nullptr;\n";
         out += "extern \"C\" std::size_t glibre_plugin_migrations_";
-        out += type_name;
+        out += mangled;
         out += "_size = 0;\n";
         out += "\n";
         return out;
@@ -228,9 +262,11 @@ struct FqnParts {
     // Static per-type migration table.
     // Fully-qualified provider is used here so the reference links even if
     // the forward decl above is in a different namespace.
+    // Use mangled FQN for the C++ static variable name so that two types with
+    // the same unqualified name but different FQNs don't clash in the same TU.
     const std::size_t count = td.migrations.size();
     out += "static const MigrationEntry k_migrations_";
-    out += type_name;
+    out += mangled;
     out += "[] = {\n";
     for (const auto& mig : td.migrations) {
         out += fmt_e(
@@ -243,15 +279,16 @@ struct FqnParts {
     out += "};\n";
     out += "\n";
 
-    // Exported per-type symbols.
+    // Exported per-type symbols — use mangled FQN as the suffix (plan #1010).
+    // fory-codegen.md §"ABI Stability Rules" point 4.
     out += "extern \"C\" const MigrationEntry* glibre_plugin_migrations_";
-    out += type_name;
+    out += mangled;
     out += " = k_migrations_";
-    out += type_name;
+    out += mangled;
     out += ";\n";
     out += fmt_e(
         "extern \"C\" std::size_t glibre_plugin_migrations_{}_size = {};\n",
-        std::string_view(type_name.data(), type_name.size()),
+        std::string_view(mangled.data(), mangled.size()),
         count
     );
     out += "\n";

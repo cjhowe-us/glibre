@@ -209,10 +209,19 @@ Notes:
    schema's major version and forces a migration. The codegen tool
    asserts this at generation time and fails the build on violation.
 4. The dylib's exported C entry points are limited to:
-   `glibre_types_abi_hash`, `glibre_types_serialize_<fqn>`,
-   `glibre_types_deserialize_<fqn>`,
-   `glibre_types_register_migration_<fqn>`. These have stable C
+   `glibre_types_abi_hash`, `glibre_types_serialize_<mangled-fqn>`,
+   `glibre_types_deserialize_<mangled-fqn>`,
+   `glibre_types_register_migration_<mangled-fqn>`. These have stable C
    signatures; the C++ wrapper templates live in headers.
+   Per-type plugin export symbols follow the same mangled-FQN convention
+   (plan #1010): the dotted FQN is mangled to a C-identifier suffix by
+   replacing every `.` with `__` (double-underscore). For example:
+   `glibre.core.Particle` → mangled suffix `glibre__core__Particle`,
+   producing `glibre_plugin_migrations_glibre__core__Particle`,
+   `glibre_plugin_migrations_glibre__core__Particle_size`, and
+   `glibre_plugin_current_version_glibre__core__Particle`. This prevents
+   link-time collisions between schema types that share the same
+   unqualified name but live in different namespaces.
 5. The middleman dylib's SONAME is bumped only on ABI-breaking schema
    changes; minor schema additions keep SONAME but bump the embedded
    `glibre_types_abi_hash`. The plugin loader's hash check catches the
