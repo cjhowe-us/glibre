@@ -19,8 +19,8 @@
 // See reviews/decisions/error-model.md for std::expected usage rules.
 
 #include <array>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <span>
 
 #include "glibre/core/frame_phase.hpp"
@@ -96,9 +96,7 @@ public:
     [[nodiscard]] std::uint64_t frame_index() const noexcept { return frame_index_; }
 
     // transient_arena_count() — number of registered transient arenas.
-    [[nodiscard]] std::size_t transient_arena_count() const noexcept {
-        return arena_count_;
-    }
+    [[nodiscard]] std::size_t transient_arena_count() const noexcept { return arena_count_; }
 
 private:
     // run_phase() — execute one phase.  Returns an error if the phase
