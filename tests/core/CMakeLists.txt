@@ -3,19 +3,12 @@ cmake_minimum_required(VERSION 3.30)
 # ---------------------------------------------------------------------------
 # tests/core — unit tests for glibre::core
 # ---------------------------------------------------------------------------
-
-# Configure-time guard: core tests require GLIBRE_TESTING instrumentation,
-# which is only compiled into glibre-core when GLIBRE_BUILD_TESTING=ON.
-# Without it, GLIBRE_TESTING-gated assertions silently degenerate to no-ops
-# and tests report PASS without exercising the instrumented code paths.
-# The macos-debug preset sets GLIBRE_BUILD_TESTING=ON; any other preset that
-# enables BUILD_TESTING must do the same.
-if(BUILD_TESTING AND NOT GLIBRE_BUILD_TESTING)
-    message(FATAL_ERROR
-        "core tests require GLIBRE_BUILD_TESTING=ON; configure with "
-        "-DGLIBRE_BUILD_TESTING=ON or use the macos-debug preset."
-    )
-endif()
+# GLIBRE_TESTING=1 is propagated PUBLIC from glibre-core when GLIBRE_BUILD_TESTS
+# is ON (the same option that enables this subdirectory at the root level), so
+# every test target in this tree receives GLIBRE_TESTING=1 transitively via
+# target_link_libraries(... glibre::core).  No separate guard is needed — the
+# root CMakeLists.txt never adds tests/ when GLIBRE_BUILD_TESTS is OFF.
+# ---------------------------------------------------------------------------
 
 add_subdirectory(plugin_api)
 add_subdirectory(plugin_loader)
@@ -66,7 +59,7 @@ target_compile_options(glibre-core-tests PRIVATE
 )
 
 # GLIBRE_TESTING is now propagated PUBLIC from glibre-core (core/CMakeLists.txt)
-# when GLIBRE_BUILD_TESTING=ON (set in the macos-debug CMake preset), so
+# when GLIBRE_BUILD_TESTS=ON (the existing root-level option), so
 # glibre-core-tests receives it transitively via target_link_libraries(glibre::core).
 # No PRIVATE definition needed here.
 # See plan #997 for the fix history (was previously PRIVATE-only on the test

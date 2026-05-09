@@ -13,7 +13,7 @@
 //
 // Additional test cases (dispatch DoD):
 //   - transient_arena_allocates_and_resets
-//   - transient_arena_drained_at_phase_9
+//   - transient_arena_present_drain_idempotent_after_caller_drain
 //   - transient_arena_alignment_respected
 //   - transient_arena_exhaustion_returns_error
 //
@@ -199,7 +199,7 @@ TEST_CASE(
 }
 
 // ===========================================================================
-// Test: transient_arena_drained_at_phase_9
+// Test: transient_arena_present_drain_idempotent_after_caller_drain
 //
 // DoD named test (dispatch): Allocate into an arena registered with FrameLoop,
 // run one tick(), assert the arena is empty (drained).
@@ -217,7 +217,7 @@ TEST_CASE(
 // undrained_allocation_through_tick_returns_out_of_budget below.
 // ===========================================================================
 
-TEST_CASE("transient_arena_drained_at_phase_9", "[core][transient_arena]") {
+TEST_CASE("transient_arena_present_drain_idempotent_after_caller_drain", "[core][transient_arena]") {
     glibre::TransientArena arena{4096};
     glibre::core::FrameLoop loop;
 

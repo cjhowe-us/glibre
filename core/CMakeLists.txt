@@ -106,21 +106,23 @@ target_compile_definitions(glibre-core PUBLIC
 # need to be compiled INTO the library (not just the test executable)
 # because the header declarations and implementation are in the library TU.
 #
-# GLIBRE_BUILD_TESTING (default OFF) is the explicit opt-in.  It is set ON
-# in the macos-debug CMake preset (CMakePresets.json) so that:
+# Gated on the existing root-level GLIBRE_BUILD_TESTS option (default ON,
+# set at the top-level CMakeLists.txt).  When tests are built, the library
+# must also compile the instrumented paths; when tests are disabled (e.g.
+# shipping presets or iOS), the instrumented code is compiled out:
 #   (a) glibre-core itself compiles the instrumented paths when tests run, and
 #   (b) consumers that link glibre::core (i.e. the test executable) receive
 #       GLIBRE_TESTING=1 transitively — no PRIVATE definition needed on the
 #       test target.
 #
 # Shipping builds (macos-release, ios-*, ios-sim-*) do not set
-# GLIBRE_BUILD_TESTING=ON; the option defaults OFF so the instrumented code
-# paths are compiled out in all non-test configurations.
+# GLIBRE_BUILD_TESTS=ON; the option defaults OFF for those presets so the
+# instrumented code paths are compiled out in all non-test configurations.
 #
-# Refs: plan #997, PR #999 (shouldfail workaround), reviews/decisions/perf-budget.md §Allocator Rules #4.
+# Refs: plan #997, PR #999 (preceding [!shouldfail] workaround, reverted by
+# this PR), reviews/decisions/perf-budget.md §Allocator Rules #4.
 # ---------------------------------------------------------------------------
-option(GLIBRE_BUILD_TESTING "Compile GLIBRE_TESTING instrumentation into glibre-core" OFF)
-if(GLIBRE_BUILD_TESTING)
+if(GLIBRE_BUILD_TESTS)
     target_compile_definitions(glibre-core PUBLIC GLIBRE_TESTING=1)
 endif()
 
