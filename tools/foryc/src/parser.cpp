@@ -251,8 +251,10 @@ public:
                     return std::unexpected{r.error()};
                 schema.types.push_back(std::move(*r));
             } else if (current_.text == "migration") {
-                // Migration blocks are parsed (consumed) but not stored.
-                // Migration dispatcher generation is out of scope for plan #219.
+                // Top-level migration blocks (fory-codegen.md style: migration v2_to_v3 { ... })
+                // are skipped.  Inline migration declarations INSIDE schema blocks are stored
+                // (plan #221, parse_inline_migration).  The top-level form is kept for
+                // backward compatibility with existing .fory files.
                 advance();
                 auto r = skip_migration_block();
                 if (!r)
@@ -408,6 +410,15 @@ private:
                     );
                 decl.fields.push_back(std::move(*fr));
 
+            } else if (current_.text == "migration") {
+                // Inline migration declaration inside a schema block (plan #221).
+                // Syntax: migration from <N> to <M> calls "<provider>"
+                advance();
+                auto mr = parse_inline_migration();
+                if (!mr)
+                    return std::unexpected{mr.error()};
+                decl.migrations.push_back(std::move(*mr));
+
             } else if (current_.text == "reserved") {
                 // reserved <tag-number> — legal but no IR representation needed yet.
                 advance();
@@ -431,6 +442,69 @@ private:
             return FORYC_ERR(tools::Error::ForycSyntaxError, "schema block is missing 'version'");
 
         return decl;
+    }
+
+    // Parse an inline migration declaration (plan #221):
+    //   from <N> to <M> calls "<provider>"
+    // Called after the "migration" keyword has been consumed.
+    [[nodiscard]] std::expected<MigrationDecl, glibre::Error> parse_inline_migration() {
+        // "from"
+        if (current_.kind != TokenKind::Ident || current_.text != "from")
+            return FORYC_ERR(tools::Error::ForycSyntaxError, "expected 'from' in migration decl");
+        advance();
+
+        // <from_version>
+        if (current_.kind != TokenKind::IntLit)
+            return FORYC_ERR(
+                tools::Error::ForycSyntaxError, "expected integer after 'from' in migration decl"
+            );
+        auto from_r = parse_uint32(current_.text);
+        if (!from_r)
+            return FORYC_ERR(
+                tools::Error::ForycSyntaxError, "invalid from-version in migration decl"
+            );
+        const std::uint32_t from_ver = *from_r;
+        advance();
+
+        // "to"
+        if (current_.kind != TokenKind::Ident || current_.text != "to")
+            return FORYC_ERR(tools::Error::ForycSyntaxError, "expected 'to' in migration decl");
+        advance();
+
+        // <to_version>
+        if (current_.kind != TokenKind::IntLit)
+            return FORYC_ERR(
+                tools::Error::ForycSyntaxError, "expected integer after 'to' in migration decl"
+            );
+        auto to_r = parse_uint32(current_.text);
+        if (!to_r)
+            return FORYC_ERR(
+                tools::Error::ForycSyntaxError, "invalid to-version in migration decl"
+            );
+        const std::uint32_t to_ver = *to_r;
+        advance();
+
+        // "calls"
+        if (current_.kind != TokenKind::Ident || current_.text != "calls")
+            return FORYC_ERR(tools::Error::ForycSyntaxError, "expected 'calls' in migration decl");
+        advance();
+
+        // "<provider>" — a string literal; strip surrounding quotes.
+        if (current_.kind != TokenKind::StringLit)
+            return FORYC_ERR(
+                tools::Error::ForycSyntaxError,
+                "expected quoted provider symbol after 'calls' in migration decl"
+            );
+        const std::string_view raw = current_.text;
+        // StringLit includes the surrounding quotes: raw[0] == '"', raw[last] == '"'.
+        eastl::string provider(raw.data() + 1, raw.size() - 2);
+        advance();
+
+        MigrationDecl md;
+        md.from_version = from_ver;
+        md.to_version = to_ver;
+        md.provider = std::move(provider);
+        return md;
     }
 
     // Parse:  <name> : <type>   tag <integer>  [since <integer>]  [default {...}]

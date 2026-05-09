@@ -1,12 +1,13 @@
 cmake_minimum_required(VERSION 3.30)
 
 # ---------------------------------------------------------------------------
-# tests/tools/foryc — unit tests for glibre-foryc (plans #219, #220)
+# tests/tools/foryc — unit tests for glibre-foryc (plans #219, #220, #221)
 #
-# foryc-parser-tests:      parser IR tests (plan #219)
-# foryc-emit-header-tests: header emission tests (plan #220)
+# foryc-parser-tests:           parser IR tests (plan #219)
+# foryc-emit-header-tests:      header emission tests (plan #220)
+# foryc-emit-migration-tests:   migration dispatcher emission tests (plan #221)
 #
-# Both test binaries pull tool sources directly so tests run without a
+# All test binaries pull tool sources directly so tests run without a
 # shared-library boundary.
 # ---------------------------------------------------------------------------
 
@@ -83,10 +84,47 @@ target_compile_options(foryc-emit-header-tests PRIVATE
     -Wno-c2y-extensions
 )
 
+# ---------------------------------------------------------------------------
+# foryc-emit-migration-tests — plan #221 migration dispatcher emission tests
+# ---------------------------------------------------------------------------
+
+add_executable(foryc-emit-migration-tests
+    foryc_emit_migration_test.cpp
+    # Pull parser and emit_migration sources directly into the test binary.
+    ${CMAKE_SOURCE_DIR}/tools/foryc/src/parser.cpp
+    ${CMAKE_SOURCE_DIR}/tools/foryc/src/emit_migration.cpp
+)
+
+target_include_directories(foryc-emit-migration-tests
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/tools/foryc/src
+)
+
+target_link_libraries(foryc-emit-migration-tests
+    PRIVATE
+        Catch2::Catch2WithMain
+        glibre::core   # glibre::Error + EASTL
+)
+
+target_compile_features(foryc-emit-migration-tests PRIVATE cxx_std_23)
+
+set_target_properties(foryc-emit-migration-tests PROPERTIES CXX_MODULE_STD OFF)
+
+target_compile_options(foryc-emit-migration-tests PRIVATE
+    -fno-exceptions
+    -fno-rtti
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wno-unused-parameter
+    -Wno-c2y-extensions
+)
+
 include(CTest)
 include(Catch)
 catch_discover_tests(foryc-parser-tests)
 catch_discover_tests(foryc-emit-header-tests)
+catch_discover_tests(foryc-emit-migration-tests)
 
 # Golden-output harness (plan #226)
 add_subdirectory(golden)

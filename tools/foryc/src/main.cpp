@@ -4,7 +4,7 @@
 // glibre-foryc — .fory schema compiler host tool.
 //
 // Usage:
-//   glibre-foryc --in <dir> --out <dir> --stamp <file> [--emit=header]
+//   glibre-foryc --in <dir> --out <dir> --stamp <file> [--emit=header|--emit=migration]
 //
 // Walks <in>/**/*.fory, parses each file into the schema IR, validates
 // basic shape (unique tags, version >= 1, builtins-only types).
@@ -19,10 +19,19 @@
 // --in data/schemas → <ctx> = "core") and <Type> is the last component
 // of the schema FQN.  Multi-type .fory files produce multiple .hpp files.
 //
+// With --emit=migration: emits one migrations.cpp per .fory file to
+//   <out>/src/<ctx>/<stem>_migrations.cpp
+// The generated TU exports:
+//   extern "C" const MigrationEntry* glibre_plugin_migrations;
+//   extern "C" std::size_t           glibre_plugin_migrations_size;
+// For schemas with no migration declarations the table is empty (size=0).
+// See reviews/decisions/fory-codegen.md §"Migration Mechanic".
+//
 // Output path derivation (fory-codegen.md §Pipeline):
 //   source:  <in>/<rel>/<file>.fory
 //   for each TypeDecl with FQN "glibre.<ns>.<Type>":
-//     output: <out>/include/glibre/types/<rel>/<Type>.hpp
+//     output: <out>/include/glibre/types/<rel>/<Type>.hpp   (--emit=header)
+//     output: <out>/src/<rel>/<stem>_migrations.cpp         (--emit=migration)
 //
 // Exits non-zero on parse or emit failure, with a diagnostic on stderr.
 
@@ -38,6 +47,7 @@
 #include <EASTL/vector.h>
 
 #include "emit_header.hpp"
+#include "emit_migration.hpp"
 #include "parser.hpp"
 
 namespace fs = std::filesystem;
@@ -48,8 +58,9 @@ using namespace glibre::tools::foryc;
 // -----------------------------------------------------------------------
 
 enum class EmitMode {
-    None,    // parse-only (default, plan #219 behaviour)
-    Header,  // emit C++ header per TypeDecl (plan #220)
+    None,       // parse-only (default, plan #219 behaviour)
+    Header,     // emit C++ header per TypeDecl (plan #220)
+    Migration,  // emit C++ migration dispatcher per .fory file (plan #221)
 };
 
 // -----------------------------------------------------------------------
@@ -64,7 +75,8 @@ struct Args {
 };
 
 static void usage(std::string_view program) {
-    std::cerr << "Usage: " << program << " --in <dir> --out <dir> --stamp <file> [--emit=header]\n";
+    std::cerr << "Usage: " << program
+              << " --in <dir> --out <dir> --stamp <file> [--emit=header|--emit=migration]\n";
 }
 
 static eastl::optional<Args> parse_args(int argc, char** argv) {
@@ -94,6 +106,8 @@ static eastl::optional<Args> parse_args(int argc, char** argv) {
             args.stamp_file = *v;
         } else if (tok == "--emit=header") {
             args.emit = EmitMode::Header;
+        } else if (tok == "--emit=migration") {
+            args.emit = EmitMode::Migration;
         } else {
             std::cerr << "foryc: unknown flag: " << tok << "\n";
             return eastl::nullopt;
@@ -239,6 +253,93 @@ static bool emit_headers_for_schema(
 }
 
 // -----------------------------------------------------------------------
+// Migration dispatcher emission helper (plan #221)
+//
+// Emits one migrations.cpp per .fory file to:
+//   <out_dir>/src/<rel_subdir>/<stem>_migrations.cpp
+//
+// Returns true on success, false on error (diagnostic already printed).
+// -----------------------------------------------------------------------
+
+static bool emit_migration_for_schema(
+    const Schema& schema,
+    const fs::path& source_path,
+    const fs::path& in_dir,
+    const fs::path& out_dir
+) noexcept {
+    if (schema.types.empty()) {
+        std::cerr << std::format(
+            "foryc: {}: schema has zero TypeDecl blocks\n", source_path.native()
+        );
+        return false;
+    }
+
+    // Compute the subdirectory relative to in_dir.
+    fs::path rel_subdir;
+    {
+        std::error_code ec;
+        const fs::path rel = fs::relative(source_path.parent_path(), in_dir, ec);
+        if (ec) {
+            std::cerr << std::format(
+                "foryc: cannot compute relative path for {}: {}\n",
+                source_path.native(),
+                ec.message()
+            );
+            return false;
+        }
+        rel_subdir = (rel == fs::path(".")) ? fs::path{} : rel;
+    }
+
+    // Output path: <out>/src/<rel>/<stem>_migrations.cpp
+    fs::path src_dir = out_dir / "src";
+    if (!rel_subdir.empty())
+        src_dir /= rel_subdir;
+
+    std::error_code ec;
+    fs::create_directories(src_dir, ec);
+    if (ec) {
+        std::cerr << std::format(
+            "foryc: cannot create directory {}: {}\n", src_dir.native(), ec.message()
+        );
+        return false;
+    }
+
+    // Stem: the .fory filename without extension.
+    const std::string stem = source_path.stem().native();
+    const fs::path out_path = src_dir / (stem + "_migrations.cpp");
+    const std::string src_native = source_path.native();
+
+    // Emit the migration dispatcher TU.
+    auto result = emit_migration(schema, src_native);
+    if (!result) {
+        std::cerr << std::format(
+            "foryc: {}: migration emit failed: {}\n",
+            source_path.native(),
+            error_name(result.error())
+        );
+        return false;
+    }
+
+    std::ofstream ofs{out_path, std::ios::trunc};
+    if (!ofs) {
+        std::cerr << std::format(
+            "foryc: cannot write migration dispatcher: {}\n", out_path.native()
+        );
+        return false;
+    }
+
+    const eastl::string& text = *result;
+    ofs.write(text.data(), static_cast<std::streamsize>(text.size()));
+    if (!ofs) {
+        std::cerr << std::format("foryc: write error: {}\n", out_path.native());
+        return false;
+    }
+
+    std::cout << std::format("foryc: emitted migration dispatcher {}\n", out_path.native());
+    return true;
+}
+
+// -----------------------------------------------------------------------
 // Entry point
 // -----------------------------------------------------------------------
 
@@ -279,6 +380,12 @@ int main(int argc, char** argv) {
         // Emit headers if requested.
         if (args.emit == EmitMode::Header) {
             if (!emit_headers_for_schema(schema, path, args.in_dir, args.out_dir))
+                return EXIT_FAILURE;
+        }
+
+        // Emit migration dispatcher if requested.
+        if (args.emit == EmitMode::Migration) {
+            if (!emit_migration_for_schema(schema, path, args.in_dir, args.out_dir))
                 return EXIT_FAILURE;
         }
     }
