@@ -151,3 +151,62 @@ template<class T>
 using Result = std::expected<T, Error>;
 
 }  // namespace glibre
+
+// -----------------------------------------------------------------------
+// GLIBRE_TRY(name, expr) — early-return-on-error propagation macro
+//
+// Rationale (error-model.md §Open Questions #2, plan #235):
+//   Chosen form: statement macro, not expression macro.
+//   Expression-form (e.g. __extension__ ({ ... })) relies on a GCC/clang
+//   statement-expression extension and produces harder-to-read call sites.
+//   Statement-form keeps macro expansion predictable, compatible with
+//   -fno-exceptions/-fno-rtti, and trivially composable.
+//   co_await-style chaining (C++23 operator co_await on expected) is
+//   explicitly off the table per error-model.md §Open Questions #2
+//   (no coroutines in engine code).
+//
+//   Temp variable is mangled with __LINE__ so that two GLIBRE_TRY calls
+//   on different lines within the same scope do not collide.
+//   Two calls on the same line (unusual; e.g. via a helper macro) would
+//   collide — document as a known limitation and require separate lines.
+//
+// Usage:
+//   glibre::Result<int> caller() {
+//       GLIBRE_TRY(x, fn1());       // binds unwrapped value to 'x'
+//       GLIBRE_TRY_VOID(fn2(x));    // propagates error from Result<void>
+//       return x * 2;
+//   }
+//
+// Both macros are valid only inside a function returning glibre::Result<T>
+// or glibre::Result<void>.  Using them in a void-returning function is a
+// compile error (std::unexpected return type mismatch).
+// -----------------------------------------------------------------------
+
+// GLIBRE_TRY_DETAIL_CONCAT2 / _CONCAT: two-level paste needed so __LINE__
+// expands before concatenation (standard CPP token-paste rule).
+// NOLINTBEGIN(cppcoreguidelines-macro-usage)
+#define GLIBRE_TRY_DETAIL_CONCAT2(a, b) a##b
+#define GLIBRE_TRY_DETAIL_CONCAT(a, b) GLIBRE_TRY_DETAIL_CONCAT2(a, b)
+
+/// GLIBRE_TRY(name, expr)
+/// Evaluates expr (which must return glibre::Result<T>).
+/// On error, returns the error to the caller unchanged via std::unexpected.
+/// On success, declares `auto name = std::move(*__result)` in the current scope.
+#define GLIBRE_TRY(name, expr)                                                          \
+    auto GLIBRE_TRY_DETAIL_CONCAT(glibre_try_result_, __LINE__) = (expr);              \
+    if (!GLIBRE_TRY_DETAIL_CONCAT(glibre_try_result_, __LINE__))                       \
+        return std::unexpected(                                                         \
+            std::move(GLIBRE_TRY_DETAIL_CONCAT(glibre_try_result_, __LINE__).error())); \
+    auto name = std::move(*GLIBRE_TRY_DETAIL_CONCAT(glibre_try_result_, __LINE__))
+
+/// GLIBRE_TRY_VOID(expr)
+/// Like GLIBRE_TRY but for glibre::Result<void> — no value to bind.
+/// On error, returns the error to the caller unchanged via std::unexpected.
+#define GLIBRE_TRY_VOID(expr)                                                           \
+    do {                                                                                \
+        auto GLIBRE_TRY_DETAIL_CONCAT(glibre_try_void_result_, __LINE__) = (expr);     \
+        if (!GLIBRE_TRY_DETAIL_CONCAT(glibre_try_void_result_, __LINE__))              \
+            return std::unexpected(std::move(                                           \
+                GLIBRE_TRY_DETAIL_CONCAT(glibre_try_void_result_, __LINE__).error())); \
+    } while (false)
+// NOLINTEND(cppcoreguidelines-macro-usage)
