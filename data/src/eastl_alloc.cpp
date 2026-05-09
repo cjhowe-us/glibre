@@ -20,7 +20,10 @@
 // dependency between the core hub and the middleman dylib).  Keeping both
 // copies avoids that coupling.  Both TUs define the same global ::operator
 // new[] signatures; only one definition is resolved per dylib boundary
-// at link time, so there is no ODR violation.
+// at link time (macOS two-level namespace + dyld duplicate-symbol
+// resolution), so there is no ODR violation.  Note: on ELF Linux this
+// pattern would cause multiply-defined symbol errors; port would require
+// extracting the overloads to a dedicated shared library.
 //
 // References:
 //   EASTL docs §"Custom Memory Allocators"
@@ -28,8 +31,18 @@
 //   PHILOSOPHY §11 — EASTL replaces std:: containers project-wide
 //
 // Threading: no lock needed — aligned_alloc is thread-safe on macOS.
-// Deallocation: EASTL deallocate calls operator delete[](void*), which
-// correctly releases aligned_alloc results via macOS libSystem's free().
+//
+// Deallocation note: EASTL's default allocator::deallocate (allocator.h:285)
+// calls plain `delete[](char*)p`, which routes through the global
+// `operator delete[](void*)` — NOT through any override defined here.
+// On macOS libc (libSystem), std::aligned_alloc results are free()-compatible
+// and the system `operator delete[]` releases them via free(), so this is
+// sound.  If portability beyond macOS is ever needed, define matching
+// `operator delete[]` overrides and switch allocate/deallocate to use
+// std::malloc/std::free for symmetric pairing.
+//
+// This is a macOS-only engine (PHILOSOPHY §0: macOS-first baseline) so
+// the current deallocation path is accepted for the MVP.
 
 #include <cstddef>
 #include <cstdlib>

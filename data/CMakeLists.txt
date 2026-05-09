@@ -39,38 +39,54 @@ find_package(EASTL CONFIG REQUIRED)
 
 # ---------------------------------------------------------------------------
 # Codegen custom command — invokes glibre-foryc over data/schemas/**/*.fory
+#
+# Guards:
+#   1. if(EXISTS …/data/schemas) — data/schemas/ is tracked via a .gitkeep
+#      but the guard prevents breakage if someone manually deletes it.
+#      Without this guard, a missing directory causes glibre-foryc to return
+#      EXIT_FAILURE, which fails cmake --build even on a clean checkout.
+#   2. if(TARGET glibre-foryc) — GLIBRE_BUILD_TOOLS=OFF omits tools/ from
+#      the build; the codegen block must not reference a non-existent target.
 # ---------------------------------------------------------------------------
-
-file(GLOB_RECURSE GLIBRE_SCHEMAS
-    CONFIGURE_DEPENDS
-    "${CMAKE_SOURCE_DIR}/data/schemas/*.fory"
-)
 
 set(GEN_DIR "${CMAKE_BINARY_DIR}/generated/glibre-types")
 
-# glibre-foryc is built by tools/foryc/CMakeLists.txt (plan #219).
-# It accepts --in <schema-dir> --out <gen-dir> --stamp <stamp-file>.
-# The stamp file is the single output CMake tracks; glibre-foryc touches
-# it after successfully writing all generated files.
-#
-# Use $<TARGET_FILE:glibre-foryc> (a generator expression) so the full path
-# to the binary is resolved at build time regardless of the working directory
-# from which Ninja invokes the command.  This avoids "command not found" when
-# glibre-foryc is not on PATH.
-add_custom_command(
-    OUTPUT  "${GEN_DIR}/.stamp"
-    COMMAND "$<TARGET_FILE:glibre-foryc>"
-            --in    "${CMAKE_SOURCE_DIR}/data/schemas"
-            --out   "${GEN_DIR}"
-            --stamp "${GEN_DIR}/.stamp"
-    DEPENDS glibre-foryc ${GLIBRE_SCHEMAS}
-    COMMENT "glibre-foryc: regenerating middleman types"
-    VERBATIM
-)
+if(TARGET glibre-foryc AND EXISTS "${CMAKE_SOURCE_DIR}/data/schemas")
+    file(GLOB_RECURSE GLIBRE_SCHEMAS
+        CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/data/schemas/*.fory"
+    )
 
-add_custom_target(glibre-types-codegen
-    DEPENDS "${GEN_DIR}/.stamp"
-)
+    # glibre-foryc is built by tools/foryc/CMakeLists.txt (plan #219).
+    # It accepts --in <schema-dir> --out <gen-dir> --stamp <stamp-file>.
+    # The stamp file is the single output CMake tracks; glibre-foryc touches
+    # it after successfully writing all generated files.
+    #
+    # Use $<TARGET_FILE:glibre-foryc> (a generator expression) so the full path
+    # to the binary is resolved at build time regardless of the working directory
+    # from which Ninja invokes the command.  This avoids "command not found" when
+    # glibre-foryc is not on PATH.
+    add_custom_command(
+        OUTPUT  "${GEN_DIR}/.stamp"
+        COMMAND "$<TARGET_FILE:glibre-foryc>"
+                --in    "${CMAKE_SOURCE_DIR}/data/schemas"
+                --out   "${GEN_DIR}"
+                --stamp "${GEN_DIR}/.stamp"
+        DEPENDS glibre-foryc ${GLIBRE_SCHEMAS}
+        COMMENT "glibre-foryc: regenerating middleman types"
+        VERBATIM
+    )
+
+    add_custom_target(glibre-types-codegen
+        DEPENDS "${GEN_DIR}/.stamp"
+    )
+else()
+    # No schemas directory or tools are disabled: create a no-op codegen target
+    # so that add_dependencies(glibre-types glibre-types-codegen) below still
+    # resolves.  This allows schema-less builds (current state before plans
+    # #220/#225 land) and GLIBRE_BUILD_TOOLS=OFF configurations.
+    add_custom_target(glibre-types-codegen)
+endif()
 
 # ---------------------------------------------------------------------------
 # Generated sources glob (populated after codegen runs, plans #220/#225)
@@ -144,10 +160,23 @@ target_compile_options(glibre-types PRIVATE
     -Wextra
     -Wpedantic
     -Wno-unused-parameter
-    -Wno-c2y-extensions   # suppress clang-22 pedantic warning on __COUNTER__
+    # -Wno-c2y-extensions: omitted here — neither types_anchor.cpp nor
+    # eastl_alloc.cpp use __COUNTER__.  Re-add when generated TUs under
+    # ${GEN_SRCS} (plans #220/#225) actually trigger the warning.
 )
 
-set_target_properties(glibre-types PROPERTIES CXX_MODULE_STD OFF)
+# SONAME versioning (plugin-abi.md §"Versioning Rules" point 2).
+# VERSION  = major.minor.patch library file version.
+# SOVERSION = major-only; the dynamic linker uses this as the SONAME.
+# Both start at 0.1.0 / 0 for the initial pre-codegen release.
+# Bump SOVERSION only on layout-breaking schema changes; bump VERSION on
+# every release.  The loader's hash check covers hash-stable window
+# changes; dyld SONAME check covers the layout-breaking window.
+set_target_properties(glibre-types PROPERTIES
+    VERSION   0.1.0
+    SOVERSION 0
+    CXX_MODULE_STD OFF
+)
 
 # ---------------------------------------------------------------------------
 # Alias for consumers

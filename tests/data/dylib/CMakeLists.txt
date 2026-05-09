@@ -32,13 +32,15 @@ target_compile_features(glibre-types-dylib-tests PRIVATE cxx_std_23)
 set_target_properties(glibre-types-dylib-tests PROPERTIES CXX_MODULE_STD OFF)
 
 target_compile_options(glibre-types-dylib-tests PRIVATE
-    -fno-exceptions
-    -fno-rtti
+    # No -fno-exceptions/-fno-rtti: Catch2's REQUIRE macro throws on failure;
+    # building tests without exceptions would call std::terminate instead of
+    # producing structured Catch2 diagnostics.  Test executables are not part
+    # of the shipping plugin link surface so these constraints do not apply.
     -Wall
     -Wextra
     -Wpedantic
     -Wno-unused-parameter
-    -Wno-c2y-extensions
+    -Wno-c2y-extensions   # Catch2 uses __COUNTER__; suppress clang pedantic warning
 )
 
 include(CTest)

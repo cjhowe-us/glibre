@@ -27,8 +27,8 @@
 //
 // The integer value here is separate from the Fory-codegen hash — it
 // answers "can the loader dlopen this dylib at all?" before the full
-// hash check runs.  Start at 1; subsequent bumps are recorded in the
-// data/CHANGELOG section of fory-codegen.md.
+// hash check runs.  Start at 1; subsequent bumps are captured in the
+// PR commit history (no separate changelog file per project convention).
 
 #include <cstdint>
 
@@ -37,14 +37,11 @@ extern "C" {
 // glibre_types_abi_version — sentinel used by tests and the loader to
 // confirm the dylib loaded and is the expected revision.
 //
-// Visibility: default (not hidden) so dlsym can find it from outside.
-// All other symbols in this dylib use -fvisibility=hidden; this one is
-// explicitly exposed via the __attribute__((visibility("default"))) from
-// the PUBLIC include path if callers want to dlsym it, but the simple
-// inline extern-C function here does not need the attribute because
-// CMake will produce a normal symbol for it in the SHARED library
-// without -fvisibility=hidden narrowing (the PRIVATE compile option
-// applies only to this TU's non-C linkage symbols).
+// Visibility: -fvisibility=hidden (set PRIVATE on glibre-types in CMake)
+// applies to ALL symbols in this TU, including extern "C" ones.  The
+// [[gnu::visibility("default")]] attribute below is therefore REQUIRED
+// to expose this symbol to dlsym from the test executable and the loader.
+// Removing it would silently hide the symbol and cause link failures.
 //
 // IMPORTANT: return type is int32_t so callers do not need to agree on
 // platform int width.  The value 1 is the initial version.
