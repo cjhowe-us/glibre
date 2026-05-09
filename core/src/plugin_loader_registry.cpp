@@ -28,8 +28,8 @@ PluginLoaderRegistry::PluginLoaderRegistry(SemVer host_engine_version) noexcept
 // ---------------------------------------------------------------------------
 
 Result<void> PluginLoaderRegistry::validate_manifest_abi_hash(
-    const PluginManifest& manifest,
-    eastl::string_view    expected_abi_hash) const noexcept {
+    const PluginManifest& manifest, eastl::string_view expected_abi_hash
+) const noexcept {
 
     if (manifest.abi_hash != expected_abi_hash) {
         return std::unexpected(glibre::Error{core::Error::PluginAbiHashMismatch});
@@ -46,8 +46,8 @@ Result<void> PluginLoaderRegistry::validate_manifest_abi_hash(
 // ---------------------------------------------------------------------------
 
 Result<void> PluginLoaderRegistry::validate_symbol_abi_hash(
-    eastl::string_view symbol_abi_hash,
-    eastl::string_view expected_abi_hash) const noexcept {
+    eastl::string_view symbol_abi_hash, eastl::string_view expected_abi_hash
+) const noexcept {
 
     if (symbol_abi_hash != expected_abi_hash) {
         return std::unexpected(glibre::Error{core::Error::PluginAbiHashMismatch});
@@ -62,8 +62,8 @@ Result<void> PluginLoaderRegistry::validate_symbol_abi_hash(
 // The SemVer operator<= is defined in plugin_manifest.hpp.
 // ---------------------------------------------------------------------------
 
-Result<void> PluginLoaderRegistry::validate_engine_version(
-    const PluginManifest& manifest) const noexcept {
+Result<void>
+PluginLoaderRegistry::validate_engine_version(const PluginManifest& manifest) const noexcept {
 
     // Refuse if the host is older than the plugin's minimum requirement.
     if (host_engine_version_ < manifest.min_engine_version) {
@@ -81,17 +81,13 @@ Result<void> PluginLoaderRegistry::validate_engine_version(
 // ---------------------------------------------------------------------------
 
 Result<void> PluginLoaderRegistry::validate_name_unique(
-    const PluginManifest& manifest,
-    eastl::string_view    file_path) const noexcept {
+    const PluginManifest& manifest, eastl::string_view file_path
+) const noexcept {
 
-    const auto it = loaded_.find(manifest.name);
-    if (it != loaded_.end()) {
-        // Name already registered.  Only a collision if the path differs.
-        if (it->second.path != file_path) {
-            return std::unexpected(glibre::Error{core::Error::PluginNameCollision});
-        }
-        // Same name + same path → idempotent; not an error.
+    if (is_collision(eastl::string_view{manifest.name.c_str()}, file_path)) {
+        return std::unexpected(glibre::Error{core::Error::PluginNameCollision});
     }
+    // Name absent, or same name + same path → idempotent; not an error.
     return {};
 }
 
@@ -102,8 +98,8 @@ Result<void> PluginLoaderRegistry::validate_name_unique(
 // Returns on the first missing dependency.
 // ---------------------------------------------------------------------------
 
-Result<void> PluginLoaderRegistry::validate_dependencies(
-    const PluginManifest& manifest) const noexcept {
+Result<void>
+PluginLoaderRegistry::validate_dependencies(const PluginManifest& manifest) const noexcept {
 
     for (const eastl::string& dep : manifest.depends_on) {
         // Heterogeneous lookup: eastl::string_view avoids materialising a
@@ -113,6 +109,25 @@ Result<void> PluginLoaderRegistry::validate_dependencies(
         }
     }
     return {};
+}
+
+// ---------------------------------------------------------------------------
+// is_collision — name/path collision predicate (MED-4: single source of truth).
+//
+// Returns true when a plugin with the same name is already registered with a
+// DIFFERENT file path — the condition that must fire PluginNameCollision.
+// Same name + same path is idempotent (hot-reload re-registration); returns
+// false.  Name not present: returns false.
+// ---------------------------------------------------------------------------
+
+bool PluginLoaderRegistry::is_collision(
+    eastl::string_view name, eastl::string_view file_path
+) const noexcept {
+    const auto it = loaded_.find(name);
+    if (it == loaded_.end()) {
+        return false;
+    }
+    return it->second.path != file_path;
 }
 
 // ---------------------------------------------------------------------------
@@ -128,17 +143,18 @@ Result<void> PluginLoaderRegistry::validate_dependencies(
 
 Result<void> PluginLoaderRegistry::validate_all(
     const PluginManifest& manifest,
-    eastl::string_view    expected_abi_hash,
-    eastl::string_view    symbol_abi_hash,
-    eastl::string_view    file_path) const noexcept {
+    eastl::string_view expected_abi_hash,
+    eastl::string_view symbol_abi_hash,
+    eastl::string_view file_path
+) const noexcept {
 
-    // Gate 1a: symbol-side ABI hash check.
-    if (auto r = validate_symbol_abi_hash(symbol_abi_hash, expected_abi_hash); !r) {
+    // Gate 1a: manifest-side ABI hash check (plugin-abi.md §step 4, leading check).
+    if (auto r = validate_manifest_abi_hash(manifest, expected_abi_hash); !r) {
         return r;
     }
 
-    // Gate 1b: manifest-side ABI hash check.
-    if (auto r = validate_manifest_abi_hash(manifest, expected_abi_hash); !r) {
+    // Gate 1b: symbol-side ABI hash check (redundant; catches malformed manifest).
+    if (auto r = validate_symbol_abi_hash(symbol_abi_hash, expected_abi_hash); !r) {
         return r;
     }
 
@@ -165,24 +181,25 @@ Result<void> PluginLoaderRegistry::validate_all(
 // ---------------------------------------------------------------------------
 
 Result<void> PluginLoaderRegistry::register_plugin(
-    const PluginManifest& manifest,
-    eastl::string_view    path) noexcept {
+    const PluginManifest& manifest, eastl::string_view path
+) noexcept {
+
+    // Unconditional precondition check — protects release builds from
+    // silent overwrites (replaces the former debug-only assert).
+    if (is_collision(eastl::string_view{manifest.name.c_str()}, path)) {
+        return std::unexpected(glibre::Error{core::Error::PluginNameCollision});
+    }
 
     const auto it = loaded_.find(manifest.name);
     if (it != loaded_.end()) {
-        // Unconditional precondition check — protects release builds from
-        // silent overwrites (replaces the former debug-only assert).
-        if (it->second.path != path) {
-            return std::unexpected(glibre::Error{core::Error::PluginNameCollision});
-        }
         // Same name + same path: idempotent re-registration, no-op.
         return {};
     }
 
     PluginRecord rec;
-    rec.name    = manifest.name;
+    rec.name = manifest.name;
     rec.version = manifest.version;
-    rec.path    = eastl::string{path.data(), path.size()};
+    rec.path = eastl::string{path.data(), path.size()};
 
     loaded_.emplace(manifest.name, eastl::move(rec));
     return {};
@@ -201,8 +218,6 @@ bool PluginLoaderRegistry::is_registered(eastl::string_view name) const noexcept
 // loaded_count
 // ---------------------------------------------------------------------------
 
-std::size_t PluginLoaderRegistry::loaded_count() const noexcept {
-    return loaded_.size();
-}
+std::size_t PluginLoaderRegistry::loaded_count() const noexcept { return loaded_.size(); }
 
 }  // namespace glibre::core

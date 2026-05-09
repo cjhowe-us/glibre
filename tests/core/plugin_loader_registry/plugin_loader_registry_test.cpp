@@ -22,7 +22,6 @@
 
 #include <EASTL/string_view.h>
 #include <catch2/catch_test_macros.hpp>
-
 #include <glibre/core/plugin_loader_registry.hpp>
 #include <glibre/core/plugin_manifest.hpp>
 #include <glibre/error.hpp>
@@ -51,15 +50,16 @@ constexpr glibre::core::SemVer kHostVersion{1, 0, 0};
 /// fresh registry with host_version = kHostVersion and
 /// expected_abi_hash = kExpectedHash.
 glibre::core::PluginManifest make_manifest(
-    const char*             name         = "glibre.test.plugin",
-    glibre::core::SemVer    version      = {1, 0, 0},
-    const char*             abi_hash     = kExpectedHash,
-    glibre::core::SemVer    min_engine   = {0, 1, 0}) {
+    const char* name = "glibre.test.plugin",
+    glibre::core::SemVer version = {1, 0, 0},
+    const char* abi_hash = kExpectedHash,
+    glibre::core::SemVer min_engine = {0, 1, 0}
+) {
 
     glibre::core::PluginManifest m;
-    m.name               = eastl::string{name};
-    m.version            = version;
-    m.abi_hash           = eastl::string{abi_hash};
+    m.name = eastl::string{name};
+    m.version = version;
+    m.abi_hash = eastl::string{abi_hash};
     m.min_engine_version = min_engine;
     // depends_on is empty by default (no dependencies).
     return m;
@@ -69,10 +69,8 @@ glibre::core::PluginManifest make_manifest(
 ///
 /// Convenience wrapper used by dependency tests to avoid repetitive
 /// push_back call sequences (LOW-7: helper reduces dep-test duplication).
-template <typename... Deps>
-glibre::core::PluginManifest make_manifest_with_deps(
-    const char* name,
-    Deps... deps) {
+template<typename... Deps>
+glibre::core::PluginManifest make_manifest_with_deps(const char* name, Deps... deps) {
 
     auto m = make_manifest(name);
     (m.depends_on.push_back(eastl::string{deps}), ...);
@@ -81,8 +79,7 @@ glibre::core::PluginManifest make_manifest_with_deps(
 
 /// Extract the core::Error variant arm.  Returns nullptr if the error holds
 /// a different arm (e.g. tools::Error or render::Error).
-[[nodiscard]] const glibre::core::Error*
-as_core_error(const glibre::Error& err) noexcept {
+[[nodiscard]] const glibre::core::Error* as_core_error(const glibre::Error& err) noexcept {
     return eastl::get_if<glibre::core::Error>(&err.code());
 }
 
@@ -109,7 +106,7 @@ TEST_CASE("plugin_loader_rejects_abi_hash_mismatch", "[core][plugin_loader_regis
         auto manifest = make_manifest(
             "glibre.test.plugin",
             {1, 0, 0},
-            kWrongHash,        // wrong manifest hash
+            kWrongHash,  // wrong manifest hash
             {0, 1, 0}
         );
 
@@ -128,7 +125,7 @@ TEST_CASE("plugin_loader_rejects_abi_hash_mismatch", "[core][plugin_loader_regis
         auto manifest = make_manifest(
             "glibre.test.plugin",
             {1, 0, 0},
-            kExpectedHash,     // manifest hash is correct
+            kExpectedHash,  // manifest hash is correct
             {0, 1, 0}
         );
 
@@ -136,8 +133,9 @@ TEST_CASE("plugin_loader_rejects_abi_hash_mismatch", "[core][plugin_loader_regis
         const eastl::string_view expected{kExpectedHash};
         const eastl::string_view wrong_symbol{kWrongHash};
 
-        auto result = registry.validate_all(manifest, expected, wrong_symbol,
-                                            eastl::string_view{"/fake/path.dylib"});
+        auto result = registry.validate_all(
+            manifest, expected, wrong_symbol, eastl::string_view{"/fake/path.dylib"}
+        );
 
         REQUIRE_FALSE(result.has_value());
         const auto* core_err = as_core_error(result.error());
@@ -149,15 +147,16 @@ TEST_CASE("plugin_loader_rejects_abi_hash_mismatch", "[core][plugin_loader_regis
         auto manifest = make_manifest(
             "glibre.test.plugin",
             {1, 0, 0},
-            kWrongHash,        // wrong manifest hash
+            kWrongHash,  // wrong manifest hash
             {0, 1, 0}
         );
 
         const eastl::string_view expected{kExpectedHash};
         const eastl::string_view wrong_symbol{kWrongHash};
 
-        auto result = registry.validate_all(manifest, expected, wrong_symbol,
-                                            eastl::string_view{"/fake/path.dylib"});
+        auto result = registry.validate_all(
+            manifest, expected, wrong_symbol, eastl::string_view{"/fake/path.dylib"}
+        );
 
         REQUIRE_FALSE(result.has_value());
         const auto* core_err = as_core_error(result.error());
@@ -269,10 +268,8 @@ TEST_CASE("plugin_loader_rejects_incompatible_version", "[core][plugin_loader_re
 
     // Plugin requires engine {2, 0, 0} — newer than the host.
     auto manifest = make_manifest(
-        "glibre.test.future",
-        {1, 0, 0},
-        kExpectedHash,
-        {2, 0, 0}     // min_engine_version = 2.0.0 > host 1.0.0
+        "glibre.test.future", {1, 0, 0}, kExpectedHash, {2, 0, 0}
+        // min_engine_version = 2.0.0 > host 1.0.0
     );
 
     auto result = registry.validate_engine_version(manifest);
@@ -313,10 +310,12 @@ TEST_CASE("validate_all_gate_ordering_hash_first", "[core][plugin_loader_registr
     {
         // validate_all would succeed here; we discard the result intentionally
         // because we're setting up state, not testing this call.
-        auto r = registry.validate_all(base,
-                                       eastl::string_view{kExpectedHash},
-                                       eastl::string_view{kExpectedHash},
-                                       eastl::string_view{"/fake/base.dylib"});
+        auto r = registry.validate_all(
+            base,
+            eastl::string_view{kExpectedHash},
+            eastl::string_view{kExpectedHash},
+            eastl::string_view{"/fake/base.dylib"}
+        );
         REQUIRE(r.has_value());
     }
     REQUIRE(registry.register_plugin(base, eastl::string_view{"/fake/base.dylib"}).has_value());
@@ -324,10 +323,7 @@ TEST_CASE("validate_all_gate_ordering_hash_first", "[core][plugin_loader_registr
     // Now build a manifest that:
     //   • has a WRONG abi_hash (gate 1 fails)
     //   • depends on "glibre.base" which IS registered (gate 4 would pass)
-    auto manifest = make_manifest_with_deps(
-        "glibre.test.order",
-        "glibre.base"
-    );
+    auto manifest = make_manifest_with_deps("glibre.test.order", "glibre.base");
     manifest.abi_hash = eastl::string{kWrongHash};  // gate 1 fails
 
     auto result = registry.validate_all(
@@ -342,6 +338,79 @@ TEST_CASE("validate_all_gate_ordering_hash_first", "[core][plugin_loader_registr
     const auto* core_err = as_core_error(result.error());
     REQUIRE(core_err != nullptr);
     CHECK(*core_err == glibre::core::Error::PluginAbiHashMismatch);
+}
+
+// ===========================================================================
+// Gate ordering: gate 2 (engine version) fires before gate 3 (name).
+//
+// A manifest that fails gate 2 must not proceed to check name uniqueness.
+// Demonstrates that the engine-version gate is ordered before the name gate.
+// ===========================================================================
+
+TEST_CASE("validate_all_gate_ordering_version_before_name", "[core][plugin_loader_registry]") {
+    glibre::core::PluginLoaderRegistry registry{glibre::core::SemVer{1, 0, 0}};
+
+    // Register "glibre.base" so a name-collision would be possible if gate 3 ran.
+    auto base = make_manifest("glibre.collision.victim");
+    REQUIRE(registry.register_plugin(base, eastl::string_view{"/fake/base.dylib"}).has_value());
+
+    // Manifest: same name as registered plugin (gate 3 would fail) AND
+    // min_engine_version newer than host (gate 2 fails).  Gate 2 must fire.
+    auto manifest = make_manifest(
+        "glibre.collision.victim",  // same name → gate 3 would fire if reached
+        {1, 0, 0},
+        kExpectedHash,
+        {2, 0, 0}  // requires engine 2.0.0, host is 1.0.0 → gate 2 fires
+    );
+
+    // Different path so gate 3 would produce PluginNameCollision if reached.
+    auto result = registry.validate_all(
+        manifest,
+        eastl::string_view{kExpectedHash},
+        eastl::string_view{kExpectedHash},
+        eastl::string_view{"/fake/other.dylib"}
+    );
+
+    // Gate 2 must fire first — PluginEngineTooOld, not PluginNameCollision.
+    REQUIRE_FALSE(result.has_value());
+    const auto* core_err = as_core_error(result.error());
+    REQUIRE(core_err != nullptr);
+    CHECK(*core_err == glibre::core::Error::PluginEngineTooOld);
+}
+
+// ===========================================================================
+// Gate ordering: gate 3 (name uniqueness) fires before gate 4 (deps).
+//
+// A manifest that fails gate 3 must not proceed to check dependencies.
+// ===========================================================================
+
+TEST_CASE("validate_all_gate_ordering_name_before_deps", "[core][plugin_loader_registry]") {
+    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+
+    // Register "glibre.taken" so name-collision fires for gate 3.
+    auto taken = make_manifest("glibre.taken");
+    REQUIRE(registry.register_plugin(taken, eastl::string_view{"/fake/taken.dylib"}).has_value());
+
+    // Manifest: same name + different path (gate 3 fails) AND missing dep
+    // "glibre.missing" which is not registered (gate 4 would fail).
+    // Gate 3 must fire before gate 4.
+    auto manifest = make_manifest_with_deps(
+        "glibre.taken",   // same name → gate 3 fires
+        "glibre.missing"  // missing dep → gate 4 would fire if reached
+    );
+
+    auto result = registry.validate_all(
+        manifest,
+        eastl::string_view{kExpectedHash},
+        eastl::string_view{kExpectedHash},
+        eastl::string_view{"/fake/different.dylib"}
+    );
+
+    // Gate 3 must fire first — PluginNameCollision, not PluginDependencyMissing.
+    REQUIRE_FALSE(result.has_value());
+    const auto* core_err = as_core_error(result.error());
+    REQUIRE(core_err != nullptr);
+    CHECK(*core_err == glibre::core::Error::PluginNameCollision);
 }
 
 // ===========================================================================
@@ -384,11 +453,11 @@ TEST_CASE("plugin_loader_accepts_multi_dependency_plugin", "[core][plugin_loader
     REQUIRE(registry.register_plugin(dep_b, eastl::string_view{"/fake/dep_b.dylib"}).has_value());
 
     // Plugin that depends on both — use make_manifest_with_deps helper.
-    auto manifest = make_manifest_with_deps("glibre.consumer",
-                                            "glibre.dep.a", "glibre.dep.b");
+    auto manifest = make_manifest_with_deps("glibre.consumer", "glibre.dep.a", "glibre.dep.b");
 
-    auto result = registry.validate_all(manifest, expected, expected,
-                                        eastl::string_view{"/fake/consumer.dylib"});
+    auto result = registry.validate_all(
+        manifest, expected, expected, eastl::string_view{"/fake/consumer.dylib"}
+    );
     CHECK(result.has_value());
 }
 
@@ -407,9 +476,11 @@ TEST_CASE("plugin_loader_rejects_partial_dependency", "[core][plugin_loader_regi
     REQUIRE(registry.register_plugin(dep_a, eastl::string_view{"/fake/dep_a.dylib"}).has_value());
 
     // Use make_manifest_with_deps helper (dep-a registered, dep-b not).
-    auto manifest = make_manifest_with_deps("glibre.consumer",
-                                            "glibre.dep.a",   // registered
-                                            "glibre.dep.b");  // NOT registered
+    auto manifest = make_manifest_with_deps(
+        "glibre.consumer",
+        "glibre.dep.a",  // registered
+        "glibre.dep.b"
+    );  // NOT registered
 
     auto result = registry.validate_dependencies(manifest);
 

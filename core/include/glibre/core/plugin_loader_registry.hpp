@@ -10,12 +10,12 @@
 // each TEST_CASE constructs its own independent registry.
 //
 // Gates enforced (in order):
-//   1. ABI hash gate (step 4) — two sub-checks:
+//   1. ABI hash gate (step 4) — two sub-checks in plugin-abi.md §step 4 order:
 //      a) validate_manifest_abi_hash: manifest.abi_hash == expected_abi_hash.
 //      b) validate_symbol_abi_hash:   symbol value == expected_abi_hash.
 //      Both must pass; either mismatch → core::Error::PluginAbiHashMismatch.
-//      validate_all runs (a) then (b); individual granular callers may call
-//      each sub-check directly.
+//      validate_all runs (a) then (b) per plugin-abi.md §step 4 text.
+//      Individual granular callers may invoke each sub-check directly.
 //   2. Engine version gate (step 5)
 //      manifest.min_engine_version ≤ host engine version.  Violation →
 //      core::Error::PluginEngineTooOld.
@@ -41,13 +41,12 @@
 #include <cstdint>
 
 #include <EASTL/functional.h>
+#include <EASTL/hash_map.h>
 #include <EASTL/string.h>
 #include <EASTL/string_view.h>
 #include <EASTL/vector.h>
-#include <EASTL/hash_map.h>
-
-#include <glibre/error.hpp>
 #include <glibre/core/plugin_manifest.hpp>
+#include <glibre/error.hpp>
 
 namespace glibre::core {
 
@@ -59,9 +58,9 @@ namespace glibre::core {
 // ---------------------------------------------------------------------------
 
 struct PluginRecord {
-    eastl::string name;      // manifest.name  — must be unique
-    SemVer        version;   // manifest.version
-    eastl::string path;      // filesystem path to the .dylib (may be empty in tests)
+    eastl::string name;  // manifest.name  — must be unique
+    SemVer version;      // manifest.version
+    eastl::string path;  // filesystem path to the .dylib (may be empty in tests)
 };
 
 // ---------------------------------------------------------------------------
@@ -98,8 +97,8 @@ public:
     // -----------------------------------------------------------------------
 
     [[nodiscard]] Result<void> validate_manifest_abi_hash(
-        const PluginManifest& manifest,
-        eastl::string_view    expected_abi_hash) const noexcept;
+        const PluginManifest& manifest, eastl::string_view expected_abi_hash
+    ) const noexcept;
 
     // -----------------------------------------------------------------------
     // validate_symbol_abi_hash — gate 1b (exported symbol value only).
@@ -113,8 +112,8 @@ public:
     // -----------------------------------------------------------------------
 
     [[nodiscard]] Result<void> validate_symbol_abi_hash(
-        eastl::string_view symbol_abi_hash,
-        eastl::string_view expected_abi_hash) const noexcept;
+        eastl::string_view symbol_abi_hash, eastl::string_view expected_abi_hash
+    ) const noexcept;
 
     // -----------------------------------------------------------------------
     // validate_engine_version — run gate 2 (engine version).
@@ -123,8 +122,8 @@ public:
     // On violation returns core::Error::PluginEngineTooOld.
     // -----------------------------------------------------------------------
 
-    [[nodiscard]] Result<void> validate_engine_version(
-        const PluginManifest& manifest) const noexcept;
+    [[nodiscard]] Result<void>
+    validate_engine_version(const PluginManifest& manifest) const noexcept;
 
     // -----------------------------------------------------------------------
     // validate_name_unique — run gate 3 (name uniqueness).
@@ -142,8 +141,8 @@ public:
     // -----------------------------------------------------------------------
 
     [[nodiscard]] Result<void> validate_name_unique(
-        const PluginManifest& manifest,
-        eastl::string_view    file_path) const noexcept;
+        const PluginManifest& manifest, eastl::string_view file_path
+    ) const noexcept;
 
     // -----------------------------------------------------------------------
     // validate_dependencies — run gate 4 (dependency resolution).
@@ -152,8 +151,7 @@ public:
     // On the first missing dependency returns core::Error::PluginDependencyMissing.
     // -----------------------------------------------------------------------
 
-    [[nodiscard]] Result<void> validate_dependencies(
-        const PluginManifest& manifest) const noexcept;
+    [[nodiscard]] Result<void> validate_dependencies(const PluginManifest& manifest) const noexcept;
 
     // -----------------------------------------------------------------------
     // validate_all — run all four gates in order (steps 4–7).
@@ -173,9 +171,10 @@ public:
 
     [[nodiscard]] Result<void> validate_all(
         const PluginManifest& manifest,
-        eastl::string_view    expected_abi_hash,
-        eastl::string_view    symbol_abi_hash,
-        eastl::string_view    file_path) const noexcept;
+        eastl::string_view expected_abi_hash,
+        eastl::string_view symbol_abi_hash,
+        eastl::string_view file_path
+    ) const noexcept;
 
     // -----------------------------------------------------------------------
     // register_plugin — record a plugin as successfully loaded.
@@ -195,8 +194,8 @@ public:
     // Same name + different path: returns core::Error::PluginNameCollision.
     // -----------------------------------------------------------------------
 
-    [[nodiscard]] Result<void> register_plugin(const PluginManifest& manifest,
-                                               eastl::string_view    path) noexcept;
+    [[nodiscard]] Result<void>
+    register_plugin(const PluginManifest& manifest, eastl::string_view path) noexcept;
 
     // -----------------------------------------------------------------------
     // is_registered — query whether a plugin name is already registered.
@@ -211,6 +210,21 @@ public:
     [[nodiscard]] std::size_t loaded_count() const noexcept;
 
 private:
+    // -----------------------------------------------------------------------
+    // is_collision — name/path collision predicate (single source of truth).
+    //
+    // Returns true when a plugin with the same name is already registered
+    // with a DIFFERENT file path — the condition that fires PluginNameCollision.
+    // Same name + same path (hot-reload idempotent path): returns false.
+    // Name not present: returns false.
+    //
+    // Used by both validate_name_unique and register_plugin so the predicate
+    // has one definition (SOLID SRP: one reason to change).
+    // -----------------------------------------------------------------------
+
+    [[nodiscard]] bool
+    is_collision(eastl::string_view name, eastl::string_view file_path) const noexcept;
+
     SemVer host_engine_version_;
 
     // key = plugin name (eastl::string), value = PluginRecord
@@ -219,9 +233,9 @@ private:
     // transparent_string_hash + equal_to<void> enable heterogeneous lookup:
     //   loaded_.find(eastl::string_view{...})  — no eastl::string allocation
     //   per lookup (MED-3: avoids per-call key materialisation).
-    eastl::hash_map<eastl::string, PluginRecord,
-                    eastl::transparent_string_hash,
-                    eastl::equal_to<void>> loaded_;
+    eastl::
+        hash_map<eastl::string, PluginRecord, eastl::transparent_string_hash, eastl::equal_to<void>>
+            loaded_;
 };
 
 }  // namespace glibre::core
