@@ -34,8 +34,9 @@ namespace {
 [[nodiscard]] std::size_t tag_index(ContextTag tag) noexcept {
     const auto idx = static_cast<std::size_t>(tag);
     assert(
-        idx < kContextTagCount && "PerfBudget: ContextTag is out-of-range; "
-                                  "caller supplied a raw cast value beyond kContextTagCount"
+        idx < kContextTagCount &&
+        "PerfBudget: ContextTag is out-of-range; "
+        "caller supplied a raw cast value beyond kContextTagCount"
     );
     return idx;
 }
