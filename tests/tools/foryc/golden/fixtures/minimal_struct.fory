@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// tests/tools/foryc/golden/fixtures/minimal_struct.fory
+//
+// Golden fixture: a single struct with one u32 field.
+// Exercises the simplest possible schema shape.
+
+schema test.MinimalStruct {
+  version 1
+  since   "0.0.1"
+  field x : u32 tag 1 since 1
+}

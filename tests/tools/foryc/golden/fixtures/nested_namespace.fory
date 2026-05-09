@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: Apache-2.0
+// tests/tools/foryc/golden/fixtures/nested_namespace.fory
+//
+// Golden fixture: package with a 3-component FQN and multiple TypeDecls.
+// Exercises namespace nesting and multi-type file emission.
+
+schema data.shapes.Circle {
+  version 1
+  since   "0.1.0"
+  field radius : f32 tag 1 since 1
+  field cx     : f32 tag 2 since 1
+  field cy     : f32 tag 3 since 1
+}
+
+schema data.shapes.Rectangle {
+  version 1
+  since   "0.1.0"
+  field x      : f32 tag 1 since 1
+  field y      : f32 tag 2 since 1
+  field width  : f32 tag 3 since 1
+  field height : f32 tag 4 since 1
+}
