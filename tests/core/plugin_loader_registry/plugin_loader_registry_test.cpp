@@ -26,7 +26,7 @@
 
 #include <EASTL/string_view.h>
 #include <catch2/catch_test_macros.hpp>
-#include <glibre/core/plugin_loader_actions.hpp>   // migrate_components + MigrationStepFn (plan #983)
+#include <glibre/core/plugin_loader_actions.hpp>  // migrate_components + MigrationStepFn (plan #983)
 #include <glibre/core/plugin_loader_registry.hpp>
 #include <glibre/core/plugin_manifest.hpp>
 #include <glibre/error.hpp>

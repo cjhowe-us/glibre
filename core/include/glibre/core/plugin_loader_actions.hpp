@@ -162,7 +162,7 @@ namespace glibre::core {
 // -fno-exceptions (error-model.md §Decision 3).
 // ---------------------------------------------------------------------------
 
-using MigrationStepFn = Result<void>(*)() noexcept;
+using MigrationStepFn = Result<void> (*)() noexcept;
 
 // ---------------------------------------------------------------------------
 // migrate_components — loader step 11 (plugin-abi.md §"Loader Sequence").
