@@ -13,9 +13,10 @@ cmake_minimum_required(VERSION 3.30)
 
 add_library(glibre-core STATIC
     src/frame_loop.cpp
-    src/eastl_alloc.cpp      # EASTL operator new[] substrate (PHILOSOPHY §11)
+    src/eastl_alloc.cpp             # EASTL operator new[] substrate (PHILOSOPHY §11)
     src/plugin_manifest.cpp
-    src/plugin_loader.cpp    # PluginLoader: dlopen+dlsym+manifest read (plan #229)
+    src/plugin_loader.cpp           # PluginLoader: dlopen+dlsym+manifest read (plan #229)
+    src/plugin_loader_registry.cpp  # PluginLoaderRegistry: ABI+version+name+deps gates (plan #230)
 )
 
 # EASTL is the substrate container/string/variant library per PHILOSOPHY §11.

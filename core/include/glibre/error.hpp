@@ -50,6 +50,21 @@ enum class Error : std::uint16_t {
     // Maps to plugin-abi.md §"Failure Modes" step 2: required symbol missing.
     // After dlclose, the loader aborts without further steps.
     PluginMissingEntryPoint,
+    // Loader step 5: engine version older than manifest.min_engine_version.
+    // Maps to plugin-abi.md §"Failure Modes" step 5.
+    // After dlclose, the loader aborts without further steps.
+    // Added by plan #230 (ABI hash + version + name + deps gates).
+    PluginEngineTooOld,
+    // Loader step 6: a plugin with the same name is already registered.
+    // Maps to plugin-abi.md §"Failure Modes" step 6.
+    // After dlclose, the loader aborts without further steps.
+    // Added by plan #230.
+    PluginNameCollision,
+    // Loader step 7: a dependency listed in manifest.depends_on is not yet
+    // registered.  Maps to plugin-abi.md §"Failure Modes" step 7.
+    // After dlclose, the loader aborts without further steps.
+    // Added by plan #230.
+    PluginDependencyMissing,
 };
 }  // namespace core
 
