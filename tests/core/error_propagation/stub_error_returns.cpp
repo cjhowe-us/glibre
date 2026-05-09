@@ -10,15 +10,19 @@
 //     Under -fno-exceptions the only observable exit from this function is a
 //     normal return; any throw would std::terminate instead.
 //
-//   glibre_test_context_write(char* buf, size_t buf_size)
-//     Constructs a glibre::Error with a known ErrorContext (file/line/detail)
-//     and serialises the three string fields into the caller-supplied buffer
-//     as a flat GlibreTestContextTransfer POD.  Returns true on success, false
-//     if buf is null or too small.
-//
 //   glibre_test_error_code()
 //     Returns the uint16_t underlying value of core::Error::PluginInitFailed,
 //     used by the host to verify the enumerator passes through unchanged.
+//
+//   glibre_test_context_write(char* buf, size_t buf_size)
+//     Constructs a glibre::Result<void> via std::unexpected(glibre::Error{...})
+//     — an actual std::expected / std::unexpected round-trip — then extracts
+//     .error().where() and serialises the three string fields into the
+//     caller-supplied buffer as a flat GlibreTestContextTransfer POD.
+//     The line field is populated with __LINE__ at the construction site so
+//     the host can verify a positive, non-zero source location without coupling
+//     to a hand-mirrored magic constant.
+//     Returns true on success, false if buf is null or too small.
 //
 // Compilation requirements:
 //   -fno-exceptions (error-model.md §Decision 3)
@@ -63,11 +67,11 @@ struct GlibreTestContextTransfer {
     char   detail[kDetailMax]; // null-terminated
 };
 
-// Sentinel values baked into the stub so the host can check them by value.
-// They are string literals whose storage lives in the stub's .rodata — valid
-// for the lifetime of the loaded dylib.
+// Sentinel string values baked into the stub so the host can check them.
+// There is no kSentinelLine constant — the line is captured via __LINE__ at
+// the ErrorContext construction site (see glibre_test_context_write below),
+// removing the fragile host-side magic number that required hand-mirroring.
 inline constexpr const char* kSentinelFile   = "stub_error_returns.cpp";
-inline constexpr int         kSentinelLine   = 99;
 inline constexpr const char* kSentinelDetail = "PluginInitFailed-context-sentinel";
 
 }  // namespace
@@ -80,7 +84,7 @@ inline constexpr const char* kSentinelDetail = "PluginInitFailed-context-sentine
 //
 // The variant index of the first arm (core::Error) in glibre::Error::Variant
 // is 0.  The host side checks for exactly 0 to verify that the C-ABI boundary
-// sees a core::Error (not a render::Error or tools::Error).
+// sees a core::Error (not a render::Error or other context error).
 //
 // The function signature is a plain C int32_t (no C++ templates cross ABI)
 // so this can be called via dlsym + function-pointer cast.
@@ -94,7 +98,8 @@ int32_t glibre_test_error_discriminant() noexcept {
     );
 
     // r is an error; extract the variant index of its error alternative.
-    // eastl::variant_index is the 0-based index of the active alternative.
+    // eastl::variant::index() returns the zero-based position of the active
+    // alternative.
     const std::size_t idx = r.error().code().index();
 
     // Return as int32_t (plain C integer) — safe for C-ABI crossing.
@@ -117,9 +122,16 @@ uint16_t glibre_test_error_code() noexcept {
 // ---------------------------------------------------------------------------
 // glibre_test_context_write
 //
-// Constructs a glibre::Error with a known ErrorContext (sentinel file/line/
-// detail) and serialises the three string fields into a GlibreTestContextTransfer
-// POD written to the caller-supplied buffer.
+// Constructs a glibre::Result<void> via std::unexpected(glibre::Error{...}),
+// then reads .error().where() to verify the ErrorContext survives the
+// std::expected / std::unexpected round-trip (error-model.md §Decision 1).
+// Serialises the three string fields into a GlibreTestContextTransfer POD
+// written to the caller-supplied buffer.
+//
+// The line field is set to __LINE__ at the construction site so the host can
+// check a positive, non-zero source location without relying on a hand-
+// mirrored magic constant.  The host verifies line > 0; it does NOT compare
+// to a specific integer.
 //
 // Parameters:
 //   buf      — host-allocated buffer; must point to at least
@@ -137,21 +149,26 @@ bool glibre_test_context_write(char* buf, std::size_t buf_size) noexcept {
         return false;
     }
 
-    // Construct a glibre::Error with the sentinel ErrorContext.
-    // The eastl::string_view members reference .rodata strings in this TU.
+    // Populate ErrorContext with sentinel values.
+    // Line is __LINE__ at this exact call site — no hand-mirrored constant.
     glibre::ErrorContext ctx;
     ctx.file   = eastl::string_view{kSentinelFile};
-    ctx.line   = kSentinelLine;
+    ctx.line   = __LINE__;  // captures the source line of this assignment
     ctx.detail = eastl::string_view{kSentinelDetail};
 
-    glibre::Error err{glibre::core::Error::PluginInitFailed, ctx};
+    // Round-trip through std::unexpected so the test verifies that
+    // glibre::Result<void> carries ErrorContext through .error().where().
+    // This is the actual contract under test (error-model.md §Decision 1).
+    glibre::Result<void> r = std::unexpected(
+        glibre::Error{glibre::core::Error::PluginInitFailed, ctx}
+    );
 
-    // Serialise into the flat transfer struct and memcpy into buf.
+    // Extract fields via .error().where() — the actual propagation path.
     GlibreTestContextTransfer transfer{};
-    transfer.line = err.where().line;
+    transfer.line = r.error().where().line;
 
-    const eastl::string_view file_view   = err.where().file;
-    const eastl::string_view detail_view = err.where().detail;
+    const eastl::string_view file_view   = r.error().where().file;
+    const eastl::string_view detail_view = r.error().where().detail;
 
     const std::size_t file_copy   = std::min(file_view.size(),   kFileMax - 1u);
     const std::size_t detail_copy = std::min(detail_view.size(), kDetailMax - 1u);
