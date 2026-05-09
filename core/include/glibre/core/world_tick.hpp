@@ -36,13 +36,13 @@ namespace glibre::core {
 // ---------------------------------------------------------------------------
 // Forward declaration — World is the ECS root aggregate.
 //
-// The real definition lands in the ECS/World plan.  advance_world_tick()
-// takes World& so that Phase::Present can pass the real world instance
-// when the ECS plan merges without changing the signature here.
+// The real definition lands in the ECS/World plan.  For MVP, Phase::Present
+// calls advance_world_tick(WorldTick&) directly (see frame_loop.cpp).
 //
-// For MVP the FrameLoop stub calls advance_world_tick with a WorldTick&
-// directly (see frame_loop.cpp); the World& overload is available for
-// future callers once World is defined.
+// FOLLOWUP(ecs-world): add advance_world_tick(World&) overload that
+// delegates to advance_world_tick(w.tick()) once World carries a tick()
+// accessor. No forward-declaration is shipped here until World is defined;
+// adding it prematurely would create a phantom promise visible in headers.
 // ---------------------------------------------------------------------------
 
 // MVP-era WorldTick — forward-compatible tick descriptor.
@@ -53,7 +53,11 @@ namespace glibre::core {
 //                 (one per tick).  When the ECS-owned ChangeTick lands, this
 //                 field will be replaced or aliased to the real type.
 struct WorldTick {
-    std::uint64_t value{0};        // frame ordinal
+    std::uint64_t value{0};  // frame ordinal
+    // FOLLOWUP(ecs-world): replace with typed `ChangeTick change_tick` once
+    // the ECS plan ships `struct ChangeTick { u64 value; }` per SPEC §2/§4.1.
+    // For MVP this u64 carries the same advance rate as `value` (one per tick)
+    // and is a forward-compatible stand-in for the typed value object.
     std::uint64_t change_tick{0};  // mutable-access counter (ECS ChangeTick MVP stand-in)
 };
 

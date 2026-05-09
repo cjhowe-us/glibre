@@ -280,13 +280,9 @@ TEST_CASE("core/frame_loop: tick_does_not_advance_when_phase_8_refuses", "[core]
     CHECK(loop.frame_counter() == 1u);
     CHECK(loop.world_tick().value == 1u);
 #else
-    // Non-GLIBRE_TESTING builds: the injection API is not available.
-    // The test still verifies that a clean tick advances both counters
-    // (redundant with present_advances_tick_exactly_once but keeps CI green).
-    FrameLoop loop;
-    auto result = loop.tick();
-    REQUIRE(result.has_value());
-    CHECK(loop.frame_counter() == 1u);
-    CHECK(loop.world_tick().value == 1u);
+    // Non-GLIBRE_TESTING builds: the phase-8 injection API is unavailable so
+    // the refusal path cannot be exercised. Skip rather than run a redundant
+    // clean-tick assertion that masks the gap.
+    SKIP("test requires -DGLIBRE_TESTING; phase-8 fault injection not available in this build");
 #endif
 }
