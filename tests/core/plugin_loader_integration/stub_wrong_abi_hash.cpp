@@ -33,6 +33,14 @@
 // 64 hex chars (32 blake3 bytes) — all 'f' sentinel that never matches any
 // real glibre_types_abi_hash() value.  The noop plugin uses all-zero; this
 // stub uses all-f to be visually distinct in test output.
+//
+// Sentinel-hash hygiene note (round-1 review, LOW finding):
+//   An all-f string is syntactically valid blake3 hex and has negligible
+//   (2^-256) probability of colliding with a real codegen-produced digest.
+//   If the project ever adopts deterministic-seeded hash testing, sentinel
+//   hashes used by test stubs should migrate to a reserved-sentinel namespace
+//   documented in reviews/decisions/plugin-abi.md.  Track via the deferred
+//   spike opened as part of round-1 review response (refs #232 MED-1 followup).
 // ---------------------------------------------------------------------------
 
 extern "C" [[gnu::visibility("default")]]

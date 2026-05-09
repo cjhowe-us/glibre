@@ -23,12 +23,24 @@
 //   GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH — stub with NO required symbols
 //   GLIBRE_STUB_WRONG_ABI_DYLIB_PATH  — stub with WRONG ABI hash symbol
 //
+// Build contract: GLIBRE_NOOP_DYLIB_PATH and GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH
+// are defined by CMakeLists.txt only when the corresponding targets exist
+// (i.e. GLIBRE_BUILD_EXAMPLES=ON, plan #229 plugin_loader subdir present).
+// If a future build omits either target the dependent test reports FAIL rather
+// than SKIP so the DoD-vs-execution divergence is visible in CI output
+// rather than silently masked.  This is intentional: these tests are part of
+// the DoD for #232 and must execute — a SKIP means coverage is missing.
+//
 // Design constraints:
 //   • -fno-exceptions (error-model.md §Decision 3).
 //   • EASTL for containers and string_view (PHILOSOPHY §11).
 //   • Each test owns its own PluginLoaderRegistry (not a singleton).
-//   • Tests that require a dylib path skip gracefully when the path macro is
-//     not defined.
+//
+// Coverage vs. plugin-abi.md §"Loader Sequence":
+//   Loader steps covered by this PR:  1, 2, 4, 6 (failure), 1–4 + 6–7 (success).
+//   Steps 3 (manifest_invalid), 5 (engine_too_old), 7 (dependency_missing):
+//     deferred to follow-up plans filed as part of round-1 review response.
+//   Steps 8, 9, 10, 11: depend on plan #231 (register + migrate); deferred.
 //
 // Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" steps 1–7,
 //            §"Failure Modes → core::Error" table.
@@ -141,7 +153,12 @@ TEST_CASE("integration_dlopen_failure_propagates", "[core][integration]") {
 
 TEST_CASE("integration_missing_symbol_propagates", "[core][integration]") {
 #ifndef GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH
-    SKIP("GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH not defined; rebuild with full test suite");
+    // FAIL rather than SKIP: this test is part of the DoD for #232.
+    // A missing macro means the CMake integration is incomplete — that is a
+    // build configuration error, not a valid skip condition.
+    // Rebuild with the tests/core/plugin_loader subdir in scope (plan #229).
+    FAIL("GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH not defined — "
+         "rebuild with tests/core/plugin_loader subdir (plan #229 target required)");
 #else
     const eastl::string_view stub_path{GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH};
     REQUIRE_FALSE(stub_path.empty());
@@ -179,7 +196,11 @@ TEST_CASE("integration_missing_symbol_propagates", "[core][integration]") {
 
 TEST_CASE("integration_abi_hash_mismatch_propagates", "[core][integration]") {
 #ifndef GLIBRE_STUB_WRONG_ABI_DYLIB_PATH
-    SKIP("GLIBRE_STUB_WRONG_ABI_DYLIB_PATH not defined; rebuild with full test suite");
+    // GLIBRE_STUB_WRONG_ABI_DYLIB_PATH is injected unconditionally by
+    // CMakeLists.txt (not conditional on any target guard).  Reaching this
+    // branch would indicate a CMake misconfiguration — fail loudly.
+    FAIL("GLIBRE_STUB_WRONG_ABI_DYLIB_PATH not defined — "
+         "this macro is unconditional; check CMakeLists.txt for glibre-plugin-stub-wrong-abi");
 #else
     const eastl::string_view stub_path{GLIBRE_STUB_WRONG_ABI_DYLIB_PATH};
     REQUIRE_FALSE(stub_path.empty());
@@ -258,7 +279,12 @@ TEST_CASE("integration_abi_hash_mismatch_propagates", "[core][integration]") {
 
 TEST_CASE("integration_name_collision_propagates", "[core][integration]") {
 #ifndef GLIBRE_NOOP_DYLIB_PATH
-    SKIP("GLIBRE_NOOP_DYLIB_PATH not defined; build with GLIBRE_BUILD_EXAMPLES=ON");
+    // FAIL rather than SKIP: this test is part of the DoD for #232.
+    // A missing macro means the noop plugin was not built (GLIBRE_BUILD_EXAMPLES=OFF
+    // or examples/plugins/ subdir not included).  That is a build configuration
+    // error for this test suite — fail loudly so CI surfaces it.
+    FAIL("GLIBRE_NOOP_DYLIB_PATH not defined — "
+         "rebuild with GLIBRE_BUILD_EXAMPLES=ON (noop plugin required for #232 DoD)");
 #else
     const eastl::string_view noop_path{GLIBRE_NOOP_DYLIB_PATH};
     REQUIRE_FALSE(noop_path.empty());
@@ -309,25 +335,35 @@ TEST_CASE("integration_name_collision_propagates", "[core][integration]") {
 // ===========================================================================
 // Test: integration_happy_path_loads_and_validates
 //
-// Exercises loader steps 1–4 and 6 along the success path:
-//   1. PluginLoader::open(noop_path) → success.
+// Exercises loader steps 1–4 and 6 along the success path, plus step 7
+// vacuously (depends_on is empty — no deps to resolve):
+//   1. PluginLoader::open(noop_path) → success (dlopen + dlsym).
 //   2. abi_hash(), register_fn() accessors return valid values.
 //   3. PluginLoaderRegistry::validate_all() with matching expected_abi_hash,
 //      correct engine version, no prior registrations, no deps →
 //      has_value() == true.
 //   4. register_plugin() succeeds; loaded_count() == 1.
 //
+// Steps NOT exercised here:
+//   • Step 3 (manifest deserialization) — awaits manifest_invalid plan.
+//   • Step 5 (engine_too_old check)     — awaits engine_too_old plan.
+//   • Step 7 non-vacuously              — awaits dependency_missing plan.
+//   • Steps 8 (drain), 9 (register()) — await plan #231 (register + migrate).
+//
 // This test catches regressions where unit-test mocking masks an integration
 // failure (e.g. dlsym resolving the right symbol name but to a wrong type,
 // or the registry gate logic depending on state that mocks pre-seed).
 //
-// Refs: plugin-abi.md §"Loader Sequence" steps 1–7 (success path).
+// Refs: plugin-abi.md §"Loader Sequence" steps 1–4, 6–7 (success path).
 // DoD: unit_test_named: integration_happy_path_loads_and_validates
 // ===========================================================================
 
 TEST_CASE("integration_happy_path_loads_and_validates", "[core][integration]") {
 #ifndef GLIBRE_NOOP_DYLIB_PATH
-    SKIP("GLIBRE_NOOP_DYLIB_PATH not defined; build with GLIBRE_BUILD_EXAMPLES=ON");
+    // FAIL rather than SKIP: this test is part of the DoD for #232.
+    // See integration_name_collision_propagates for the same rationale.
+    FAIL("GLIBRE_NOOP_DYLIB_PATH not defined — "
+         "rebuild with GLIBRE_BUILD_EXAMPLES=ON (noop plugin required for #232 DoD)");
 #else
     const eastl::string_view noop_path{GLIBRE_NOOP_DYLIB_PATH};
     REQUIRE_FALSE(noop_path.empty());
@@ -359,7 +395,7 @@ TEST_CASE("integration_happy_path_loads_and_validates", "[core][integration]") {
     // Gate 1b: symbol value    == expected → pass.
     // Gate 2:  min_engine_version {0,1,0} ≤ host {1,0,0} → pass.
     // Gate 3:  "glibre.integration.happy" not yet registered → pass.
-    // Gate 4:  depends_on is empty → pass.
+    // Gate 4:  depends_on is empty → pass (step 7 vacuously satisfied).
     auto validate_result = registry.validate_all(
         manifest,
         eastl::string_view{kNoopAbiHash},                         // expected hash
