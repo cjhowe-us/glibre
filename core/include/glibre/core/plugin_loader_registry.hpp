@@ -1,15 +1,15 @@
 #pragma once
 // core/include/glibre/core/plugin_loader_registry.hpp
 //
-// PluginLoaderRegistry — tracks loaded plugins and enforces the four
-// compatibility gates described in reviews/decisions/plugin-abi.md
-// §"Loader Sequence" steps 4–7.
+// PluginLoaderRegistry — tracks loaded plugins and enforces the compatibility
+// gates described in reviews/decisions/plugin-abi.md §"Loader Sequence"
+// steps 4–7.
 //
 // This class is NOT a singleton; callers own the registry value.  In
 // production the engine owns one instance per process.  In tests,
 // each TEST_CASE constructs its own independent registry.
 //
-// Gates enforced (in order):
+// Gates enforced (in order, steps 4–7):
 //   1. ABI hash gate (step 4) — two sub-checks in plugin-abi.md §step 4 order:
 //      a) validate_manifest_abi_hash: manifest.abi_hash == expected_abi_hash.
 //      b) validate_symbol_abi_hash:   symbol value == expected_abi_hash.
@@ -28,10 +28,11 @@
 //      every entry in manifest.depends_on must already be registered.
 //      Missing → core::Error::PluginDependencyMissing.
 //
-// Out of scope (plan #231):
-//   - glibre_plugin_register invocation
-//   - schedule rebuild
-//   - migrate / hot-reload
+// Post-gate actions (steps 9–11) live in plugin_loader_actions.hpp as free
+// functions.  They are free functions — not methods here — because they do
+// not read or mutate this class's registry-of-records state (loaded_ map and
+// host_engine_version_).  Mixing registry-of-records state with loader-
+// procedure logic would introduce a second reason to change this class (SRP).
 //
 // PHILOSOPHY §11: EASTL replaces std:: for runtime data structures.
 // std:: is retained for std::expected (Result alias) and std::filesystem.

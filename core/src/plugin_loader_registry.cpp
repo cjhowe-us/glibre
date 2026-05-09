@@ -5,12 +5,14 @@
 // Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" steps 4–7
 //            and §"Failure Modes → core::Error".
 //
-// Plan: #230 (ABI hash + version + name + deps gates).
-// Out of scope: dlopen/dlsym (plan #229), register + rebuild + migrate (#231).
+// Plans: #230 (ABI hash + version + name + deps gates, steps 4–7).
+// Out of scope: dlopen/dlsym (plan #229); post-gate actions 9–11
+//   (plugin_loader_actions.cpp, plan #231).
 
 #include "glibre/core/plugin_loader_registry.hpp"
 
 #include <cstddef>
+#include <cstdint>
 
 namespace glibre::core {
 

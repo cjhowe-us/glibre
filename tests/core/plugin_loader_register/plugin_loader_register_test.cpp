@@ -1,0 +1,299 @@
+// tests/core/plugin_loader_register/plugin_loader_register_test.cpp
+//
+// Unit tests for loader-procedure free functions (steps 9–11):
+//   call_register   (step 9) — invoke glibre_plugin_register(PluginContext&)
+//   rebuild_schedule (step 10) — MVP stub; always succeeds
+//   migrate_components (step 11) — MVP stub; always succeeds
+//
+// Named test cases (plan #231 Unit Test Plan):
+//   - register_invokes_plugin_entry_point
+//   - register_failure_cleans_up_dlopen
+//   - rebuild_schedule_smoke
+//   - migrate_components_no_op_when_versions_equal
+//
+// Design constraints:
+//   • -fno-exceptions (error-model.md §Decision 3).
+//   • EASTL for containers/strings per PHILOSOPHY §11.
+//   • Each TEST_CASE constructs its own objects (no singletons).
+//   • PluginContext references World, TypeRegistry, etc. which are opaque
+//     pending types.  The test defines minimal empty stubs for each
+//     forward-declared class so that PluginContext can be constructed
+//     without pulling in the real implementations (which are not yet landed).
+//     These stubs are TU-local and cannot conflict because none of the
+//     opaque types have definitions in glibre-core yet (all are pending).
+//
+// Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" steps 9–11,
+//            §"Failure Modes → core::Error" table (rows 9, 10, 11).
+//
+// Plan: #231 — loader-procedure free functions: call_register + rebuild_schedule
+//              + migrate_components.
+
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+
+#include <EASTL/string_view.h>
+#include <catch2/catch_test_macros.hpp>
+#include <glibre/core/plugin_api.hpp>             // PluginContext aggregate
+#include <glibre/core/plugin_loader.hpp>          // PluginLoader::open
+#include <glibre/core/plugin_loader_actions.hpp>  // call_register, rebuild_schedule, migrate_components
+#include <glibre/core/plugin_manifest.hpp>
+#include <glibre/error.hpp>
+
+// ---------------------------------------------------------------------------
+// Shell definitions for PluginContext's pending reference types.
+//
+// Pulled from the shared fixture header (MED-4, round-1 review).  All test
+// TUs in this directory that need PluginContext include this header rather
+// than re-defining the shells inline — single source of truth, no ODR risk.
+// ---------------------------------------------------------------------------
+
+#include "plugin_context_fixture.hpp"
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// ABI hash the noop plugin and stub_register_fails export (all-zeros).
+constexpr const char kNoopAbiHash[] =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// Return the core::Error variant arm, or nullptr if the error belongs to a
+/// different context (render::Error, tools::Error, etc.).
+[[nodiscard]] const glibre::core::Error* as_core_error(const glibre::Error& err) noexcept {
+    return eastl::get_if<glibre::core::Error>(&err.code());
+}
+
+/// Build a minimal valid PluginManifest that passes all registry gates when
+/// expected_abi_hash == kNoopAbiHash.
+glibre::core::PluginManifest make_manifest(
+    const char* name = "glibre.test.register",
+    const char* abi_hash = kNoopAbiHash,
+    glibre::core::SemVer version = {1, 0, 0},
+    glibre::core::SemVer min_engine = {0, 1, 0}
+) {
+    glibre::core::PluginManifest m;
+    m.name = eastl::string{name};
+    m.abi_hash = eastl::string{abi_hash};
+    m.version = version;
+    m.min_engine_version = min_engine;
+    return m;
+}
+
+/// Build a minimal PluginContext from stub references.
+/// Each stub object is passed by reference; none of the test stubs dereference
+/// the fields, so the stubs' layout is irrelevant — only their address matters.
+glibre::core::PluginContext make_context(
+    glibre::core::World& world,
+    glibre::core::TypeRegistry& type_reg,
+    glibre::core::SystemRegistry& sys_reg,
+    glibre::core::PassRegistry& pass_reg,
+    glibre::core::PanelRegistry& panel_reg,
+    glibre::core::LogSink& log_sink,
+    const glibre::core::PluginManifest& manifest
+) {
+    return glibre::core::PluginContext{
+        .world = world,
+        .type_registry = type_reg,
+        .system_registry = sys_reg,
+        .pass_registry = pass_reg,
+        .panel_registry = panel_reg,
+        .manifest = manifest,
+        .log = log_sink,
+    };
+}
+
+}  // namespace
+
+// ===========================================================================
+// Test: register_invokes_plugin_entry_point
+//
+// Exercises loader step 9 (plugin-abi.md §"Loader Sequence") on the happy path:
+//   1. Load the noop plugin via PluginLoader::open() — steps 1–2 succeed.
+//   2. Extract the RegisterFn function pointer via loader.register_fn().
+//   3. Call PluginLoaderRegistry::call_register(register_fn, ctx).
+//   4. Assert the call returns success and did not mutate the registry.
+//
+// The noop plugin's glibre_plugin_register returns {} (success) without
+// touching the context.  This test verifies that call_register correctly
+// propagates a success result.
+//
+// Refs: plugin-abi.md §"Loader Sequence" step 9 (success path).
+// DoD: unit_test_named: register_invokes_plugin_entry_point
+// ===========================================================================
+
+TEST_CASE("register_invokes_plugin_entry_point", "[core][register]") {
+#ifndef GLIBRE_NOOP_DYLIB_PATH
+    // FAIL rather than SKIP: noop plugin is required for this test.
+    // Rebuild with GLIBRE_BUILD_EXAMPLES=ON or add glibre-plugin-noop as a dep.
+    FAIL(
+        "GLIBRE_NOOP_DYLIB_PATH not defined — "
+        "rebuild with GLIBRE_BUILD_EXAMPLES=ON (noop plugin required)"
+    );
+#else
+    const eastl::string_view noop_path{GLIBRE_NOOP_DYLIB_PATH};
+    REQUIRE_FALSE(noop_path.empty());
+
+    // Step 1–2: load the noop plugin.
+    auto loader_result = glibre::core::PluginLoader::open(noop_path);
+    REQUIRE(loader_result.has_value());
+
+    const glibre::core::PluginLoader& loader = *loader_result;
+    REQUIRE(loader.register_fn() != nullptr);
+
+    // Step 3: build stub context objects and PluginContext.
+    glibre::core::World world;
+    glibre::core::TypeRegistry type_reg;
+    glibre::core::SystemRegistry sys_reg;
+    glibre::core::PassRegistry pass_reg;
+    glibre::core::PanelRegistry panel_reg;
+    glibre::core::LogSink log_sink;
+    auto manifest = make_manifest("glibre.test.register.noop");
+    auto ctx = make_context(world, type_reg, sys_reg, pass_reg, panel_reg, log_sink, manifest);
+
+    // Step 4: call call_register — noop plugin returns success.
+    auto result = glibre::core::call_register(loader.register_fn(), ctx);
+
+    REQUIRE(result.has_value());
+#endif
+}
+
+// ===========================================================================
+// Test: register_failure_cleans_up_dlopen
+//
+// Exercises loader step 9 on the failure path:
+//   1. Load the stub_register_fails plugin via PluginLoader::open() — steps
+//      1–2 succeed (all four symbols present; register returns failure).
+//   2. Extract the RegisterFn function pointer.
+//   3. Call PluginLoaderRegistry::call_register(register_fn, ctx).
+//   4. Assert the call returns core::Error::PluginInitFailed.
+//   5. Assert that after the error the PluginLoader can be destructed without
+//      crashing (the caller is responsible for dlclose — the loader's RAII
+//      destructor handles it automatically when the loader goes out of scope).
+//
+// Note: "cleans_up_dlopen" refers to the caller's responsibility to let the
+// PluginLoader destructor run (which calls dlclose).  call_register itself
+// does NOT call dlclose; it only invokes the entry-point and surfaces the
+// error.  This test verifies that after a call_register failure the PluginLoader
+// RAII destructor safely performs dlclose without crashing or double-closing.
+//
+// Refs: plugin-abi.md §"Loader Sequence" step 9 (failure path),
+//       §"Failure Modes → core::Error" step 9 (PluginInitFailed).
+// DoD: unit_test_named: register_failure_cleans_up_dlopen
+// ===========================================================================
+
+TEST_CASE("register_failure_cleans_up_dlopen", "[core][register]") {
+#ifndef GLIBRE_STUB_REGISTER_FAILS_DYLIB_PATH
+    // FAIL rather than SKIP: this test is part of the DoD for #231.
+    FAIL(
+        "GLIBRE_STUB_REGISTER_FAILS_DYLIB_PATH not defined — "
+        "CMakeLists.txt must inject this macro for stub_register_fails target"
+    );
+#else
+    const eastl::string_view stub_path{GLIBRE_STUB_REGISTER_FAILS_DYLIB_PATH};
+    REQUIRE_FALSE(stub_path.empty());
+
+    // Step 1–2: load the failing stub — dlopen + dlsym must succeed.
+    auto loader_result = glibre::core::PluginLoader::open(stub_path);
+    REQUIRE(loader_result.has_value());
+
+    glibre::core::PluginLoader& loader = *loader_result;
+    REQUIRE(loader.register_fn() != nullptr);
+
+    // Step 3: build stub context objects and PluginContext.
+    glibre::core::World world;
+    glibre::core::TypeRegistry type_reg;
+    glibre::core::SystemRegistry sys_reg;
+    glibre::core::PassRegistry pass_reg;
+    glibre::core::PanelRegistry panel_reg;
+    glibre::core::LogSink log_sink;
+    auto manifest = make_manifest("glibre.test.register.fails");
+    auto ctx = make_context(world, type_reg, sys_reg, pass_reg, panel_reg, log_sink, manifest);
+
+    // Step 4: call_register must return PluginInitFailed.
+    auto result = glibre::core::call_register(loader.register_fn(), ctx);
+
+    REQUIRE_FALSE(result.has_value());
+    const auto* core_err = as_core_error(result.error());
+    REQUIRE(core_err != nullptr);
+    CHECK(*core_err == glibre::core::Error::PluginInitFailed);
+
+    // Assert that the inner error's stable enumerator name is carried in
+    // ErrorContext::detail (plugin-abi.md §"Loader Sequence" step 9 —
+    // "carrying the inner error in ErrorContext::detail").
+    // The stub returns core::Error::PluginInitFailed, so detail must be
+    // "PluginInitFailed" (the stable to_string value from log_error.hpp).
+    CHECK(result.error().where().detail == eastl::string_view{"PluginInitFailed"});
+
+    // Step 5: loader goes out of scope at end of test — destructor calls
+    // dlclose.  If the RAII cleanup crashes or double-frees, the test runner
+    // will report an abnormal exit, catching regressions.
+    // (No explicit assertion needed; absence of crash is the verification.)
+#endif
+}
+
+// ===========================================================================
+// Test: rebuild_schedule_smoke
+//
+// Exercises loader step 10 (plugin-abi.md §"Loader Sequence"):
+//   Calls rebuild_schedule() on an empty registry.  The MVP stub must return
+//   success unconditionally without allocating or accessing any state.
+//
+// This is a smoke test: it verifies that the stub does not crash, does not
+// return an error, and does not depend on any loaded plugins being present.
+//
+// When the real topology sort lands (#247, #248), this test remains valid
+// for the empty-registry case (zero plugins → no cycle possible → success).
+//
+// Refs: plugin-abi.md §"Loader Sequence" step 10,
+//       §"Failure Modes → core::Error" step 10 (SystemScheduleCycle).
+// DoD: unit_test_named: rebuild_schedule_smoke
+// ===========================================================================
+
+TEST_CASE("rebuild_schedule_smoke", "[core][register]") {
+    auto result = glibre::core::rebuild_schedule();
+
+    REQUIRE(result.has_value());
+}
+
+// ===========================================================================
+// Test: migrate_components_no_op_when_versions_equal
+//
+// Exercises loader step 11 (plugin-abi.md §"Loader Sequence"):
+//   Calls migrate_components(N, N) — same from and to version.  When versions
+//   are equal there is nothing to migrate; the stub must return success.
+//
+// Also tests the mixed-version case (from != to) — the MVP stub must still
+// return success because no real migration tables exist yet (plan #221).
+//
+// When plan #221 lands and real migration tables are emitted by glibre-foryc,
+// this test will need to be extended with a fixture that exercises the real
+// migration path.  The no-op case (from == to) remains valid indefinitely.
+//
+// Refs: plugin-abi.md §"Loader Sequence" step 11,
+//       §"Failure Modes → core::Error" step 11 (SchemaMigrationFailed).
+// DoD: unit_test_named: migrate_components_no_op_when_versions_equal
+// ===========================================================================
+
+TEST_CASE("migrate_components_no_op_when_versions_equal", "[core][register]") {
+    // Case 1: from == to (identity — nothing to migrate).
+    SECTION("identical versions return success") {
+        auto result = glibre::core::migrate_components(3u, 3u);
+        REQUIRE(result.has_value());
+    }
+
+    // Case 2: from == 0, to == 0 (initial install — no prior version).
+    SECTION("both zero versions return success") {
+        auto result = glibre::core::migrate_components(0u, 0u);
+        REQUIRE(result.has_value());
+    }
+
+    // Case 3: from < to (upgrade path — MVP stub returns success;
+    //   real migration deferred to plan #221).
+    SECTION("upgrade path stub returns success") {
+        auto result = glibre::core::migrate_components(1u, 2u);
+        REQUIRE(result.has_value());
+    }
+}

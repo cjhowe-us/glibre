@@ -43,8 +43,10 @@
 //   }
 //
 // Usage — engine/loader side (plan #229):
-//   using RegisterFn = glibre::Result<void>(*)(glibre::core::PluginContext&);
-//   auto* fn = reinterpret_cast<RegisterFn>(dlsym(handle, "glibre_plugin_register"));
+//   // RegisterFn typedef is in plugin_api.hpp (not plugin_entry.hpp):
+//   #include <glibre/core/plugin_api.hpp>
+//   glibre::core::RegisterFn fn{nullptr};
+//   std::memcpy(&fn, &sym_register, sizeof(fn));
 //
 // Compilation requirements:
 //   -fno-exceptions (error-model.md §Decision 3)
@@ -128,23 +130,12 @@ glibre::Result<void> glibre_plugin_unregister(glibre::core::PluginContext& ctx) 
 
 #pragma clang diagnostic pop
 
-namespace glibre::core {
-
 // ---------------------------------------------------------------------------
-// RegisterFn — single source of truth for the loader-side function-pointer
-// type corresponding to glibre_plugin_register.
+// RegisterFn — canonical definition lives in plugin_api.hpp.
 //
-// noexcept is intentionally absent: since C++17, noexcept is part of the
-// function type.  A plugin compiled against a header that omits noexcept
-// would produce a different function pointer type, causing a silent mismatch.
-// The loader (plugin_loader.hpp) imports this alias; plugin_entry.hpp (this
-// file) is the canonical definition.
-//
-// Usage (loader side):
-//   #include <glibre/core/plugin_entry.hpp>
-//   RegisterFn fn{nullptr};
-//   std::memcpy(&fn, &sym_register, sizeof(fn));
+// plugin_entry.hpp is the plugin-author-facing header; the loader-side
+// function-pointer typedef was moved to plugin_api.hpp so that engine TUs
+// (the loader) can obtain RegisterFn without pulling in the extern "C"
+// prototype declarations below.  See plugin_api.hpp for the typedef and
+// rationale (LOW-7, round-1 review).
 // ---------------------------------------------------------------------------
-using RegisterFn = glibre::Result<void> (*)(glibre::core::PluginContext&);
-
-}  // namespace glibre::core
