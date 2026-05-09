@@ -5,9 +5,16 @@
 //
 // Usage:
 //   glibre-foryc --in <dir> --out <dir> --stamp <file> [--emit=header|--emit=migration]
+//   glibre-foryc --file <path> --out <dir> --stamp <file> --emit=manifest
 //
-// Walks <in>/**/*.fory, parses each file into the schema IR, validates
-// basic shape (unique tags, version >= 1, builtins-only types).
+// In directory mode (--in <dir>):
+//   Walks <in>/**/*.fory, parses each file into the schema IR, validates
+//   basic shape (unique tags, version >= 1, builtins-only types).
+//
+// In single-file mode (--file <path>):
+//   Processes exactly one .fory file.  Required for --emit=manifest to avoid
+//   races when multiple plugins invoke the helper concurrently (MED-7 fix,
+//   reviews/decisions/plugin-abi.md §"Manifest source-of-truth").
 //
 // Without --emit: parse-only mode (plan #219 behaviour).  Emits a
 //   one-line summary to stdout per file and touches <stamp> on success.
@@ -27,11 +34,20 @@
 // For schemas with no migration declarations the table is empty (size=0).
 // See reviews/decisions/fory-codegen.md §"Migration Mechanic".
 //
+// With --emit=manifest: emits <out>/manifest.cpp with the four C-ABI symbols
+//   required by the glibre plugin loader (plugin-abi.md §"Plugin file shape"):
+//   - glibre_plugin_manifest      — extern "C" const uint8_t*, serialized blob
+//   - glibre_plugin_manifest_size — extern "C" size_t, blob byte length
+//   - glibre_plugin_abi_hash      — extern "C" const char*, 64-char blake3 hex
+//   - glibre_plugin_name          — extern "C" const char*, fully-qualified name
+//   Use --file <path> (single file) rather than --in <dir> to avoid races.
+//
 // Output path derivation (fory-codegen.md §Pipeline):
 //   source:  <in>/<rel>/<file>.fory
 //   for each TypeDecl with FQN "glibre.<ns>.<Type>":
 //     output: <out>/include/glibre/types/<rel>/<Type>.hpp   (--emit=header)
 //     output: <out>/src/<rel>/<stem>_migrations.cpp         (--emit=migration)
+//     output: <out>/manifest.cpp                            (--emit=manifest)
 //
 // Exits non-zero on parse or emit failure, with a diagnostic on stderr.
 
@@ -47,6 +63,7 @@
 #include <EASTL/vector.h>
 
 #include "emit_header.hpp"
+#include "emit_manifest.hpp"
 #include "emit_migration.hpp"
 #include "parser.hpp"
 
@@ -61,6 +78,7 @@ enum class EmitMode {
     None,       // parse-only (default, plan #219 behaviour)
     Header,     // emit C++ header per TypeDecl (plan #220)
     Migration,  // emit C++ migration dispatcher per .fory file (plan #221)
+    Manifest,   // emit manifest.cpp per plugin.fory (plan #225)
 };
 
 // -----------------------------------------------------------------------
@@ -68,7 +86,8 @@ enum class EmitMode {
 // -----------------------------------------------------------------------
 
 struct Args {
-    fs::path in_dir{};
+    fs::path in_dir{};       // directory to scan recursively (--in)
+    fs::path single_file{};  // single .fory file to process (--file)
     fs::path out_dir{};
     fs::path stamp_file{};
     EmitMode emit{EmitMode::None};
@@ -76,7 +95,8 @@ struct Args {
 
 static void usage(std::string_view program) {
     std::cerr << "Usage: " << program
-              << " --in <dir> --out <dir> --stamp <file> [--emit=header|--emit=migration]\n";
+              << " --in <dir>|--file <path> --out <dir> --stamp <file>"
+                 " [--emit=header|--emit=migration|--emit=manifest]\n";
 }
 
 static eastl::optional<Args> parse_args(int argc, char** argv) {
@@ -94,6 +114,11 @@ static eastl::optional<Args> parse_args(int argc, char** argv) {
             if (!v)
                 return eastl::nullopt;
             args.in_dir = *v;
+        } else if (tok == "--file") {
+            auto v = next();
+            if (!v)
+                return eastl::nullopt;
+            args.single_file = *v;
         } else if (tok == "--out") {
             auto v = next();
             if (!v)
@@ -108,12 +133,19 @@ static eastl::optional<Args> parse_args(int argc, char** argv) {
             args.emit = EmitMode::Header;
         } else if (tok == "--emit=migration") {
             args.emit = EmitMode::Migration;
+        } else if (tok == "--emit=manifest") {
+            args.emit = EmitMode::Manifest;
         } else {
             std::cerr << "foryc: unknown flag: " << tok << "\n";
             return eastl::nullopt;
         }
     }
-    if (args.in_dir.empty() || args.out_dir.empty() || args.stamp_file.empty())
+    // Either --in (directory) or --file (single file) must be provided, not both.
+    if (args.in_dir.empty() == args.single_file.empty()) {
+        std::cerr << "foryc: exactly one of --in or --file must be specified\n";
+        return eastl::nullopt;
+    }
+    if (args.out_dir.empty() || args.stamp_file.empty())
         return eastl::nullopt;
     return args;
 }
@@ -340,6 +372,142 @@ static bool emit_migration_for_schema(
 }
 
 // -----------------------------------------------------------------------
+// Manifest emission helper (plan #225)
+//
+// For a given parsed Schema, builds a PluginManifestSpec from the schema
+// metadata and emits a manifest.cpp to <out_dir>/manifest.cpp.
+//
+// Spec derivation from parsed Schema (HIGH-3 fix):
+//   - name         ← FQN of the first TypeDecl, minus its last component
+//                    (e.g. schema "glibre.render.PluginManifest" → "glibre.render").
+//                    This is the canonical plugin id per plugin-abi.md §"name" field.
+//   - version      ← {0, 1, 0} — not encoded in the MVP .fory IR; deferred to #231.
+//   - abi_hash     ← 64 hex zeros placeholder; the real value is the blake3 over
+//                    all schema sources (plan #222, not yet landed).  The loader
+//                    falls back to the sidecar path per plugin-abi.md §"Step-3
+//                    deferral" until #222 lands and this is wired up.
+//   - min_engine_version ← {0, 0, 0} — not encoded in MVP .fory IR; deferred to #231.
+//   - depends_on   ← empty — not encoded in MVP .fory IR; deferred to #231.
+//
+// Returns true on success, false on error (diagnostic already printed).
+// -----------------------------------------------------------------------
+
+// Derive a plugin name from a TypeDecl FQN by stripping the last dot-separated
+// component.
+//
+// Convention (enforced here): the first TypeDecl in a PluginManifest schema MUST
+// have an FQN whose last component is exactly "PluginManifest", e.g.
+// "glibre.render.PluginManifest" → plugin name "glibre.render".
+// plugin-abi.md §"name" field: "fully-qualified plugin id (e.g. glibre.render)".
+//
+// Returns an empty string and sets *error_msg if the FQN does not end with
+// ".PluginManifest" (including the case of a single-component FQN with no dot,
+// which would otherwise silently return the FQN as-is and produce a non-namespaced
+// plugin name).
+static eastl::string
+plugin_name_from_fqn(const eastl::string& fqn, eastl::string* error_msg) noexcept {
+    static constexpr std::string_view kSuffix = ".PluginManifest";
+    const std::string_view fqn_sv{fqn.data(), fqn.size()};
+
+    if (!fqn_sv.ends_with(kSuffix)) {
+        if (error_msg) {
+            *error_msg = eastl::string(
+                std::format(
+                    "first TypeDecl FQN \"{}\" does not end with \".PluginManifest\"; "
+                    "rename the type or update the schema convention",
+                    fqn_sv
+                )
+                    .c_str()
+            );
+        }
+        return {};
+    }
+
+    // Strip the ".PluginManifest" suffix to get the plugin namespace id.
+    return fqn.substr(0, fqn.size() - kSuffix.size());
+}
+
+static bool emit_manifest_for_file(
+    const Schema& schema, const fs::path& source_path, const fs::path& out_dir
+) noexcept {
+    if (schema.types.empty()) {
+        std::cerr << std::format(
+            "foryc: {}: schema has zero TypeDecl blocks\n", source_path.native()
+        );
+        return false;
+    }
+
+    // Derive plugin name from the first TypeDecl's FQN (not from the path stem).
+    // Convention: FQN must end with ".PluginManifest" (enforced by plugin_name_from_fqn).
+    // e.g. "glibre.render.PluginManifest" → plugin name "glibre.render".
+    // plugin-abi.md §"name" field: "fully-qualified plugin id (e.g. glibre.render)".
+    eastl::string fqn_error;
+    const eastl::string plugin_fqn = plugin_name_from_fqn(schema.types[0].fqn, &fqn_error);
+    if (plugin_fqn.empty()) {
+        std::cerr << std::format(
+            "foryc: {}: {}\n",
+            source_path.native(),
+            std::string_view{fqn_error.data(), fqn_error.size()}
+        );
+        return false;
+    }
+
+    // Parse `since` version from the first TypeDecl if present.
+    // Format: "MAJOR.MINOR.PATCH" (e.g. "0.1.0").  Defaults to {0,1,0} if absent
+    // or unparseable — version/min_engine_version are not yet in the .fory IR
+    // (deferred to plan #231).
+    ManifestSemVer version{0, 1, 0};
+
+    PluginManifestSpec spec;
+    spec.name = plugin_fqn;
+    spec.version = version;
+    // abi_hash: plan #222 (schema source-hash + ABI hash export) has not landed.
+    // Emit a 64-zero hex placeholder so the loader can distinguish a zero hash
+    // (pre-#222) from a missing field.  The loader falls back to the sidecar path
+    // per plugin-abi.md §"Step-3 deferral".  When #222 lands, wire
+    // compute_collection_abi_hash() + format_as_full_hex() here.
+    spec.abi_hash = eastl::string(64, '0');
+    spec.min_engine_version = ManifestSemVer{0, 0, 0};
+    // depends_on: not yet encoded in the .fory IR; deferred to plan #231.
+
+    auto result = emit_manifest(spec);
+    if (!result) {
+        std::cerr << std::format(
+            "foryc: {}: manifest emit failed: {}\n",
+            source_path.native(),
+            error_name(result.error())
+        );
+        return false;
+    }
+
+    std::error_code ec;
+    fs::create_directories(out_dir, ec);
+    if (ec) {
+        std::cerr << std::format(
+            "foryc: cannot create output directory {}: {}\n", out_dir.native(), ec.message()
+        );
+        return false;
+    }
+
+    const fs::path out_path = out_dir / "manifest.cpp";
+    std::ofstream ofs{out_path, std::ios::trunc};
+    if (!ofs) {
+        std::cerr << std::format("foryc: cannot write manifest: {}\n", out_path.native());
+        return false;
+    }
+
+    const eastl::string& text = *result;
+    ofs.write(text.data(), static_cast<std::streamsize>(text.size()));
+    if (!ofs) {
+        std::cerr << std::format("foryc: write error: {}\n", out_path.native());
+        return false;
+    }
+
+    std::cout << std::format("foryc: emitted manifest {}\n", out_path.native());
+    return true;
+}
+
+// -----------------------------------------------------------------------
 // Entry point
 // -----------------------------------------------------------------------
 
@@ -351,16 +519,29 @@ int main(int argc, char** argv) {
     }
     const auto& args = *args_opt;
 
-    // Collect all .fory files under args.in_dir recursively.
+    // Collect .fory files to process.
+    // In single-file mode (--file), process exactly the one specified path.
+    // In directory mode (--in), recursively scan for all .fory files.
     eastl::vector<fs::path> schema_files;
-    if (!fs::exists(args.in_dir) || !fs::is_directory(args.in_dir)) {
-        std::cerr << "foryc: --in directory does not exist: " << args.in_dir << "\n";
-        return EXIT_FAILURE;
-    }
-
-    for (const auto& entry : fs::recursive_directory_iterator(args.in_dir)) {
-        if (entry.is_regular_file() && entry.path().extension() == ".fory")
-            schema_files.push_back(entry.path());
+    if (!args.single_file.empty()) {
+        // Single-file mode (MED-7 fix): used for --emit=manifest to avoid races
+        // when multiple plugins invoke the codegen helper concurrently.
+        if (!fs::exists(args.single_file) || !fs::is_regular_file(args.single_file)) {
+            std::cerr << "foryc: --file path does not exist or is not a file: " << args.single_file
+                      << "\n";
+            return EXIT_FAILURE;
+        }
+        schema_files.push_back(args.single_file);
+    } else {
+        // Directory mode: scan recursively.
+        if (!fs::exists(args.in_dir) || !fs::is_directory(args.in_dir)) {
+            std::cerr << "foryc: --in directory does not exist: " << args.in_dir << "\n";
+            return EXIT_FAILURE;
+        }
+        for (const auto& entry : fs::recursive_directory_iterator(args.in_dir)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".fory")
+                schema_files.push_back(entry.path());
+        }
     }
 
     // Parse (and optionally emit) each file.
@@ -383,9 +564,15 @@ int main(int argc, char** argv) {
                 return EXIT_FAILURE;
         }
 
-        // Emit migration dispatcher if requested.
+        // Emit migration dispatcher if requested (plan #221).
         if (args.emit == EmitMode::Migration) {
             if (!emit_migration_for_schema(schema, path, args.in_dir, args.out_dir))
+                return EXIT_FAILURE;
+        }
+
+        // Emit manifest.cpp if requested (plan #225).
+        if (args.emit == EmitMode::Manifest) {
+            if (!emit_manifest_for_file(schema, path, args.out_dir))
                 return EXIT_FAILURE;
         }
     }
