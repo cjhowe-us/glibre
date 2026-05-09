@@ -40,8 +40,14 @@ namespace {
 // 8 bytes of garbage — not a valid Fory header.
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays)
 constexpr std::byte kGarbageBlob[8]{
-    std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE}, std::byte{0xEF},
-    std::byte{0xCA}, std::byte{0xFE}, std::byte{0xBA}, std::byte{0xBE},
+    std::byte{0xDE},
+    std::byte{0xAD},
+    std::byte{0xBE},
+    std::byte{0xEF},
+    std::byte{0xCA},
+    std::byte{0xFE},
+    std::byte{0xBA},
+    std::byte{0xBE},
 };
 
 }  // namespace

@@ -554,8 +554,8 @@ TEST_CASE("integration_engine_too_old_propagates", "[core][integration]") {
     // Gates 1a and 1b pass because the manifest and symbol both carry kNoopAbiHash.
     auto result = registry.validate_all(
         manifest,
-        eastl::string_view{kNoopAbiHash},   // expected
-        eastl::string_view{kNoopAbiHash},   // symbol value (noop hash)
+        eastl::string_view{kNoopAbiHash},  // expected
+        eastl::string_view{kNoopAbiHash},  // symbol value (noop hash)
         noop_path
     );
 
