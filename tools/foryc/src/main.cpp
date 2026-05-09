@@ -2,11 +2,12 @@
 // tools/foryc/src/main.cpp
 //
 // glibre-foryc — .fory schema compiler host tool (plan #219 skeleton,
-//                plan #222 adds --emit=abi-hash).
+//                plan #222 adds --emit=abi-hash + --emit=collection-abi-hash).
 //
 // Usage:
 //   glibre-foryc --in <dir> --out <dir> --stamp <file>
 //   glibre-foryc --in <dir> --emit=abi-hash
+//   glibre-foryc --in <dir> --emit=collection-abi-hash
 //
 // --in <dir> --out <dir> --stamp <file>:
 //   Walks <in>/**/*.fory, parses each file into the schema IR, validates
@@ -14,12 +15,20 @@
 //   one-line summary to stdout per file, touches <stamp> on success.
 //
 // --in <dir> --emit=abi-hash:
-//   Walks <in>/**/*.fory, computes the per-file source-hash and the
-//   per-schema collection ABI hash, prints one tab-separated line per
-//   schema file:
-//     <schema_path>\t<source_hash_hex>\t<abi_hash_hex>
-//   (hex is 16-char lowercase representing the first 8 bytes of the 32-byte
-//   blake3 digest, suitable for embedding as uint64_t literals.)
+//   Walks <in>/**/*.fory, computes the per-file source-hash, prints one
+//   tab-separated line per schema file:
+//     <schema_path>\t<source_hash_hex_64>
+//   (hex is 64-char lowercase full blake3 digest, per plugin-abi.md §2.)
+//   Useful for populating ComponentDecl.schema_hash in the manifest (#225).
+//
+// --in <dir> --emit=collection-abi-hash:
+//   Walks <in>/**/*.fory, computes the engine-wide ABI hash over ALL schemas
+//   using the locked recipe from plugin-abi.md §"ABI Hash Function":
+//     For each TypeDecl (fqn-sorted): fqn || ":" || version_le(4) || ":" || src_digest(32)
+//     Separated by "\n", no trailing newline.
+//   Prints a single line:
+//     <COLLECTION>\t<global_abi_hash_hex_64>
+//   This is the value embedded as glibre_types_abi_hash in _abi_hash.cpp.
 //
 // Exits non-zero on parse failure, with a diagnostic on stderr.
 //
@@ -51,8 +60,9 @@ using namespace glibre::tools::foryc;
 // -----------------------------------------------------------------------
 
 enum class EmitMode {
-    Default,  // --out + --stamp (original mode)
-    AbiHash,  // --emit=abi-hash
+    Default,           // --out + --stamp (original mode)
+    AbiHash,           // --emit=abi-hash (per-file source hashes)
+    CollectionAbiHash, // --emit=collection-abi-hash (engine-wide hash)
 };
 
 // -----------------------------------------------------------------------
@@ -70,7 +80,9 @@ static void usage(std::string_view program) {
     std::cerr << "Usage: " << program
               << " --in <dir> --out <dir> --stamp <file>\n"
                  "   or: "
-              << program << " --in <dir> --emit=abi-hash\n";
+              << program << " --in <dir> --emit=abi-hash\n"
+                 "   or: "
+              << program << " --in <dir> --emit=collection-abi-hash\n";
 }
 
 static eastl::optional<Args> parse_args(int argc, char** argv) {
@@ -100,6 +112,8 @@ static eastl::optional<Args> parse_args(int argc, char** argv) {
             args.stamp_file = *v;
         } else if (tok == "--emit=abi-hash") {
             args.emit_mode = EmitMode::AbiHash;
+        } else if (tok == "--emit=collection-abi-hash") {
+            args.emit_mode = EmitMode::CollectionAbiHash;
         } else {
             std::cerr << "foryc: unknown flag: " << tok << "\n";
             return eastl::nullopt;
@@ -146,26 +160,42 @@ static std::string_view error_name(const glibre::Error& e) noexcept {
 }
 
 // -----------------------------------------------------------------------
-// abi-hash emit mode
+// Shared helper: collect and sort .fory files under in_dir.
+// -----------------------------------------------------------------------
+
+static eastl::optional<eastl::vector<fs::path>>
+collect_schema_files(const fs::path& in_dir) {
+    if (!fs::exists(in_dir) || !fs::is_directory(in_dir)) {
+        std::cerr << "foryc: --in directory does not exist: " << in_dir << "\n";
+        return eastl::nullopt;
+    }
+    eastl::vector<fs::path> files;
+    for (const auto& entry : fs::recursive_directory_iterator(in_dir)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".fory")
+            files.push_back(entry.path());
+    }
+    eastl::sort(files.begin(), files.end());
+    return files;
+}
+
+// -----------------------------------------------------------------------
+// abi-hash emit mode: per-file source hashes (64-char full hex).
+// Useful for ComponentDecl.schema_hash in the plugin manifest (#225).
 // -----------------------------------------------------------------------
 
 static int run_abi_hash(const fs::path& in_dir) {
-    eastl::vector<fs::path> schema_files;
-    if (!fs::exists(in_dir) || !fs::is_directory(in_dir)) {
-        std::cerr << "foryc: --in directory does not exist: " << in_dir << "\n";
+    auto files_opt = collect_schema_files(in_dir);
+    if (!files_opt)
         return EXIT_FAILURE;
-    }
+    const eastl::vector<fs::path>& schema_files = *files_opt;
 
-    for (const auto& entry : fs::recursive_directory_iterator(in_dir)) {
-        if (entry.is_regular_file() && entry.path().extension() == ".fory")
-            schema_files.push_back(entry.path());
+    if (schema_files.empty()) {
+        std::cout << "foryc: no .fory files found in " << in_dir.native() << "\n";
+        return EXIT_SUCCESS;
     }
-
-    // Sort for deterministic output order.
-    eastl::sort(schema_files.begin(), schema_files.end());
 
     for (const auto& path : schema_files) {
-        // Read raw source for source-hash.
+        // Read raw source.
         std::ifstream ifs{path};
         if (!ifs) {
             std::cerr << std::format("foryc: cannot open: {}\n", path.native());
@@ -175,7 +205,7 @@ static int run_abi_hash(const fs::path& in_dir) {
         buf << ifs.rdbuf();
         const std::string raw_source = buf.str();
 
-        // Compute source-hash.
+        // Compute source-hash (raw bytes, no canonicalization).
         auto src_hash_r = compute_source_hash(raw_source);
         if (!src_hash_r) {
             std::cerr << std::format(
@@ -184,7 +214,59 @@ static int run_abi_hash(const fs::path& in_dir) {
             );
             return EXIT_FAILURE;
         }
-        const eastl::string src_hex = format_as_uint64_hex(*src_hash_r);
+        // 64-char wire-format hex (plugin-abi.md §2).
+        const eastl::string src_hex = format_as_full_hex(*src_hash_r);
+
+        // Print tab-separated: path, source_hash_64.
+        std::cout << path.native() << "\t"
+                  << std::string_view(src_hex.data(), src_hex.size()) << "\n";
+    }
+
+    return EXIT_SUCCESS;
+}
+
+// -----------------------------------------------------------------------
+// collection-abi-hash emit mode: single engine-wide ABI hash (64-char).
+// This is the value embedded as glibre_types_abi_hash in _abi_hash.cpp.
+// Recipe: plugin-abi.md §"ABI Hash Function" point 1.
+// -----------------------------------------------------------------------
+
+static int run_collection_abi_hash(const fs::path& in_dir) {
+    auto files_opt = collect_schema_files(in_dir);
+    if (!files_opt)
+        return EXIT_FAILURE;
+    const eastl::vector<fs::path>& schema_files = *files_opt;
+
+    if (schema_files.empty()) {
+        std::cout << "foryc: no .fory files found in " << in_dir.native() << "\n";
+        return EXIT_SUCCESS;
+    }
+
+    eastl::vector<Schema> schemas;
+    eastl::vector<Blake3Digest> source_digests;
+    schemas.reserve(schema_files.size());
+    source_digests.reserve(schema_files.size());
+
+    for (const auto& path : schema_files) {
+        // Read raw source.
+        std::ifstream ifs{path};
+        if (!ifs) {
+            std::cerr << std::format("foryc: cannot open: {}\n", path.native());
+            return EXIT_FAILURE;
+        }
+        std::ostringstream buf;
+        buf << ifs.rdbuf();
+        const std::string raw_source = buf.str();
+
+        // Compute raw source-hash.
+        auto src_hash_r = compute_source_hash(raw_source);
+        if (!src_hash_r) {
+            std::cerr << std::format(
+                "foryc: source-hash failed for {}: {}\n", path.native(),
+                error_name(src_hash_r.error())
+            );
+            return EXIT_FAILURE;
+        }
 
         // Parse schema IR.
         auto parse_r = parse_file(path);
@@ -195,26 +277,21 @@ static int run_abi_hash(const fs::path& in_dir) {
             return EXIT_FAILURE;
         }
 
-        // Compute ABI hash.
-        auto abi_hash_r = compute_abi_hash(*parse_r);
-        if (!abi_hash_r) {
-            std::cerr << std::format(
-                "foryc: abi-hash failed for {}: {}\n", path.native(),
-                error_name(abi_hash_r.error())
-            );
-            return EXIT_FAILURE;
-        }
-        const eastl::string abi_hex = format_as_uint64_hex(*abi_hash_r);
-
-        // Print tab-separated: path, source_hash, abi_hash.
-        std::cout << path.native() << "\t"
-                  << std::string_view(src_hex.data(), src_hex.size()) << "\t"
-                  << std::string_view(abi_hex.data(), abi_hex.size()) << "\n";
+        source_digests.push_back(*src_hash_r);
+        schemas.push_back(std::move(*parse_r));
     }
 
-    if (schema_files.empty()) {
-        std::cout << "foryc: no .fory files found in " << in_dir.native() << "\n";
+    // Compute collection ABI hash over all schemas.
+    auto coll_hash_r = compute_collection_abi_hash(schemas, source_digests);
+    if (!coll_hash_r) {
+        std::cerr << "foryc: collection-abi-hash computation failed\n";
+        return EXIT_FAILURE;
     }
+    const eastl::string coll_hex = format_as_full_hex(*coll_hash_r);
+
+    // Print: <COLLECTION>\t<64-char hex>
+    std::cout << "<COLLECTION>\t"
+              << std::string_view(coll_hex.data(), coll_hex.size()) << "\n";
 
     return EXIT_SUCCESS;
 }
@@ -287,6 +364,9 @@ int main(int argc, char** argv) {
 
     if (args.emit_mode == EmitMode::AbiHash)
         return run_abi_hash(args.in_dir);
+
+    if (args.emit_mode == EmitMode::CollectionAbiHash)
+        return run_collection_abi_hash(args.in_dir);
 
     return run_default(args);
 }

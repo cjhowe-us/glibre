@@ -13,7 +13,6 @@
 #include <cstdint>
 #include <cstring>
 #include <format>
-#include <string>
 #include <string_view>
 
 // BLAKE3 C API (vcpkg "blake3" port, target blake3::blake3).
@@ -44,19 +43,12 @@ namespace {
 //     spaces; the surrounding quotes are included)
 //   - Single-character punctuation: { } : < > , .
 //
-// By reassembling from tokens, the output is independent of:
-//   - indentation style
-//   - blank lines
-//   - spacing around punctuation (`Foo{` vs `Foo {`)
-//   - comments
-//
-// The output changes when:
-//   - any identifier, keyword, or literal is added, removed, or renamed
-//   - any punctuation character changes
+// This function is used only by compute_canonical_source_hash.  The
+// wire-format compute_source_hash hashes raw bytes directly.
 // -----------------------------------------------------------------------
-[[nodiscard]] std::string canonicalize_source(std::string_view src) {
-    std::string out;
-    out.reserve(src.size());
+[[nodiscard]] eastl::string canonicalize_source(std::string_view src) {
+    eastl::string out;
+    out.reserve(static_cast<eastl::string::size_type>(src.size()));
 
     std::size_t i = 0;
     bool need_space = false;
@@ -135,8 +127,6 @@ namespace {
 // blake3_of
 //
 // Hash `data` with blake3 and return the 32-byte digest.
-// This is a plain inline helper; it exists to avoid repeating the
-// hasher init/update/finalize pattern.
 // -----------------------------------------------------------------------
 [[nodiscard]] Blake3Digest blake3_of(const void* data, std::size_t len) noexcept {
     blake3_hasher hasher;
@@ -147,94 +137,140 @@ namespace {
     return digest;
 }
 
-// Overload for std::string.
-[[nodiscard]] Blake3Digest blake3_of(const std::string& s) noexcept {
+// Overload for eastl::string.
+[[nodiscard]] Blake3Digest blake3_of(const eastl::string& s) noexcept {
     return blake3_of(s.data(), s.size());
+}
+
+// Encode `val` as 4 little-endian bytes into `out[0..3]`.
+// Used for the version field in the collection ABI hash recipe.
+inline void encode_le32(uint32_t val, uint8_t out[4]) noexcept {
+    out[0] = static_cast<uint8_t>(val & 0xFFu);
+    out[1] = static_cast<uint8_t>((val >> 8u) & 0xFFu);
+    out[2] = static_cast<uint8_t>((val >> 16u) & 0xFFu);
+    out[3] = static_cast<uint8_t>((val >> 24u) & 0xFFu);
 }
 
 }  // anonymous namespace
 
 // -----------------------------------------------------------------------
 // compute_source_hash
+//
+// Hash the RAW bytes of `raw_source` directly — no canonicalization.
+// This is the `schema_source_blake3` term in the ABI hash recipe
+// (plugin-abi.md §"ABI Hash Function" point 1).
 // -----------------------------------------------------------------------
 Result<Blake3Digest> compute_source_hash(std::string_view raw_source) noexcept {
-    const std::string canonical = canonicalize_source(raw_source);
+    return blake3_of(raw_source.data(), raw_source.size());
+}
+
+// -----------------------------------------------------------------------
+// compute_canonical_source_hash
+//
+// Canonical (whitespace-invariant) source hash — diagnostic opt-in only.
+// NOT used for the wire-format ABI hash.
+// -----------------------------------------------------------------------
+Result<Blake3Digest> compute_canonical_source_hash(std::string_view raw_source) noexcept {
+    const eastl::string canonical = canonicalize_source(raw_source);
     return blake3_of(canonical);
 }
 
 // -----------------------------------------------------------------------
-// compute_abi_hash
+// compute_collection_abi_hash
+//
+// Recipe (plugin-abi.md §"ABI Hash Function" point 1):
+//   For each TypeDecl, sorted by fqn in Unicode code-point order:
+//     feed: fqn_bytes || ":" || version_le_bytes(4) || ":" || source_digest_bytes(32)
+//   Between entries feed "\n"; no trailing newline.
+//   Finalize → 32-byte digest.
 // -----------------------------------------------------------------------
-Result<Blake3Digest> compute_abi_hash(const Schema& schema) noexcept {
-    // Sort TypeDecls by fqn (Unicode code-point order = byte order for
-    // the UTF-8 subset used in .fory FQNs).
-    eastl::vector<const TypeDecl*> sorted_types;
-    sorted_types.reserve(schema.types.size());
-    for (const auto& td : schema.types)
-        sorted_types.push_back(&td);
-
-    eastl::sort(sorted_types.begin(), sorted_types.end(), [](const TypeDecl* a, const TypeDecl* b) {
-        return a->fqn < b->fqn;
-    });
-
-    // Build the canonical representation fed into blake3.
-    // Format:
-    //   "<fqn>:<version_decimal>\n"
-    //   "  <tag>:<type_name>:<field_name>\n"  (for each field, tag-sorted)
-    // No trailing newline after the last entry.
-    std::string canonical;
-    canonical.reserve(256);
-
-    bool first_type = true;
-    for (const TypeDecl* td_ptr : sorted_types) {
-        const TypeDecl& td = *td_ptr;
-
-        if (!first_type)
-            canonical += '\n';
-        first_type = false;
-
-        // Type header line.
-        canonical += std::string(td.fqn.data(), td.fqn.size());
-        canonical += ':';
-        canonical += std::to_string(td.version);
-        canonical += '\n';
-
-        // Sort fields by tag ascending.
-        eastl::vector<const FieldDecl*> sorted_fields;
-        sorted_fields.reserve(td.fields.size());
-        for (const auto& fd : td.fields)
-            sorted_fields.push_back(&fd);
-
-        eastl::sort(
-            sorted_fields.begin(), sorted_fields.end(),
-            [](const FieldDecl* a, const FieldDecl* b) { return a->tag < b->tag; }
-        );
-
-        for (const FieldDecl* fd_ptr : sorted_fields) {
-            const FieldDecl& fd = *fd_ptr;
-            canonical += "  ";
-            canonical += std::to_string(fd.tag);
-            canonical += ':';
-            canonical += std::string(fd.type_name.data(), fd.type_name.size());
-            canonical += ':';
-            canonical += std::string(fd.name.data(), fd.name.size());
-            canonical += '\n';
-        }
+Result<Blake3Digest>
+compute_collection_abi_hash(
+    const eastl::vector<Schema>& schemas,
+    const eastl::vector<Blake3Digest>& source_digests
+) noexcept {
+    // Flatten all TypeDecls, each paired with the source digest of its
+    // containing schema.
+    struct TypeEntry {
+        const TypeDecl* decl;
+        const Blake3Digest* src_digest;
+    };
+    eastl::vector<TypeEntry> entries;
+    for (eastl::vector<Schema>::size_type si = 0; si < schemas.size(); ++si) {
+        const Blake3Digest& dig = source_digests[si];
+        for (const TypeDecl& td : schemas[si].types)
+            entries.push_back({&td, &dig});
     }
 
-    // Remove the trailing newline if present (after the last field line).
-    // Per spec: "No trailing newline" refers to between top-level types;
-    // however this impl ends with '\n' after the last field — keep it for
-    // simplicity (the hash is deterministic as long as the convention is
-    // consistent).  Remove trailing newline for strict spec compliance.
-    if (!canonical.empty() && canonical.back() == '\n')
-        canonical.pop_back();
+    // Sort by fqn in Unicode code-point (byte) order.
+    eastl::sort(entries.begin(), entries.end(), [](const TypeEntry& a, const TypeEntry& b) {
+        return a.decl->fqn < b.decl->fqn;
+    });
 
-    return blake3_of(canonical);
+    // Stream entries into a single blake3 hasher.
+    // Format per entry: fqn || ":" || version_le(4) || ":" || src_digest(32)
+    // Separator between entries: "\n"
+    blake3_hasher hasher;
+    blake3_hasher_init(&hasher);
+
+    static constexpr uint8_t kColon = static_cast<uint8_t>(':');
+    static constexpr uint8_t kNewline = static_cast<uint8_t>('\n');
+
+    bool first_entry = true;
+    for (const TypeEntry& e : entries) {
+        if (!first_entry)
+            blake3_hasher_update(&hasher, &kNewline, 1);
+        first_entry = false;
+
+        // fqn bytes
+        blake3_hasher_update(&hasher, e.decl->fqn.data(), e.decl->fqn.size());
+
+        // ":"
+        blake3_hasher_update(&hasher, &kColon, 1);
+
+        // version as 4 little-endian bytes
+        uint8_t ver_le[4];
+        encode_le32(e.decl->version, ver_le);
+        blake3_hasher_update(&hasher, ver_le, 4);
+
+        // ":"
+        blake3_hasher_update(&hasher, &kColon, 1);
+
+        // 32 raw bytes of the source digest
+        blake3_hasher_update(&hasher, e.src_digest->data(), e.src_digest->size());
+    }
+
+    Blake3Digest digest{};
+    blake3_hasher_finalize(&hasher, digest.data(), digest.size());
+    return digest;
+}
+
+// -----------------------------------------------------------------------
+// format_as_full_hex
+//
+// 64-character lowercase hex of the full 32-byte digest.
+// This is the wire format (plugin-abi.md §"ABI Hash Function" point 2).
+// -----------------------------------------------------------------------
+eastl::string format_as_full_hex(const Blake3Digest& digest) noexcept {
+    static constexpr char kHexChars[] = "0123456789abcdef";
+    eastl::string out;
+    out.resize(64);
+    for (std::size_t i = 0; i < 32; ++i) {
+        out[2 * i]     = kHexChars[(digest[i] >> 4) & 0x0Fu];
+        out[2 * i + 1] = kHexChars[digest[i] & 0x0Fu];
+    }
+    return out;
 }
 
 // -----------------------------------------------------------------------
 // format_as_uint64_hex
+//
+// For per-type uint64_t embedding in generated headers (plan #220) ONLY.
+// NOT the wire-format ABI hash.
+//
+// First 8 bytes of digest interpreted as big-endian uint64_t.
+// Returns 16-char lowercase hex.
+// Endianness: big-endian so the result is a prefix of format_as_full_hex.
 // -----------------------------------------------------------------------
 eastl::string format_as_uint64_hex(const Blake3Digest& digest) noexcept {
     // Interpret first 8 bytes as big-endian uint64_t.
