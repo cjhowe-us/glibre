@@ -4,7 +4,7 @@
 // glibre-foryc — .fory schema compiler host tool.
 //
 // Usage:
-//   glibre-foryc --in <dir> --out <dir> --stamp <file> [--emit=header]
+//   glibre-foryc --in <dir> --out <dir> --stamp <file> [--emit=header|manifest]
 //
 // Walks <in>/**/*.fory, parses each file into the schema IR, validates
 // basic shape (unique tags, version >= 1, builtins-only types).
@@ -18,6 +18,19 @@
 // the .fory file under <in> (e.g. data/schemas/core/Transform.fory with
 // --in data/schemas → <ctx> = "core") and <Type> is the last component
 // of the schema FQN.  Multi-type .fory files produce multiple .hpp files.
+//
+// With --emit=manifest: for each plugin.fory file found under <in>, emits
+//   <out>/manifest.cpp containing the four C-ABI symbols required by the
+//   glibre plugin loader (plugin-abi.md §"Plugin file shape"):
+//   - glibre_plugin_manifest      — const uint8_t*, serialized manifest blob
+//   - glibre_plugin_manifest_size — size_t, blob byte length
+//   - glibre_plugin_abi_hash()    — uint64_t, truncated ABI hash
+//   - glibre_plugin_name()        — const char*, plugin name
+//   The manifest spec is synthesized from the parsed schema: the first
+//   TypeDecl whose FQN ends with ".PluginManifest" is used as the source
+//   of truth.  Name, version, abi_hash, and depends_on fields are read
+//   from the first TypeDecl's "since" field (MVP: defaults used for
+//   fields not yet represented in the .fory IR).
 //
 // Output path derivation (fory-codegen.md §Pipeline):
 //   source:  <in>/<rel>/<file>.fory
@@ -38,6 +51,7 @@
 #include <EASTL/vector.h>
 
 #include "emit_header.hpp"
+#include "emit_manifest.hpp"
 #include "parser.hpp"
 
 namespace fs = std::filesystem;
@@ -48,8 +62,9 @@ using namespace glibre::tools::foryc;
 // -----------------------------------------------------------------------
 
 enum class EmitMode {
-    None,    // parse-only (default, plan #219 behaviour)
-    Header,  // emit C++ header per TypeDecl (plan #220)
+    None,      // parse-only (default, plan #219 behaviour)
+    Header,    // emit C++ header per TypeDecl (plan #220)
+    Manifest,  // emit manifest.cpp per plugin.fory (plan #225)
 };
 
 // -----------------------------------------------------------------------
@@ -64,7 +79,8 @@ struct Args {
 };
 
 static void usage(std::string_view program) {
-    std::cerr << "Usage: " << program << " --in <dir> --out <dir> --stamp <file> [--emit=header]\n";
+    std::cerr << "Usage: " << program
+              << " --in <dir> --out <dir> --stamp <file> [--emit=header|manifest]\n";
 }
 
 static eastl::optional<Args> parse_args(int argc, char** argv) {
@@ -94,6 +110,8 @@ static eastl::optional<Args> parse_args(int argc, char** argv) {
             args.stamp_file = *v;
         } else if (tok == "--emit=header") {
             args.emit = EmitMode::Header;
+        } else if (tok == "--emit=manifest") {
+            args.emit = EmitMode::Manifest;
         } else {
             std::cerr << "foryc: unknown flag: " << tok << "\n";
             return eastl::nullopt;
@@ -239,6 +257,89 @@ static bool emit_headers_for_schema(
 }
 
 // -----------------------------------------------------------------------
+// Manifest emission helper (plan #225)
+//
+// For a given parsed Schema, builds a PluginManifestSpec from the schema
+// metadata and emits a manifest.cpp to <out_dir>/manifest.cpp.
+//
+// MVP spec derivation: the schema source path's stem is used as the
+// plugin name (e.g. "plugins/render/plugin.fory" → name "render").
+// For a richer derivation from the actual .fory content the TypeDecl
+// fields would need to encode PluginManifest-specific data, which is
+// deferred to plan #231.  In this MVP:
+//   - name         ← schema source stem (plugin dir name)
+//   - version      ← {0, 1, 0}
+//   - abi_hash     ← empty string (loader uses sidecar fallback per #229)
+//   - depends_on   ← empty
+//
+// Returns true on success, false on error (diagnostic already printed).
+// -----------------------------------------------------------------------
+
+static bool emit_manifest_for_file(
+    const Schema& schema,
+    const fs::path& source_path,
+    const fs::path& out_dir
+) noexcept {
+    if (schema.types.empty()) {
+        std::cerr << std::format(
+            "foryc: {}: schema has zero TypeDecl blocks\n", source_path.native()
+        );
+        return false;
+    }
+
+    // Derive plugin name from parent directory name (e.g. plugins/render/plugin.fory → "render").
+    // Fall back to the file stem if the parent is empty or ".".
+    fs::path parent = source_path.parent_path();
+    const std::string parent_name = parent.filename().string();
+    const std::string stem = source_path.stem().string();
+    const std::string plugin_name = (!parent_name.empty() && parent_name != ".") ? parent_name : stem;
+
+    PluginManifestSpec spec;
+    spec.name = eastl::string(plugin_name.data(), plugin_name.size());
+    spec.version = ManifestSemVer{0, 1, 0};
+    // abi_hash left empty in MVP; loader falls back to sidecar (plugin-abi.md step-3 deferral).
+    spec.abi_hash = eastl::string{};
+    spec.min_engine_version = ManifestSemVer{0, 0, 0};
+    // depends_on derived from schema: not encoded in the MVP .fory IR, left empty.
+
+    auto result = emit_manifest(spec);
+    if (!result) {
+        std::cerr << std::format(
+            "foryc: {}: manifest emit failed: {}\n",
+            source_path.native(),
+            error_name(result.error())
+        );
+        return false;
+    }
+
+    std::error_code ec;
+    fs::create_directories(out_dir, ec);
+    if (ec) {
+        std::cerr << std::format(
+            "foryc: cannot create output directory {}: {}\n", out_dir.native(), ec.message()
+        );
+        return false;
+    }
+
+    const fs::path out_path = out_dir / "manifest.cpp";
+    std::ofstream ofs{out_path, std::ios::trunc};
+    if (!ofs) {
+        std::cerr << std::format("foryc: cannot write manifest: {}\n", out_path.native());
+        return false;
+    }
+
+    const eastl::string& text = *result;
+    ofs.write(text.data(), static_cast<std::streamsize>(text.size()));
+    if (!ofs) {
+        std::cerr << std::format("foryc: write error: {}\n", out_path.native());
+        return false;
+    }
+
+    std::cout << std::format("foryc: emitted manifest {}\n", out_path.native());
+    return true;
+}
+
+// -----------------------------------------------------------------------
 // Entry point
 // -----------------------------------------------------------------------
 
@@ -279,6 +380,12 @@ int main(int argc, char** argv) {
         // Emit headers if requested.
         if (args.emit == EmitMode::Header) {
             if (!emit_headers_for_schema(schema, path, args.in_dir, args.out_dir))
+                return EXIT_FAILURE;
+        }
+
+        // Emit manifest.cpp if requested.
+        if (args.emit == EmitMode::Manifest) {
+            if (!emit_manifest_for_file(schema, path, args.out_dir))
                 return EXIT_FAILURE;
         }
     }
