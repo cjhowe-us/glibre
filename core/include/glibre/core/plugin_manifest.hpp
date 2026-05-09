@@ -34,6 +34,7 @@
 #include <filesystem>
 
 #include <EASTL/string.h>
+#include <EASTL/string_view.h>
 #include <EASTL/vector.h>
 
 #include "glibre/error.hpp"
@@ -55,11 +56,15 @@ struct SemVer {
     std::uint16_t patch{0};  // tag 3
 
     [[nodiscard]] constexpr bool operator==(const SemVer&) const noexcept = default;
+
     [[nodiscard]] constexpr bool operator<(const SemVer& rhs) const noexcept {
-        if (major != rhs.major) return major < rhs.major;
-        if (minor != rhs.minor) return minor < rhs.minor;
+        if (major != rhs.major)
+            return major < rhs.major;
+        if (minor != rhs.minor)
+            return minor < rhs.minor;
         return patch < rhs.patch;
     }
+
     [[nodiscard]] constexpr bool operator<=(const SemVer& rhs) const noexcept {
         return !(rhs < *this);
     }
@@ -75,9 +80,9 @@ struct SemVer {
 // ---------------------------------------------------------------------------
 
 struct ComponentDecl {
-    eastl::string fqn;           // tag 1
-    eastl::string schema_hash;   // tag 2 — 64-char blake3 hex
-    std::uint8_t  storage_hint;  // tag 3 — archetype=0, sparse=1, singleton=2
+    eastl::string fqn;          // tag 1
+    eastl::string schema_hash;  // tag 2 — 64-char blake3 hex
+    std::uint8_t storage_hint;  // tag 3 — archetype=0, sparse=1, singleton=2
 
     [[nodiscard]] bool operator==(const ComponentDecl&) const noexcept = default;
 };
@@ -95,12 +100,12 @@ struct ComponentDecl {
 // ---------------------------------------------------------------------------
 
 struct SystemDecl {
-    eastl::string               name;    // tag 1
-    std::uint8_t                phase;   // tag 2 — 1..=9
-    eastl::vector<eastl::string> reads;  // tag 3
-    eastl::vector<eastl::string> writes; // tag 4
-    eastl::vector<eastl::string> after;  // tag 5
-    eastl::vector<eastl::string> before; // tag 6
+    eastl::string name;                   // tag 1
+    std::uint8_t phase;                   // tag 2 — 1..=9
+    eastl::vector<eastl::string> reads;   // tag 3
+    eastl::vector<eastl::string> writes;  // tag 4
+    eastl::vector<eastl::string> after;   // tag 5
+    eastl::vector<eastl::string> before;  // tag 6
 
     [[nodiscard]] bool operator==(const SystemDecl&) const noexcept = default;
 };
@@ -119,10 +124,10 @@ struct SystemDecl {
 // ---------------------------------------------------------------------------
 
 struct PassDecl {
-    eastl::string               name;          // tag 1
-    std::uint8_t                render_phase;  // tag 2 — 6 or 7
-    eastl::vector<eastl::string> inputs;       // tag 3
-    eastl::vector<eastl::string> outputs;      // tag 4
+    eastl::string name;                    // tag 1
+    std::uint8_t render_phase;             // tag 2 — 6 or 7
+    eastl::vector<eastl::string> inputs;   // tag 3
+    eastl::vector<eastl::string> outputs;  // tag 4
 
     [[nodiscard]] bool operator==(const PassDecl&) const noexcept = default;
 };
@@ -141,7 +146,7 @@ struct PassDecl {
 struct PanelDecl {
     eastl::string id;     // tag 1
     eastl::string title;  // tag 2
-    std::uint8_t  area;   // tag 3 — docked-area byte enum
+    std::uint8_t area;    // tag 3 — docked-area byte enum
 
     [[nodiscard]] bool operator==(const PanelDecl&) const noexcept = default;
 };
@@ -212,31 +217,47 @@ struct PluginManifest {
     //
     // Errors:
     //   core::Error::PluginManifestNotFound  — path does not exist or is not
-    //     a regular file.
+    //     a regular file.  This arm is new and not listed in the loader-sequence
+    //     table of plugin-abi.md §"Failure Modes → core::Error" because that
+    //     table covers post-dlopen loader steps (steps 1..11); PluginManifest::
+    //     open() is a pre-loader utility used in tests and codegen tooling, so
+    //     its failure arm is a schema-layer addition orthogonal to loader step 3
+    //     (PluginManifestInvalid).
     //   core::Error::PluginManifestInvalid   — file exists but Fory
     //     deserialization fails (corrupt, wrong schema version, truncated).
+    //
+    // Takes eastl::string_view so callers holding string literals, eastl::string,
+    // or std::string do not need to materialise an extra eastl::string copy.
     //
     // Note: implementation stub in core/src/plugin_manifest.cpp; full
     //   deserialization lands when glibre-foryc emits manifest.cpp (#225).
     // -----------------------------------------------------------------------
-    [[nodiscard]] static Result<PluginManifest> open(const eastl::string& path);
+    [[nodiscard]] static Result<PluginManifest> open(eastl::string_view path);
 };
 
 // static_assert: PluginManifest is an aggregate (no user-provided ctor,
 // no private/protected non-static data, no virtual functions, no base
 // classes with private/protected members).  The codegen pipeline requires
 // this property for POD-compatible layout synthesis.
-static_assert(std::is_aggregate_v<PluginManifest>,
-              "PluginManifest must remain an aggregate for codegen compatibility");
-static_assert(std::is_aggregate_v<SemVer>,
-              "SemVer must remain an aggregate for codegen compatibility");
-static_assert(std::is_aggregate_v<ComponentDecl>,
-              "ComponentDecl must remain an aggregate for codegen compatibility");
-static_assert(std::is_aggregate_v<SystemDecl>,
-              "SystemDecl must remain an aggregate for codegen compatibility");
-static_assert(std::is_aggregate_v<PassDecl>,
-              "PassDecl must remain an aggregate for codegen compatibility");
-static_assert(std::is_aggregate_v<PanelDecl>,
-              "PanelDecl must remain an aggregate for codegen compatibility");
+static_assert(
+    std::is_aggregate_v<PluginManifest>,
+    "PluginManifest must remain an aggregate for codegen compatibility"
+);
+static_assert(
+    std::is_aggregate_v<SemVer>, "SemVer must remain an aggregate for codegen compatibility"
+);
+static_assert(
+    std::is_aggregate_v<ComponentDecl>,
+    "ComponentDecl must remain an aggregate for codegen compatibility"
+);
+static_assert(
+    std::is_aggregate_v<SystemDecl>, "SystemDecl must remain an aggregate for codegen compatibility"
+);
+static_assert(
+    std::is_aggregate_v<PassDecl>, "PassDecl must remain an aggregate for codegen compatibility"
+);
+static_assert(
+    std::is_aggregate_v<PanelDecl>, "PanelDecl must remain an aggregate for codegen compatibility"
+);
 
 }  // namespace glibre::core

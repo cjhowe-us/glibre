@@ -9,6 +9,8 @@
 // Scope: schema correctness and open() error paths.
 // Out of scope: Fory serialisation (plan #225), loader sequence (#229..#231).
 
+#include <filesystem>
+
 #include <catch2/catch_test_macros.hpp>
 
 #include "glibre/core/plugin_manifest.hpp"
@@ -22,35 +24,35 @@ using namespace glibre::core;
 
 static PluginManifest make_test_manifest() {
     PluginManifest m;
-    m.name     = "glibre.render";
-    m.version  = SemVer{1, 2, 3};
+    m.name = "glibre.render";
+    m.version = SemVer{1, 2, 3};
     m.abi_hash = "0000000000000000000000000000000000000000000000000000000000000000";
     m.min_engine_version = SemVer{0, 1, 0};
 
     ComponentDecl comp;
-    comp.fqn          = "glibre.render.Camera";
-    comp.schema_hash  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    comp.fqn = "glibre.render.Camera";
+    comp.schema_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     comp.storage_hint = 0;  // archetype
     m.components.push_back(comp);
 
     SystemDecl sys;
-    sys.name  = "CullSystem";
+    sys.name = "CullSystem";
     sys.phase = 6;  // CullExtract per frame-phases.md
     sys.reads.push_back("glibre.render.Camera");
     sys.writes.push_back("glibre.render.DrawList");
     m.systems.push_back(sys);
 
     PassDecl pass;
-    pass.name         = "opaque-pass";
+    pass.name = "opaque-pass";
     pass.render_phase = 7;  // RenderSubmit
     pass.inputs.push_back("glibre.render.DrawList");
     pass.outputs.push_back("glibre.render.BackBuffer");
     m.passes.push_back(pass);
 
     PanelDecl panel;
-    panel.id    = "render-stats";
+    panel.id = "render-stats";
     panel.title = "Render Statistics";
-    panel.area  = 2;
+    panel.area = 2;
     m.panels.push_back(panel);
 
     m.depends_on.push_back("glibre.core");
@@ -78,7 +80,7 @@ TEST_CASE("plugin_manifest_round_trip", "[core][plugin_manifest]") {
     const PluginManifest copy = original;  // NOLINT(performance-unnecessary-copy-initialization)
 
     // Top-level scalar and string fields.
-    REQUIRE(copy.name     == original.name);
+    REQUIRE(copy.name == original.name);
     REQUIRE(copy.abi_hash == original.abi_hash);
 
     // SemVer fields.
@@ -92,31 +94,31 @@ TEST_CASE("plugin_manifest_round_trip", "[core][plugin_manifest]") {
 
     // components vector.
     REQUIRE(copy.components.size() == original.components.size());
-    REQUIRE(copy.components[0].fqn          == original.components[0].fqn);
-    REQUIRE(copy.components[0].schema_hash  == original.components[0].schema_hash);
+    REQUIRE(copy.components[0].fqn == original.components[0].fqn);
+    REQUIRE(copy.components[0].schema_hash == original.components[0].schema_hash);
     REQUIRE(copy.components[0].storage_hint == original.components[0].storage_hint);
 
     // systems vector.
     REQUIRE(copy.systems.size() == original.systems.size());
-    REQUIRE(copy.systems[0].name         == original.systems[0].name);
-    REQUIRE(copy.systems[0].phase        == original.systems[0].phase);
+    REQUIRE(copy.systems[0].name == original.systems[0].name);
+    REQUIRE(copy.systems[0].phase == original.systems[0].phase);
     REQUIRE(copy.systems[0].reads.size() == original.systems[0].reads.size());
-    REQUIRE(copy.systems[0].reads[0]     == original.systems[0].reads[0]);
+    REQUIRE(copy.systems[0].reads[0] == original.systems[0].reads[0]);
 
     // passes vector.
     REQUIRE(copy.passes.size() == original.passes.size());
-    REQUIRE(copy.passes[0].name         == original.passes[0].name);
+    REQUIRE(copy.passes[0].name == original.passes[0].name);
     REQUIRE(copy.passes[0].render_phase == original.passes[0].render_phase);
 
     // panels vector.
     REQUIRE(copy.panels.size() == original.panels.size());
-    REQUIRE(copy.panels[0].id    == original.panels[0].id);
+    REQUIRE(copy.panels[0].id == original.panels[0].id);
     REQUIRE(copy.panels[0].title == original.panels[0].title);
-    REQUIRE(copy.panels[0].area  == original.panels[0].area);
+    REQUIRE(copy.panels[0].area == original.panels[0].area);
 
     // depends_on vector.
     REQUIRE(copy.depends_on.size() == original.depends_on.size());
-    REQUIRE(copy.depends_on[0]     == original.depends_on[0]);
+    REQUIRE(copy.depends_on[0] == original.depends_on[0]);
 
     // Aggregate equality (operator== synthesised from field-by-field comparison).
     REQUIRE(copy == original);
@@ -132,10 +134,20 @@ TEST_CASE("plugin_manifest_round_trip", "[core][plugin_manifest]") {
 // requiring the Fory deserialisation pipeline (plan #225) to be present.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("plugin_manifest_open_returns_not_found_on_missing_path",
-          "[core][plugin_manifest]") {
-    // /tmp is always writable but this particular path is intentionally absent.
-    const auto result = PluginManifest::open("/tmp/glibre_nonexistent_manifest_42.manifest");
+TEST_CASE("plugin_manifest_open_returns_not_found_on_missing_path", "[core][plugin_manifest]") {
+    // Construct a path that is guaranteed not to exist.  Using
+    // std::filesystem::temp_directory_path() keeps this hermetic across CI
+    // environments (avoids hard-coded /tmp which is not portable to all hosts).
+    // The filename uses a UUID-like suffix to avoid collisions between parallel
+    // test shards.
+    const std::filesystem::path absent =
+        std::filesystem::temp_directory_path() / "glibre_nonexistent_manifest_test_r1.manifest";
+    // Belt-and-suspenders: remove if somehow the file was left behind by a
+    // previous run (error_code variant to stay -fno-exceptions compatible).
+    std::error_code ec;
+    std::filesystem::remove(absent, ec);
+
+    const auto result = PluginManifest::open(eastl::string_view{absent.c_str()});
 
     REQUIRE(!result.has_value());
 

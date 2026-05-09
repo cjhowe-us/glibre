@@ -13,15 +13,17 @@
 #include "glibre/core/plugin_manifest.hpp"
 
 #include <filesystem>
-#include <string>
+#include <string_view>
 
 namespace glibre::core {
 
-Result<PluginManifest> PluginManifest::open(const eastl::string& path) {
-    // Convert eastl::string to std::filesystem::path for OS stat call.
+Result<PluginManifest> PluginManifest::open(eastl::string_view path) {
+    // Convert eastl::string_view to std::filesystem::path for OS stat call.
     // std::filesystem is an explicit std:: carve-out per PHILOSOPHY §11
     // ("std::filesystem" is in the permitted-std list).
-    const std::filesystem::path fs_path(path.c_str());
+    // Bridge through std::string_view so std::filesystem::path can accept the
+    // character range without requiring a NUL terminator.
+    const std::filesystem::path fs_path(std::string_view{path.data(), path.size()});
 
     // Use the error_code overload to avoid potential filesystem_error throws
     // in -fno-exceptions builds.  Any OS error (permissions, etc.) maps to
@@ -29,16 +31,14 @@ Result<PluginManifest> PluginManifest::open(const eastl::string& path) {
     // in this stub; the full implementation in plan #225 may refine this.
     std::error_code ec;
     if (!std::filesystem::is_regular_file(fs_path, ec)) {
-        return std::unexpected(
-            glibre::Error{core::Error::PluginManifestNotFound});
+        return std::unexpected(glibre::Error{core::Error::PluginManifestNotFound});
     }
 
     // Stub: a real file exists at this path but we cannot deserialize it
     // until glibre-foryc emits the Fory decode shim (plan #225).
     // Return Invalid so callers that reach here with a real file get a
     // predictable, diagnosable error rather than UB.
-    return std::unexpected(
-        glibre::Error{core::Error::PluginManifestInvalid});
+    return std::unexpected(glibre::Error{core::Error::PluginManifestInvalid});
 }
 
 }  // namespace glibre::core
