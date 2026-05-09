@@ -772,20 +772,23 @@ schema glibre.fx.Particle {
 }
 
 // -----------------------------------------------------------------------
-// Test: foryc_emit_migration_fqn_mangle_uses_double_underscore
+// Test: foryc_emit_migration_fqn_mangle_single_segment
 //
-// Verify the mangling rule: dots in the FQN are replaced by "__"
-// (double-underscore).  The canonical example from fory-codegen.md
-// §"ABI Stability Rules" point 4:
-//   "glibre.core.Transform" → symbol contains "glibre__core__Transform".
+// Verify the single-segment edge case: a FQN with no dots (no namespace)
+// must emit a symbol whose suffix equals the type name unchanged — no
+// leading or trailing "__" is prepended or appended.
 //
-// Also verifies the single-segment case (no namespace, no change).
+// Also spot-checks the double-underscore mangling rule for multi-segment
+// FQNs to confirm the same test exercises both sides of the boundary.
+// The canonical multi-segment case is covered in depth by
+// foryc_emit_migration_fqn_mangle_format.
 //
-// Satisfies plan #1010 Unit Test Plan item 2.
+// Satisfies plan #1010 Unit Test Plan item 2
+// (was shipped as _uses_double_underscore; renamed in R1 review to match plan).
 // -----------------------------------------------------------------------
 
 TEST_CASE(
-    "foryc_emit_migration_fqn_mangle_uses_double_underscore", "[foryc][emit_migration][fqn_mangle]"
+    "foryc_emit_migration_fqn_mangle_single_segment", "[foryc][emit_migration][fqn_mangle]"
 ) {
     // Multi-segment FQN: dots become double-underscores.
     constexpr std::string_view src_multi = R"(
