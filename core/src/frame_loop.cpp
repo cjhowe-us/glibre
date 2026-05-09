@@ -11,7 +11,6 @@
 #include "glibre/core/frame_loop.hpp"
 
 #include <cstdint>
-#include <expected>
 
 #include "glibre/core/frame_phase.hpp"
 #include "glibre/error.hpp"
@@ -21,19 +20,22 @@ namespace glibre::core {
 // ---------------------------------------------------------------------------
 // run_phase — execute one phase slot.
 //
-// In debug builds the expected_ordinal parameter enforces strict ordering:
-// if the phase's numeric value differs from the expected counter, the tick
-// is aborted with FramePhaseMisordered.  This catches any future regression
-// where the phase walk order or the kPhaseTable order is misaligned.
+// Debug-build ordinal guard: verifies that the Phase ordinal supplied at the
+// call site matches the position expected by the sequential walk.  In the
+// current skeleton this check cannot fire (kPhaseTable is statically verified
+// to be in ordinal order 1..=9 by the static_assert in frame_phase.hpp), but
+// the guard is load-bearing for correctness once a future schedule-compilation
+// plan introduces a dynamic phase-body registration mechanism that might supply
+// phases out of order.  Keeping the check here means the registration path
+// must also pass through run_phase, where order violations are caught.
 //
-// In release builds the ordinal check is compiled out (NDEBUG defined →
-// the branch is dead; the compiler eliminates it).
+// In release builds the ordinal check is compiled out (NDEBUG defined).
 //
 // MVP phase bodies are empty (no-op): the skeleton ships the ordering
 // infrastructure; individual context plans fill the bodies.
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] std::expected<void, glibre::Error>
+[[nodiscard]] glibre::Result<void>
 FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
 #ifndef NDEBUG
     const auto ordinal = static_cast<std::uint8_t>(phase);
@@ -85,14 +87,23 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
 // No heap allocation occurs inside this function.
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] std::expected<void, glibre::Error> FrameLoop::tick() noexcept {
+[[nodiscard]] glibre::Result<void> FrameLoop::tick() noexcept {
     std::uint8_t expected_ordinal = kPhaseMin;
+
+#ifdef GLIBRE_TESTING
+    last_tick_phase_count_ = 0;
+#endif
 
     for (const PhaseDesc& desc : kPhaseTable) {
         auto result = run_phase(desc.id, expected_ordinal);
         if (!result) {
             return result;  // propagate error; frame_index_ not incremented
         }
+#ifdef GLIBRE_TESTING
+        // Record the ordinal of each phase visited, in execution order.
+        last_tick_phase_ordinals_[last_tick_phase_count_++] =
+            static_cast<std::uint8_t>(desc.id);
+#endif
         ++expected_ordinal;
     }
 
