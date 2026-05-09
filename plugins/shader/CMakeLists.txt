@@ -55,6 +55,9 @@ target_link_libraries(glibre-shader
         EASTL
     PRIVATE
         BLAKE3::blake3        # BLAKE3 content hashing (SPEC §4.1)
+        # Compile-flag contract: enforces -fno-exceptions, -fno-rtti,
+        # -fvisibility=hidden project-wide (cmake/Compile.cmake).
+        glibre::compile_contract
 )
 
 target_compile_features(glibre-shader PUBLIC cxx_std_23)
@@ -62,10 +65,10 @@ target_compile_features(glibre-shader PUBLIC cxx_std_23)
 # No CXX_MODULE_STD (no `import std;` in this translation unit).
 set_target_properties(glibre-shader PROPERTIES CXX_MODULE_STD OFF)
 
+# Warning flags for glibre-shader.
+# -fno-exceptions, -fno-rtti, and -fvisibility=hidden are provided transitively
+# via glibre::compile_contract (cmake/Compile.cmake) — do not duplicate them here.
 target_compile_options(glibre-shader PRIVATE
-    -fno-exceptions
-    -fno-rtti
-    -fvisibility=hidden
     -Wall
     -Wextra
     -Wpedantic

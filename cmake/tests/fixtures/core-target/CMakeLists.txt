@@ -33,6 +33,22 @@ if(NOT "-fno-rtti" IN_LIST _contract_opts)
     )
 endif()
 
+if(NOT "-fvisibility=hidden" IN_LIST _contract_opts)
+    message(FATAL_ERROR
+        "ASSERTION FAILED: -fvisibility=hidden not found in "
+        "glibre_compile_contract INTERFACE_COMPILE_OPTIONS. "
+        "Got: ${_contract_opts}"
+    )
+endif()
+
+if(NOT "-fvisibility-inlines-hidden" IN_LIST _contract_opts)
+    message(FATAL_ERROR
+        "ASSERTION FAILED: -fvisibility-inlines-hidden not found in "
+        "glibre_compile_contract INTERFACE_COMPILE_OPTIONS. "
+        "Got: ${_contract_opts}"
+    )
+endif()
+
 message(STATUS "PASS: -fno-exceptions and -fno-rtti present on core compile contract")
 
 # --- Assertion 2 ---

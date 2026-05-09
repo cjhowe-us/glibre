@@ -28,6 +28,7 @@ target_link_libraries(glibre-core-tests
     PRIVATE
         glibre::core
         Catch2::Catch2WithMain
+        glibre::compile_contract
 )
 
 target_compile_features(glibre-core-tests PRIVATE cxx_std_23)
@@ -35,14 +36,12 @@ target_compile_features(glibre-core-tests PRIVATE cxx_std_23)
 # Same as glibre-core: no `import std;` in test files.
 set_target_properties(glibre-core-tests PROPERTIES CXX_MODULE_STD OFF)
 
-# -fno-exceptions clean per reviews/decisions/error-model.md §Decision 3.
+# -fno-exceptions and -fno-rtti are provided via glibre::compile_contract.
 # Catch2 3.x supports -fno-exceptions builds when CATCH_CONFIG_DISABLE_EXCEPTIONS
 # is defined (see Catch2 docs §"Compile-time configuration").
 # LOW-9 review finding: Catch2 internals are compatible with -fno-exceptions when
 # REQUIRE_THROWS is not used; glibre-core-tests never uses REQUIRE_THROWS.
 target_compile_options(glibre-core-tests PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic

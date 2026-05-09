@@ -57,6 +57,7 @@ target_link_libraries(foryc-golden-tests
     PRIVATE
         Catch2::Catch2WithMain
         glibre::core   # glibre::Error + EASTL
+        glibre::compile_contract
 )
 
 target_compile_features(foryc-golden-tests PRIVATE cxx_std_23)
@@ -64,8 +65,6 @@ target_compile_features(foryc-golden-tests PRIVATE cxx_std_23)
 set_target_properties(foryc-golden-tests PROPERTIES CXX_MODULE_STD OFF)
 
 target_compile_options(foryc-golden-tests PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic
@@ -132,15 +131,15 @@ if(EXISTS "${_EMIT_MIGRATION_HPP}" AND EXISTS "${_EMIT_MIGRATION_CPP}")
         PRIVATE
             Catch2::Catch2WithMain
             glibre::core   # glibre::Error + EASTL
+            glibre::compile_contract
     )
 
     target_compile_features(foryc-migration-golden-tests PRIVATE cxx_std_23)
 
     set_target_properties(foryc-migration-golden-tests PROPERTIES CXX_MODULE_STD OFF)
 
+    # -fno-exceptions and -fno-rtti are provided via glibre::compile_contract.
     target_compile_options(foryc-migration-golden-tests PRIVATE
-        -fno-exceptions
-        -fno-rtti
         -Wall
         -Wextra
         -Wpedantic

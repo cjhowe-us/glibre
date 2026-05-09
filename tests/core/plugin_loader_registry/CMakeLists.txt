@@ -22,6 +22,7 @@ target_link_libraries(glibre-core-plugin-loader-registry-tests
     PRIVATE
         glibre::core
         Catch2::Catch2WithMain
+        glibre::compile_contract
 )
 
 target_compile_features(glibre-core-plugin-loader-registry-tests PRIVATE cxx_std_23)
@@ -32,8 +33,6 @@ set_target_properties(glibre-core-plugin-loader-registry-tests PROPERTIES CXX_MO
 # Catch2 3.x supports -fno-exceptions builds when CATCH_CONFIG_DISABLE_EXCEPTIONS
 # is defined.  These tests do not use REQUIRE_THROWS.
 target_compile_options(glibre-core-plugin-loader-registry-tests PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic

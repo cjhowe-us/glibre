@@ -26,6 +26,7 @@ target_link_libraries(glibre-shader-source-tests
     PRIVATE
         glibre::shader
         Catch2::Catch2WithMain
+        glibre::compile_contract
 )
 
 target_compile_features(glibre-shader-source-tests PRIVATE cxx_std_23)
@@ -40,8 +41,6 @@ target_compile_definitions(glibre-shader-source-tests PRIVATE
 )
 
 target_compile_options(glibre-shader-source-tests PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic

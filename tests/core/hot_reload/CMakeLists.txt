@@ -22,6 +22,7 @@ target_link_libraries(glibre-core-hot-reload-tests
     PRIVATE
         glibre::core
         Catch2::Catch2WithMain
+        glibre::compile_contract
 )
 
 target_compile_features(glibre-core-hot-reload-tests PRIVATE cxx_std_23)
@@ -32,8 +33,6 @@ set_target_properties(glibre-core-hot-reload-tests PROPERTIES CXX_MODULE_STD OFF
 # Catch2 3.x supports -fno-exceptions when REQUIRE_THROWS is not used;
 # glibre-core-hot-reload-tests never uses REQUIRE_THROWS.
 target_compile_options(glibre-core-hot-reload-tests PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic

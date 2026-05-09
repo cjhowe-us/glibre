@@ -17,6 +17,22 @@
 #    Plugins link glibre-types (not glibre-core) and must also link this
 #    contract explicitly per plugin-abi.md.  glibre-core does NOT propagate
 #    this contract transitively to plugin DSOs.
+#
+# Flags encoded in this contract (all INTERFACE, applied to every consumer):
+#   -fno-exceptions          — no C++ exception machinery (error-model.md §Decision 3)
+#   -fno-rtti                — no run-time type information (matches no-exceptions)
+#   -fvisibility=hidden      — engine-wide ABI discipline: only explicitly
+#                              attributed symbols are exported from DSOs.
+#                              Mirrors plugin-abi.md §"Plugin file shape" rule 3
+#                              and data/CMakeLists.txt §ABI discipline comment.
+#   -fvisibility-inlines-hidden — suppress inline symbol export (complements
+#                              -fvisibility=hidden for inline/template code).
+#
+# NOTE: For the iOS subproject build (CMAKE_SYSTEM_NAME=iOS), core/ and data/
+# early-return before adding any targets, so the deferred reachability check at
+# the end of this file becomes a no-op — no engine targets exist in that
+# configure pass.  This is intentional: the iOS sub-build is excluded from the
+# main configure and its tests, so the contract is not wired there.
 # ---------------------------------------------------------------------------
 if(NOT TARGET glibre::compile_contract)
     add_library(glibre_compile_contract INTERFACE)
@@ -25,6 +41,8 @@ if(NOT TARGET glibre::compile_contract)
     target_compile_options(glibre_compile_contract INTERFACE
         -fno-exceptions
         -fno-rtti
+        -fvisibility=hidden
+        -fvisibility-inlines-hidden
     )
 endif()
 
@@ -138,11 +156,20 @@ function(_glibre_run_core_exception_check)
     # glibre-foryc is a host tool (serialiser codegen) and is also excluded.
     # Roots that do not exist yet (stubs not yet added_subdirectory) are
     # silently skipped via the TARGET guard inside the walker.
+    #
+    # STATIC LIST NOTE: This is a manually maintained list of engine roots.
+    # A cleaner SRP approach would invert control: each subdirectory
+    # self-registers into a GLIBRE_ENGINE_ROOTS property at define time,
+    # and this function reads that property.  Deferred to a follow-up plan;
+    # see issue #1005 (iterate-infra-compile-contract-self-register).
     set(_engine_roots
         glibre-core
         glibre-types
         glibre-runtime
-        glibre-shader-plugin
+        glibre-shader        # plugins/shader — links glibre::core not glibre-types
+        glibre-shader-plugin # future SHARED plugin dylib target name
+        glibre-foryc         # host tool; also carries contract flags
+        glibre-plugin-noop   # reference plugin example
         # add further plugin / context targets here as subdirs land
     )
     set(_visited "")

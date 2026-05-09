@@ -54,6 +54,10 @@ target_link_libraries(glibre-core
     PUBLIC
         EASTL
         spdlog::spdlog
+    PRIVATE
+        # Compile-flag contract: enforces -fno-exceptions, -fno-rtti,
+        # -fvisibility=hidden project-wide (cmake/Compile.cmake).
+        glibre::compile_contract
 )
 
 target_compile_features(glibre-core PUBLIC cxx_std_23)
@@ -63,11 +67,11 @@ target_compile_features(glibre-core PUBLIC cxx_std_23)
 # here since this target uses #include-based C++23, not module import std.
 set_target_properties(glibre-core PROPERTIES CXX_MODULE_STD OFF)
 
-# -fno-exceptions on all engine code per reviews/decisions/error-model.md §Decision 3.
+# Warning flags for glibre-core.
+# -fno-exceptions, -fno-rtti, and -fvisibility=hidden are provided transitively
+# via glibre::compile_contract (cmake/Compile.cmake) — do not duplicate them here.
 # The editor-UI carve-out (ImGui) is in tools/, not here.
 target_compile_options(glibre-core PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic

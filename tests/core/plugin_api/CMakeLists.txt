@@ -20,6 +20,7 @@ target_link_libraries(glibre-core-plugin-api-tests
     PRIVATE
         glibre::core
         Catch2::Catch2WithMain
+        glibre::compile_contract
 )
 
 target_compile_features(glibre-core-plugin-api-tests PRIVATE cxx_std_23)
@@ -28,8 +29,6 @@ set_target_properties(glibre-core-plugin-api-tests PROPERTIES CXX_MODULE_STD OFF
 
 # -fno-exceptions clean per reviews/decisions/error-model.md §Decision 3.
 target_compile_options(glibre-core-plugin-api-tests PRIVATE
-    -fno-exceptions
-    -fno-rtti
     -Wall
     -Wextra
     -Wpedantic
