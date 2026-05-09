@@ -40,7 +40,8 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <memory>
+
+#include <EASTL/unique_ptr.h>
 
 #include "glibre/error.hpp"
 
@@ -55,7 +56,7 @@ public:
     // Construct an arena with `capacity_bytes` of backing storage.
     //
     // The backing store is allocated once on construction via
-    // `std::make_unique<std::byte[]>`.  No further allocation occurs for
+    // `eastl::make_unique<std::byte[]>`.  No further allocation occurs for
     // the lifetime of this object.  capacity_bytes == 0 is valid: every
     // allocate() call will return TransientArenaExhausted.
     explicit TransientArena(std::size_t capacity_bytes);
@@ -120,7 +121,7 @@ public:
     [[nodiscard]] glibre::Result<void> assert_drained() const noexcept;
 
 private:
-    std::unique_ptr<std::byte[]> storage_;
+    eastl::unique_ptr<std::byte[]> storage_;
     std::size_t capacity_{0};
     std::size_t cursor_{0};
     std::size_t high_watermark_{0};
