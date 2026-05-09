@@ -10,10 +10,7 @@
 
 #include "glibre/core/plugin_loader_registry.hpp"
 
-#include <cassert>
 #include <cstddef>
-
-#include <EASTL/algorithm.h>
 
 namespace glibre::core {
 
@@ -25,18 +22,34 @@ PluginLoaderRegistry::PluginLoaderRegistry(SemVer host_engine_version) noexcept
     : host_engine_version_{host_engine_version} {}
 
 // ---------------------------------------------------------------------------
-// validate_abi_hash — gate 1 (plugin-abi.md step 4, manifest field only)
+// validate_manifest_abi_hash — gate 1a (plugin-abi.md step 4, manifest field)
 //
-// The manifest field manifest.abi_hash must equal expected_abi_hash.
-// The caller also checks the exported symbol value separately; this method
-// covers only the manifest field side of the redundant check.
+// manifest.abi_hash must equal expected_abi_hash.
 // ---------------------------------------------------------------------------
 
-Result<void> PluginLoaderRegistry::validate_abi_hash(
+Result<void> PluginLoaderRegistry::validate_manifest_abi_hash(
     const PluginManifest& manifest,
     eastl::string_view    expected_abi_hash) const noexcept {
 
     if (manifest.abi_hash != expected_abi_hash) {
+        return std::unexpected(glibre::Error{core::Error::PluginAbiHashMismatch});
+    }
+    return {};
+}
+
+// ---------------------------------------------------------------------------
+// validate_symbol_abi_hash — gate 1b (plugin-abi.md step 4, exported symbol)
+//
+// The value from the plugin's exported glibre_plugin_abi_hash C symbol must
+// equal expected_abi_hash.  The redundant check catches a malformed manifest
+// whose abi_hash field disagrees with the compiled-in symbol.
+// ---------------------------------------------------------------------------
+
+Result<void> PluginLoaderRegistry::validate_symbol_abi_hash(
+    eastl::string_view symbol_abi_hash,
+    eastl::string_view expected_abi_hash) const noexcept {
+
+    if (symbol_abi_hash != expected_abi_hash) {
         return std::unexpected(glibre::Error{core::Error::PluginAbiHashMismatch});
     }
     return {};
@@ -62,14 +75,22 @@ Result<void> PluginLoaderRegistry::validate_engine_version(
 // ---------------------------------------------------------------------------
 // validate_name_unique — gate 3 (plugin-abi.md step 6)
 //
-// manifest.name must not already exist in the registry.
+// Collision fires only when name matches AND file_path differs.
+// Same name + same path: idempotent re-registration (hot-reload re-load path).
+// Same name + different path: PluginNameCollision.
 // ---------------------------------------------------------------------------
 
 Result<void> PluginLoaderRegistry::validate_name_unique(
-    const PluginManifest& manifest) const noexcept {
+    const PluginManifest& manifest,
+    eastl::string_view    file_path) const noexcept {
 
-    if (loaded_.find(manifest.name) != loaded_.end()) {
-        return std::unexpected(glibre::Error{core::Error::PluginNameCollision});
+    const auto it = loaded_.find(manifest.name);
+    if (it != loaded_.end()) {
+        // Name already registered.  Only a collision if the path differs.
+        if (it->second.path != file_path) {
+            return std::unexpected(glibre::Error{core::Error::PluginNameCollision});
+        }
+        // Same name + same path → idempotent; not an error.
     }
     return {};
 }
@@ -85,7 +106,9 @@ Result<void> PluginLoaderRegistry::validate_dependencies(
     const PluginManifest& manifest) const noexcept {
 
     for (const eastl::string& dep : manifest.depends_on) {
-        if (loaded_.find(dep) == loaded_.end()) {
+        // Heterogeneous lookup: eastl::string_view avoids materialising a
+        // temporary eastl::string key per call (transparent_string_hash).
+        if (loaded_.find(eastl::string_view{dep}) == loaded_.end()) {
             return std::unexpected(glibre::Error{core::Error::PluginDependencyMissing});
         }
     }
@@ -98,20 +121,24 @@ Result<void> PluginLoaderRegistry::validate_dependencies(
 // Both manifest.abi_hash and symbol_abi_hash must equal expected_abi_hash
 // per plugin-abi.md §step 4 ("the redundant check catches a malformed
 // manifest whose abi_hash field disagrees with the compiled-in symbol").
+//
+// file_path is forwarded to validate_name_unique for the "different file
+// path" qualifier of step 6.
 // ---------------------------------------------------------------------------
 
 Result<void> PluginLoaderRegistry::validate_all(
     const PluginManifest& manifest,
     eastl::string_view    expected_abi_hash,
-    eastl::string_view    symbol_abi_hash) const noexcept {
+    eastl::string_view    symbol_abi_hash,
+    eastl::string_view    file_path) const noexcept {
 
     // Gate 1a: symbol-side ABI hash check.
-    if (symbol_abi_hash != expected_abi_hash) {
-        return std::unexpected(glibre::Error{core::Error::PluginAbiHashMismatch});
+    if (auto r = validate_symbol_abi_hash(symbol_abi_hash, expected_abi_hash); !r) {
+        return r;
     }
 
     // Gate 1b: manifest-side ABI hash check.
-    if (auto r = validate_abi_hash(manifest, expected_abi_hash); !r) {
+    if (auto r = validate_manifest_abi_hash(manifest, expected_abi_hash); !r) {
         return r;
     }
 
@@ -120,8 +147,8 @@ Result<void> PluginLoaderRegistry::validate_all(
         return r;
     }
 
-    // Gate 3: name uniqueness.
-    if (auto r = validate_name_unique(manifest); !r) {
+    // Gate 3: name uniqueness (with file-path qualifier).
+    if (auto r = validate_name_unique(manifest, file_path); !r) {
         return r;
     }
 
@@ -131,16 +158,26 @@ Result<void> PluginLoaderRegistry::validate_all(
 
 // ---------------------------------------------------------------------------
 // register_plugin — record a successfully validated plugin.
+//
+// Returns an error (without mutating the registry) if name is already
+// registered with a different path.  Same name + same path is an idempotent
+// no-op (returns success without re-inserting).
 // ---------------------------------------------------------------------------
 
-void PluginLoaderRegistry::register_plugin(
+Result<void> PluginLoaderRegistry::register_plugin(
     const PluginManifest& manifest,
     eastl::string_view    path) noexcept {
 
-    // Debug-mode precondition: must not already be registered.
-    assert(loaded_.find(manifest.name) == loaded_.end() &&
-           "register_plugin called for a name that is already registered; "
-           "call validate_all first");
+    const auto it = loaded_.find(manifest.name);
+    if (it != loaded_.end()) {
+        // Unconditional precondition check — protects release builds from
+        // silent overwrites (replaces the former debug-only assert).
+        if (it->second.path != path) {
+            return std::unexpected(glibre::Error{core::Error::PluginNameCollision});
+        }
+        // Same name + same path: idempotent re-registration, no-op.
+        return {};
+    }
 
     PluginRecord rec;
     rec.name    = manifest.name;
@@ -148,6 +185,7 @@ void PluginLoaderRegistry::register_plugin(
     rec.path    = eastl::string{path.data(), path.size()};
 
     loaded_.emplace(manifest.name, eastl::move(rec));
+    return {};
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +193,8 @@ void PluginLoaderRegistry::register_plugin(
 // ---------------------------------------------------------------------------
 
 bool PluginLoaderRegistry::is_registered(eastl::string_view name) const noexcept {
-    return loaded_.find(eastl::string{name.data(), name.size()}) != loaded_.end();
+    // Heterogeneous lookup: no eastl::string allocation per call.
+    return loaded_.find(name) != loaded_.end();
 }
 
 // ---------------------------------------------------------------------------

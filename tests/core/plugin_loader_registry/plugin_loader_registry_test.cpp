@@ -65,6 +65,20 @@ glibre::core::PluginManifest make_manifest(
     return m;
 }
 
+/// Build a manifest with a pre-populated depends_on list.
+///
+/// Convenience wrapper used by dependency tests to avoid repetitive
+/// push_back call sequences (LOW-7: helper reduces dep-test duplication).
+template <typename... Deps>
+glibre::core::PluginManifest make_manifest_with_deps(
+    const char* name,
+    Deps... deps) {
+
+    auto m = make_manifest(name);
+    (m.depends_on.push_back(eastl::string{deps}), ...);
+    return m;
+}
+
 /// Extract the core::Error variant arm.  Returns nullptr if the error holds
 /// a different arm (e.g. tools::Error or render::Error).
 [[nodiscard]] const glibre::core::Error*
@@ -78,12 +92,13 @@ as_core_error(const glibre::Error& err) noexcept {
 // Test: plugin_loader_rejects_abi_hash_mismatch
 //
 // Gate 1 (plugin-abi.md §"Loader Sequence" step 4):
-//   manifest.abi_hash must equal the expected (host) ABI hash.
-//   Mismatch → core::Error::PluginAbiHashMismatch.
+//   manifest.abi_hash AND the exported symbol must both equal the expected
+//   (host) ABI hash.  Mismatch → core::Error::PluginAbiHashMismatch.
 //
-// Two sub-cases:
-//   a) manifest.abi_hash mismatches → rejected via validate_abi_hash.
-//   b) symbol_abi_hash mismatches   → rejected via validate_all gate-1a.
+// Three sub-cases:
+//   a) manifest.abi_hash mismatches  → rejected via validate_manifest_abi_hash.
+//   b) symbol_abi_hash mismatches    → rejected via validate_all gate-1a.
+//   c) both hashes wrong             → still PluginAbiHashMismatch (not masked).
 // ===========================================================================
 
 TEST_CASE("plugin_loader_rejects_abi_hash_mismatch", "[core][plugin_loader_registry]") {
@@ -98,9 +113,9 @@ TEST_CASE("plugin_loader_rejects_abi_hash_mismatch", "[core][plugin_loader_regis
             {0, 1, 0}
         );
 
-        // Validate through the standalone gate — should reject.
+        // Validate through the standalone manifest gate — should reject.
         const eastl::string_view expected{kExpectedHash};
-        auto result = registry.validate_abi_hash(manifest, expected);
+        auto result = registry.validate_manifest_abi_hash(manifest, expected);
 
         REQUIRE_FALSE(result.has_value());
         const auto* core_err = as_core_error(result.error());
@@ -121,7 +136,8 @@ TEST_CASE("plugin_loader_rejects_abi_hash_mismatch", "[core][plugin_loader_regis
         const eastl::string_view expected{kExpectedHash};
         const eastl::string_view wrong_symbol{kWrongHash};
 
-        auto result = registry.validate_all(manifest, expected, wrong_symbol);
+        auto result = registry.validate_all(manifest, expected, wrong_symbol,
+                                            eastl::string_view{"/fake/path.dylib"});
 
         REQUIRE_FALSE(result.has_value());
         const auto* core_err = as_core_error(result.error());
@@ -140,7 +156,8 @@ TEST_CASE("plugin_loader_rejects_abi_hash_mismatch", "[core][plugin_loader_regis
         const eastl::string_view expected{kExpectedHash};
         const eastl::string_view wrong_symbol{kWrongHash};
 
-        auto result = registry.validate_all(manifest, expected, wrong_symbol);
+        auto result = registry.validate_all(manifest, expected, wrong_symbol,
+                                            eastl::string_view{"/fake/path.dylib"});
 
         REQUIRE_FALSE(result.has_value());
         const auto* core_err = as_core_error(result.error());
@@ -161,8 +178,7 @@ TEST_CASE("plugin_loader_rejects_unknown_dependency", "[core][plugin_loader_regi
     glibre::core::PluginLoaderRegistry registry{kHostVersion};
 
     // Build a manifest that depends on "glibre.base" which is not registered.
-    auto manifest = make_manifest();
-    manifest.depends_on.push_back(eastl::string{"glibre.base"});
+    auto manifest = make_manifest_with_deps("glibre.test.plugin", "glibre.base");
 
     auto result = registry.validate_dependencies(manifest);
 
@@ -193,13 +209,14 @@ TEST_CASE("plugin_loader_accepts_compatible_plugin", "[core][plugin_loader_regis
     auto manifest = make_manifest();
 
     const eastl::string_view expected{kExpectedHash};
+    const eastl::string_view path{"/fake/path/plugin.dylib"};
 
-    auto result = registry.validate_all(manifest, expected, expected);
+    auto result = registry.validate_all(manifest, expected, expected, path);
 
     REQUIRE(result.has_value());
 
     // After successful validation, register the plugin.
-    registry.register_plugin(manifest, eastl::string_view{"/fake/path/plugin.dylib"});
+    REQUIRE(registry.register_plugin(manifest, path).has_value());
 
     // Registry should now have one loaded plugin.
     CHECK(registry.loaded_count() == 1u);
@@ -219,15 +236,18 @@ TEST_CASE("plugin_loader_rejects_duplicate_name", "[core][plugin_loader_registry
 
     const eastl::string_view expected{kExpectedHash};
 
+    const eastl::string_view first_path{"/fake/path/first.dylib"};
+    const eastl::string_view second_path{"/fake/path/second.dylib"};  // different path
+
     // Register the first plugin successfully.
     auto first = make_manifest("glibre.test.duplicate", {1, 0, 0}, kExpectedHash, {0, 1, 0});
-    auto r1 = registry.validate_all(first, expected, expected);
+    auto r1 = registry.validate_all(first, expected, expected, first_path);
     REQUIRE(r1.has_value());
-    registry.register_plugin(first, eastl::string_view{"/fake/path/first.dylib"});
+    REQUIRE(registry.register_plugin(first, first_path).has_value());
 
-    // Attempt to register a second plugin with the same name.
+    // Attempt to register a second plugin with the same name but different path.
     auto second = make_manifest("glibre.test.duplicate", {1, 1, 0}, kExpectedHash, {0, 1, 0});
-    auto r2 = registry.validate_all(second, expected, expected);
+    auto r2 = registry.validate_all(second, expected, expected, second_path);
 
     REQUIRE_FALSE(r2.has_value());
     const auto* core_err = as_core_error(r2.error());
@@ -295,26 +315,26 @@ TEST_CASE("validate_all_gate_ordering_hash_first", "[core][plugin_loader_registr
         // because we're setting up state, not testing this call.
         auto r = registry.validate_all(base,
                                        eastl::string_view{kExpectedHash},
-                                       eastl::string_view{kExpectedHash});
+                                       eastl::string_view{kExpectedHash},
+                                       eastl::string_view{"/fake/base.dylib"});
         REQUIRE(r.has_value());
     }
-    registry.register_plugin(base, eastl::string_view{"/fake/base.dylib"});
+    REQUIRE(registry.register_plugin(base, eastl::string_view{"/fake/base.dylib"}).has_value());
 
     // Now build a manifest that:
     //   • has a WRONG abi_hash (gate 1 fails)
     //   • depends on "glibre.base" which IS registered (gate 4 would pass)
-    auto manifest = make_manifest(
+    auto manifest = make_manifest_with_deps(
         "glibre.test.order",
-        {1, 0, 0},
-        kWrongHash,           // gate 1 fails
-        {0, 1, 0}
+        "glibre.base"
     );
-    manifest.depends_on.push_back(eastl::string{"glibre.base"});
+    manifest.abi_hash = eastl::string{kWrongHash};  // gate 1 fails
 
     auto result = registry.validate_all(
         manifest,
         eastl::string_view{kExpectedHash},
-        eastl::string_view{kExpectedHash}  // symbol hash matches, but manifest hash does not
+        eastl::string_view{kExpectedHash},  // symbol hash matches, but manifest hash does not
+        eastl::string_view{"/fake/order.dylib"}
     );
 
     // Gate 1 (manifest hash check) must fire, not gate 4.
@@ -337,7 +357,7 @@ TEST_CASE("registry_is_registered_and_loaded_count", "[core][plugin_loader_regis
     CHECK_FALSE(registry.is_registered(eastl::string_view{"glibre.absent"}));
 
     auto m = make_manifest("glibre.test.accessor");
-    registry.register_plugin(m, eastl::string_view{""});
+    REQUIRE(registry.register_plugin(m, eastl::string_view{""}).has_value());
 
     CHECK(registry.loaded_count() == 1u);
     CHECK(registry.is_registered(eastl::string_view{"glibre.test.accessor"}));
@@ -358,17 +378,17 @@ TEST_CASE("plugin_loader_accepts_multi_dependency_plugin", "[core][plugin_loader
 
     // Register dep-a and dep-b first.
     auto dep_a = make_manifest("glibre.dep.a");
-    registry.register_plugin(dep_a, eastl::string_view{"/fake/dep_a.dylib"});
+    REQUIRE(registry.register_plugin(dep_a, eastl::string_view{"/fake/dep_a.dylib"}).has_value());
 
     auto dep_b = make_manifest("glibre.dep.b");
-    registry.register_plugin(dep_b, eastl::string_view{"/fake/dep_b.dylib"});
+    REQUIRE(registry.register_plugin(dep_b, eastl::string_view{"/fake/dep_b.dylib"}).has_value());
 
-    // Plugin that depends on both.
-    auto manifest = make_manifest("glibre.consumer");
-    manifest.depends_on.push_back(eastl::string{"glibre.dep.a"});
-    manifest.depends_on.push_back(eastl::string{"glibre.dep.b"});
+    // Plugin that depends on both — use make_manifest_with_deps helper.
+    auto manifest = make_manifest_with_deps("glibre.consumer",
+                                            "glibre.dep.a", "glibre.dep.b");
 
-    auto result = registry.validate_all(manifest, expected, expected);
+    auto result = registry.validate_all(manifest, expected, expected,
+                                        eastl::string_view{"/fake/consumer.dylib"});
     CHECK(result.has_value());
 }
 
@@ -384,16 +404,79 @@ TEST_CASE("plugin_loader_rejects_partial_dependency", "[core][plugin_loader_regi
 
     // Register only dep-a; dep-b is missing.
     auto dep_a = make_manifest("glibre.dep.a");
-    registry.register_plugin(dep_a, eastl::string_view{"/fake/dep_a.dylib"});
+    REQUIRE(registry.register_plugin(dep_a, eastl::string_view{"/fake/dep_a.dylib"}).has_value());
 
-    auto manifest = make_manifest("glibre.consumer");
-    manifest.depends_on.push_back(eastl::string{"glibre.dep.a"});   // registered
-    manifest.depends_on.push_back(eastl::string{"glibre.dep.b"});   // NOT registered
+    // Use make_manifest_with_deps helper (dep-a registered, dep-b not).
+    auto manifest = make_manifest_with_deps("glibre.consumer",
+                                            "glibre.dep.a",   // registered
+                                            "glibre.dep.b");  // NOT registered
 
     auto result = registry.validate_dependencies(manifest);
 
     REQUIRE_FALSE(result.has_value());
-    const auto* core_err = as_core_error(result.error());
+    const auto* core_err2 = as_core_error(result.error());
+    REQUIRE(core_err2 != nullptr);
+    CHECK(*core_err2 == glibre::core::Error::PluginDependencyMissing);
+}
+
+// ===========================================================================
+// Additional: name uniqueness — same name + same path is idempotent (HIGH-1)
+//
+// plugin-abi.md §"Loader Sequence" step 6 qualifies the collision check with
+// "with a different file path".  Hot-reload re-registration of the same .dylib
+// must succeed without error.
+// ===========================================================================
+
+TEST_CASE("name_unique_allows_same_name_same_path", "[core][plugin_loader_registry]") {
+    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+
+    const eastl::string_view path{"/fake/path/plugin.dylib"};
+    const eastl::string_view expected{kExpectedHash};
+
+    auto manifest = make_manifest("glibre.test.hotreload");
+    REQUIRE(registry.validate_all(manifest, expected, expected, path).has_value());
+    REQUIRE(registry.register_plugin(manifest, path).has_value());
+
+    // Same name + same path: validate_name_unique must accept (idempotent).
+    auto r2 = registry.validate_name_unique(manifest, path);
+    CHECK(r2.has_value());
+
+    // register_plugin with same name + same path must also succeed.
+    auto r3 = registry.register_plugin(manifest, path);
+    CHECK(r3.has_value());
+    CHECK(registry.loaded_count() == 1u);  // still only one entry
+}
+
+// ===========================================================================
+// Additional: name uniqueness — same name + different path is a collision
+// (HIGH-1)
+//
+// The hot-reload re-load path is the same .dylib; a different .dylib with
+// the same plugin name is a genuine collision.
+// ===========================================================================
+
+TEST_CASE("name_unique_rejects_same_name_different_path", "[core][plugin_loader_registry]") {
+    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+
+    const eastl::string_view path_a{"/fake/path/plugin_v1.dylib"};
+    const eastl::string_view path_b{"/fake/path/plugin_v2.dylib"};  // different path
+    const eastl::string_view expected{kExpectedHash};
+
+    auto manifest = make_manifest("glibre.test.collision");
+    REQUIRE(registry.validate_all(manifest, expected, expected, path_a).has_value());
+    REQUIRE(registry.register_plugin(manifest, path_a).has_value());
+
+    // Same name + different path: validate_name_unique must reject.
+    auto r2 = registry.validate_name_unique(manifest, path_b);
+    REQUIRE_FALSE(r2.has_value());
+    const auto* core_err = as_core_error(r2.error());
     REQUIRE(core_err != nullptr);
-    CHECK(*core_err == glibre::core::Error::PluginDependencyMissing);
+    CHECK(*core_err == glibre::core::Error::PluginNameCollision);
+
+    // register_plugin with different path must also reject.
+    auto r3 = registry.register_plugin(manifest, path_b);
+    REQUIRE_FALSE(r3.has_value());
+    const auto* core_err2 = as_core_error(r3.error());
+    REQUIRE(core_err2 != nullptr);
+    CHECK(*core_err2 == glibre::core::Error::PluginNameCollision);
 }
