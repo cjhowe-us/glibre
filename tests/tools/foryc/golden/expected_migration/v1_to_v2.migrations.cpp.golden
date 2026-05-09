@@ -19,6 +19,13 @@ struct MigrationEntry {
 
 // Provider forward declarations.
 // The owning context supplies the function bodies.
+//
+// TODO(#975): The line below — `extern "C" void test::migrate_Particle_v1_to_v2();`
+// — is invalid C++: extern "C" linkage specification cannot include a
+// namespace-qualified name.  This golden faithfully mirrors the bug in
+// emit_migration.cpp (PR #975).  Once #975 applies the namespace fix,
+// regenerate this file:
+//   GLIBRE_UPDATE_GOLDEN=1 ctest --preset macos-debug -R foryc_migration_golden_
 extern "C" void test::migrate_Particle_v1_to_v2();
 
 // clang-format off

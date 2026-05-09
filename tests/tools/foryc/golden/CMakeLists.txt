@@ -104,6 +104,16 @@ catch_discover_tests(foryc-golden-tests)
 set(_EMIT_MIGRATION_HPP "${CMAKE_SOURCE_DIR}/tools/foryc/src/emit_migration.hpp")
 set(_EMIT_MIGRATION_CPP "${CMAKE_SOURCE_DIR}/tools/foryc/src/emit_migration.cpp")
 
+# Tell CMake to re-run configure automatically when emit_migration.hpp appears
+# (i.e., when PR #975 merges).  Without this, local devs must manually invoke
+# `cmake --preset macos-debug` again after #975 lands to pick up the new target.
+# CI is unaffected (it always does a fresh configure), but the declare-once
+# property removes the reconfigure step for local workflows.
+set_property(DIRECTORY PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${_EMIT_MIGRATION_HPP}"
+    "${_EMIT_MIGRATION_CPP}"
+)
+
 if(EXISTS "${_EMIT_MIGRATION_HPP}" AND EXISTS "${_EMIT_MIGRATION_CPP}")
     add_executable(foryc-migration-golden-tests
         golden_migration_test.cpp
