@@ -62,7 +62,7 @@ constexpr bool all_distinct(const eastl::array<T, N>& arr) noexcept {
 
 /// All core::Error enumerator values, listed in declaration order.
 /// When a new enumerator is added to core::Error, add it here too.
-constexpr eastl::array<std::underlying_type_t<glibre::core::Error>, 17> kCoreErrorValues{{
+constexpr eastl::array<std::underlying_type_t<glibre::core::Error>, 18> kCoreErrorValues{{
     static_cast<std::uint16_t>(glibre::core::Error::PluginAbiHashMismatch),
     static_cast<std::uint16_t>(glibre::core::Error::PluginInitFailed),
     static_cast<std::uint16_t>(glibre::core::Error::SchemaMigrationFailed),
@@ -82,6 +82,8 @@ constexpr eastl::array<std::underlying_type_t<glibre::core::Error>, 17> kCoreErr
     static_cast<std::uint16_t>(glibre::core::Error::TransientArenaExhausted),
     // plan #239 r1/r2: NullArgument — null pointer to core API (was InvalidArgument).
     static_cast<std::uint16_t>(glibre::core::Error::NullArgument),
+    // plan #250: PluginNameMismatch — hot-reload swap candidate has a different name.
+    static_cast<std::uint16_t>(glibre::core::Error::PluginNameMismatch),
     // When a new enumerator is added to core::Error, add it here and
     // increment the array size template argument above.
 }};
@@ -130,7 +132,7 @@ TEST_CASE("error_register_per_context_arms_unique", "[core][error_register]") {
     // Making them visible in the Catch2 report means they appear in CI output
     // and are tracked as named test cases in the DoD.
 
-    // core::Error: 17 enumerators with sequential values 0..16
+    // core::Error: 18 enumerators with sequential values 0..17
     CHECK(all_distinct(kCoreErrorValues));
 
     // render::Error: 5 enumerators with sequential values 0..4

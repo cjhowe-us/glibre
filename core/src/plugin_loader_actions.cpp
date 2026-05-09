@@ -1,13 +1,16 @@
 // core/src/plugin_loader_actions.cpp
 //
-// Loader-procedure free functions — steps 9–11 of the plugin loader sequence.
+// Loader-procedure free functions — steps 9–11 of the plugin loader sequence,
+// and hot-reload swap candidate validation (plan #250).
 //
 // Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" steps 9–11
 //            and §"Failure Modes → core::Error".
+//            reviews/decisions/hot-reload-protocol.md §"Step 2 — Swap" 2.1–2.2.
 //
 // Plans: #229 (dlopen/dlsym/manifest, steps 1–3).
 //        #230 (ABI hash + version + name + deps gates, steps 4–7).
 //        #231 (register call + rebuild + migrate stubs, steps 9–11).
+//        #250 (hot-reload manifest + ABI hash gate — hot_reload_validate).
 // Out of scope: dlopen/dlsym (plan #229); registry-of-records state (plan #230).
 
 #include "glibre/core/plugin_loader_actions.hpp"
@@ -135,6 +138,90 @@ Result<void> migrate_components(
     // handles that case correctly.  When they differ, the real implementation
     // will dispatch the migration chain; the stub silently succeeds (acceptable
     // for MVP since no persistent archetype data exists yet).
+    return {};
+}
+
+// ---------------------------------------------------------------------------
+// hot_reload_validate — pre-swap compatibility check (plan #250).
+//
+// Authority: reviews/decisions/hot-reload-protocol.md §"Step 2 — Swap" 2.1–2.2.
+//
+// Performs three manifest-only checks in order.  The checks do not touch ECS
+// state (archetype storage, migration arena) — those checks belong to plans
+// #251+.
+//
+// Check A — Plugin name identity:
+//   The incoming plugin must have the same name as the outgoing plugin.  A
+//   different name is a configuration error (wrong dylib).
+//   Failure → core::Error::PluginNameMismatch.
+//
+// Check B — ABI hash equality (protocol §2.1):
+//   The incoming manifest's abi_hash must equal the outgoing manifest's
+//   abi_hash.  Both were already validated against the host hash by
+//   PluginLoaderRegistry::validate_all() before this function is called,
+//   so manifest-vs-manifest equality implies both-vs-host equality.
+//   Failure → core::Error::PluginAbiHashMismatch.
+//
+// Check C — SemVer major version compatibility (protocol §2.2 compatible swap):
+//   The incoming plugin's major version must equal the outgoing's.  Minor and
+//   patch may advance.  A major bump signals a breaking change requiring a
+//   fresh world.
+//   Failure → core::Error::HotReloadRefused.
+// ---------------------------------------------------------------------------
+
+Result<void>
+hot_reload_validate(const PluginManifest& outgoing, const PluginManifest& incoming) noexcept {
+    // Check A — Name identity.
+    // Both plugins must declare the same name.  A different name means the
+    // operator supplied the wrong dylib as a swap candidate.
+    if (incoming.name != outgoing.name) {
+        return std::unexpected(
+            glibre::Error{
+                core::Error::PluginNameMismatch,
+                ErrorContext{
+                    .file = __FILE__,
+                    .line = __LINE__,
+                    .detail = "incoming plugin name does not match outgoing plugin name",
+                },
+            }
+        );
+    }
+
+    // Check B — ABI hash equality (hot-reload-protocol §2.1).
+    // The two manifests must carry identical abi_hash strings.  The
+    // PluginLoaderRegistry already confirmed each against the host hash
+    // independently; here we confirm they agree with each other (a belt-and-
+    // suspenders guard and a clear error message if they somehow diverge).
+    if (incoming.abi_hash != outgoing.abi_hash) {
+        return std::unexpected(
+            glibre::Error{
+                core::Error::PluginAbiHashMismatch,
+                ErrorContext{
+                    .file = __FILE__,
+                    .line = __LINE__,
+                    .detail = "incoming plugin abi_hash does not match outgoing plugin abi_hash",
+                },
+            }
+        );
+    }
+
+    // Check C — SemVer major version compatibility (hot-reload-protocol §2.2).
+    // A major-version change is a breaking redesign that cannot be hot-reloaded
+    // into a running world; it requires a process restart with a fresh world.
+    if (incoming.version.major != outgoing.version.major) {
+        return std::unexpected(
+            glibre::Error{
+                core::Error::HotReloadRefused,
+                ErrorContext{
+                    .file = __FILE__,
+                    .line = __LINE__,
+                    .detail = "incoming plugin major version differs from outgoing — "
+                              "major-version change requires a fresh world, not a hot-reload",
+                },
+            }
+        );
+    }
+
     return {};
 }
 
