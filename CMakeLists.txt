@@ -51,11 +51,12 @@ if(GLIBRE_BUILD_TESTS)
     enable_testing()
 endif()
 
-# Subdirectories will be added once stubs land.
-# add_subdirectory(core)
+add_subdirectory(core)
+
 # add_subdirectory(plugins)
 # add_subdirectory(tools)
 # add_subdirectory(runtime)
+
 if(GLIBRE_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
