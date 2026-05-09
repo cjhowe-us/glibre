@@ -461,7 +461,7 @@ TEST_CASE("plugin_loader_stamps_allocator_handle_with_plugin_tag", "[core][regis
 // file-scope helper so it can be used from a non-capturing function pointer).
 // Reset to 0 before each SECTION to avoid cross-section interference.
 namespace {
-static int g_broken_step_call_count =
+int g_broken_step_call_count =
     0;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 glibre::Result<void> broken_step_fn() noexcept {

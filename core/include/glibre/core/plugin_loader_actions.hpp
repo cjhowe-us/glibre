@@ -174,9 +174,11 @@ using MigrationStepFn = Result<void> (*)() noexcept;
 // Two overloads:
 //
 //   (1) migrate_components(from_version, to_version)
-//       Production and smoke-test path.  Uses the default no-op step
-//       function (always returns success).  Returns success unconditionally
-//       in the MVP stub; real migration deferred to plan #221.
+//       Production and smoke-test path.  Takes no step_fn parameter;
+//       returns success unconditionally in the MVP stub.  The plan #221
+//       implementation will walk a per-type migration table internally
+//       rather than accepting an injected step.  For tests that need an
+//       injection seam, use overload (2).
 //
 //   (2) migrate_components(from_version, to_version, step_fn)
 //       Test-injectable overload.  Calls step_fn() once when from_version
