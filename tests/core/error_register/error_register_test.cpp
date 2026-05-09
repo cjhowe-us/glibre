@@ -125,6 +125,41 @@ constexpr eastl::array<std::underlying_type_t<glibre::tools::Error>, 6> kToolsEr
 
 static_assert(all_distinct(kToolsErrorValues), "tools::Error has duplicate enumerator values.");
 
+// ---------------------------------------------------------------------------
+// shader::Error — enumerator values
+// ---------------------------------------------------------------------------
+// Added by plan #508 (ShaderSource open + include resolver + entry-point scanner).
+
+constexpr eastl::array<std::underlying_type_t<glibre::shader::Error>, 25> kShaderErrorValues{{
+    static_cast<std::uint16_t>(glibre::shader::Error::SourceNotFound),
+    static_cast<std::uint16_t>(glibre::shader::Error::SourceParseFailed),
+    static_cast<std::uint16_t>(glibre::shader::Error::IncludeEscape),
+    static_cast<std::uint16_t>(glibre::shader::Error::IncludeCycle),
+    static_cast<std::uint16_t>(glibre::shader::Error::EncodingInvalid),
+    static_cast<std::uint16_t>(glibre::shader::Error::EntryPointMissing),
+    static_cast<std::uint16_t>(glibre::shader::Error::EntryPointStageAmbiguous),
+    static_cast<std::uint16_t>(glibre::shader::Error::PermutationKeyMalformed),
+    static_cast<std::uint16_t>(glibre::shader::Error::PermutationKeyOutOfRange),
+    static_cast<std::uint16_t>(glibre::shader::Error::CompilerInvocationFailed),
+    static_cast<std::uint16_t>(glibre::shader::Error::CompilerExitNonZero),
+    static_cast<std::uint16_t>(glibre::shader::Error::CompilerTimedOut),
+    static_cast<std::uint16_t>(glibre::shader::Error::UnsupportedTarget),
+    static_cast<std::uint16_t>(glibre::shader::Error::MetalLibEmitFailed),
+    static_cast<std::uint16_t>(glibre::shader::Error::ReflectionExtractionFailed),
+    static_cast<std::uint16_t>(glibre::shader::Error::DescriptorFrequencyAmbiguous),
+    static_cast<std::uint16_t>(glibre::shader::Error::DescriptorFrequencyMissing),
+    static_cast<std::uint16_t>(glibre::shader::Error::LinkFailed),
+    static_cast<std::uint16_t>(glibre::shader::Error::SpecializationConstantMissing),
+    static_cast<std::uint16_t>(glibre::shader::Error::CacheLookupMiss),
+    static_cast<std::uint16_t>(glibre::shader::Error::CacheCorrupt),
+    static_cast<std::uint16_t>(glibre::shader::Error::CacheIntegrity),
+    static_cast<std::uint16_t>(glibre::shader::Error::CacheReadOnlyViolation),
+    static_cast<std::uint16_t>(glibre::shader::Error::CapabilityNotSupported),
+    static_cast<std::uint16_t>(glibre::shader::Error::ShippingCompilationAttempted),
+}};
+
+static_assert(all_distinct(kShaderErrorValues), "shader::Error has duplicate enumerator values.");
+
 }  // anonymous namespace
 
 TEST_CASE("error_register_per_context_arms_unique", "[core][error_register]") {
@@ -140,6 +175,9 @@ TEST_CASE("error_register_per_context_arms_unique", "[core][error_register]") {
 
     // tools::Error: 6 enumerators with sequential values 0..5
     CHECK(all_distinct(kToolsErrorValues));
+
+    // shader::Error: 25 enumerators with sequential values 0..24
+    CHECK(all_distinct(kShaderErrorValues));
 }
 
 // ===========================================================================
@@ -192,8 +230,8 @@ TEST_CASE("error_register_lists_known_contexts", "[core][error_register]") {
     // kAllErrorContexts.size() == kExpectedArmCount — this runtime REQUIRE
     // makes the same contract visible in the Catch2 report and OOB-safe.
     static_assert(
-        glibre::kExpectedArmCount >= 3,
-        "kExpectedArmCount must be >= 3 (core + render + tools are registered)."
+        glibre::kExpectedArmCount >= 4,
+        "kExpectedArmCount must be >= 4 (core + render + tools + shader are registered)."
     );
     REQUIRE(glibre::kAllErrorContexts.size() == glibre::kExpectedArmCount);
 
@@ -205,6 +243,9 @@ TEST_CASE("error_register_lists_known_contexts", "[core][error_register]") {
 
     // Index 2 corresponds to tools::Error.
     CHECK(glibre::kAllErrorContexts[2] == eastl::string_view{"tools"});
+
+    // Index 3 corresponds to shader::Error (added by plan #508).
+    CHECK(glibre::kAllErrorContexts[3] == eastl::string_view{"shader"});
 
     // No duplicates in the context names list.
     bool has_duplicates = false;
