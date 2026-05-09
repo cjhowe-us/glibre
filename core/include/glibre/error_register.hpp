@@ -29,7 +29,13 @@
 //         forget step (c) — that is the intended compile-time guard.
 //
 //   4. Add a per-context enum uniqueness check to the Catch2 test suite under
-//      `tests/core/error_register/` (test `error_register_per_context_arms_unique`).
+//      `tests/core/error_register/` (test `error_register_per_context_arms_unique`):
+//      a. Declare a per-context `kYourCtxErrorValues` array in
+//         `error_register_test.cpp` containing all enumerators cast to uint16_t.
+//      b. Add a `static_assert(all_distinct(...))` in the registry header to
+//         verify uniqueness at compile time (optional; runtime check below also valid).
+//      c. Add a `CHECK` line in the `error_register_per_context_arms_unique`
+//         TEST_CASE that validates the array against the actual enum cardinality.
 //
 //   5. When adding a **new enumerator** to an *existing* per-context enum (not
 //      a brand-new context), update the corresponding hand-written value array
