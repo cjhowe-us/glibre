@@ -151,3 +151,103 @@ template<class T>
 using Result = std::expected<T, Error>;
 
 }  // namespace glibre
+
+// -----------------------------------------------------------------------
+// GLIBRE_TRY(name, expr) — early-return-on-error propagation macro
+//
+// Rationale (error-model.md §Open Questions #2, plan #235):
+//   Chosen form: statement macro, not expression macro.
+//   Expression-form (e.g. __extension__ ({ ... })) relies on a GCC/clang
+//   statement-expression extension and produces harder-to-read call sites.
+//   Statement-form keeps macro expansion predictable, compatible with
+//   -fno-exceptions/-fno-rtti, and trivially composable.
+//   co_await-style chaining (C++23 operator co_await on expected) is
+//   explicitly off the table per error-model.md §Open Questions #2
+//   (no coroutines in engine code).
+//
+//   Header placement: The macro lives here in error.hpp rather than the
+//   originally-scoped try.hpp (plan #235 Scope) because GLIBRE_TRY is
+//   only meaningful in a translation unit that already knows about
+//   glibre::Result<T>.  Co-locating both in error.hpp eliminates a
+//   fragile include-order dependency and means callers get the macro
+//   for free whenever they include the type they are already using.
+//
+//   Temp variable is mangled with __COUNTER__ so that two GLIBRE_TRY
+//   calls within the same expansion (e.g. when a helper macro emits
+//   multiple GLIBRE_TRY on the same source line) never collide.
+//   __COUNTER__ is a clang/gcc/MSVC extension but is universally
+//   available on all toolchains that support C++23.
+//
+// Usage rules (GLIBRE_TRY expands to multiple statements):
+//   GLIBRE_TRY MUST appear as a top-level statement in a braced block.
+//   It MUST NOT be the unbraced body of if / else / for / while — the
+//   macro expands to two or three statements and only the first would
+//   be governed by the control-flow construct; the remainder would
+//   execute unconditionally (or, if the declared name is used in the
+//   remainder, produce a hard compile error).
+//
+//   CORRECT:
+//     if (cond) {
+//         GLIBRE_TRY(x, fn());
+//         use(x);
+//     }
+//
+//   WRONG — do not do this:
+//     if (cond)
+//         GLIBRE_TRY(x, fn());  // second statement leaks out of if-body
+//
+// Usage examples:
+//   glibre::Result<int> caller() {
+//       GLIBRE_TRY(x, fn1());       // binds unwrapped value to 'x'
+//       GLIBRE_TRY_VOID(fn2(x));    // propagates error from Result<void>
+//       return x * 2;
+//   }
+//
+// Both macros are valid only inside a function returning glibre::Result<T>
+// or glibre::Result<void>.  Using them in a void-returning function is a
+// compile error (std::unexpected return type mismatch).
+// -----------------------------------------------------------------------
+
+// GLIBRE_TRY_DETAIL_CONCAT2 / _CONCAT: two-level paste needed so macro
+// arguments expand before concatenation (standard CPP token-paste rule).
+//
+// GLIBRE_TRY_DETAIL / GLIBRE_TRY_VOID_DETAIL: inner helpers that receive
+// __COUNTER__ as a stable integer argument (cnt).  __COUNTER__ is evaluated
+// exactly once in the outer GLIBRE_TRY / GLIBRE_TRY_VOID call and forwarded
+// as a literal, so all three glibre_try_result_<cnt> references name the
+// same variable.  This is the correct pattern for __COUNTER__-based mangling;
+// using __COUNTER__ directly in the inner macro body would produce a fresh
+// counter value on each expansion.
+// NOLINTBEGIN(cppcoreguidelines-macro-usage)
+#define GLIBRE_TRY_DETAIL_CONCAT2(a, b) a##b
+#define GLIBRE_TRY_DETAIL_CONCAT(a, b) GLIBRE_TRY_DETAIL_CONCAT2(a, b)
+
+#define GLIBRE_TRY_DETAIL(name, expr, cnt)                                                         \
+    auto GLIBRE_TRY_DETAIL_CONCAT(glibre_try_result_, cnt) = (expr);                               \
+    if (!GLIBRE_TRY_DETAIL_CONCAT(glibre_try_result_, cnt))                                        \
+        return std::unexpected(                                                                    \
+            std::move(GLIBRE_TRY_DETAIL_CONCAT(glibre_try_result_, cnt).error())                   \
+        );                                                                                         \
+    auto name = std::move(*GLIBRE_TRY_DETAIL_CONCAT(glibre_try_result_, cnt))
+
+#define GLIBRE_TRY_VOID_DETAIL(expr, cnt)                                                          \
+    do {                                                                                           \
+        auto GLIBRE_TRY_DETAIL_CONCAT(glibre_try_void_result_, cnt) = (expr);                      \
+        if (!GLIBRE_TRY_DETAIL_CONCAT(glibre_try_void_result_, cnt))                               \
+            return std::unexpected(                                                                \
+                std::move(GLIBRE_TRY_DETAIL_CONCAT(glibre_try_void_result_, cnt).error())          \
+            );                                                                                     \
+    } while (false)
+
+/// GLIBRE_TRY(name, expr)
+/// Evaluates expr (which must return glibre::Result<T>).
+/// On error, returns the error to the caller unchanged via std::unexpected.
+/// On success, declares `auto name = std::move(*result)` in the current scope.
+/// MUST appear as a top-level statement in a braced block (multi-statement macro).
+#define GLIBRE_TRY(name, expr) GLIBRE_TRY_DETAIL(name, expr, __COUNTER__)
+
+/// GLIBRE_TRY_VOID(expr)
+/// Like GLIBRE_TRY but for glibre::Result<void> — no value to bind.
+/// On error, returns the error to the caller unchanged via std::unexpected.
+#define GLIBRE_TRY_VOID(expr) GLIBRE_TRY_VOID_DETAIL(expr, __COUNTER__)
+// NOLINTEND(cppcoreguidelines-macro-usage)
