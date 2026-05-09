@@ -1419,12 +1419,12 @@ all per-§ owners; use the issue tracker label `domain:core` +
 | #935 | `world: hierarchy_refuses_depth_overflow` unit test                                 | §3.5, §11.1           |
 | #936 | Lifecycle hook present/absent + column-order discrimination tests                   | §3.6, §11.1           |
 | #937 | World migration row-addressing API for HotReloadBarrier (per-row byte span exposure) | §8.2 #1–3, §3.2      |
-| #944 | macOS PMC sampler helper (`pmc_sampler.{hpp,cpp}`) + CI artifact-upload gate (infra) | §5.3, §9.5            |
 | #938 | Archetype-iter L1-D miss-rate alarm (≤5%) on archetype iteration hot loop (core)    | §5.3, §9.5            |
 | #939 | `ResourceSlot::last_modified` tick + `Changed<Res<T>>` readback                     | §3.9, §3.7, §3.8      |
 | #940 | `EntityForeignWorld` refusal-shape contract (post-MVP arm placeholder)              | §10.1, §11.4          |
 | #941 | `ChangeTick` relaxed-atomic upgrade-path scaffold (`TickStorage` alias)             | §6.4                  |
 | #942 | Archetype forward/reverse map debug invariant cross-check                           | §3.2 #5, §5.3         |
+| #944 | macOS PMC sampler helper (`pmc_sampler.{hpp,cpp}`) + CI artifact-upload gate (infra) | §5.3, §9.5            |
 
 Authorship rule: any further `[PLAN]` decomposing this design (e.g.
 once an `[OPEN]` resolves) appends to this table in the same PR
