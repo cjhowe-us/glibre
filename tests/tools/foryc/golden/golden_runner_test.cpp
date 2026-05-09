@@ -4,7 +4,7 @@
 // Golden-output test harness for glibre-foryc (plan #226).
 //
 // Each fixture in golden/fixtures/ is parsed with parse_file() and emitted
-// via emit_header_for_type() (or emit_header() for multi-type files).  The
+// via emit_header() (with source_path set to the fixture basename).  The
 // resulting text is compared byte-for-byte against the checked-in golden in
 // golden/expected/<basename>.hpp.golden.
 //
@@ -24,8 +24,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <sstream>
-#include <string>
+
+#include <EASTL/string.h>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -40,22 +40,36 @@ namespace foryc = glibre::tools::foryc;
 // Helpers
 // -----------------------------------------------------------------------
 
-// Read a file to string.  Returns empty string on failure.
-static std::string slurp(const fs::path& p) {
+// Read a file into an eastl::string.  Returns an empty string on failure.
+// Uses std::filesystem::file_size for the pre-sized buffer read (PHILOSOPHY
+// §11 permits std::filesystem; std::ifstream::read is a language I/O
+// primitive, not a container — plain iostreams streaming is avoided).
+static eastl::string slurp(const fs::path& p) {
+    std::error_code ec;
+    const auto sz = fs::file_size(p, ec);
+    if (ec || sz == 0)
+        return {};
+
+    eastl::string buf;
+    buf.resize(static_cast<eastl::string::size_type>(sz));
+
     std::ifstream ifs{p, std::ios::binary};
     if (!ifs)
         return {};
-    std::ostringstream ss;
-    ss << ifs.rdbuf();
-    return ss.str();
+
+    ifs.read(buf.data(), static_cast<std::streamsize>(sz));
+    if (!ifs)
+        return {};
+
+    return buf;
 }
 
-// Write a string to a file.  Returns true on success.
-static bool splat(const fs::path& p, std::string_view content) {
+// Write an eastl::string to a file.  Returns true on success.
+static bool splat(const fs::path& p, const eastl::string& content) {
     std::ofstream ofs{p, std::ios::binary | std::ios::trunc};
     if (!ofs)
         return false;
-    ofs << content;
+    ofs.write(content.data(), static_cast<std::streamsize>(content.size()));
     return ofs.good();
 }
 
@@ -69,45 +83,25 @@ static fs::path golden_dir() {
     return fs::path{GLIBRE_GOLDEN_DIR};
 }
 
-// Emit all types in a schema into a single string, using only the fixture
-// basename as the virtual source path (so goldens are portable across machines).
-// Matches the concatenation logic of emit_header(schema) but with a controlled
-// virtual path that does not embed the machine-specific absolute fixture path.
-static glibre::Result<eastl::string>
-emit_with_stable_path(const foryc::Schema& schema, std::string_view virtual_path) noexcept {
-    if (schema.types.empty())
-        return std::unexpected{glibre::Error{glibre::tools::Error::ForycEmptySchema}};
-
-    eastl::string out;
-    for (const auto& td : schema.types) {
-        auto result = foryc::emit_header_for_type(td, virtual_path);
-        if (!result)
-            return std::unexpected{result.error()};
-        out += *result;
-        out += "\n";
-    }
-    return out;
-}
-
 // Produce a simple diagnostic string describing where `actual` and `expected`
 // differ.  Not a true unified diff — used only in FAIL() messages.
-static std::string simple_diff(std::string_view actual, std::string_view expected) {
-    std::string msg;
+static eastl::string simple_diff(const eastl::string& actual, const eastl::string& expected) {
+    eastl::string msg;
 
     // Find the first differing character position.
     const std::size_t n = std::min(actual.size(), expected.size());
-    std::size_t first_diff = std::string_view::npos;
+    std::size_t first_diff = eastl::string::npos;
     for (std::size_t i = 0; i < n; ++i) {
         if (actual[i] != expected[i]) {
             first_diff = i;
             break;
         }
     }
-    if (first_diff == std::string_view::npos && actual.size() != expected.size())
+    if (first_diff == eastl::string::npos && actual.size() != expected.size())
         first_diff = n;
 
-    if (first_diff == std::string_view::npos) {
-        return "(no difference found — sizes match)\n";
+    if (first_diff == eastl::string::npos) {
+        return eastl::string("(no difference found — sizes match)\n");
     }
 
     // Find the approximate line number of the first difference.
@@ -117,10 +111,12 @@ static std::string simple_diff(std::string_view actual, std::string_view expecte
             ++line;
     }
 
+    // Build diagnostic using std::format is acceptable (PHILOSOPHY §11
+    // retains std::format), but simple concatenation avoids the include cost.
     msg += "First difference at byte offset ";
-    msg += std::to_string(first_diff);
+    msg += eastl::string(std::to_string(first_diff).c_str());
     msg += " (approx line ";
-    msg += std::to_string(line);
+    msg += eastl::string(std::to_string(line).c_str());
     msg += ")\n";
 
     // Show a context window around the difference.
@@ -129,14 +125,18 @@ static std::string simple_diff(std::string_view actual, std::string_view expecte
     const std::size_t ctx_end_e = std::min(first_diff + 80, expected.size());
 
     msg += "actual:   [";
-    msg += std::string(actual.substr(ctx_start, ctx_end_a - ctx_start));
+    msg += actual.substr(ctx_start, ctx_end_a - ctx_start);
     msg += "]\n";
     msg += "expected: [";
-    msg += std::string(expected.substr(ctx_start, ctx_end_e - ctx_start));
+    msg += expected.substr(ctx_start, ctx_end_e - ctx_start);
     msg += "]\n";
 
-    msg += "actual size:   " + std::to_string(actual.size()) + "\n";
-    msg += "expected size: " + std::to_string(expected.size()) + "\n";
+    msg += "actual size:   ";
+    msg += eastl::string(std::to_string(actual.size()).c_str());
+    msg += "\n";
+    msg += "expected size: ";
+    msg += eastl::string(std::to_string(expected.size()).c_str());
+    msg += "\n";
 
     return msg;
 }
@@ -146,63 +146,76 @@ static std::string simple_diff(std::string_view actual, std::string_view expecte
 //
 // Parameterised over four fixture basenames via GENERATE().  For each:
 //   1. Parse golden/fixtures/<basename>.fory.
-//   2. Emit header via emit_with_stable_path(<basename>.fory as virtual path).
+//   2. Mutate schema.source_path to <basename>.fory (stable virtual path,
+//      no machine-specific prefix) and call emit_header(schema).
 //   3. Read golden/expected/<basename>.hpp.golden.
 //   4. If GLIBRE_UPDATE_GOLDEN=1, overwrite the golden and pass.
 //   5. Otherwise assert byte-equality and emit a diagnostic diff on failure.
 // -----------------------------------------------------------------------
 
 TEST_CASE("foryc_golden_emit_header_matches_expected", "[foryc][golden]") {
-    const std::string basename{GENERATE(
-        std::string{"minimal_struct"},
-        std::string{"nested_namespace"},
-        std::string{"all_scalars"},
-        std::string{"with_generics"}
+    const eastl::string basename{GENERATE(
+        eastl::string{"minimal_struct"},
+        eastl::string{"nested_namespace"},
+        eastl::string{"all_scalars"},
+        eastl::string{"with_generics"}
     )};
 
-    const fs::path fixture_path = golden_dir() / "fixtures" / (basename + ".fory");
-    const fs::path golden_path = golden_dir() / "expected" / (basename + ".hpp.golden");
+    // Build std::filesystem paths from the eastl::string basename.
+    const std::string basename_std{basename.c_str(), basename.size()};
+    const fs::path fixture_path = golden_dir() / "fixtures" / (basename_std + ".fory");
+    const fs::path golden_path  = golden_dir() / "expected"  / (basename_std + ".hpp.golden");
 
     INFO("fixture: " << fixture_path.native());
     INFO("golden:  " << golden_path.native());
 
     // Step 1: parse the fixture.
+    // Use CHECK rather than REQUIRE so -fno-exceptions builds do not abort on
+    // a parse failure; the early return prevents dereferencing a bad Result.
     auto parse_result = foryc::parse_file(fixture_path);
     INFO("parse_file failed for: " << fixture_path.native());
-    REQUIRE(parse_result.has_value());
+    CHECK(parse_result.has_value());
+    if (!parse_result.has_value())
+        return;
 
-    // Step 2: emit header with a stable (basename-only) virtual path.
-    const std::string virtual_path = basename + ".fory";
-    auto emit_result = emit_with_stable_path(*parse_result, virtual_path);
-    INFO("emit_header_for_type failed for: " << virtual_path);
-    REQUIRE(emit_result.has_value());
+    // Step 2: emit header with a stable (basename-only) virtual source path
+    // so goldens are portable across machines.  Mutate schema.source_path
+    // instead of duplicating emit_header's logic in a wrapper.
+    foryc::Schema& schema = *parse_result;
+    schema.source_path = basename + eastl::string(".fory");
+    auto emit_result = foryc::emit_header(schema);
+    INFO("emit_header failed for: " << basename.c_str() << ".fory");
+    CHECK(emit_result.has_value());
+    if (!emit_result.has_value())
+        return;
 
-    // Convert eastl::string to std::string for comparison and I/O.
-    const std::string actual(emit_result->c_str(), emit_result->size());
+    const eastl::string& actual = *emit_result;
 
     // Step 3: UPDATE_GOLDEN mode — overwrite the golden and return.
     const char* update_env = std::getenv("GLIBRE_UPDATE_GOLDEN");
     if (update_env && std::string_view{update_env} == "1") {
         INFO("Updating golden: " << golden_path.native());
-        REQUIRE(splat(golden_path, actual));
+        CHECK(splat(golden_path, actual));
         return;
     }
 
     // Step 4: read existing golden.
-    const std::string expected = slurp(golden_path);
+    const eastl::string expected = slurp(golden_path);
     {
         INFO("golden file missing or empty: " << golden_path.native()
              << "\nRun with GLIBRE_UPDATE_GOLDEN=1 to generate it.");
-        REQUIRE(!expected.empty());
+        CHECK(!expected.empty());
+        if (expected.empty())
+            return;
     }
 
     // Step 5: byte-equality check with a diagnostic diff on failure.
-    // Use INFO() + CHECK() rather than FAIL() so that -fno-exceptions builds
+    // Use INFO() + CHECK() rather than REQUIRE() so that -fno-exceptions builds
     // (which abort on TestFailureException) continue running remaining GENERATE()
     // iterations after a mismatch.
     if (actual != expected) {
-        const std::string diff = simple_diff(actual, expected);
-        INFO("Golden mismatch for '" << basename << "':\n" << diff
+        const eastl::string diff = simple_diff(actual, expected);
+        INFO("Golden mismatch for '" << basename.c_str() << "':\n" << diff.c_str()
              << "\nRun with GLIBRE_UPDATE_GOLDEN=1 to regenerate the golden.");
         CHECK(actual == expected);
     }

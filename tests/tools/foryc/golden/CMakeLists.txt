@@ -20,8 +20,8 @@ cmake_minimum_required(VERSION 3.30)
 #
 # ADDING A NEW FIXTURE:
 #   1. Add <name>.fory to golden/fixtures/.
-#   2. Add the basename to k_fixture_basenames[] in golden_runner_test.cpp AND
-#      to the GENERATE() call in foryc_golden_emit_header_matches_expected.
+#   2. Add the basename to the GENERATE() list in
+#      foryc_golden_emit_header_matches_expected (golden_runner_test.cpp).
 #   3. Run with GLIBRE_UPDATE_GOLDEN=1 to generate the initial golden.
 #   4. Review the generated golden and commit both files.
 #
