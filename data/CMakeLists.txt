@@ -204,3 +204,8 @@ set_target_properties(glibre-types PROPERTIES
 # ---------------------------------------------------------------------------
 
 add_library(glibre::types ALIAS glibre-types)
+
+# Self-register into the engine roots list so the deferred configure-time
+# reachability check (cmake/Compile.cmake §4) covers this target without
+# requiring a manually maintained hardcoded list.  See plan #1005.
+glibre_register_engine_root(glibre-types)

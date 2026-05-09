@@ -81,3 +81,8 @@ target_compile_options(glibre-plugin-noop PRIVATE
     -Wpedantic
     -Wno-unused-parameter
 )
+
+# Self-register into the engine roots list so the deferred configure-time
+# reachability check (cmake/Compile.cmake §4) covers this reference plugin
+# without requiring a manually maintained hardcoded list.  See plan #1005.
+glibre_register_engine_root(glibre-plugin-noop)

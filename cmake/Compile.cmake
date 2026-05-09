@@ -47,7 +47,29 @@ if(NOT TARGET glibre::compile_contract)
 endif()
 
 # ---------------------------------------------------------------------------
-# 2. Helper: glibre_target_exceptions(target)
+# 2. Helper: glibre_register_engine_root(target)
+#
+#    Self-registration macro: each engine CMakeLists.txt calls this after
+#    add_library(<target> ...) to append the target to the GLIBRE_ENGINE_ROOTS
+#    global CMake property.  _glibre_run_core_exception_check() reads that
+#    property at configure-end so it no longer needs a hardcoded list.
+#
+#    Callers: core/CMakeLists.txt, data/CMakeLists.txt, plugins/*/CMakeLists.txt,
+#    tools/foryc/CMakeLists.txt, examples/plugin-noop/CMakeLists.txt.
+#
+#    Must be called AFTER add_library/add_executable so the target exists.
+# ---------------------------------------------------------------------------
+function(glibre_register_engine_root target)
+    if(NOT TARGET ${target})
+        message(FATAL_ERROR
+            "glibre_register_engine_root(${target}): target '${target}' is not yet "
+            "defined; call after add_library/add_executable.")
+    endif()
+    set_property(GLOBAL APPEND PROPERTY GLIBRE_ENGINE_ROOTS "${target}")
+endfunction()
+
+# ---------------------------------------------------------------------------
+# 3. Helper: glibre_target_exceptions(target)
 #
 #    Opts <target> into exception + RTTI mode for ImGui / third-party interop.
 #    Strips the INTERFACE no-exceptions flags inherited from glibre-core
@@ -89,7 +111,7 @@ function(glibre_target_exceptions target)
 endfunction()
 
 # ---------------------------------------------------------------------------
-# 3. Configure-time reachability check.
+# 4. Configure-time reachability check.
 #
 #    Walks the transitive link closure of glibre-core (depth-first, cycle-
 #    safe) and errors out if any reachable target has GLIBRE_USES_EXCEPTIONS.
@@ -150,28 +172,15 @@ function(_glibre_check_exceptions_reachable_from_core root visited_var)
 endfunction()
 
 function(_glibre_run_core_exception_check)
-    # Walk from every known engine root so that plugin DSOs (which link
-    # glibre-types, not glibre-core) and runtime are also covered.
-    # Tools/editor/ui are excluded — they are the permitted carve-out.
-    # glibre-foryc is a host tool (serialiser codegen) and is also excluded.
-    # Roots that do not exist yet (stubs not yet added_subdirectory) are
-    # silently skipped via the TARGET guard inside the walker.
-    #
-    # STATIC LIST NOTE: This is a manually maintained list of engine roots.
-    # A cleaner SRP approach would invert control: each subdirectory
-    # self-registers into a GLIBRE_ENGINE_ROOTS property at define time,
-    # and this function reads that property.  Deferred to a follow-up plan;
-    # see issue #1005 (iterate-infra-compile-contract-self-register).
-    set(_engine_roots
-        glibre-core
-        glibre-types
-        glibre-runtime
-        glibre-shader        # plugins/shader — links glibre::core not glibre-types
-        glibre-shader-plugin # future SHARED plugin dylib target name
-        glibre-foryc         # host tool; also carries contract flags
-        glibre-plugin-noop   # reference plugin example
-        # add further plugin / context targets here as subdirs land
-    )
+    # Walk from every self-registered engine root so that plugin DSOs (which
+    # link glibre-types, not glibre-core) and host tools are also covered.
+    # Each engine CMakeLists.txt calls glibre_register_engine_root(<target>)
+    # after add_library/add_executable, appending to GLIBRE_ENGINE_ROOTS.
+    # Tools/editor/ui are excluded from registration — they are the permitted
+    # exception carve-out.
+    # Roots that do not exist (iOS sub-builds that early-return before
+    # add_library) will not be in GLIBRE_ENGINE_ROOTS and are silently absent.
+    get_property(_engine_roots GLOBAL PROPERTY GLIBRE_ENGINE_ROOTS)
     set(_visited "")
     foreach(_root IN LISTS _engine_roots)
         if(TARGET "${_root}")

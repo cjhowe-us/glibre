@@ -92,3 +92,53 @@ set_tests_properties(
         # silently masquerade as a PASS.
         FAIL_REGULAR_EXPRESSION "\\[glibre\\] Configure error: target '.*' has GLIBRE_USES_EXCEPTIONS=TRUE"
 )
+
+# ---------------------------------------------------------------------------
+# Test 4: engine_roots_property_self_registration
+#
+# Configures cmake/tests/fixtures/engine-roots-property which calls
+# glibre_register_engine_root() for two mock targets and asserts that
+# GLIBRE_ENGINE_ROOTS global property contains both registered targets.
+# Introduced by plan #1005 (invert control: self-register engine roots).
+# ---------------------------------------------------------------------------
+add_test(
+    NAME "ci/cmake: engine_roots_property_self_registration"
+    COMMAND "${_cmake_exe}"
+        -G "${_generator}"
+        -S "${_fixture_dir}/engine-roots-property"
+        -B "${CMAKE_CURRENT_BINARY_DIR}/cmake_test_engine_roots_property"
+        "-DGLIBRE_CMAKE_DIR=${_glibre_cmake_dir}"
+        "-DCMAKE_CXX_COMPILER=${_cxx_compiler}"
+)
+set_tests_properties("ci/cmake: engine_roots_property_self_registration" PROPERTIES
+    LABELS "cmake;infra"
+    PASS_REGULAR_EXPRESSION "PASS: GLIBRE_ENGINE_ROOTS contains both registered engine roots"
+)
+
+# ---------------------------------------------------------------------------
+# Test 5: engine_roots_property_rejects_exception_root
+#
+# Configures cmake/tests/fixtures/engine-roots-property-rejects-exception-root
+# which registers two roots and marks one GLIBRE_USES_EXCEPTIONS=TRUE.
+# The deferred check must FATAL_ERROR because the exception-flagged root is
+# itself in GLIBRE_ENGINE_ROOTS — negative coverage for plan #1005 / #237.
+# ---------------------------------------------------------------------------
+add_test(
+    NAME "ci/cmake: engine_roots_property_rejects_exception_root"
+    COMMAND "${_cmake_exe}"
+        -G "${_generator}"
+        -S "${_fixture_dir}/engine-roots-property-rejects-exception-root"
+        -B "${CMAKE_CURRENT_BINARY_DIR}/cmake_test_engine_roots_rejects_exc"
+        "-DGLIBRE_CMAKE_DIR=${_glibre_cmake_dir}"
+        "-DCMAKE_CXX_COMPILER=${_cxx_compiler}"
+)
+set_tests_properties(
+    "ci/cmake: engine_roots_property_rejects_exception_root"
+    PROPERTIES
+        LABELS "cmake;infra"
+        WILL_FAIL TRUE
+        # Require the specific [glibre] FATAL_ERROR so that unrelated configure
+        # failures (missing compiler, bad generator, etc.) do not silently
+        # masquerade as a PASS.
+        FAIL_REGULAR_EXPRESSION "\\[glibre\\] Configure error: target '.*' has GLIBRE_USES_EXCEPTIONS=TRUE"
+)

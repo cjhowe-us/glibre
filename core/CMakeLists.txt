@@ -135,3 +135,8 @@ endif()
 # Alias for consistent glibre:: namespace usage by consumers
 # ---------------------------------------------------------------------------
 add_library(glibre::core ALIAS glibre-core)
+
+# Self-register into the engine roots list so the deferred configure-time
+# reachability check (cmake/Compile.cmake §4) covers this target without
+# requiring a manually maintained hardcoded list.  See plan #1005.
+glibre_register_engine_root(glibre-core)
