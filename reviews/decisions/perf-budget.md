@@ -243,10 +243,13 @@ implementation plan, not here).
 
 1. **Per-context tag.** Every allocation carries a `ContextTag`
    (`core`, `platform`, `data`, `shader`, `render`, `geometry`,
-   `physics`, `content`, `tools`). Tag is supplied by the caller via
-   the allocator handle obtained at `glibre_plugin_register` time;
-   the registration code stamps the tag into the handle so plugin
-   call sites are tag-free.
+   `physics`, `content`, `tools`, `e2e`). The `e2e` tag exists in the
+   enum for test-fixture allocations but carries no shipping-build
+   ceiling (the Budget Table row is `n/a`); `GLIBRE_ALLOC_STRICT`
+   leaves the e2e row unchecked.  Ten tags total; the enum is closed.
+   Tag is supplied by the caller via the allocator handle obtained at
+   `glibre_plugin_register` time; the registration code stamps the tag
+   into the handle so plugin call sites are tag-free.
 2. **Hard ceiling in diagnostic / debug builds.** When
    `GLIBRE_ALLOC_STRICT=1`, the allocator tracks live bytes per
    `ContextTag` and returns

@@ -59,12 +59,19 @@ enum class ContextTag : std::uint8_t {
     Physics,
     Content,
     Tools,
-    E2E,           // test-only context; budget not enforced in shipping builds
-    Count_         // sentinel — not a valid tag; used only for array sizing
+    E2E,  // test-only context; no shipping-build budget ceiling
+          // (perf-budget.md §Budget Table: e2e row is n/a for all cells;
+          //  perf-budget.md §Rationale: encoding n/a as a row rather than
+          //  gating behind GLIBRE_TESTING avoids ODR violations from the
+          //  library being compiled without GLIBRE_TESTING while tests are).
 };
 
-inline constexpr std::size_t kContextTagCount =
-    static_cast<std::size_t>(ContextTag::Count_);
+// kContextTagCount — number of valid ContextTag entries.
+//
+// Kept as a free constexpr rather than a Count_ enumerator inside the enum so
+// that an out-of-range integer cast to ContextTag cannot silently alias a
+// sentinel value (pattern from frame_phase.hpp §kPhaseCount).
+inline constexpr std::size_t kContextTagCount = 10u;
 
 // ---------------------------------------------------------------------------
 // PerfBudgetSample — snapshot of one context's per-frame counters
@@ -103,11 +110,15 @@ public:
     // at the end of the frame via sample().
     void record_cpu(ContextTag tag, std::uint64_t ns) noexcept;
 
-    // record_gpu(tag, ns) — add `ns` nanoseconds to the GPU counter for `tag`.
+    // record_gpu(tag, ns) — STUB.  Does NOT capture real GPU time.
     //
-    // Stub in this plan.  Real values come from MTLCounterSampleBuffer
-    // (render plan, out of scope here).  Callers may record 0 or
-    // passthrough values from the render context.
+    // Real GPU nanoseconds come from MTLCounterSampleBuffer, which is
+    // implemented by the render plan (out of scope for plan #241).  Until
+    // that plan lands, callers may pass through 0 or placeholder values.
+    // Follow-up search tag: [GPU-COUNTER-STUB] — grep for this tag when
+    // wiring up MTLCounterSampleBuffer to replace this stub.
+    //
+    // Accumulates `ns` into the GPU counter for `tag`.
     // Thread-safe: same atomics contract as record_cpu.
     void record_gpu(ContextTag tag, std::uint64_t ns) noexcept;
 
