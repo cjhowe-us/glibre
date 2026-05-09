@@ -9,6 +9,7 @@ cmake_minimum_required(VERSION 3.30)
 
 find_package(Catch2 CONFIG REQUIRED)
 find_package(Fory CONFIG REQUIRED)
+find_package(absl CONFIG REQUIRED)
 
 add_executable(fory_smoke fory_smoke.cpp)
 
@@ -16,6 +17,7 @@ target_link_libraries(fory_smoke
     PRIVATE
         Catch2::Catch2WithMain
         Fory::fory
+        absl::status
 )
 
 # CXX_MODULE_STD OFF: Catch2's generated main calls std:: symbols via classical
