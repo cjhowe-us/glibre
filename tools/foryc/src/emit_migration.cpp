@@ -111,41 +111,85 @@ struct FqnParts {
     // namespace").
     // -----------------------------------------------------------------------
 
-    if (!parts.ns.empty()) {
-        out += "namespace ";
-        out += parts.ns;
-        out += " {\n";
-    }
     for (const auto& mig : td.migrations) {
-        // Versioned argument type names: <TypeName>V<N>, <TypeName>V<M>
-        const eastl::string from_type =
+        // Versioned argument type names (always fully-qualified to be
+        // unambiguous regardless of which namespace wraps the provider
+        // fwd-decl): <ns>::<TypeName>V<N>, <ns>::<TypeName>V<M>.
+        // These structs live in the type's own namespace (parts.ns).
+        // Forward-declare them (in that namespace) so the migration
+        // function signature compiles without including the generated
+        // type headers.  In the real glibre-types.dylib build the
+        // generated headers are on the include path, but forward-
+        // declarations make the TU independently well-formed.
+        const eastl::string from_unq =
             type_name + eastl::string(std::format("V{}", mig.from_version).c_str());
-        const eastl::string to_type =
+        const eastl::string to_unq =
             type_name + eastl::string(std::format("V{}", mig.to_version).c_str());
 
-        // Derive the unqualified function name from the provider string.
-        // The provider is the fully-qualified name; strip the namespace prefix
-        // (everything up to and including the last "::").
+        // Emit struct forward-declarations in the type's namespace.
+        if (!parts.ns.empty()) {
+            out += "namespace ";
+            out += parts.ns;
+            out += " { struct ";
+            out += from_unq;
+            out += "; struct ";
+            out += to_unq;
+            out += "; }  // namespace ";
+            out += parts.ns;
+            out += "\n";
+        } else {
+            out += "struct ";
+            out += from_unq;
+            out += ";\n";
+            out += "struct ";
+            out += to_unq;
+            out += ";\n";
+        }
+
+        // Fully-qualified parameter type names for the provider fwd-decl.
+        // Always qualify with the type's namespace so the declaration is
+        // unambiguous even when the provider lives in a different namespace.
+        const eastl::string ns_prefix =
+            parts.ns.empty() ? eastl::string("") : (parts.ns + eastl::string("::"));
+        const eastl::string from_fq = ns_prefix + from_unq;
+        const eastl::string to_fq = ns_prefix + to_unq;
+
+        // Derive the provider's own namespace and unqualified function name by
+        // splitting mig.provider on the last "::".  This is independent of the
+        // type's namespace: a schema may declare a provider in a different
+        // namespace (e.g. type "glibre.core.Transform" with provider
+        // "glibre::physics::migrate_Transform_v1_to_v2").  Using the type's
+        // namespace for the fwd-decl would silently forward-declare the wrong
+        // symbol and cause a link error.
+        eastl::string provider_ns;
         eastl::string fn_name = mig.provider;
         const auto last_sep = fn_name.rfind("::");
         if (last_sep != eastl::string::npos) {
-            fn_name = eastl::string(fn_name.data() + last_sep + 2, fn_name.size() - last_sep - 2);
+            provider_ns = eastl::string(mig.provider.data(), last_sep);
+            fn_name = eastl::string(
+                mig.provider.data() + last_sep + 2, mig.provider.size() - last_sep - 2
+            );
         }
 
+        if (!provider_ns.empty()) {
+            out += "namespace ";
+            out += provider_ns;
+            out += " {\n";
+        }
         out += eastl::string(
             std::format(
                 "std::expected<void, glibre::Error> {}(const {}&, {}&);\n",
                 std::string_view(fn_name.data(), fn_name.size()),
-                std::string_view(from_type.data(), from_type.size()),
-                std::string_view(to_type.data(), to_type.size())
+                std::string_view(from_fq.data(), from_fq.size()),
+                std::string_view(to_fq.data(), to_fq.size())
             )
                 .c_str()
         );
-    }
-    if (!parts.ns.empty()) {
-        out += "}  // namespace ";
-        out += parts.ns;
-        out += "\n";
+        if (!provider_ns.empty()) {
+            out += "}  // namespace ";
+            out += provider_ns;
+            out += "\n";
+        }
     }
     out += "\n";
 
@@ -163,7 +207,6 @@ struct FqnParts {
     // Fully-qualified provider is used here so the reference links even if
     // the forward decl above is in a different namespace.
     const std::size_t count = td.migrations.size();
-    out += "// clang-format off\n";
     out += "static const MigrationEntry k_migrations_";
     out += type_name;
     out += "[] = {\n";
@@ -179,7 +222,6 @@ struct FqnParts {
         );
     }
     out += "};\n";
-    out += "// clang-format on\n";
     out += "\n";
 
     // Exported per-type symbols.
@@ -242,11 +284,12 @@ emit_migration(const Schema& schema, std::string_view source_path) noexcept {
     out += "#include <expected>\n";
     out += "\n";
 
-    // Bring glibre::Error into scope so the provider forward-declarations
-    // can name it without requiring a separate header in the generated TU.
-    out += "// Forward-declare glibre::Error so provider signatures compile\n";
-    out += "// without pulling in the full engine headers.\n";
-    out += "namespace glibre { struct Error; }\n";
+    // glibre/error.hpp provides glibre::Error (complete definition).
+    // The generated TU is compiled into glibre-types.dylib which has
+    // core/include on its include path; this include is therefore valid.
+    // A forward-declaration is insufficient because std::expected<void, E>
+    // requires E complete on instantiation (libc++ stores E in a union).
+    out += "#include \"glibre/error.hpp\"\n";
     out += "\n";
 
     // MigrationEntry struct — must match glibre/types/migration_entry.hpp layout.

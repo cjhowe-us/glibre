@@ -229,6 +229,67 @@ schema glibre.data.Asset {
 }
 
 // -----------------------------------------------------------------------
+// Test: foryc_emit_migration_cross_namespace_provider
+//
+// MED-B regression: when the schema type lives in one namespace and the
+// provider lives in another (e.g. glibre.core.Transform with provider
+// "glibre::physics::migrate_Transform_v1_to_v2"), the emitter must wrap
+// the fwd-decl in the PROVIDER's namespace, not the type's namespace.
+// Failure mode: emitter wraps the fwd-decl in glibre::core but the table
+// references &glibre::physics::migrate_Transform_v1_to_v2 → link error.
+// -----------------------------------------------------------------------
+
+TEST_CASE("foryc_emit_migration_cross_namespace_provider", "[foryc][emit_migration]") {
+    constexpr std::string_view src = R"(
+schema glibre.core.Transform {
+  version 2
+  field translation : vec3f tag 1
+  migration from 1 to 2 calls "glibre::physics::migrate_Transform_v1_to_v2"
+}
+)";
+
+    const auto schema = parse_ok(src, "core/Transform.fory");
+    auto result = emit_migration(schema, "core/Transform.fory");
+    REQUIRE(result.has_value());
+
+    const eastl::string& text = *result;
+
+    // The provider forward-declaration must be wrapped in the provider's
+    // namespace (glibre::physics).
+    CHECK(text.find("namespace glibre::physics") != eastl::string::npos);
+
+    // The fully-qualified provider reference in the table must use the
+    // full path (glibre::physics::migrate_Transform_v1_to_v2).
+    CHECK(text.find("glibre::physics::migrate_Transform_v1_to_v2") != eastl::string::npos);
+
+    // The function signature uses the correct std::expected return type.
+    CHECK(text.find("std::expected<void, glibre::Error>") != eastl::string::npos);
+
+    // The versioned type forward-declarations (TransformV1, TransformV2) must
+    // appear in the type's namespace (glibre::core), not the provider's.
+    // Check that glibre::core namespace appears (for type fwd-decl) and that
+    // the function fwd-decl uses fully-qualified type names (glibre::core::).
+    CHECK(text.find("namespace glibre::core") != eastl::string::npos);
+
+    // The provider function signature uses fully-qualified parameter types.
+    // This ensures the fwd-decl is valid regardless of which namespace wraps it.
+    CHECK(text.find("glibre::core::TransformV1") != eastl::string::npos);
+    CHECK(text.find("glibre::core::TransformV2") != eastl::string::npos);
+
+    // Verify the provider fwd-decl (inside glibre::physics) uses the
+    // unqualified function name (not the fully-qualified glibre::physics:: prefix).
+    // The namespace block owns the name; full qualification inside would be wrong.
+    const auto physics_open = text.find("namespace glibre::physics");
+    const auto physics_close = text.find("}  // namespace glibre::physics");
+    REQUIRE(physics_open != eastl::string::npos);
+    REQUIRE(physics_close != eastl::string::npos);
+    REQUIRE(physics_open < physics_close);
+    const eastl::string physics_block(text.data() + physics_open, physics_close - physics_open);
+    // Inside the namespace block, the function name is unqualified.
+    CHECK(physics_block.find("migrate_Transform_v1_to_v2") != eastl::string::npos);
+}
+
+// -----------------------------------------------------------------------
 // Test: foryc_emit_migration_round_trip_via_compile
 //
 // Compiles the emitted migrations.cpp into a stub .dylib using the system
@@ -284,21 +345,25 @@ schema glibre.test.Gadget {
     const fs::path gen_path = tmp_dir / "migrations_roundtrip.cpp";
     const fs::path dylib_path = tmp_dir / "migrations_roundtrip.dylib";
 
-    // The generated TU forward-declares provider functions with versioned
-    // argument types (e.g. `const WidgetV1&, WidgetV2&`).  In a real build
-    // those types are defined in `glibre/types/<ctx>/<Type>V<N>.hpp`.  For
-    // this round-trip test we inject the type definitions via a preamble
-    // written before the generated TU content into a single combined source
-    // file.  This mirrors how the real build assembles the generated TU with
-    // the owning context's type headers visible.
+    // The generated TU now includes "glibre/error.hpp" (complete glibre::Error)
+    // and forward-declares provider functions with versioned argument types.
+    // In a real build those types are defined in glibre/types/<ctx>/<Type>V<N>.hpp.
+    // For this round-trip test we write a stub preamble source that:
+    //   1. Includes the real "glibre/error.hpp" (via -I in compile_cmd).
+    //   2. Defines versioned struct stand-ins and the provider body.
+    // The preamble is written into a SEPARATE file (preamble.cpp), compiled
+    // into a separate object, and linked with the generated TU into the dylib.
+    // This means the generated TU (gen_path) is compiled WITHOUT any preamble
+    // injection, so the seam is genuinely exercised: the generated #include
+    // "glibre/error.hpp" must resolve on its own via -I flags.
+    const fs::path preamble_path = tmp_dir / "preamble.cpp";
     {
-        // Preamble: minimal type definitions + glibre::Error stub so the
-        // generated forward-decls and the provider body all compile together.
+        // Preamble: versioned type stubs + provider body.
+        // glibre::Error is NOT defined here; it comes from glibre/error.hpp
+        // which the generated TU includes directly.
         constexpr std::string_view preamble = R"(
 #include <expected>
-
-// Minimal definition of glibre::Error (stand-in for the real header).
-namespace glibre { struct Error {}; }
+#include "glibre/error.hpp"
 
 // Versioned struct definitions (stand-ins for the real generated types).
 namespace glibre::test {
@@ -311,21 +376,33 @@ migrate_Widget_v1_to_v2(const WidgetV1&, WidgetV2&) {
     return {};
 }
 }  // namespace glibre::test
-
 )";
+        std::ofstream ofs{preamble_path, std::ios::trunc};
+        REQUIRE(ofs.is_open());
+        ofs.write(preamble.data(), static_cast<std::streamsize>(preamble.size()));
+        REQUIRE(ofs.good());
+    }
+
+    // Write the generated TU verbatim — no preamble prepended.
+    {
         std::ofstream ofs{gen_path, std::ios::trunc};
         REQUIRE(ofs.is_open());
-        // Write the preamble, then the generated content.
-        ofs.write(preamble.data(), static_cast<std::streamsize>(preamble.size()));
         ofs.write(gen_text.data(), static_cast<std::streamsize>(gen_text.size()));
         REQUIRE(ofs.good());
     }
 
     // --- Compile the combined TU into a .dylib. ---
+    // HIGH-A fix: supply -I flags so the generated TU's #include "glibre/error.hpp"
+    // and "glibre/error.hpp"'s own #include <EASTL/...> both resolve.
+    // GLIBRE_CORE_INCLUDE_DIR and GLIBRE_VCPKG_INCLUDE_DIR are injected by
+    // the CMakeLists target_compile_definitions for this test binary.
     const auto compile_cmd = std::format(
         "clang++ -std=c++23 -fno-exceptions -fno-rtti "
-        "-dynamiclib -o \"{}\" \"{}\" 2>&1",
+        "-I\"" GLIBRE_CORE_INCLUDE_DIR "\" "
+        "-I\"" GLIBRE_VCPKG_INCLUDE_DIR "\" "
+        "-dynamiclib -o \"{}\" \"{}\" \"{}\" 2>&1",
         dylib_path.native(),
+        preamble_path.native(),
         gen_path.native()
     );
 
