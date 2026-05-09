@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 4.3.0)
 # tests/core/plugin_loader_register — unit tests for loader steps 9–11
 #
 # Plan: #231 — PluginLoaderRegistry register + schedule rebuild + migrate.
+# Plan: #982 — SystemScheduleCycle integration test (step 10 failure path).
 # Plan: #983 — SchemaMigrationFailed integration test (step 11 failure path).
 # Authority: reviews/decisions/plugin-abi.md §"Loader Sequence" steps 9–11.
 #
@@ -11,6 +12,7 @@ cmake_minimum_required(VERSION 4.3.0)
 #   - register_invokes_plugin_entry_point   (step 9: happy path)
 #   - register_failure_cleans_up_dlopen     (step 9: failure path)
 #   - rebuild_schedule_smoke                (step 10: MVP stub smoke)
+#   - rebuild_schedule_returns_cycle_on_conflicting_systems (step 10: #982)
 #   - migrate_components_no_op_when_versions_equal (step 11: MVP stub)
 #   - migrate_components_returns_failed_on_broken_migration_step (step 11: #983)
 #

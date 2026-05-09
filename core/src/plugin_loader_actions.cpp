@@ -189,6 +189,41 @@ Result<void> rebuild_schedule() noexcept {
 }
 
 // ---------------------------------------------------------------------------
+// rebuild_schedule(rebuild_fn) — test-injectable overload (plan #982).
+//
+// Calls rebuild_fn() and propagates its result unchanged.  This overload
+// exists to provide a test-injectable seam so that the SystemScheduleCycle
+// failure path is exercisable before plans #247/#248 land with the real
+// topology sort.
+//
+// In production (plan #247/#248), overload (1) (no-parameter form) will be
+// updated to call the real schedule builder; this overload remains available
+// as a permanent test-injection point that mirrors the MigrationStepFn seam
+// for step 11.
+//
+// Design note: rebuild_fn is a plain function pointer (not eastl::function<>)
+// to avoid heap allocation and vtable overhead.  All test-injection scenarios
+// supply file-scope function pointers, so the plain pointer is sufficient
+// (mirrors the MigrationStepFn design note in migrate_components).
+// ---------------------------------------------------------------------------
+
+Result<void> rebuild_schedule(ScheduleRebuildFn rebuild_fn) noexcept {
+    // Precondition: rebuild_fn must be non-null (documented in the header —
+    // the injectable overload requires a valid callable).  Fire a debug-build
+    // assertion consistent with the codebase pattern.
+#ifndef NDEBUG
+    assert(
+        rebuild_fn != nullptr &&
+        "rebuild_schedule precondition: "
+        "rebuild_fn must be non-null — caller must supply a valid schedule rebuild step"
+    );
+#endif
+
+    // Invoke the injected rebuild step and propagate the result unchanged.
+    return rebuild_fn();
+}
+
+// ---------------------------------------------------------------------------
 // migrate_components — loader step 11 (plugin-abi.md §"Loader Sequence")
 //
 // Two overloads; see plugin_loader_actions.hpp for the full contract.

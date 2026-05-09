@@ -131,6 +131,21 @@ namespace glibre::core {
 [[nodiscard]] Result<void> call_register(RegisterFn register_fn, PluginContext& ctx) noexcept;
 
 // ---------------------------------------------------------------------------
+// ScheduleRebuildFn — function-pointer type for a single schedule rebuild step.
+//
+// A ScheduleRebuildFn takes no arguments and returns Result<void>.  In
+// production (post-plan #247/#248) the loader will call the real topology
+// sort on the full SystemRegistry; in tests a mock function can be injected
+// directly to exercise the SystemScheduleCycle path without the real schedule
+// graph infrastructure.
+//
+// The noexcept qualifier is required: engine code compiles with
+// -fno-exceptions (error-model.md §Decision 3).
+// ---------------------------------------------------------------------------
+
+using ScheduleRebuildFn = Result<void> (*)() noexcept;
+
+// ---------------------------------------------------------------------------
 // rebuild_schedule — loader step 10 (plugin-abi.md §"Loader Sequence").
 //
 // Recomputes the per-phase system schedule from the union of all loaded
@@ -138,16 +153,34 @@ namespace glibre::core {
 // core::Error::SystemScheduleCycle; the loader rolls back the last plugin's
 // registration and aborts that single load (other plugins keep running).
 //
-// MVP STUB: Returns success unconditionally.  Real schedule graph topology
-// sort from SystemDecl.after / SystemDecl.before edges is deferred to
-// frame-loop plans #247 and #248 which define SystemRegistry and the full
-// schedule graph builder.
+// Two overloads:
 //
-// TODO(#247, #248): replace stub with topological sort over loaded plugins'
-// SystemDecl vectors; return SystemScheduleCycle on cycle.
+//   (1) rebuild_schedule()
+//       Production and smoke-test path.  Takes no rebuild_fn parameter;
+//       returns success unconditionally in the MVP stub.  The plan #247/#248
+//       implementation will perform the real topology sort internally rather
+//       than accepting an injected step.  For tests that need an injection
+//       seam, use overload (2).
+//
+//   (2) rebuild_schedule(rebuild_fn)
+//       Test-injectable overload.  Calls rebuild_fn() unconditionally;
+//       propagates the result unmodified.  Lets tests inject a mock that
+//       returns std::unexpected(SystemScheduleCycle) to exercise the step-10
+//       failure path without real SystemRegistry / topology sort
+//       infrastructure (plan #247/#248).
+//
+// MVP STUB: Overload (1) returns success unconditionally.  Real schedule
+// graph topology sort from SystemDecl.after / SystemDecl.before edges is
+// deferred to frame-loop plans #247 and #248 which define SystemRegistry
+// and the full schedule graph builder.
+//
+// TODO(#247, #248): replace overload (1) stub with topological sort over
+// loaded plugins' SystemDecl vectors; return SystemScheduleCycle on cycle.
 // ---------------------------------------------------------------------------
 
 [[nodiscard]] Result<void> rebuild_schedule() noexcept;
+
+[[nodiscard]] Result<void> rebuild_schedule(ScheduleRebuildFn rebuild_fn) noexcept;
 
 // ---------------------------------------------------------------------------
 // MigrationStepFn — function-pointer type for a single migration step.
