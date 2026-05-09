@@ -176,9 +176,9 @@ TEST_CASE("core/log_error: tag_string_stable_for_core", "[core][log_error]") {
 // string for every enumerator in core::Error.
 //
 // If a new enumerator is added to core::Error without adding a matching arm
-// to to_string(core::Error), the -Werror-covered switch statement will
-// produce a compile error (unhandled enum case).  This test provides the
-// runtime confirmation that every enumerator maps to a non-trivial string.
+// to to_string(core::Error), -Werror=switch (core/CMakeLists.txt) turns the
+// -Wswitch diagnostic into a build error.  This test provides runtime
+// confirmation that every enumerator maps to the correct string literal.
 // ---------------------------------------------------------------------------
 TEST_CASE("core/log_error: tostring_complete_for_core_error", "[core][log_error]") {
     using E = glibre::core::Error;
@@ -208,4 +208,56 @@ TEST_CASE("core/log_error: tostring_complete_for_core_error", "[core][log_error]
     check(E::PluginEngineTooOld,      "PluginEngineTooOld");
     check(E::PluginNameCollision,     "PluginNameCollision");
     check(E::PluginDependencyMissing, "PluginDependencyMissing");
+}
+
+// ---------------------------------------------------------------------------
+// Test: core/log_error: tostring_complete_for_render_error
+//
+// Verifies that glibre::to_string(render::Error) returns a non-null, non-empty
+// string for every enumerator in render::Error.
+//
+// Symmetric to tostring_complete_for_core_error.  -Werror=switch catches
+// missing arms at build time; this test provides runtime string-value checks.
+// ---------------------------------------------------------------------------
+TEST_CASE("core/log_error: tostring_complete_for_render_error", "[core][log_error]") {
+    using E = glibre::render::Error;
+
+    const auto check = [](E e, const char* expected) {
+        const char* s = glibre::to_string(e);
+        REQUIRE(s != nullptr);
+        CHECK(*s != '\0');
+        CHECK(std::string{s} == std::string{expected});
+    };
+
+    check(E::DeviceLost,                "DeviceLost");
+    check(E::PipelineCompileFailed,     "PipelineCompileFailed");
+    check(E::ResourceResidencyExceeded, "ResourceResidencyExceeded");
+    check(E::RenderGraphCycle,          "RenderGraphCycle");
+    check(E::UnsupportedBackend,        "UnsupportedBackend");
+}
+
+// ---------------------------------------------------------------------------
+// Test: core/log_error: tostring_complete_for_tools_error
+//
+// Verifies that glibre::to_string(tools::Error) returns a non-null, non-empty
+// string for every enumerator in tools::Error.
+//
+// Symmetric to tostring_complete_for_core_error.
+// ---------------------------------------------------------------------------
+TEST_CASE("core/log_error: tostring_complete_for_tools_error", "[core][log_error]") {
+    using E = glibre::tools::Error;
+
+    const auto check = [](E e, const char* expected) {
+        const char* s = glibre::to_string(e);
+        REQUIRE(s != nullptr);
+        CHECK(*s != '\0');
+        CHECK(std::string{s} == std::string{expected});
+    };
+
+    check(E::ForycSyntaxError,        "ForycSyntaxError");
+    check(E::ForycDuplicateTag,       "ForycDuplicateTag");
+    check(E::ForycNonMonotoneVersion, "ForycNonMonotoneVersion");
+    check(E::ForycUnknownType,        "ForycUnknownType");
+    check(E::ForycIOError,            "ForycIOError");
+    check(E::ForycEmptySchema,        "ForycEmptySchema");
 }

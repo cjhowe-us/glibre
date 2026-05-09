@@ -14,9 +14,16 @@
 // std::string is used only as the transient buffer passed to spdlog, which is
 // immediately discarded after the log call).
 //
-// -fno-exceptions: spdlog 1.x supports SPDLOG_NO_EXCEPTIONS.
-// The log_error functions are declared noexcept; any spdlog internal
-// allocation failure is swallowed (spdlog's no-exceptions behaviour).
+// noexcept contract: log_error() is declared noexcept.  glibre-core compiles
+// with -fno-exceptions so std::format and std::string cannot throw from this
+// TU.  The vcpkg spdlog port builds with SPDLOG_COMPILED_LIB only (not
+// SPDLOG_NO_EXCEPTIONS), so spdlog's internal exception paths are compiled
+// into the spdlog binary; however, because log_error() is noexcept, any
+// exception that attempts to escape spdlog terminates the process via
+// std::terminate (the standard C++ noexcept-on-throw rule).  For a log-emit
+// failure, std::terminate is the correct outcome: the previous-good plugin
+// state is preserved (per error-model.md §Logging rule 3), and the crash is
+// detectable in CI.
 
 #include "glibre/log_error.hpp"
 
@@ -35,9 +42,10 @@ namespace {
     const glibre::Error::Variant& v = err.code();
     const glibre::ErrorContext& ctx = err.where();
 
-    // Convert eastl::string_view to std::string_view for std::format interop.
-    // eastl::string_view and std::string_view have the same data/size semantics;
-    // the reinterpret is safe for UTF-8 string literals from __FILE__ and detail.
+    // Construct a std::string_view over the same character buffer that
+    // ctx.file / ctx.detail point at.  This is a standard range constructor
+    // (data + size) — no copy, no type-pun.  std::format then consumes the
+    // view directly without further allocation.
     const std::string_view file_sv{ctx.file.data(), ctx.file.size()};
     const std::string_view detail_sv{ctx.detail.data(), ctx.detail.size()};
 
@@ -62,11 +70,12 @@ void log_error(
     const glibre::Error& err,
     spdlog::level::level_enum level
 ) noexcept {
-    // format_error_message may allocate (std::format, std::string).
-    // The noexcept boundary is maintained by the OS-level assumption:
-    // std::string allocation failure on macOS terminates via new-handler.
-    // For -fno-exceptions builds, exceptions from std::format/string are
-    // compile-time impossible; this noexcept annotation is valid.
+    // format_error_message returns std::string (may allocate).
+    // This TU compiles with -fno-exceptions so std::bad_alloc cannot be
+    // thrown here; the noexcept annotation is valid for this call site.
+    // If spdlog itself throws (its binary was compiled without -fno-exceptions),
+    // the noexcept boundary converts it to std::terminate — see file-level
+    // noexcept contract comment above.
     sink.log(level, "{}", format_error_message(err));
 }
 

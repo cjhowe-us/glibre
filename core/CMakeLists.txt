@@ -58,6 +58,10 @@ target_compile_options(glibre-core PRIVATE
     -Wextra
     -Wpedantic
     -Wno-unused-parameter
+    # Promote -Wswitch to an error so hand-written to_string() and tag_string()
+    # completeness is enforced at build time, not just by runtime unit tests.
+    # This is the guarantee described in log_error.hpp §"to_string design choice".
+    -Werror=switch
 )
 
 # ---------------------------------------------------------------------------

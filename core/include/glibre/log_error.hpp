@@ -19,13 +19,15 @@
 // to_string design choice (plan #236 §Scope):
 //   Hand-written to_string() per per-context enum is used instead of
 //   magic_enum.  Rationale: avoids the dependency, keeps compile times
-//   predictable, and allows the unit test `tostring_complete_for_core_error`
-//   to fail the build the moment the enum gains an enumerator without a
-//   matching arm — which is a stronger guarantee than magic_enum's runtime
-//   "unknown" fallback.
+//   predictable, and triggers a -Wswitch compiler warning when an enum gains
+//   an enumerator without a matching arm.  glibre-core compiles with
+//   -Werror=switch so that warning is promoted to a build error, making the
+//   guarantee compile-time.  The runtime completeness tests
+//   (tostring_complete_for_{core,render,tools}_error) verify string values.
 //
-// -fno-exceptions compatible: no throws; spdlog is compiled with
-// SPDLOG_NO_EXCEPTIONS (enforced by the glibre-core compile flags).
+// -fno-exceptions compatible: log_error() is declared noexcept.  Any exception
+// that attempts to escape spdlog terminates the process via std::terminate —
+// the standard noexcept-on-throw behaviour.  See log_error.cpp for details.
 
 #include <spdlog/logger.h>
 #include <spdlog/spdlog.h>
@@ -42,9 +44,15 @@ namespace glibre {
 // pointer past the lifetime of the program; the literals have static storage
 // duration and are always valid.
 //
-// Adding a new enumerator without adding a matching arm causes a compiler
-// warning (unhandled enum case in switch) that is treated as an error under
-// -Werror.  This is the "fails the build" guarantee referenced in plan #236.
+// Namespace placement: all overloads live in namespace glibre — NOT in the
+// per-context namespaces (glibre::core, glibre::render, …).  ADL on a value
+// of type render::Error will NOT find glibre::to_string; call sites must
+// qualify: `glibre::to_string(e)`.  The implementation (variant_code_string)
+// already qualifies correctly; external callers must do the same.
+//
+// Adding a new enumerator without adding a matching arm fires -Wswitch, which
+// glibre-core promotes to a build error via -Werror=switch (core/CMakeLists.txt).
+// This is the compile-time coverage guarantee referenced in plan #236.
 
 [[nodiscard]] constexpr const char* to_string(core::Error e) noexcept {
     switch (e) {
@@ -100,16 +108,31 @@ namespace glibre {
 //   1 → render::Error → "render::Error"
 //   2 → tools::Error  → "tools::Error"
 //
-// This mapping is compile-time-stable: changing the Variant typedef order
-// requires updating this function (which the unit test will flag).
+// Compile-time guard: the static_assert below fires if Error::Variant grows
+// beyond the currently-known 3 alternatives without this function being
+// updated.  Adding a 4th alternative to Error::Variant will fail the build
+// with an actionable message ("extend tag_string when Error::Variant grows").
+//
+// Once tag_string is extended for the new alternative, increment the
+// static_assert count to match.
+
+static_assert(
+    eastl::variant_size_v<Error::Variant> == 3,
+    "extend tag_string() when Error::Variant grows (add a new case and bump "
+    "the static_assert count in log_error.hpp)"
+);
 
 [[nodiscard]] inline const char* tag_string(const Error::Variant& v) noexcept {
     switch (v.index()) {
         case 0: return "core::Error";
         case 1: return "render::Error";
         case 2: return "tools::Error";
-        default: return "unknown::Error";
     }
+    // v.index() == eastl::variant_npos only when the variant holds
+    // valueless_by_exception state, which cannot occur in -fno-exceptions
+    // builds.  __builtin_unreachable() eliminates any dead-code warning and
+    // asserts this path is logically impossible.
+    __builtin_unreachable();
 }
 
 // ---------------------------------------------------------------------------
