@@ -78,9 +78,9 @@ inline constexpr std::size_t kContextTagCount = 10u;
 // ---------------------------------------------------------------------------
 
 struct PerfBudgetSample {
-    std::uint64_t cpu_ns{0};      // accumulated CPU nanoseconds this frame
-    std::uint64_t gpu_ns{0};      // accumulated GPU nanoseconds (stub; 0 until Metal plan)
-    std::uint64_t heap_bytes{0};  // live heap bytes at snapshot time
+    std::uint64_t cpu_ns{0};     // accumulated CPU nanoseconds this frame
+    std::uint64_t gpu_ns{0};     // accumulated GPU nanoseconds (stub; 0 until Metal plan)
+    std::uint64_t heap_bytes{0}; // live heap bytes at snapshot time
 };
 
 // ---------------------------------------------------------------------------
