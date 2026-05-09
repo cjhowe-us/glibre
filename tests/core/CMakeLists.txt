@@ -3,6 +3,12 @@ cmake_minimum_required(VERSION 3.30)
 # ---------------------------------------------------------------------------
 # tests/core — unit tests for glibre::core
 # ---------------------------------------------------------------------------
+# GLIBRE_TESTING=1 is propagated PUBLIC from glibre-core when GLIBRE_BUILD_TESTS
+# is ON (the same option that enables this subdirectory at the root level), so
+# every test target in this tree receives GLIBRE_TESTING=1 transitively via
+# target_link_libraries(... glibre::core).  No separate guard is needed — the
+# root CMakeLists.txt never adds tests/ when GLIBRE_BUILD_TESTS is OFF.
+# ---------------------------------------------------------------------------
 
 add_subdirectory(plugin_api)
 add_subdirectory(plugin_loader)
@@ -52,10 +58,12 @@ target_compile_options(glibre-core-tests PRIVATE
     -Wno-c2y-extensions
 )
 
-# Enable test-only recording hooks in FrameLoop (MED-6 fix).
-# The GLIBRE_TESTING macro activates last_tick_phase_ordinals_ tracking
-# in FrameLoop so order-verification tests can observe execution order.
-target_compile_definitions(glibre-core-tests PRIVATE GLIBRE_TESTING)
+# GLIBRE_TESTING is now propagated PUBLIC from glibre-core (core/CMakeLists.txt)
+# when GLIBRE_BUILD_TESTS=ON (the existing root-level option), so
+# glibre-core-tests receives it transitively via target_link_libraries(glibre::core).
+# No PRIVATE definition needed here.
+# See plan #997 for the fix history (was previously PRIVATE-only on the test
+# executable, causing the library TU to compile without the instrumentation paths).
 
 include(CTest)
 include(Catch)
