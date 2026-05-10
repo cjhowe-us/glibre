@@ -57,7 +57,7 @@
 #   window_size:        1280x720
 #   dpi_scale:          1.0
 #   rng_seed:           0x0000_0000_0000_0001
-#   frame_budget:       max_frames=64                # 26 authored × ~2.5× safety
+#   frame_budget:       max_frames=64                # 27 authored × ~2.4× safety (frame 14 added by #916)
 #   golden_refs:        []                           # AssertEcsSnapshot/Screenshot not used
 #   fixture_layout:     tests/e2e/core/fixtures/archetype-storage-components.md
 #
@@ -442,6 +442,15 @@ op: AssertState
                   an Archetype is deterministic by chunk insertion
                   order").
 
+# AssertLogContains id=17 is placed on a distinct successor frame (frame 14)
+# rather than on frame 13 alongside AssertState ids 13–16. Per specs/e2e/SPEC.md
+# §4.1.7 inv 4 (fail-fast), if any AssertState on frame 13 fails the runner
+# aborts immediately and any same-frame successor op is unreachable — the
+# log-channel diagnostic would be invisible precisely when state-checking fails.
+# A successor frame guarantees the log window spans a full frame boundary and
+# that id=17 runs independently of the frame-13 AssertState outcomes.
+# (refs #916; canonical pattern from entity-lifecycle PR #866)
+frame: 14
 op: AssertLogContains
   id:             17
   is_regex:       false
@@ -460,7 +469,7 @@ op: AssertLogContains
 # Termination
 # ============================================================================
 
-frame: 14
+frame: 15
 op: End
   evidence:       specs/e2e/SPEC.md §4.1.1 inv 5 — exactly one End op,
                   emitted last; specs/e2e/SPEC.md §7.1.5 EndPayload.
