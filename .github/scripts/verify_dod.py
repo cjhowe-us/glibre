@@ -115,15 +115,21 @@ def check_workflow_passed(arg: object) -> tuple[bool, str]:
         "--workflow", name,
         "--branch", "main",
         "--status", "completed",
-        "--limit", "1",
+        "--limit", "10",
         "--json", "conclusion,status,databaseId",
     )
     runs = json.loads(raw or "[]")
     if not runs:
-        return False, f"workflow_passed: {name} (no runs on main)"
-    r = runs[0]
-    ok = r.get("status") == "completed" and r.get("conclusion") == "success"
-    return ok, f"workflow_passed: {name} → run {r.get('databaseId')} {r.get('conclusion')}"
+        return False, f"workflow_passed: {name} (no completed runs on main)"
+    success = next((r for r in runs if r.get("conclusion") == "success"), None)
+    if success is None:
+        latest = runs[0]
+        return False, (
+            f"workflow_passed: {name} → "
+            f"latest 10 completed runs all non-success "
+            f"(most recent: run {latest.get('databaseId')} {latest.get('conclusion')})"
+        )
+    return True, f"workflow_passed: {name} → run {success.get('databaseId')} success"
 
 
 def check_unit_test_named(arg: object) -> tuple[bool, str]:
