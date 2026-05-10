@@ -15,10 +15,13 @@
 > resources / `TransientPool` heaps, §9.5 heap composition (256 MiB
 > transient + 128 MiB persistent + 16 MiB handle tables + 48 MiB RT
 > + 64 MiB PSO = 512 MiB ceiling), §9.5.1 allocator rules, and §10
-> failure-mode rows `ResourceAllocFailed` / `ResourceResidencyExceeded` / `SamplerCapExceeded`
+> failure-mode rows `ResourceAllocFailed` / `ResourceResidencyExceeded` / `SamplerCapExceeded` / `SlotTableExhausted`
 > (§10 design-name labels; §5 enum identifiers are `HeapOutOfMemory` /
-> `TransientPoolExhausted` / `ResourceResidencyExceeded` / `SamplerCapExceeded` — the last per spike #874 SRP split,
-> `reviews/decisions/resourceresidency-srp.md`).
+> `TransientPoolExhausted` / `ResourceResidencyExceeded` / `SamplerCapExceeded` / `SlotTableExhausted` — the
+> sampler-cap arm split per spike #874 SRP decision
+> (`reviews/decisions/resourceresidency-srp.md`); the slot-table-cap arm
+> split per spike #904 SRP decision
+> (`reviews/decisions/slot-table-overflow-error.md`)).
 > Cites `reviews/decisions/error-model.md`,
 > `reviews/decisions/perf-budget.md`,
 > `reviews/decisions/plugin-abi.md`,
@@ -180,7 +183,7 @@ re-derived per PHILOSOPHY §"How harmonius is used"):
 | **R-2.5.9** — Lifetime-driven release (not refcount); release happens at known frame boundaries. | **Covered.** §3.7: transient releases at phase 7 exit; persistent releases by explicit `release_persistent()`; imported releases are no-ops (importer owns). No reference counting; PHILOSOPHY §"explicit lifetimes" preserved. |
 | **R-2.5.10** — Heap pool with placement-resource sub-allocation (Metal `MTLHeap`).                  | **Covered.** §3.5 transient pool + §3.6 persistent allocator: both back onto `MTL::Heap` with `MTL::HeapType::placement`, slot-allocated by best-fit-by-size on the persistent side and alias-plan-driven on the transient side. Heap creation goes through `MetalDevice::heap_allocator()`. |
 | **R-2.5.11** — Per-context allocator tagging; render owns the GPU residency tag.                    | **Covered.** §3.11 + `SPEC.md` §9.5.1: every allocation routes through `glibre::PerContextAllocator` stamped with `ContextTag::render`. CPU shadows are tagged by the requesting context; GPU bytes are render-tagged regardless of caller per `perf-budget.md` Allocator Rule 5. |
-| **R-2.5.12** — Resource exhaustion produces typed errors, not exceptions.                           | **Covered.** §3.12 + §10: `ResourceResidencyExceeded`, `SamplerCapExceeded`, `HeapOutOfMemory`, `TransientPoolExhausted`, `StaleResourceHandle`, `ResourceRoleMismatch`, `ResourceImportRefused`, `CapabilityNotSupported` (for Tier-2 absence). All return `glibre::Result<T>`; no exception path. |
+| **R-2.5.12** — Resource exhaustion produces typed errors, not exceptions.                           | **Covered.** §3.12 + §10: `ResourceResidencyExceeded`, `SamplerCapExceeded`, `SlotTableExhausted`, `HeapOutOfMemory`, `TransientPoolExhausted`, `StaleResourceHandle`, `ResourceRoleMismatch`, `ResourceImportRefused`, `CapabilityNotSupported` (for Tier-2 absence). All return `glibre::Result<T>`; no exception path. |
 | Harmonius design — Free list per `MTLHeap` with first-fit / best-fit policy.                       | **Covered, simplified.** §3.6 step 3: persistent allocator uses best-fit-by-size against a fixed-bin free list (eight power-of-two size buckets); the alias planner handles transient placement and does not need a free list at all (its colouring runs cold-path each compile). PHILOSOPHY collapse: one allocator policy, not two. |
 | Harmonius design — Resource versioning per write to enable cross-pass barriers.                    | **Refused at this aggregate; routed to graph aggregate.** Read-after-write versioning is the alias planner's job (#760 §3.5). Resources only declare lifetime; the planner derives versioning from declared edges. |
 | Harmonius design — Sampler cache keyed by `MTLSamplerDescriptor`.                                  | **Covered.** §3.13: a small sampler cache (16 entries) keyed by the closed-set `SamplerDesc` value object; vended by `SamplerHandle` (using distinct `tags::sampler` — see §3.3). Samplers are persistent and alias-disjoint. |
@@ -268,6 +271,24 @@ sized at init from `RenderSettings` and the `QualityTier` baseline:
 The remaining headroom inside the 16 MiB row absorbs hot-reload
 resume churn (§3.14) and per-`View` ring expansions when MVP scales
 from one to four views without a budget amendment.
+
+A `SlotTable<T, Tag>::alloc` call that finds `free_indices_.empty() &&
+slots_.size() == cap_` returns
+`std::unexpected{render::Error::SlotTableExhausted}` (`SPEC.md` §5;
+this aggregate's §10 row, §10.1 single construction site at
+`resources/handle_table.cpp::SlotTable::alloc`). The slot table never
+reallocates its `eastl::vector<Slot>` mid-frame: capacity is fixed at
+init per the table above, slot pointers are stability-required by the
+hot-path lookup contract (§6.1), and resizing would violate the
+no-allocations-in-the-hot-path invariant (`SPEC.md` §4.1.3 invariant
+4). Recovery is `lower-tier` (a lower QualityTier reduces the per-View
+declared resource count proportionally; persistent slot demands shrink
+with reduced shadow-atlas / HZB extent / RT TLAS instance count). The
+SRP rationale for `SlotTableExhausted` having its own §5 enumerator
+rather than re-using `HeapOutOfMemory` (CPU bookkeeping ≠ GPU bytes)
+or `ResourceResidencyExceeded` (per-table cap ≠ aggregate 512 MiB
+ceiling) is recorded in `reviews/decisions/slot-table-overflow-error.md`
+(spike #904).
 
 ### 3.2 Three resource roles
 
@@ -692,7 +713,7 @@ per `perf-budget.md` Allocator Rule 5. The wiring obeys
 
 ### 3.12 Failure-mode mapping (forward reference to §10)
 
-The catalog produces eight render-error variants (§5 enum identifiers;
+The catalog produces nine render-error variants (§5 enum identifiers;
 §10 design-name labels in parentheses for cross-reference):
 
 | Trigger | §5 Variant | §10 design-name row |
@@ -700,6 +721,7 @@ The catalog produces eight render-error variants (§5 enum identifiers;
 | Persistent allocator exhausted (best-fit failed) | `HeapOutOfMemory` | `ResourceAllocFailed` |
 | Transient pool peak-residency > sub-pool cap | `TransientPoolExhausted` | `ResourceAllocFailed` |
 | Per-frame total residency > 512 MiB | `ResourceResidencyExceeded` | `ResourceResidencyExceeded` |
+| Slot table per-kind cap exhausted (no free index, `slots_.size() == cap_`) | `SlotTableExhausted` | `SlotTableExhausted` |
 | Stale handle (generation mismatch at lookup) | `StaleResourceHandle` | (abort-frame; see §10) |
 | Role mismatch (e.g. `release_persistent` on transient handle) | `ResourceRoleMismatch` | (cold-path assert; see §10) |
 | Genuine import-borrow refusal (write declaration on read-only borrow) | `ResourceImportRefused` | (abort-engine; see §10) |
@@ -713,6 +735,20 @@ the §10.1 single-construction-site SRP rule. It is now its own §5
 enumerator that rides the same render-plugin ABI bump as
 `StaleResourceHandle` / `ResourceRoleMismatch` (zero incremental ABI
 cost).
+
+`SlotTableExhausted` was previously implicit in §11.1's test name
+("`slot table — capacity overflow returns ResourceResidencyExceeded`")
+which mis-attributed slot-table CPU-side cap exhaustion to
+`ResourceResidencyExceeded` (the per-frame > 512 MiB GPU-bytes
+variant). Spike #904
+(`reviews/decisions/slot-table-overflow-error.md`) split it out per
+the same §10.1 SRP rule; it is its own §5 enumerator with one
+construction site (§10.1) and rides the same upcoming ABI bump
+cluster (zero incremental ABI cost). Re-using `HeapOutOfMemory`
+(GPU-bytes exhaustion) was rejected because it would re-violate the
+single-construction-site rule (§10.1 names
+`resources/persistent.cpp::PersistentAllocator::allocate` as the sole
+`HeapOutOfMemory` site).
 
 Recovery routing per `SPEC.md` §10.2 is preserved verbatim;
 detail in §10 below.
@@ -1244,12 +1280,13 @@ performance signature.
 
 ## 10. Failure modes
 
-The aggregate produces eight distinct errors, each rolling into
-`SPEC.md` §10.1's closed sum. The three new variants
-(`StaleResourceHandle`, `ResourceRoleMismatch`, `SamplerCapExceeded`)
-are ABI additions that require a `SPEC.md` §5 enum amendment and an
-ABI bump per `reviews/decisions/error-model.md` Composition Rule 5.
-All three ride one shared bump; zero incremental ABI cost.
+The aggregate produces nine distinct errors, each rolling into
+`SPEC.md` §10.1's closed sum. The four new variants
+(`StaleResourceHandle`, `ResourceRoleMismatch`, `SamplerCapExceeded`,
+`SlotTableExhausted`) are ABI additions that require a `SPEC.md` §5
+enum amendment and an ABI bump per
+`reviews/decisions/error-model.md` Composition Rule 5. All four ride
+one shared bump; zero incremental ABI cost.
 
 | Render error variant | Trigger | Recovery (per §10.2) | Severity | Capability-fallback path | Test fixture |
 |----------------------|---------|----------------------|----------|---------------------------|--------------|
@@ -1257,6 +1294,7 @@ All three ride one shared bump; zero incremental ABI cost.
 | `TransientPoolExhausted` | Alias planner produces a peak-residency for any sub-pool exceeding its cap; triggered during graph compile, phase 7 entry. | `lower-tier`. | `warn` | Same as `HeapOutOfMemory`; lower tier shrinks gbuffer / scratch targets. | `tests/render/resources/transient_pool_exhausted.cpp` |
 | `ResourceResidencyExceeded` | Compile computes `total_live_bytes_after_compile > 512 MiB` (`SPEC.md` §10 row; this aggregate's primary shared trigger with `RenderGraph`). | `lower-tier`. | `warn` | Re-plan at the lower tier shrinks the working set under 512 MiB. | `tests/render/resources/residency_exceeded_lower_tier.cpp` |
 | `SamplerCapExceeded` | Sampler cache over-capacity (`sampler_cache_.size() == 16` and a new `SamplerDesc` is requested). Triggered at init or hot-reload register; cannot arise at frame-time under MVP's static sampler set (§3.13). Split from the prior `ResourceResidencyExceeded` arm per spike #874 (`reviews/decisions/resourceresidency-srp.md`). | `abort-engine` at init / `lower-tier` (sampler count reduction) at hot-reload register. | `error` | n/a — sampler cap is a build-time / config-time invariant; lower-tier predicates do not reduce the static sampler set. | `tests/render/resources/sampler_over_cap.cpp` |
+| `SlotTableExhausted` | A `SlotTable<T, Tag>` (one per public-handle kind: virtual / physical / argbuf / ring / sampler — §3.1, §3.4) has no free index and `slots_.size() == cap_` when `alloc` is called. Triggered phase 6 plan or cold-path `declare_*`; structurally distinct from `HeapOutOfMemory` (CPU-side bookkeeping vs. GPU `MTL::Heap` bytes), from `ResourceResidencyExceeded` (per-table cap vs. aggregate 512 MiB), and from `TransientPoolExhausted` (the alias planner's peak-residency check, not a slot-table cap). Per-table caps are sized at init from `RenderSettings` × `QualityTier`; resizing mid-frame would violate the slot-pointer-stability contract (§6.1) and the no-allocations-in-the-hot-path invariant. Split out per spike #904 (`reviews/decisions/slot-table-overflow-error.md`). | `lower-tier` (lower tier reduces declared resource count per `View`; persistent slot demands shrink with reduced shadow-atlas / HZB extent / RT TLAS instance count). | `warn` | n/a — slot-table cap is a build-time / config-time invariant; lower-tier acts indirectly by lowering declared resource counts, not by raising the cap. | `tests/render/resources/handle_table.cpp` (test row: `slot table — capacity overflow returns SlotTableExhausted`) |
 | `StaleResourceHandle` | Generation mismatch at `SlotTable::lookup`: the handle's generation counter does not match the slot's current generation, indicating the slot was freed and reallocated since the handle was issued. Structurally distinct from a role mismatch or import refusal. | `abort-frame`. | `error` | n/a | `tests/render/resources/stale_handle.cpp` |
 | `ResourceRoleMismatch` | Role mismatch on a release API call (e.g. `release_persistent` called on a transient or imported handle). Cold-path only; cannot arise on the render-thread hot path. No state mutation. | Cold-path no-op + debug assert; surfaced as `warn` in structured log. | `warn` | n/a | `tests/render/resources/role_mismatch.cpp` |
 | `ResourceImportRefused` | Genuine import-borrow refusal: an imported handle is declared for write access on a resource whose borrow record was registered read-only (§3.8 invariant). Structurally distinct from a stale handle or role mismatch; this is a graph structural error. | `abort-engine` (graph is structurally invalid). | `error` | n/a — graph must be fixed. | `tests/render/resources/import_write_on_read_borrow.cpp` |
@@ -1274,6 +1312,7 @@ dylib:
 - `TransientPoolExhausted` — `resources/alias_planner.cpp::AliasPlanner::compute` (the planner constructs the error; the catalog forwards it through `RenderGraph::compile`).
 - `ResourceResidencyExceeded` — `resources/transient_pool.cpp::TransientPool::peak_residency_check` (per-frame total residency > 512 MiB).
 - `SamplerCapExceeded` — `resources/sampler_cache.cpp::SamplerCache::get_or_create` (over-cap on the closed 16-entry cache; §3.13). Split from `ResourceResidencyExceeded` per spike #874 / `reviews/decisions/resourceresidency-srp.md` to honour the single-construction-site SRP rule below.
+- `SlotTableExhausted` — `resources/handle_table.cpp::SlotTable::alloc` (no free index, `slots_.size() == cap_`; §3.1). Split from the prior §11.1 mis-attribution to `ResourceResidencyExceeded` per spike #904 / `reviews/decisions/slot-table-overflow-error.md` to honour the single-construction-site SRP rule below; re-using `HeapOutOfMemory` was rejected because it would have introduced a second construction site for that variant (the first being `resources/persistent.cpp::PersistentAllocator::allocate`).
 - `StaleResourceHandle` — `resources/handle_table.cpp::SlotTable::lookup` (generation mismatch).
 - `ResourceRoleMismatch` — `resources/imported.cpp::ImportRegistry::release` (wrong release API for handle's lifetime kind).
 - `ResourceImportRefused` — `resources/imported.cpp::ImportRegistry::declare_write` (write-on-read-borrow).
@@ -1306,36 +1345,47 @@ not violate the rule:
    cross-context mappings that reshape an inbound `core::Error`
    rather than constructing a fresh `render::Error`.
 2. **§11.1 unit test "slot table — capacity overflow returns
-   `ResourceResidencyExceeded`."** This test asserts the
-   slot-table's behaviour under exhaustion. The test name is a
-   pre-spike-#874 carry-over and may itself need realignment with
-   §10.1 — flagged as an out-of-scope follow-up in
-   `reviews/decisions/resourceresidency-srp.md` ("Out-of-scope
-   follow-ups" item 1). Resolution is its own leaf.
+   `SlotTableExhausted`" (resolved).** Spike #904
+   (`reviews/decisions/slot-table-overflow-error.md`) resolved the
+   pre-#874 mis-attribution: the slot-table allocation failure is
+   its own §5 enumerator (`SlotTableExhausted`) with one construction
+   site (`resources/handle_table.cpp::SlotTable::alloc`, see the list
+   above). The §11.1 row is realigned in this design's §11.1 below
+   (`slot table — capacity overflow returns SlotTableExhausted`).
+   Re-using `HeapOutOfMemory` or re-folding into
+   `ResourceResidencyExceeded` would each have re-violated the
+   single-construction-site rule; #904's "Alternatives considered"
+   section walks the refutations.
 
 ### 10.2 Cross-references
 
-- `SPEC.md` §10.1 — closed sum (twenty-one design-name rows / 26 §5 enumerators;
-  this design adds `StaleResourceHandle`, `ResourceRoleMismatch`, and
-  `SamplerCapExceeded` as ABI additions, plus adds `tags::sampler` to
-  the §5 handle catalog).
+- `SPEC.md` §10.1 — closed sum (twenty-two design-name rows / 27 §5 enumerators;
+  this design adds `StaleResourceHandle`, `ResourceRoleMismatch`,
+  `SamplerCapExceeded`, and `SlotTableExhausted` as ABI additions, plus
+  adds `tags::sampler` to the §5 handle catalog).
 - `SPEC.md` §10.2 — recovery ladder.
 - `SPEC.md` §10.3 — per-variant rows. This design's contributions map
   to §10 design-name rows as follows:
   - `HeapOutOfMemory` + `TransientPoolExhausted` → `ResourceAllocFailed`
   - `ResourceResidencyExceeded` → `ResourceResidencyExceeded`
   - `SamplerCapExceeded` → `SamplerCapExceeded` (its own §10.3 row, added by spike #874)
+  - `SlotTableExhausted` → `SlotTableExhausted` (its own §10.3 row, added by spike #904)
   - `StaleResourceHandle` + `ResourceRoleMismatch` + `ResourceImportRefused` → (resource borrow failure rows; no single §10 design-name — each has its own recovery action per §10)
   - `CapabilityNotSupported` (bindless arm) → `RtCapabilityMissing` (§10 design-name)
 - `reviews/decisions/error-model.md` — Composition Rules item 5
   (closed sum extension is an ABI bump; `StaleResourceHandle`,
-  `ResourceRoleMismatch`, and `SamplerCapExceeded` are new variants
-  requiring an ABI bump when `SPEC.md` §5 is updated; all three ride
-  one shared bump).
+  `ResourceRoleMismatch`, `SamplerCapExceeded`, and
+  `SlotTableExhausted` are new variants requiring an ABI bump when
+  `SPEC.md` §5 is updated; all four ride one shared bump cluster).
 - `reviews/decisions/resourceresidency-srp.md` — spike #874 decision
   record: `ResourceResidencyExceeded` SRP split into
   `ResourceResidencyExceeded` (kept, transient-pool / aggregate
   residency) + `SamplerCapExceeded` (new, sampler-cache over-cap).
+- `reviews/decisions/slot-table-overflow-error.md` — spike #904
+  decision record: §11.1 slot-table overflow test re-pointed to
+  new `SlotTableExhausted` enumerator (rejected re-using
+  `HeapOutOfMemory` and re-folding into `ResourceResidencyExceeded`
+  on §10.1 SRP grounds).
 
 ## 11. Test plan
 
@@ -1354,7 +1404,7 @@ Catch2 file: `tests/render/resources/handle_table.cpp`.
 | `slot table — alloc / release / realloc cycles preserve generation soundness` | After `K = 10 000` cycles, every emitted handle satisfies `generation == slot.generation` at lookup; freed handles fail. |
 | `slot table — generation wrap reaches retire state at gen-cap` | With `cap = 4`, `generation_bits = 4`, the 17th realloc cycle marks the slot retired and pops the next free index. |
 | `slot table — phantom-tag prevents cross-assignment at compile time` | `static_assert` on `!std::is_assignable_v<VirtualResourceHandle&, PhysicalAllocHandle>` and `!std::is_assignable_v<SamplerHandle&, ArgumentBufferHandle>` (distinct tags verify no sub-tag aliasing). |
-| `slot table — capacity overflow returns ResourceResidencyExceeded` | Exhaust `cap`; next `alloc` returns the typed error; no slot inserted. |
+| `slot table — capacity overflow returns SlotTableExhausted` | Exhaust `cap` (`free_indices_.empty() && slots_.size() == cap_`); next `alloc` returns `render::Error::SlotTableExhausted`; no slot inserted; underlying `eastl::vector<Slot>` does not reallocate (size unchanged). Per spike #904 (`reviews/decisions/slot-table-overflow-error.md`). |
 | `slot table — release of stale handle is a no-op` | A handle whose generation mismatches the slot's current generation does not free the slot; idempotent. |
 
 ### 11.2 Unit tests — transient pool / alias plan integration

@@ -845,6 +845,7 @@ enum class Error : std::uint16_t {
     StaleResourceHandle,          // ABI add: render-resources design §3.4 / §10
     ResourceRoleMismatch,         // ABI add: render-resources design §3.7 / §10
     SamplerCapExceeded,           // ABI add: render-resources design §3.13 / §10 — split from ResourceResidencyExceeded per #874 SRP decision
+    SlotTableExhausted,           // ABI add: render-resources design §3.1 / §10 — slot-table per-kind cap exhausted per #904 SRP decision
     TransientPoolExhausted,
     HeapOutOfMemory,
 
@@ -2755,7 +2756,7 @@ strategy, severity, and capability-fallback path. Adding or removing a
 variant is a render-plugin ABI bump (per `reviews/decisions/error-model.md`
 §"Composition Rules" item 5 and §3.2 collapse #5 of this spec).
 
-### 10.1 The closed sum (twenty-one design-name rows; 26 §5 enumerators)
+### 10.1 The closed sum (twenty-two design-name rows; 27 §5 enumerators)
 
 The §5 stub publishes the canonical enumerator names; §10 names them in
 the documentation form below and notes the §5 spelling in parentheses
@@ -2772,6 +2773,7 @@ adds them in a single ABI bump alongside the §10 acceptance test.
 | `ResourceAllocFailed`          | `HeapOutOfMemory` (§5)                       | phase 6 plan / phase 7 record        |
 | `ResourceResidencyExceeded`    | `ResourceResidencyExceeded` (§5)             | phase 6 plan                         |
 | `SamplerCapExceeded`           | ABI add `SamplerCapExceeded` (§5)            | init / hot-reload register           |
+| `SlotTableExhausted`           | ABI add `SlotTableExhausted` (§5)            | phase 6 plan / cold-path declare     |
 | (stale handle)                 | ABI add `StaleResourceHandle` (§5)           | phase 7 record (lookup)              |
 | (role mismatch)                | ABI add `ResourceRoleMismatch` (§5)          | cold-path release                    |
 | `BarrierViolation`             | `BarrierConflict` (§5)                       | phase 6 graph compile                |
@@ -2789,14 +2791,16 @@ adds them in a single ABI bump alongside the §10 acceptance test.
 
 `ShaderModuleLoadFailed` was previously "ABI add" in this table;
 it is now a real §5 enumerator (added by the PSO-cache design followup,
-PR #849 r1). Six "ABI add" rows remain (four original +
+PR #849 r1). Seven "ABI add" rows remain (four original +
 `StaleResourceHandle` + `ResourceRoleMismatch` added by the
 render-resources design, minus the now-landed `ShaderModuleLoadFailed`,
 plus `SamplerCapExceeded` added by the §10.1 SRP-split decision in
-`reviews/decisions/resourceresidency-srp.md` / spike #874): these are
-the cumulative diff §5 acquires when those designs land; they are
+`reviews/decisions/resourceresidency-srp.md` / spike #874, plus
+`SlotTableExhausted` added by the slot-table-overflow SRP decision in
+`reviews/decisions/slot-table-overflow-error.md` / spike #904): these
+are the cumulative diff §5 acquires when those designs land; they are
 testable today as `static_assert`s against the header in
-`tests/render/spec_§5_§10_consistency.cpp`. All six "ABI add"
+`tests/render/spec_§5_§10_consistency.cpp`. All seven "ABI add"
 enumerators ride one shared ABI hash bump per
 `reviews/decisions/error-model.md` Composition Rule 5.
 
@@ -2862,6 +2866,7 @@ Every variant carries five fields:
 | `ResourceAllocFailed`         | `MTLHeap` sub-allocation returns `nil`, or the residency set rejects a commit at phase 7 record because a transient texture exceeds the heap composition (§9.5).| `lower-tier`      | `warn`   | Lower tier's pass predicates use smaller targets (e.g. shadow atlas 4K → 2K, GBuffer half-res). | `resource_alloc_lower_tier.cpp`        |
 | `ResourceResidencyExceeded`   | Phase 6 plan computes a peak-residency footprint > 512 MiB ceiling (§9.5).                                                                 | `lower-tier`      | `warn`   | Re-plan at the lower tier shrinks the working set under 512 MiB.       | `residency_exceeded_lower_tier.cpp`    |
 | `SamplerCapExceeded`          | Init or hot-reload register: the closed sampler cache (`render-resources-design.md` §3.13, cap = 16) is full and a new `SamplerDesc` is requested. Cannot arise at frame-time under MVP's static sampler set. | `abort-engine` (init) / `lower-tier` (hot-reload register — refusal cause §8.4). | `error`  | n/a — sampler cap is a build-time / config-time invariant; no tier-driven fallback exists. | `sampler_over_cap.cpp`                 |
+| `SlotTableExhausted`          | Phase 6 graph compile or cold-path `declare_*`: a `SlotTable<T, Tag>` (one per public-handle kind: virtual / physical / argbuf / ring / sampler — `render-resources-design.md` §3.1, §3.4) has no free index and `slots_.size() == cap_`. Single construction site at `resources/handle_table.cpp::SlotTable::alloc` per `render-resources-design.md` §10.1; structurally distinct from `HeapOutOfMemory` (GPU bytes), `ResourceResidencyExceeded` (per-frame > 512 MiB), and `TransientPoolExhausted` (alias planner peak). | `lower-tier`      | `warn`   | Lower tier reduces declared resource count per `View` (fewer transient targets, smaller persistent slots, fewer per-pass arg buffers); slot demand falls proportionally. | `tests/render/resources/handle_table.cpp` |
 | `BarrierViolation`            | Phase 6 barrier-emit step detects a writer→reader pair the planner cannot satisfy (e.g. write-after-write on an aliased subresource without an explicit `Pass::declared_use`). | `abort-engine`    | `error`  | n/a — graph is structurally invalid; no fallback rescues a malformed graph. | `barrier_violation.cpp`               |
 | `GraphCycle`                  | `RenderGraph::compile()` topological sort detects a cycle among `Pass` nodes.                                                              | `abort-engine`    | `error`  | n/a — same reasoning as `BarrierViolation`.                           | `graph_cycle.cpp`                      |
 | `GraphResourceUnknown`        | A `Pass::execute` records access to a `VirtualResourceHandle` not in its `declared_use` set (debug-build assertion; release-build returns the error). | `abort-frame` (debug) / `abort-engine` (release CI gate). | `error`  | n/a — the pass body is buggy.                                         | `graph_resource_unknown.cpp`           |
