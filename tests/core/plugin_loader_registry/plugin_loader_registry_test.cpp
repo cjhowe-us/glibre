@@ -740,9 +740,16 @@ TEST_CASE(
 //
 // Mechanism: construct a PluginLoaderRegistry with a
 // PerContextAllocatorResource{ContextTag::core} as the backing resource.
-// After registering N plugins, assert bytes_used() > 0 on the underlying
-// PerContextAllocator, confirming that the PMR allocator is tracking the
-// string allocations.
+// After registering N plugins, assert bytes_used() has grown by at least
+// the sum of the raw string lengths — catching both total escape (zero
+// delta) and partial escape (only map nodes routed through mr_, strings
+// still escaping to get_default_resource()).
+//
+// String length choices: all names are >= 24 bytes (well above libc++'s
+// 15-byte SSO threshold) so that the string heap allocation is guaranteed
+// to occur regardless of future SSO tweaks.  The path is 24 bytes for the
+// same reason.  expected_min = kPluginCount * (name_len + path_len) is a
+// conservative lower bound (ignores bucket / map-node overhead).
 //
 // Authority: plan #1044 Unit Test Plan (HIGH-2 fix verification).
 // ===========================================================================
@@ -760,26 +767,35 @@ TEST_CASE(
     // Baseline: no bytes consumed before any registration.
     const std::uint64_t bytes_before = alloc.bytes_used();
 
-    // Register a small batch of plugins under the tracked allocator.
+    // Names are >= 24 chars each (above libc++ 15-byte SSO) so string heap
+    // allocation is guaranteed.  Path is 24 chars for the same reason.
     constexpr std::size_t kPluginCount = 4;
+    // clang-format off
     const char* names[kPluginCount] = {
-        "glibre.alloc.alpha",
-        "glibre.alloc.beta",
-        "glibre.alloc.gamma",
-        "glibre.alloc.delta",
+        "glibre.alloc.alpha.test01",   // 25 chars
+        "glibre.alloc.beta.test002",   // 25 chars
+        "glibre.alloc.gamma.test03",   // 25 chars
+        "glibre.alloc.delta.test04",   // 25 chars
     };
+    // clang-format on
+    constexpr const char* kAllocPath = "/fake/alloc_test_path.dylib";  // 27 chars
 
     for (std::size_t i = 0; i < kPluginCount; ++i) {
         auto m = make_manifest(names[i]);
-        auto r = registry.register_plugin(m, "/fake/alloc_test.dylib");
+        auto r = registry.register_plugin(m, kAllocPath);
         REQUIRE(r.has_value());
     }
 
     CHECK(registry.loaded_count() == kPluginCount);
 
-    // Key assertion: bytes are tracked under the injected allocator.
-    // If PluginRecord members escape to get_default_resource(), bytes_used()
-    // would remain at bytes_before, exposing the allocator-escape bug.
+    // Tightened assertion (LOW-2): require at least the sum of raw string
+    // bytes for name + path across all registered plugins.  A partial routing
+    // failure (e.g. only map nodes tracked, strings escaping) would produce a
+    // delta below this bound.
     const std::uint64_t bytes_after = alloc.bytes_used();
-    CHECK(bytes_after > bytes_before);
+    constexpr std::uint64_t kNameLen = 25;  // length of each name above
+    constexpr std::uint64_t kPathLen = 27;  // length of kAllocPath above
+    const std::uint64_t expected_min =
+        kPluginCount * (kNameLen + kPathLen);  // conservative: string content only
+    CHECK(bytes_after - bytes_before >= expected_min);
 }

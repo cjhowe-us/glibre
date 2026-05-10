@@ -93,6 +93,11 @@ namespace glibre::core {
 struct PluginRecord {
     using allocator_type = std::pmr::polymorphic_allocator<std::byte>;
 
+    // No default ctor: every PluginRecord must be allocator-aware (HIGH-2 fix,
+    // plan #1044).  If you need a default-resource record in tests, construct
+    // explicitly with std::pmr::polymorphic_allocator<std::byte>{}.
+    PluginRecord() = delete;
+
     // Allocator-extended constructor: wires name and path to the supplied
     // allocator so both strings live under the caller's memory resource.
     explicit PluginRecord(

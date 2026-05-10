@@ -100,7 +100,7 @@ Result<void> PluginLoaderRegistry::validate_manifest_abi_hash(
     const PluginManifest& manifest, std::string_view expected_abi_hash
 ) const noexcept {
 
-    if (std::string_view{manifest.abi_hash} != expected_abi_hash) {
+    if (manifest.abi_hash != expected_abi_hash) {
         return std::unexpected(glibre::Error{core::Error::PluginAbiHashMismatch});
     }
     return {};
@@ -201,7 +201,7 @@ bool PluginLoaderRegistry::is_collision(
     if (it == loaded_.end()) {
         return false;
     }
-    return std::string_view{it->second.path} != file_path;
+    return it->second.path != file_path;
 }
 
 // ---------------------------------------------------------------------------
@@ -281,12 +281,14 @@ Result<void> PluginLoaderRegistry::register_plugin(
         return std::unexpected(glibre::Error{core::Error::PluginNameCollision});
     }
 
-    if (loaded_.contains(name_sv)) {
-        // Same name + same path: idempotent re-registration, no-op.
-        return {};
-    }
-
     // Construct key and value in-place via uses-allocator protocol.
+    //
+    // LOW-4 fix: collapse redundant contains() + emplace() into a single
+    // emplace call.  emplace returns pair<iterator, bool>; if the key is
+    // already present (same name + same path — is_collision returned false
+    // above, so paths match), inserted == false and we no-op as before.
+    // This eliminates one redundant hash + bucket walk per idempotent
+    // re-registration.
     //
     // HIGH-3 fix: name_sv is the single materialization of the plugin name;
     // both the map key (std::pmr::string) and PluginRecord::name are
