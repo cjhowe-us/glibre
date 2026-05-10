@@ -9,6 +9,7 @@
 //   - core/asset_table: release_increments_generation
 //   - core/asset_table: stale_handle_resolves_to_AssetStale
 //   - core/asset_table: free_index_reused_lowest_first
+//   - core/asset_table: generation_saturation_retires_slot
 //   - core/asset_registry: per_T_table_instantiated_on_first_insert
 //
 // Design constraints:
@@ -360,4 +361,80 @@ TEST_CASE(
     // Clean up.
     reg.reset_for_testing();
 #endif
+}
+
+// ===========================================================================
+// Test: core/asset_table: generation_saturation_retires_slot
+//
+// MED-3 (r2): generation saturation behavior added in R1 is untested.
+//
+// SPEC §6.8, §6.12.3: after kAssetGenerationMax release/reinsert cycles the
+// 22-bit generation counter is exhausted; the slot is permanently retired
+// (not returned to the free list) to avoid silent handle aliasing.
+//
+// Procedure:
+//   1. Insert slot 0 (generation 1).
+//   2. Loop kAssetGenerationMax - 1 times: release slot (gen increments),
+//      re-insert (reuses same slot, picks up the incremented generation).
+//      After the loop, the active handle for slot 0 carries
+//      generation == kAssetGenerationMax - 1; the slot holds
+//      generation == kAssetGenerationMax - 1 as well.
+//   3. Release once more: generation reaches kAssetGenerationMax; the
+//      release path detects saturation (>= kAssetGenerationMax) and does
+//      NOT add the slot to the free list.
+//   4. A new insert must create slot 1 (new slot, not reuse slot 0).
+//      slot_count() must be 2.
+//   5. slot 0 resolves to AssetStale for all stale handles (saturation does
+//      not affect staleness semantics).
+// ===========================================================================
+
+TEST_CASE("core/asset_table: generation_saturation_retires_slot", "[core][asset_table]") {
+    using namespace glibre::core;
+    using namespace glibre::core::detail;
+
+    // Allocate enough for kAssetGenerationMax iterations × small header overhead.
+    // Each cycle: Slot<int> stays in the vector; free_list_ grows/shrinks by 1
+    // entry per cycle (one uint32_t).  Memory budget: 2 × sizeof(Slot<int>) +
+    // 2 × sizeof(uint32_t) + generous headroom.
+    glibre::PerContextAllocator alloc{glibre::ContextTag::core, 4 * 1024 * 1024};  // 4 MiB
+    AssetTable<int> table{alloc, AssetTypeTag{0}};
+
+    // Step 1: first insert → slot 0, generation 1.
+    auto h = table.insert(0);
+    CHECK(table.slot_count() == 1u);
+
+    // Step 2: cycle kAssetGenerationMax - 1 times.
+    // Each iteration: release (increments gen) → re-insert (reuses slot 0 with
+    // the already-incremented generation).
+    //
+    // After i iterations: slot 0 has generation == i+1 and h carries gen i+1.
+    // After the full kAssetGenerationMax - 1 iterations:
+    //   slot.generation == kAssetGenerationMax, h carries kAssetGenerationMax.
+    for (std::uint32_t i = 1; i < kAssetGenerationMax; ++i) {
+        table.release(h);
+        h = table.insert(static_cast<int>(i));  // reuses slot 0 with generation i+1
+    }
+
+    // At this point: slot 0 has generation == kAssetGenerationMax, live == true.
+    // The handle h carries generation kAssetGenerationMax.
+    CHECK(table.slot_count() == 1u);  // no new slots allocated during cycling
+
+    // Step 3: final saturating release.
+    // slot.generation == kAssetGenerationMax → guard fires → slot NOT returned
+    // to free list.
+    table.release(h);
+
+    // Step 4: new insert must allocate slot 1 (slot 0 is retired).
+    auto h2 = table.insert(999);
+    CHECK(table.slot_count() == 2u);  // new slot appended, not reuse of slot 0
+
+    // Verify h2 is a valid, different handle resolving to 999.
+    auto r2 = table.resolve(h2);
+    REQUIRE(r2.has_value());
+    CHECK(*r2.value() == 999);
+
+    // Step 5: old handle h is stale (released).
+    auto r_stale = table.resolve(h);
+    REQUIRE(!r_stale.has_value());
+    CHECK(std::get<glibre::core::Error>(r_stale.error().code()) == glibre::core::Error::AssetStale);
 }
