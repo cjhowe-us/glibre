@@ -67,3 +67,12 @@ target_compile_options(geometry-schema-parse-tests PRIVATE
 include(CTest)
 include(Catch)
 catch_discover_tests(geometry-schema-parse-tests)
+
+# Thread the on-disk schema directory into the test binary so parse tests
+# exercise the canonical .fory artefacts named by the DoD file_exists: block.
+# The macro expands to an absolute path at configure time; ctest does not need
+# to set any working directory for file reads to succeed.
+target_compile_definitions(geometry-schema-parse-tests
+    PRIVATE
+        GEOMETRY_SCHEMA_DIR="${CMAKE_SOURCE_DIR}/data/schemas/geometry"
+)

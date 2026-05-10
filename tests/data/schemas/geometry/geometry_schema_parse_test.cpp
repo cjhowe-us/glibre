@@ -44,110 +44,26 @@ namespace fs = std::filesystem;
 using namespace glibre::tools::foryc;
 
 // ---------------------------------------------------------------------------
-// Embedded schema sources (verbatim from data/schemas/geometry/*.fory).
+// On-disk schema root threaded in by CMakeLists.txt via target_compile_definitions.
 //
-// Inline strings are used so that the tests exercise schema-as-text parsing
-// rather than depending on the on-disk file path at ctest time.  The on-disk
-// files are the canonical artefacts gated by the DoD file_exists assertions;
-// the parse tests here use the same field layout so any divergence between
-// the embedded text and the on-disk file will be caught by inspection /
-// review rather than at test time.
+// GEOMETRY_SCHEMA_DIR expands to "${CMAKE_SOURCE_DIR}/data/schemas/geometry"
+// at configure time so tests always parse the canonical .fory artefacts named
+// by the DoD file_exists: block, preventing silent drift between the on-disk
+// file and any previously-embedded copy.
 // ---------------------------------------------------------------------------
 
-// CookManifest schema text (§7.1.1).
-static constexpr std::string_view k_cook_manifest_src = R"(
-schema glibre.geometry.CookManifest {
-  version  1
-  since    "0.1.0"
+#ifndef GEOMETRY_SCHEMA_DIR
+#    error "GEOMETRY_SCHEMA_DIR must be set via target_compile_definitions in CMakeLists.txt"
+#endif
 
-  field source_path          : string  tag 1  since 1
-  field pak_path             : string  tag 2  since 1
-  field source_content_hash  : u64     tag 3  since 1
-  field format_hash          : u64     tag 4  since 1
-  field foryc_abi_hash       : u64     tag 5  since 1
-  field cooker_version       : string  tag 6  since 1
-  field cooked_at_unix_ms    : u64     tag 7  since 1
-
-  field meshopt_overdraw_threshold       : f32  tag 10 since 1
-  field meshopt_lod_error_threshold      : f32  tag 11 since 1
-  field meshopt_target_lod_count         : u8   tag 12 since 1
-  field meshopt_apply_vertex_cache_opt   : bool tag 13 since 1
-  field meshopt_apply_overdraw_opt       : bool tag 14 since 1
-  field meshopt_apply_vertex_fetch_opt   : bool tag 15 since 1
-
-  field meshlet_max_vertices             : u8   tag 20 since 1
-  field meshlet_max_triangles            : u8   tag 21 since 1
-  field meshlet_cone_weight              : f32  tag 22 since 1
-  field meshlet_sse_reference_distance_m : f32  tag 23 since 1
-
-  field draco_profile                    : u8   tag 30 since 1
-  field draco_speed                      : u8   tag 31 since 1
-
-  field pak_target_page_size_bytes       : u32  tag 40 since 1
-  field pak_max_page_size_bytes          : u32  tag 41 since 1
-  field pak_enable_blas_recipe           : bool tag 42 since 1
-
-  field cooked_meshlet_group_count       : u32  tag 50 since 1
-  field cooked_lod_band_count            : u8   tag 51 since 1
-  field cooked_page_count                : u32  tag 52 since 1
-  field cooked_pak_size_bytes            : u64  tag 53 since 1
+// Parse the .fory file at GEOMETRY_SCHEMA_DIR/<filename> and return the result.
+// On failure the caller is expected to REQUIRE(result.has_value()) which will
+// emit the Catch2 failure with the full result context; this helper is kept
+// thin so the failure line number points into the TEST_CASE, not this helper.
+[[nodiscard]] static ParseResult load_schema(const char* filename) {
+    fs::path path = fs::path(GEOMETRY_SCHEMA_DIR) / filename;
+    return parse_file(path);
 }
-)";
-
-// BLASRecipeRecord schema text (§7.1.2) — includes companion BLASGeometryDescriptor.
-static constexpr std::string_view k_blas_recipe_record_src = R"(
-schema glibre.geometry.BLASRecipeRecord {
-  version  1
-  since    "0.1.0"
-
-  field pak_path                : string  tag 1 since 1
-  field format_hash             : u64     tag 2 since 1
-  field source_content_hash     : u64     tag 3 since 1
-
-  field accel_struct_flags      : u32     tag 10 since 1
-  field lod0_descriptor_count   : u32     tag 11 since 1
-
-  field descriptors             : list<BLASGeometryDescriptor>  tag 12 since 1
-}
-
-schema glibre.geometry.BLASGeometryDescriptor {
-  version  1
-  since    "0.1.0"
-
-  field group_index             : u32  tag 1 since 1
-  field material_slot_index     : u32  tag 2 since 1
-
-  field vertex_buffer_offset    : u64  tag 10 since 1
-  field vertex_buffer_length    : u64  tag 11 since 1
-  field vertex_stride_bytes     : u32  tag 12 since 1
-  field vertex_format           : u8   tag 13 since 1
-
-  field index_buffer_offset     : u64  tag 20 since 1
-  field index_buffer_length     : u64  tag 21 since 1
-  field index_format            : u8   tag 22 since 1
-
-  field triangle_count          : u32  tag 30 since 1
-}
-)";
-
-// MeshSourceMetadata schema text (§7.1.3).
-static constexpr std::string_view k_mesh_source_metadata_src = R"(
-schema glibre.geometry.MeshSourceMetadata {
-  version  1
-  since    "0.1.0"
-
-  field source_path         : string  tag 1  since 1
-  field author              : string  tag 2  since 1
-  field tool_version        : string  tag 3  since 1
-  field source_content_hash : u64     tag 4  since 1
-  field authored_at_unix_ms : u64     tag 5  since 1
-  field license_tag         : string  tag 6  since 1
-  field bounding_box_min    : vec3f   tag 10 since 1
-  field bounding_box_max    : vec3f   tag 11 since 1
-  field source_vertex_count : u32     tag 12 since 1
-  field source_triangle_count : u32   tag 13 since 1
-}
-)";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -163,12 +79,12 @@ static const FieldDecl* find_field(const TypeDecl& td, std::string_view name) no
 }
 
 // ---------------------------------------------------------------------------
-// DoD smoke-parse tests: assert each schema file text parses successfully.
+// DoD smoke-parse tests: assert each on-disk .fory file parses successfully.
 // These are the names required by the plan's DoD block.
 // ---------------------------------------------------------------------------
 
 TEST_CASE("geometry_cook_manifest_schema_parses", "[geometry][schemas][cook_manifest]") {
-    auto result = parse_string(k_cook_manifest_src, "geometry/CookManifest.fory");
+    auto result = load_schema("CookManifest.fory");
     REQUIRE(result.has_value());
 
     const Schema& schema = *result;
@@ -186,7 +102,7 @@ TEST_CASE("geometry_cook_manifest_schema_parses", "[geometry][schemas][cook_mani
 }
 
 TEST_CASE("geometry_blas_recipe_record_schema_parses", "[geometry][schemas][blas_recipe]") {
-    auto result = parse_string(k_blas_recipe_record_src, "geometry/BLASRecipeRecord.fory");
+    auto result = load_schema("BLASRecipeRecord.fory");
     REQUIRE(result.has_value());
 
     const Schema& schema = *result;
@@ -209,7 +125,7 @@ TEST_CASE("geometry_blas_recipe_record_schema_parses", "[geometry][schemas][blas
 TEST_CASE(
     "geometry_mesh_source_metadata_schema_parses", "[geometry][schemas][mesh_source_metadata]"
 ) {
-    auto result = parse_string(k_mesh_source_metadata_src, "geometry/MeshSourceMetadata.fory");
+    auto result = load_schema("MeshSourceMetadata.fory");
     REQUIRE(result.has_value());
 
     const Schema& schema = *result;
@@ -236,7 +152,7 @@ TEST_CASE(
     "data/schemas/geometry/CookManifest: round_trip_preserves_triple_lock",
     "[geometry][schemas][cook_manifest]"
 ) {
-    auto result = parse_string(k_cook_manifest_src, "geometry/CookManifest.fory");
+    auto result = load_schema("CookManifest.fory");
     REQUIRE(result.has_value());
     const TypeDecl& td = result->types[0];
 
@@ -267,11 +183,18 @@ TEST_CASE(
 // uphold the invariant; we verify the fields are present, typed correctly, and
 // at the correct tags — the validator that checks *values* lives in the cooker
 // (Error::CookManifestInvalid) and is out of scope for plan #696.
+//
+// TODO(value-check): the name "rejects_*" implies runtime value rejection, but
+// this test only verifies field type/tag layout (u8 at tags 20/21) — a
+// necessary precondition.  Actual rejection of non-64/non-124 values via
+// Error::CookManifestInvalid will be owned by the cook-driver plan (#487) once
+// the cooker pipeline is wired.  The DoD unit_test_named: clause must keep this
+// exact test name, so we document the intent gap here rather than renaming.
 TEST_CASE(
     "data/schemas/geometry/CookManifest: rejects_meshlet_caps_other_than_64_124",
     "[geometry][schemas][cook_manifest]"
 ) {
-    auto result = parse_string(k_cook_manifest_src, "geometry/CookManifest.fory");
+    auto result = load_schema("CookManifest.fory");
     REQUIRE(result.has_value());
     const TypeDecl& td = result->types[0];
 
@@ -314,11 +237,18 @@ schema glibre.geometry.CookManifestMutated {
 // is declared as u8 at tag 30 — the closed-sum enforcement comes from the
 // runtime.  A schema with a wider type (u32) would silently accept values
 // outside the closed set; the test confirms the current schema uses u8.
+//
+// TODO(value-check): as with rejects_meshlet_caps_other_than_64_124, the
+// "rejects_*" name implies runtime value rejection.  Actual
+// Error::CookManifestInvalid for unknown draco_profile values is owned by the
+// cook-driver plan (#487) and the Draco integration plan (#482).  This test
+// verifies the schema layout precondition only; test name is frozen by the DoD
+// unit_test_named: clause.
 TEST_CASE(
     "data/schemas/geometry/CookManifest: rejects_unknown_draco_profile_value",
     "[geometry][schemas][cook_manifest]"
 ) {
-    auto result = parse_string(k_cook_manifest_src, "geometry/CookManifest.fory");
+    auto result = load_schema("CookManifest.fory");
     REQUIRE(result.has_value());
     const TypeDecl& td = result->types[0];
 
@@ -351,7 +281,7 @@ TEST_CASE(
     "data/schemas/geometry/BLASRecipeRecord: round_trip_preserves_descriptor_order",
     "[geometry][schemas][blas_recipe]"
 ) {
-    auto result = parse_string(k_blas_recipe_record_src, "geometry/BLASRecipeRecord.fory");
+    auto result = load_schema("BLASRecipeRecord.fory");
     REQUIRE(result.has_value());
     REQUIRE(result->types.size() == 2);
 
@@ -386,11 +316,16 @@ TEST_CASE(
 // Error::BLASRecipeInvalid.  The runtime validation is in the cooker; here we
 // verify that both hash fields are declared as u64 at the correct tags (2 and 3)
 // so the binary layout is correct for the companion-pak comparison.
+//
+// TODO(value-check): actual Error::BLASRecipeInvalid for mismatched hashes is
+// owned by the BLASRecipe cooker plan (#482).  This test verifies the schema
+// layout precondition (u64 at tags 2 and 3) only; test name is frozen by the
+// DoD unit_test_named: clause.
 TEST_CASE(
     "data/schemas/geometry/BLASRecipeRecord: rejects_format_hash_mismatch_with_companion_pak",
     "[geometry][schemas][blas_recipe]"
 ) {
-    auto result = parse_string(k_blas_recipe_record_src, "geometry/BLASRecipeRecord.fory");
+    auto result = load_schema("BLASRecipeRecord.fory");
     REQUIRE(result.has_value());
     REQUIRE(result->types.size() >= 1);
 
@@ -429,7 +364,7 @@ TEST_CASE(
     "data/schemas/geometry/MeshSourceMetadata: round_trip_preserves_bounding_box",
     "[geometry][schemas][mesh_source_metadata]"
 ) {
-    auto result = parse_string(k_mesh_source_metadata_src, "geometry/MeshSourceMetadata.fory");
+    auto result = load_schema("MeshSourceMetadata.fory");
     REQUIRE(result.has_value());
     const TypeDecl& td = result->types[0];
 
