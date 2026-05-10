@@ -6,11 +6,18 @@
 //
 // Scope (plan #977):
 //   1. migration_v1_to_v3_chain_succeeds
-//      — v1 payload migrates through chain (v1→v2, v2→v3) to current version.
+//      — v1 payload migrates through chain (v1→v2, v2→v3) to current version,
+//        invoking each provider end-to-end.
 //   2. migration_byte_round_trip_is_stable
-//      — re-serializing the current-version struct yields a stable byte sequence.
+//      — layout of the current-version struct is pinned via static_assert on
+//        field offsets and total size (byte-stability via type-layout invariant).
+//      NOTE: full Fory round-trip (serialize → deserialize → re-serialize → memcmp)
+//      is deferred because the Apache Fory serializer is not yet plumbed in this
+//      codebase (no Fory C++ API surface in core/ or plugins/ as of plan #977).
+//      Deferred to follow-up plan; see updated Scope §2 in issue #977.
 //   3. missing_chain_yields_schema_migration_failure
-//      — skipping an intermediate provider yields core::Error::SchemaMigrationFailed.
+//      — skipping an intermediate provider yields core::Error::SchemaMigrationFailed
+//        with the missing-pair info in ErrorContext::detail.
 //   4. provider_io_or_alloc_is_caught_by_sanitizer
 //      — SKIPPED: ASan/custom-alloc-shim infrastructure not yet plumbed in the
 //        macos-debug preset. Deferred per plan #977 Scope §4 ("SKIP if sanitizer
@@ -22,11 +29,14 @@
 //     shipped codebase).
 //   - A local chain_walk() helper exercises the same walk logic the plugin
 //     loader will eventually use (fory-codegen.md §"Migration Mechanic" point 3).
+//     chain_walk() invokes each type-erased provider by casting the void* to the
+//     concrete function-pointer type for the step and calling it.
 //   - Fixture types are minimal POD structs defined in this TU; the emitted TU
 //     is compiled into a stub .dylib via clang++ (same pattern as
 //     foryc_emit_migration_round_trip_via_compile in plan #227).
-//   - Byte round-trip uses plain memcmp on two default-constructed current-
-//     version structs (determinism per PHILOSOPHY §7).
+//   - Byte round-trip uses static_assert on field offsets and struct size to pin
+//     the layout (determinism per PHILOSOPHY §7).  Full Fory serialization round-
+//     trip is deferred to a follow-up plan (serializer not yet plumbed).
 //
 // Error arm: core::Error::SchemaMigrationFailed  (error.hpp line ~34)
 //
@@ -37,6 +47,7 @@
 //   std::filesystem, std::system (subprocess invocation), dlfcn.h,
 //   std::format (no EASTL equivalent), std::memcmp.
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -82,7 +93,22 @@ struct LocalMigrationEntry {
     void* provider;  // type-erased function pointer
 };
 
-// chain_walk — walk the migration table from `from_ver` to `to_ver`.
+// unique_test_suffix — return a deterministic per-test-case suffix for
+// temporary directory names.
+//
+// Uses an atomic counter to guarantee that each call within a single process
+// gets a unique string, even if multiple TEST_CASEs run back-to-back in the
+// same binary (possible when catch_discover_tests runs sequentially).
+//
+// PHILOSOPHY §11: std::atomic is fine here (no EASTL equivalent needed).
+static std::string unique_test_suffix(std::string_view test_name) {
+    static std::atomic<unsigned> counter{0};
+    const unsigned idx = counter.fetch_add(1, std::memory_order_relaxed);
+    return std::format("{}_{}_{}", test_name, static_cast<unsigned>(getpid()), idx);
+}
+
+// chain_walk — walk the migration table from `from_ver` to `to_ver`, invoking
+// each provider function end-to-end with the supplied payload buffer.
 //
 // Implements the same linear-scan chain logic described in
 // fory-codegen.md §"Migration Mechanic" point 3:
@@ -90,20 +116,26 @@ struct LocalMigrationEntry {
 //    execute each step into a temporary; final T is yielded.
 //    Missing chain → Error::SchemaMigrationFailure."
 //
-// This test-local helper intentionally does NOT call the provider functions
-// (they are type-erased and the exact concrete types only exist inside the
-// dylib) — it only verifies that every chain step is present, which is the
-// concern for tests 1 and 3.  Test 1 verifies the complete chain is present;
-// test 3 verifies the error when a step is absent.
+// Type-safety: the caller supplies `invoke_step`, a function object that
+// receives (entry, cur_ver, next_ver) and is responsible for casting the
+// type-erased `entry.provider` to the concrete function-pointer type and
+// calling it.  This keeps chain_walk() generic (it only handles table walking
+// and error production) while allowing Test 1 to actually invoke the providers
+// with concrete types.
+//
+// chain_walk() also enriches the SchemaMigrationFailed error with
+// ErrorContext::detail naming the missing pair (plan #977 Scope §3).
 //
 // Returns:
-//   std::expected<void, glibre::Error> — success if every step from `from_ver`
-//   to `to_ver` is present; SchemaMigrationFailed otherwise.
+//   std::expected<void, glibre::Error> — success if every step executes OK;
+//   SchemaMigrationFailed (with detail) otherwise.
+template<class InvokeStep>
 static std::expected<void, glibre::Error> chain_walk(
     const LocalMigrationEntry* table,
     std::size_t table_size,
     std::uint32_t from_ver,
-    std::uint32_t to_ver
+    std::uint32_t to_ver,
+    InvokeStep&& invoke_step
 ) noexcept {
     std::uint32_t cur = from_ver;
     while (cur < to_ver) {
@@ -111,16 +143,56 @@ static std::expected<void, glibre::Error> chain_walk(
         bool found = false;
         for (std::size_t i = 0; i < table_size; ++i) {
             if (table[i].from_version == cur) {
+                // Invoke the provider for this step.
+                auto step_result = invoke_step(table[i], cur, table[i].to_version);
+                if (!step_result)
+                    return step_result;
                 cur = table[i].to_version;
                 found = true;
                 break;
             }
         }
         if (!found) {
-            return std::unexpected{glibre::Error{glibre::core::Error::SchemaMigrationFailed}};
+            // Build detail string naming the missing pair.
+            const std::string detail_std = std::format("missing v{}->v{} provider", cur, cur + 1);
+            // PHILOSOPHY §11: ErrorContext::detail is eastl::string_view (non-owning).
+            // The static storage below ensures the string_view remains valid for
+            // the lifetime of the error (the caller inspects it synchronously).
+            static thread_local std::string tl_detail;
+            tl_detail = detail_std;
+            return std::unexpected{glibre::Error{
+                glibre::core::Error::SchemaMigrationFailed,
+                glibre::ErrorContext{
+                    .file = __FILE__,
+                    .line = __LINE__,
+                    .detail = eastl::string_view(tl_detail.data(), tl_detail.size()),
+                }
+            }};
         }
     }
     return {};
+}
+
+// chain_walk_presence_only — variant of chain_walk that only checks table
+// entries are present (does not invoke providers).  Used when the test has no
+// access to the concrete payload types (e.g. a subset-walk in Test 3 for the
+// partial chain that IS present).
+static std::expected<void, glibre::Error> chain_walk_presence_only(
+    const LocalMigrationEntry* table,
+    std::size_t table_size,
+    std::uint32_t from_ver,
+    std::uint32_t to_ver
+) noexcept {
+    // Trivial invoke_step: just return success — we only care about table presence.
+    return chain_walk(
+        table,
+        table_size,
+        from_ver,
+        to_ver,
+        [](const LocalMigrationEntry& /*entry*/,
+           std::uint32_t /*cur*/,
+           std::uint32_t /*next*/) noexcept -> std::expected<void, glibre::Error> { return {}; }
+    );
 }
 
 // compile_and_load — emit + compile a schema into a stub .dylib and dlopen it.
@@ -151,17 +223,65 @@ struct DylibHandleGuard {
 // TEST 1: migration_v1_to_v3_chain_succeeds
 //
 // Fixture: glibre.test.Sample has version 3 with migration declarations
-//   v1→v2  calls "glibre::test_migrate::migrate_Sample_v1_to_v2"
-//   v2→v3  calls "glibre::test_migrate::migrate_Sample_v2_to_v3"
+//   v1→v2  calls "glibre::test::migrate_Sample_v1_to_v2"
+//   v2→v3  calls "glibre::test::migrate_Sample_v2_to_v3"
 //
-// The emitted TU is compiled into a stub .dylib.  chain_walk() then traverses
-// the migration table from version 1 to 3 and must succeed (both steps present).
+// The emitted TU is compiled into a stub .dylib.  chain_walk() traverses the
+// migration table from version 1 to 3, casting and invoking each type-erased
+// provider with the correct concrete types (SampleV1 → SampleV2 → SampleV3).
+// The final SampleV3.value must equal the original SampleV1.value (42).
 //
 // fory-codegen.md §"Migration Mechanic" point 3 ("look up a chain"):
 //   "execute each step into a temporary; final T is yielded."
 // ---------------------------------------------------------------------------
 
+// Fixture versioned structs for glibre::test::Sample — must match the preamble
+// compiled into the dylib.  Plain POD with a single unsigned field 'value'.
+// Defined at namespace scope so they are usable in provider-cast lambdas below.
+namespace glibre_test_sample_fixture {
+struct SampleV1 {
+    unsigned value{};
+};
+
+struct SampleV2 {
+    unsigned value{};
+};
+
+struct SampleV3 {
+    unsigned value{};
+};
+}  // namespace glibre_test_sample_fixture
+
+// Layout invariants: the preamble compiled into the dylib uses identical POD
+// definitions.  Pin them here so any drift is caught at compile time.
+static_assert(
+    sizeof(glibre_test_sample_fixture::SampleV1) == sizeof(unsigned),
+    "SampleV1 layout must match preamble definition"
+);
+static_assert(
+    sizeof(glibre_test_sample_fixture::SampleV2) == sizeof(unsigned),
+    "SampleV2 layout must match preamble definition"
+);
+static_assert(
+    sizeof(glibre_test_sample_fixture::SampleV3) == sizeof(unsigned),
+    "SampleV3 layout must match preamble definition"
+);
+static_assert(
+    std::is_standard_layout_v<glibre_test_sample_fixture::SampleV1>,
+    "SampleV1 must be standard-layout for cross-dylib POD compatibility"
+);
+static_assert(
+    std::is_standard_layout_v<glibre_test_sample_fixture::SampleV2>,
+    "SampleV2 must be standard-layout for cross-dylib POD compatibility"
+);
+static_assert(
+    std::is_standard_layout_v<glibre_test_sample_fixture::SampleV3>,
+    "SampleV3 must be standard-layout for cross-dylib POD compatibility"
+);
+
 TEST_CASE("migration_v1_to_v3_chain_succeeds", "[data][schemas][migration]") {
+    using namespace glibre_test_sample_fixture;
+
     constexpr std::string_view fory_src = R"(
 schema glibre.test.Sample {
   version 3
@@ -180,16 +300,13 @@ schema glibre.test.Sample {
 
     const eastl::string& gen_text = *emit_result;
 
-    // Confirm the chain entries appear in the generated TU.
+    // Confirm the table symbol name appears in the generated TU.
     // Mangled FQN: "glibre.test.Sample" → "glibre__test__Sample"
     CHECK(gen_text.find("glibre_plugin_migrations_glibre__test__Sample") != eastl::string::npos);
-    CHECK(gen_text.find("1, 2") != eastl::string::npos);
-    CHECK(gen_text.find("2, 3") != eastl::string::npos);
 
     // --- Write and compile the stub dylib. ---
     const fs::path tmp_base = fs::temp_directory_path() / "glibre_schema_mig_test";
-    const auto unique_suffix =
-        std::format("chain_{}_{}", getpid(), reinterpret_cast<uintptr_t>(gen_text.data()));
+    const auto unique_suffix = unique_test_suffix("chain");
     const fs::path tmp_dir = tmp_base / unique_suffix;
     std::error_code ec;
     fs::create_directories(tmp_dir, ec);
@@ -205,6 +322,8 @@ schema glibre.test.Sample {
     // owning context (glibre::test) is the natural home for migrations (fory-codegen.md
     // §"Rationale": "the context that owns the type's invariants is the only one that
     // can write a correct vN→vN+1 transform").
+    //
+    // Layout must match glibre_test_sample_fixture::{SampleV1,SampleV2,SampleV3} above.
     constexpr std::string_view preamble = R"(
 #include <expected>
 #include "glibre/error.hpp"
@@ -290,9 +409,49 @@ migrate_Sample_v2_to_v3(const SampleV2& in, SampleV3& out) {
     CHECK(has_v1_v2);
     CHECK(has_v2_v3);
 
-    // Walk the chain from v1 to v3 via chain_walk() — must succeed.
-    const auto walk_result = chain_walk(table, table_size, 1, 3);
-    CHECK(walk_result.has_value());
+    // --- Drive the chain end-to-end: SampleV1{42} → SampleV2 → SampleV3. ---
+    //
+    // Intermediate and final values are stored here and passed by reference into
+    // each provider.  chain_walk's invoke_step lambda casts the type-erased
+    // provider void* to the concrete function-pointer type for the step and calls
+    // it (fory-codegen.md §"Migration Mechanic" point 2 gives the provider signature:
+    //   std::expected<void, glibre::Error>(const <Type>V<N>&, <Type>V<N+1>&)).
+    SampleV1 v1_payload{42};
+    SampleV2 v2_payload{};
+    SampleV3 v3_payload{};
+
+    // Function pointer types matching the providers in the preamble.
+    using Fn_v1_v2 = std::expected<void, glibre::Error> (*)(const SampleV1&, SampleV2&) noexcept;
+    using Fn_v2_v3 = std::expected<void, glibre::Error> (*)(const SampleV2&, SampleV3&) noexcept;
+
+    const auto walk_result = chain_walk(
+        table,
+        table_size,
+        1,
+        3,
+        [&](const LocalMigrationEntry& entry,
+            std::uint32_t cur,
+            std::uint32_t /*next*/) noexcept -> std::expected<void, glibre::Error> {
+            if (cur == 1) {
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+                auto* fn = reinterpret_cast<Fn_v1_v2>(entry.provider);
+                return fn(v1_payload, v2_payload);
+            }
+            if (cur == 2) {
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+                auto* fn = reinterpret_cast<Fn_v2_v3>(entry.provider);
+                return fn(v2_payload, v3_payload);
+            }
+            // Unexpected version step — should not reach here given table_size == 2.
+            return std::unexpected{glibre::Error{glibre::core::Error::SchemaMigrationFailed}};
+        }
+    );
+
+    REQUIRE(walk_result.has_value());
+
+    // After the full chain, the original value must have been forwarded to V3.
+    CHECK(v2_payload.value == 42u);
+    CHECK(v3_payload.value == 42u);
 
     // Cleanup (best effort).
     fs::remove_all(tmp_dir, ec);
@@ -301,23 +460,60 @@ migrate_Sample_v2_to_v3(const SampleV2& in, SampleV3& out) {
 // ---------------------------------------------------------------------------
 // TEST 2: migration_byte_round_trip_is_stable
 //
-// Verifies that re-serializing a current-version struct (v3) yields a stable
-// byte sequence across two identical constructions.
+// Verifies that the current-version struct (StableV3) has a pinned, stable
+// byte layout — two independently constructed instances with the same field
+// values are byte-equal, and the layout (field offsets + total size) is pinned
+// at compile time via static_assert.
 //
-// "Byte round-trip stability" in this context means: two default-constructed
-// instances of the same struct produce byte-equal memory — the serialization
-// is deterministic.  This satisfies PHILOSOPHY §7 ("Determinism by default").
+// "Byte round-trip stability" in this plan means: the struct layout is
+// deterministic and does not drift across compiler versions or reorders.  This
+// satisfies PHILOSOPHY §7 ("Determinism by default") and the precondition for
+// the Fory serializer to produce stable output.
 //
-// The fixture is a simple POD struct (SampleV3) with known field layout.
-// We memcmp two independent copies.  This exercises the determinism property
-// that the actual glibre-types serializer must uphold for the dispatcher-table
-// round-trip (fory-codegen.md §"Migration Mechanic" point 5).
+// NOTE: full Fory round-trip (serialize → deserialize → re-serialize → memcmp)
+// is explicitly deferred because the Apache Fory C++ serializer is not yet
+// plumbed in this codebase.  grep -r "fory" core/ tools/ yields only the foryc
+// codegen tool; no runtime Fory serializer API exists in core/ or plugins/.
+// Scope §2 and the DoD in issue #977 are updated to reflect this deferral.
 //
 // The current_version symbol is also verified: dlsymd from the compiled dylib,
 // it must equal the schema's declared version (3).
 // ---------------------------------------------------------------------------
 
+// Fixture struct matching StableV3 in the dylib preamble.
+// { unsigned alpha; unsigned beta; } — 8 bytes, standard layout.
+namespace glibre_test_stable_fixture {
+struct StableV3 {
+    unsigned alpha{};
+    unsigned beta{};
+};
+}  // namespace glibre_test_stable_fixture
+
+// Pin layout at compile time (satisfies PHILOSOPHY §7 and HIGH-2 path b).
+// If a field is added or reordered, the offset/size asserts fire immediately.
+static_assert(
+    sizeof(glibre_test_stable_fixture::StableV3) == 8u,
+    "StableV3 total size must be 8 bytes (two unsigned fields)"
+);
+static_assert(
+    offsetof(glibre_test_stable_fixture::StableV3, alpha) == 0u,
+    "StableV3::alpha must be at offset 0"
+);
+static_assert(
+    offsetof(glibre_test_stable_fixture::StableV3, beta) == 4u, "StableV3::beta must be at offset 4"
+);
+static_assert(
+    std::is_standard_layout_v<glibre_test_stable_fixture::StableV3>,
+    "StableV3 must be standard-layout for deterministic serialization"
+);
+static_assert(
+    std::is_trivially_copyable_v<glibre_test_stable_fixture::StableV3>,
+    "StableV3 must be trivially copyable (Fory ABI requirement)"
+);
+
 TEST_CASE("migration_byte_round_trip_is_stable", "[data][schemas][migration]") {
+    using namespace glibre_test_stable_fixture;
+
     constexpr std::string_view fory_src = R"(
 schema glibre.test.Stable {
   version 3
@@ -343,8 +539,7 @@ schema glibre.test.Stable {
 
     // --- Write and compile the stub dylib. ---
     const fs::path tmp_base = fs::temp_directory_path() / "glibre_schema_mig_test";
-    const auto unique_suffix =
-        std::format("rtrip_{}_{}", getpid(), reinterpret_cast<uintptr_t>(gen_text.data()));
+    const auto unique_suffix = unique_test_suffix("rtrip");
     const fs::path tmp_dir = tmp_base / unique_suffix;
     std::error_code ec;
     fs::create_directories(tmp_dir, ec);
@@ -356,6 +551,7 @@ schema glibre.test.Stable {
 
     // Struct types + providers in glibre::test (the type's namespace from FQN
     // "glibre.test.Stable").
+    // Layout must match glibre_test_stable_fixture::StableV3 pinned above.
     constexpr std::string_view preamble = R"(
 #include <expected>
 #include "glibre/error.hpp"
@@ -417,35 +613,20 @@ migrate_Stable_v2_to_v3(const StableV2& in, StableV3& out) {
     REQUIRE(cur_ver != nullptr);
     CHECK(*cur_ver == 3u);
 
-    // Byte round-trip stability:
-    // Two independent default-constructed instances of the v3 struct must be
-    // byte-equal.  This tests the determinism requirement (PHILOSOPHY §7):
-    // default construction produces a canonical zero-filled representation,
-    // and re-serializing (encoding) the same logical value must always yield
-    // the same bytes.
+    // Byte-stability check: two independently-constructed StableV3 instances
+    // with the same field values must be byte-equal.  The static_asserts above
+    // pin the layout; this runtime check confirms default-construction produces
+    // a canonical zero-filled representation (PHILOSOPHY §7).
     //
-    // Struct layout mirrors test_stable::StableV3: { unsigned alpha; unsigned beta; }
-    // Both fields are zero-initialised by default construction.
-    struct StableV3Repr {
-        unsigned alpha{};
-        unsigned beta{};
-    };
+    // Layout is also pinned by the static_asserts at namespace scope above —
+    // see glibre_test_stable_fixture::StableV3 static_asserts.
+    const StableV3 inst_a{};
+    const StableV3 inst_b{};
+    CHECK(std::memcmp(&inst_a, &inst_b, sizeof(StableV3)) == 0);
 
-    static_assert(sizeof(StableV3Repr) == 8, "byte-level layout sanity");
-
-    const StableV3Repr inst_a{};
-    const StableV3Repr inst_b{};
-
-    // Two identical default-constructed instances must be byte-equal.
-    const bool bytes_equal = (std::memcmp(&inst_a, &inst_b, sizeof(StableV3Repr)) == 0);
-    CHECK(bytes_equal);
-
-    // Additionally confirm that setting the same field values on two
-    // independently constructed instances yields byte-equal results.
-    const StableV3Repr inst_c{42, 7};
-    const StableV3Repr inst_d{42, 7};
-    const bool values_equal = (std::memcmp(&inst_c, &inst_d, sizeof(StableV3Repr)) == 0);
-    CHECK(values_equal);
+    const StableV3 inst_c{42u, 7u};
+    const StableV3 inst_d{42u, 7u};
+    CHECK(std::memcmp(&inst_c, &inst_d, sizeof(StableV3)) == 0);
 
     fs::remove_all(tmp_dir, ec);
 }
@@ -455,10 +636,12 @@ migrate_Stable_v2_to_v3(const StableV2& in, StableV3& out) {
 //
 // If the migration table for a type is missing the step that bridges from_ver
 // to the next step in the chain, chain_walk() must return
-// core::Error::SchemaMigrationFailed.
+// core::Error::SchemaMigrationFailed with the missing-pair info in
+// ErrorContext::detail (plan #977 Scope §3).
 //
 // Fixture: glibre.test.Broken has version 3 with ONLY the v2→v3 step; the
-// v1→v2 step is absent.  chain_walk(table, size, 1, 3) must return an error.
+// v1→v2 step is absent.  chain_walk(table, size, 1, 3) must return an error
+// whose detail string contains "v1" and "v2" (or "missing v1->v2").
 //
 // fory-codegen.md §"Migration Mechanic" point 3:
 //   "Missing chain → Error::SchemaMigrationFailure."
@@ -487,15 +670,9 @@ schema glibre.test.Broken {
     REQUIRE(emit_result.has_value());
     const eastl::string& gen_text = *emit_result;
 
-    // Only the v2→v3 pair should appear in the generated table.
-    CHECK(gen_text.find("2, 3") != eastl::string::npos);
-    // v1→v2 pair must NOT appear.
-    CHECK(gen_text.find("1, 2") == eastl::string::npos);
-
     // --- Write and compile the stub dylib. ---
     const fs::path tmp_base = fs::temp_directory_path() / "glibre_schema_mig_test";
-    const auto unique_suffix =
-        std::format("broken_{}_{}", getpid(), reinterpret_cast<uintptr_t>(gen_text.data()));
+    const auto unique_suffix = unique_test_suffix("broken");
     const fs::path tmp_dir = tmp_base / unique_suffix;
     std::error_code ec;
     fs::create_directories(tmp_dir, ec);
@@ -571,19 +748,37 @@ migrate_Broken_v2_to_v3(const BrokenV2& in, BrokenV3& out) {
     REQUIRE(table != nullptr);
     REQUIRE(table_size == 1);
 
+    // Structural verification: the one entry is v2→v3; no v1→v2 entry exists.
+    CHECK(table[0].from_version == 2u);
+    CHECK(table[0].to_version == 3u);
+    bool has_v1_v2 = false;
+    for (std::size_t i = 0; i < table_size; ++i) {
+        if (table[i].from_version == 1 && table[i].to_version == 2)
+            has_v1_v2 = true;
+    }
+    CHECK(!has_v1_v2);
+
     // Attempting to walk from v1 to v3 must fail because v1→v2 is absent.
-    const auto walk_result = chain_walk(table, table_size, 1, 3);
+    const auto walk_result = chain_walk_presence_only(table, table_size, 1, 3);
     REQUIRE_FALSE(walk_result.has_value());
 
     // The error must be core::Error::SchemaMigrationFailed.
-    // error.hpp: arm is core::Error::SchemaMigrationFailed
     const glibre::Error& err = walk_result.error();
     const auto* core_err = eastl::get_if<glibre::core::Error>(&err.code());
     REQUIRE(core_err != nullptr);
     CHECK(*core_err == glibre::core::Error::SchemaMigrationFailed);
 
-    // Walking v2→v3 (a chain that IS complete) must succeed.
-    const auto partial_walk = chain_walk(table, table_size, 2, 3);
+    // Plan #977 Scope §3: the missing-pair info must appear in ErrorContext::detail.
+    // chain_walk() enriches the error with "missing v<cur>->v<cur+1> provider".
+    const eastl::string_view detail = err.where().detail;
+    REQUIRE(!detail.empty());
+    // Detail must contain "v1" and "v2" (the missing step from version 1 toward 2).
+    const std::string detail_std(detail.data(), detail.size());
+    CHECK(detail_std.find("v1") != std::string::npos);
+    CHECK(detail_std.find("v2") != std::string::npos);
+
+    // Walking v2→v3 (a chain that IS complete) must succeed via presence-only check.
+    const auto partial_walk = chain_walk_presence_only(table, table_size, 2, 3);
     CHECK(partial_walk.has_value());
 
     fs::remove_all(tmp_dir, ec);
