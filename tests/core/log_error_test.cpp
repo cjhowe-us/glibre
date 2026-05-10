@@ -219,6 +219,10 @@ TEST_CASE("core/log_error: tostring_complete_for_core_error", "[core][log_error]
     check(E::NullArgument, "NullArgument");
     // plan #250: PluginNameMismatch — hot-reload swap candidate has different name
     check(E::PluginNameMismatch, "PluginNameMismatch");
+    // plan #597: TypeUnregistered — lookup on unregistered TypeId
+    check(E::TypeUnregistered, "TypeUnregistered");
+    // plan #597: TypeRegistryClosed — register_type() called after seal()
+    check(E::TypeRegistryClosed, "TypeRegistryClosed");
 }
 
 // ---------------------------------------------------------------------------

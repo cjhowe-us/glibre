@@ -84,6 +84,19 @@ enum class Error : std::uint16_t {
     // different identity is a configuration error, not an ABI issue.
     // Detected by hot_reload_validate() in plugin_loader_actions (plan #250).
     PluginNameMismatch,
+    // TypeRegistry lookup on a TypeId that has no registered descriptor.
+    // Returned by TypeRegistry::lookup() when TypeId.value is out of range
+    // or the slot was never populated.  (plan #597 — TypeRegistry immutable-after-init)
+    // Spec authority: specs/core/SPEC.md §4.9 invariant 2, §10 error table row
+    // "TypeUnregistered".
+    TypeUnregistered,
+    // TypeRegistry mutation attempted after World construction has called seal().
+    // register_type() returns this error on any call that arrives after the seal.
+    // The friend hook extend_during_load() bypasses the seal for plugin-load
+    // time registration only.  (plan #597)
+    // Spec authority: specs/core/SPEC.md §4.9 invariant 1, §10 error table row
+    // "TypeRegistryClosed".
+    TypeRegistryClosed,
 };
 }  // namespace core
 
