@@ -89,6 +89,51 @@ struct SemVer {
 // ---------------------------------------------------------------------------
 
 struct ComponentDecl {
+    // -----------------------------------------------------------------------
+    // Allocator-aware constructor set (PMR ABI, eastl-removal.md §3).
+    //
+    // Introducing allocator_type + explicit constructors makes ComponentDecl
+    // non-aggregate (C++17: user-provided ctor removes aggregate status) and
+    // enables std::uses_allocator_v<ComponentDecl, Alloc> = true.  The full
+    // set of allocator-extended constructors (default, copy, move) is required
+    // so that std::uses_allocator_construction_args correctly threads the
+    // parent vector's allocator into every construction path — including
+    // push_back / insert (copy/move) and emplace_back (default).
+    //
+    // The Fory deserialiser (plan #225) populates fields by tag after
+    // construction; it does not rely on C++ aggregate initialisation.
+    // -----------------------------------------------------------------------
+    using allocator_type = std::pmr::polymorphic_allocator<std::byte>;
+
+    // Default + allocator.
+    explicit ComponentDecl(allocator_type alloc = allocator_type{})
+        : fqn{alloc},
+          schema_hash{alloc} {}
+
+    // Extended copy (allocator-extended copy constructor for PMR containers).
+    ComponentDecl(const ComponentDecl& other, allocator_type alloc)
+        : fqn{other.fqn, alloc},
+          schema_hash{other.schema_hash, alloc},
+          storage_hint{other.storage_hint} {}
+
+    // Extended move (allocator-extended move constructor for PMR containers).
+    // noexcept: safe under glibre's -fno-exceptions posture (cmake/Compile.cmake
+    // glibre::compile_contract, eastl-removal.md §2) + PerContextAllocatorResource::
+    // do_allocate abort-on-ceiling-breach (eastl-removal.md §3.do_allocate).
+    // NOT unconditionally noexcept under the standard: std::pmr::polymorphic_allocator::
+    // is_always_equal is false (pointer-identity per eastl-removal.md §3.2), so
+    // std::pmr::string/std::pmr::vector's allocator-extended move ctor may allocate
+    // (and therefore throw under exceptions) when source and destination allocators
+    // compare unequal. Vector growth within a single std::pmr::vector<ComponentDecl>
+    // always uses the same resource, so this throwing branch is statically unreachable
+    // in this engine.
+    // This noexcept allows std::pmr::vector<ComponentDecl> to use move (not copy) on
+    // grow, avoiding redundant heap allocation during reallocation.
+    ComponentDecl(ComponentDecl&& other, allocator_type alloc) noexcept
+        : fqn{std::move(other.fqn), alloc},
+          schema_hash{std::move(other.schema_hash), alloc},
+          storage_hint{other.storage_hint} {}
+
     std::pmr::string fqn;          // tag 1
     std::pmr::string schema_hash;  // tag 2 — 64-char blake3 hex
     std::uint8_t storage_hint{0};  // tag 3 — archetype=0, sparse=1, singleton=2
@@ -109,6 +154,44 @@ struct ComponentDecl {
 // ---------------------------------------------------------------------------
 
 struct SystemDecl {
+    // -----------------------------------------------------------------------
+    // Allocator-aware constructor set (PMR ABI, eastl-removal.md §3).
+    // Full set of allocator-extended constructors required — see ComponentDecl.
+    // -----------------------------------------------------------------------
+    using allocator_type = std::pmr::polymorphic_allocator<std::byte>;
+
+    explicit SystemDecl(allocator_type alloc = allocator_type{})
+        : name{alloc},
+          reads{alloc},
+          writes{alloc},
+          after{alloc},
+          before{alloc} {}
+
+    SystemDecl(const SystemDecl& other, allocator_type alloc)
+        : name{other.name, alloc},
+          phase{other.phase},
+          reads{other.reads, alloc},
+          writes{other.writes, alloc},
+          after{other.after, alloc},
+          before{other.before, alloc} {}
+
+    // noexcept: safe under glibre's -fno-exceptions posture (cmake/Compile.cmake
+    // glibre::compile_contract, eastl-removal.md §2) + PerContextAllocatorResource::
+    // do_allocate abort-on-ceiling-breach (eastl-removal.md §3.do_allocate).
+    // NOT unconditionally noexcept under the standard: std::pmr::polymorphic_allocator::
+    // is_always_equal is false (pointer-identity per eastl-removal.md §3.2), so
+    // std::pmr::string/std::pmr::vector's allocator-extended move ctor may allocate
+    // (and therefore throw under exceptions) when source and destination allocators
+    // compare unequal. The throwing branch is statically unreachable in this engine.
+    // See ComponentDecl move+alloc ctor comment for full rationale.
+    SystemDecl(SystemDecl&& other, allocator_type alloc) noexcept
+        : name{std::move(other.name), alloc},
+          phase{other.phase},
+          reads{std::move(other.reads), alloc},
+          writes{std::move(other.writes), alloc},
+          after{std::move(other.after), alloc},
+          before{std::move(other.before), alloc} {}
+
     std::pmr::string name;                      // tag 1
     std::uint8_t phase{0};                      // tag 2 — 1..=9
     std::pmr::vector<std::pmr::string> reads;   // tag 3
@@ -133,6 +216,38 @@ struct SystemDecl {
 // ---------------------------------------------------------------------------
 
 struct PassDecl {
+    // -----------------------------------------------------------------------
+    // Allocator-aware constructor set (PMR ABI, eastl-removal.md §3).
+    // Full set of allocator-extended constructors required — see ComponentDecl.
+    // -----------------------------------------------------------------------
+    using allocator_type = std::pmr::polymorphic_allocator<std::byte>;
+
+    explicit PassDecl(allocator_type alloc = allocator_type{})
+        : name{alloc},
+          inputs{alloc},
+          outputs{alloc} {}
+
+    PassDecl(const PassDecl& other, allocator_type alloc)
+        : name{other.name, alloc},
+          render_phase{other.render_phase},
+          inputs{other.inputs, alloc},
+          outputs{other.outputs, alloc} {}
+
+    // noexcept: safe under glibre's -fno-exceptions posture (cmake/Compile.cmake
+    // glibre::compile_contract, eastl-removal.md §2) + PerContextAllocatorResource::
+    // do_allocate abort-on-ceiling-breach (eastl-removal.md §3.do_allocate).
+    // NOT unconditionally noexcept under the standard: std::pmr::polymorphic_allocator::
+    // is_always_equal is false (pointer-identity per eastl-removal.md §3.2), so
+    // std::pmr::string/std::pmr::vector's allocator-extended move ctor may allocate
+    // (and therefore throw under exceptions) when source and destination allocators
+    // compare unequal. The throwing branch is statically unreachable in this engine.
+    // See ComponentDecl move+alloc ctor comment for full rationale.
+    PassDecl(PassDecl&& other, allocator_type alloc) noexcept
+        : name{std::move(other.name), alloc},
+          render_phase{other.render_phase},
+          inputs{std::move(other.inputs), alloc},
+          outputs{std::move(other.outputs), alloc} {}
+
     std::pmr::string name;                       // tag 1
     std::uint8_t render_phase{0};                // tag 2 — 6 or 7
     std::pmr::vector<std::pmr::string> inputs;   // tag 3
@@ -153,6 +268,35 @@ struct PassDecl {
 // ---------------------------------------------------------------------------
 
 struct PanelDecl {
+    // -----------------------------------------------------------------------
+    // Allocator-aware constructor set (PMR ABI, eastl-removal.md §3).
+    // Full set of allocator-extended constructors required — see ComponentDecl.
+    // -----------------------------------------------------------------------
+    using allocator_type = std::pmr::polymorphic_allocator<std::byte>;
+
+    explicit PanelDecl(allocator_type alloc = allocator_type{})
+        : id{alloc},
+          title{alloc} {}
+
+    PanelDecl(const PanelDecl& other, allocator_type alloc)
+        : id{other.id, alloc},
+          title{other.title, alloc},
+          area{other.area} {}
+
+    // noexcept: safe under glibre's -fno-exceptions posture (cmake/Compile.cmake
+    // glibre::compile_contract, eastl-removal.md §2) + PerContextAllocatorResource::
+    // do_allocate abort-on-ceiling-breach (eastl-removal.md §3.do_allocate).
+    // NOT unconditionally noexcept under the standard: std::pmr::polymorphic_allocator::
+    // is_always_equal is false (pointer-identity per eastl-removal.md §3.2), so
+    // std::pmr::string's allocator-extended move ctor may allocate (and therefore throw
+    // under exceptions) when source and destination allocators compare unequal.
+    // The throwing branch is statically unreachable in this engine.
+    // See ComponentDecl move+alloc ctor comment for full rationale.
+    PanelDecl(PanelDecl&& other, allocator_type alloc) noexcept
+        : id{std::move(other.id), alloc},
+          title{std::move(other.title), alloc},
+          area{other.area} {}
+
     std::pmr::string id;     // tag 1
     std::pmr::string title;  // tag 2
     std::uint8_t area{0};    // tag 3 — docked-area byte enum
@@ -299,23 +443,16 @@ struct PluginManifest {
 // (plan #225) populates fields by tag number after construction; it does not
 // rely on C++ aggregate initialisation.
 //
-// SemVer, ComponentDecl, SystemDecl, PassDecl, PanelDecl remain aggregates
-// (no user-provided ctors) — asserted below.
+// SemVer has no PMR fields and remains a true C++ aggregate — asserted below.
+//
+// ComponentDecl, SystemDecl, PassDecl, PanelDecl each carry a user-provided
+// allocator-aware constructor (plan #1066) so they are no longer aggregates
+// (C++17: user-provided ctor removes aggregate status).  Their is_aggregate_v
+// assertions are intentionally absent.  The Fory deserialiser (plan #225)
+// populates fields by tag after construction; it does not rely on aggregate
+// initialisation for any of these types.
 static_assert(
     std::is_aggregate_v<SemVer>, "SemVer must remain an aggregate for codegen compatibility"
-);
-static_assert(
-    std::is_aggregate_v<ComponentDecl>,
-    "ComponentDecl must remain an aggregate for codegen compatibility"
-);
-static_assert(
-    std::is_aggregate_v<SystemDecl>, "SystemDecl must remain an aggregate for codegen compatibility"
-);
-static_assert(
-    std::is_aggregate_v<PassDecl>, "PassDecl must remain an aggregate for codegen compatibility"
-);
-static_assert(
-    std::is_aggregate_v<PanelDecl>, "PanelDecl must remain an aggregate for codegen compatibility"
 );
 
 }  // namespace glibre::core
