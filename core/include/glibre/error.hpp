@@ -209,6 +209,14 @@ enum class Error : std::uint16_t {
     CacheReadOnlyViolation,         // write attempted to a read-only cache
     CapabilityNotSupported,         // backend lacks required capability
     ShippingCompilationAttempted,   // compile path invoked in a shipping build
+    // Metal 4 baseline allows ≤ 31 slots per DescriptorFrequencyGroup.
+    // Returned by Pass 7 of DescriptorLayout::derive() when any table exceeds
+    // the cap.  Distinct from DescriptorFrequencyAmbiguous (tagger conflicts)
+    // so that telemetry and the §8.4 refusal classifier can distinguish layout-cap
+    // violations from multi-tag annotation bugs.
+    // Added by plan #1087 R1 (MED-1 fix) — full sub-epic #69 plan will extend
+    // this with SamplerLimitExceeded / IncompatibleVertexLayout / PushConstantTooLarge.
+    BindingOverflow,  // per-table slot count exceeds Metal 4 cap (31)
 };
 }  // namespace shader
 

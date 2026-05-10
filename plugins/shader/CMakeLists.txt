@@ -33,6 +33,7 @@ add_library(glibre-shader STATIC
     src/source/preprocessor.cpp
     src/source/include_resolver.cpp
     src/source/entry_point_scanner.cpp
+    src/descriptor/descriptor_layout.cpp  # plan #1087 — DescriptorLayout::derive
 )
 
 # Public include path: plugins/shader/include (exposes glibre/shader/shader.hpp

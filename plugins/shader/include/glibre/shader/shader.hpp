@@ -357,19 +357,42 @@ struct RootSignatureSchema {
 
 class DescriptorLayout {
 public:
-    // TODO(#1087): add `std::pmr::memory_resource* mr` parameter so that
-    // reflection-blob assembly (future slangc harvest plan) does not silently
-    // bind to std::pmr::get_default_resource() — same per-tag ceiling escape
-    // that PR #1085 fixed for ShaderSource::open().  Track in
-    // [PLAN] iterate-shader-descriptor-allocator-threading (#1087).
-    static glibre::Result<DescriptorLayout> derive(const ReflectionBlob&, CompileTarget) noexcept;
+    // derive — produce a backend-neutral resource binding layout from a fully-tagged
+    // ReflectionBlob.
+    //
+    // mr  — PMR memory resource used for all internal string and vector allocations
+    //       that populate RootSignatureSchema / DescriptorTable::slots.  MUST be a
+    //       glibre::PerContextAllocatorResource backed by the shader context's
+    //       PerContextAllocator so that all allocations are accounted under
+    //       ContextTag::shader (perf-budget.md §Allocator Rules #1).
+    //       Must outlive the returned DescriptorLayout.
+    //
+    // Returns shader::Error::DescriptorFrequencyMissing if any binding carries
+    //   an unrecognised DescriptorFrequencyGroup value.
+    // Returns shader::Error::DescriptorFrequencyAmbiguous on double-count detected
+    //   in the cross-table completeness check.
+    static glibre::Result<DescriptorLayout>
+    derive(const ReflectionBlob&, CompileTarget, std::pmr::memory_resource* mr) noexcept;
 
     [[nodiscard]] const DescriptorTable& table(DescriptorFrequencyGroup g) const noexcept;
     [[nodiscard]] const RootSignatureSchema& schema() const noexcept;
 
 private:
-    DescriptorLayout() = default;
-    RootSignatureSchema schema_{};
+    // Private constructor: wire all PMR vector members to the supplied resource so
+    // that every BindingSlot, StaticSampler, and PushConstantRange pushed into the
+    // schema allocates under mr (perf-budget.md §Allocator Rules #1).
+    // Called only from derive().  mr must outlive this DescriptorLayout.
+    explicit DescriptorLayout(std::pmr::memory_resource* mr)
+        : schema_{
+              DescriptorTable{std::pmr::vector<BindingSlot>{mr}},
+              DescriptorTable{std::pmr::vector<BindingSlot>{mr}},
+              DescriptorTable{std::pmr::vector<BindingSlot>{mr}},
+              DescriptorTable{std::pmr::vector<BindingSlot>{mr}},
+              std::pmr::vector<StaticSampler>{mr},
+              std::pmr::vector<PushConstantRange>{mr}
+          } {}
+
+    RootSignatureSchema schema_;
 };
 
 }  // namespace glibre::shader

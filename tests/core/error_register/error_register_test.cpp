@@ -154,8 +154,9 @@ static_assert(all_distinct(kToolsErrorValues), "tools::Error has duplicate enume
 // shader::Error — enumerator values
 // ---------------------------------------------------------------------------
 // Added by plan #508 (ShaderSource open + include resolver + entry-point scanner).
+// plan #1087 R1 MED-1: BindingOverflow arm added (array size bumped 25 → 26).
 
-constexpr std::array<std::underlying_type_t<glibre::shader::Error>, 25> kShaderErrorValues{{
+constexpr std::array<std::underlying_type_t<glibre::shader::Error>, 26> kShaderErrorValues{{
     static_cast<std::uint16_t>(glibre::shader::Error::SourceNotFound),
     static_cast<std::uint16_t>(glibre::shader::Error::SourceParseFailed),
     static_cast<std::uint16_t>(glibre::shader::Error::IncludeEscape),
@@ -181,6 +182,8 @@ constexpr std::array<std::underlying_type_t<glibre::shader::Error>, 25> kShaderE
     static_cast<std::uint16_t>(glibre::shader::Error::CacheReadOnlyViolation),
     static_cast<std::uint16_t>(glibre::shader::Error::CapabilityNotSupported),
     static_cast<std::uint16_t>(glibre::shader::Error::ShippingCompilationAttempted),
+    // plan #1087 R1 MED-1: BindingOverflow — per-table slot count exceeds Metal 4 cap.
+    static_cast<std::uint16_t>(glibre::shader::Error::BindingOverflow),
 }};
 
 static_assert(all_distinct(kShaderErrorValues), "shader::Error has duplicate enumerator values.");
@@ -205,7 +208,8 @@ TEST_CASE("error_register_per_context_arms_unique", "[core][error_register]") {
     // tools::Error: 6 enumerators with sequential values 0..5
     CHECK(all_distinct(kToolsErrorValues));
 
-    // shader::Error: 25 enumerators with sequential values 0..24
+    // shader::Error: 26 enumerators with sequential values 0..25
+    // (plan #1087 R1 MED-1 added BindingOverflow)
     CHECK(all_distinct(kShaderErrorValues));
 }
 
