@@ -23,6 +23,14 @@
 //   -fno-exceptions.  std::pmr containers via PerContextAllocatorResource
 //   per reviews/decisions/eastl-removal.md matrix rows 1-3.
 //
+// open() allocator contract (HIGH-1 + HIGH-2, round-2, addressed):
+//   Callers pass a std::pmr::memory_resource& that backs dylib_path_.
+//   The resource pointer is stored in mr_ (declared before dylib_path_)
+//   and initialised as dylib_path_{mr_}, so every allocation in dylib_path_
+//   is tracked under the caller's PerContextAllocator ceiling.
+//   The assign() form (HIGH-2) avoids constructing a default-resource
+//   temporary and instead writes directly into the backed storage.
+//
 // dlerror() note (HIGH finding round-1, addressed):
 //   POSIX specifies dlerror() returns a pointer to a thread-local static that
 //   may be overwritten by the next dlerror() call.  Storing it in a non-owning
@@ -139,7 +147,8 @@ try_resolve_required(void* handle, const char* sym_name) noexcept {
 // PluginLoader::open
 // ---------------------------------------------------------------------------
 
-glibre::Result<PluginLoader> PluginLoader::open(std::string_view dylib_path) {
+glibre::Result<PluginLoader>
+PluginLoader::open(std::string_view dylib_path, std::pmr::memory_resource& mr) {
     // Step 1: dlopen
     //
     // RTLD_NOW   — resolve all undefined symbols in the dylib immediately.
@@ -254,7 +263,7 @@ glibre::Result<PluginLoader> PluginLoader::open(std::string_view dylib_path) {
     // POSIX-specified to work on conformant platforms.  We use std::memcpy to
     // copy the bits between the two pointer types — this is the most portable
     // approach (avoids the reinterpret_cast UB flagged by MED finding round-1).
-    PluginLoader loader;
+    PluginLoader loader{&mr};
     loader.handle_ = handle;
     loader.abi_hash_ = *static_cast<const char* const*>(sym_abi_hash);
     loader.manifest_blob_ = *static_cast<const std::byte* const*>(sym_manifest);
@@ -270,11 +279,23 @@ glibre::Result<PluginLoader> PluginLoader::open(std::string_view dylib_path) {
     std::memcpy(&register_fn_tmp, &sym_register, sizeof(register_fn_tmp));
     loader.register_fn_ = register_fn_tmp;
 
-    loader.dylib_path_ = std::pmr::string{dylib_path.data(), dylib_path.size()};
+    // HIGH-2 fix: assign() writes directly into the mr_-backed storage
+    // without constructing a default-resource temporary.  The allocator is
+    // already bound in the private constructor (dylib_path_{mr_}), so assign()
+    // is allocation-correct — all storage comes from mr_.
+    loader.dylib_path_.assign(dylib_path.data(), dylib_path.size());
     loader.manifest_result_ = std::move(manifest_result);
 
     return loader;
 }
+
+// ---------------------------------------------------------------------------
+// Private constructor
+// ---------------------------------------------------------------------------
+
+PluginLoader::PluginLoader(std::pmr::memory_resource* mr) noexcept
+    : mr_{mr},
+      dylib_path_{mr_} {}
 
 // ---------------------------------------------------------------------------
 // Destructor
@@ -297,6 +318,11 @@ PluginLoader::PluginLoader(PluginLoader&& other) noexcept
       manifest_blob_{other.manifest_blob_},
       manifest_blob_size_{other.manifest_blob_size_},
       register_fn_{other.register_fn_},
+      // Transfer mr_ first so dylib_path_ is constructed with the source's
+      // resource.  Since both sides now share the same memory_resource*,
+      // std::pmr::string's move constructor can steal the allocation
+      // (allocators compare equal ↔ same memory_resource*).
+      mr_{other.mr_},
       dylib_path_{std::move(other.dylib_path_)},
       manifest_result_{std::move(other.manifest_result_)} {
     // Null out the source so its destructor is a no-op.
@@ -305,6 +331,9 @@ PluginLoader::PluginLoader(PluginLoader&& other) noexcept
     other.manifest_blob_ = nullptr;
     other.manifest_blob_size_ = 0;
     other.register_fn_ = nullptr;
+    // Reset source's mr_ to the default resource; its dylib_path_ is empty
+    // (moved-from) so no allocation through the original mr_ will occur.
+    other.mr_ = std::pmr::get_default_resource();
 }
 
 PluginLoader& PluginLoader::operator=(PluginLoader&& other) noexcept {
@@ -320,6 +349,11 @@ PluginLoader& PluginLoader::operator=(PluginLoader&& other) noexcept {
     manifest_blob_ = other.manifest_blob_;
     manifest_blob_size_ = other.manifest_blob_size_;
     register_fn_ = other.register_fn_;
+    // Transfer mr_ before assigning dylib_path_.  std::pmr::string's
+    // move-assignment with POCMA=false: if allocators differ, it copies
+    // rather than steals.  By taking the source's mr_ first we keep the
+    // same resource pointer on both sides so the string move can steal.
+    mr_ = other.mr_;
     dylib_path_ = std::move(other.dylib_path_);
     manifest_result_ = std::move(other.manifest_result_);
 
@@ -328,6 +362,8 @@ PluginLoader& PluginLoader::operator=(PluginLoader&& other) noexcept {
     other.manifest_blob_ = nullptr;
     other.manifest_blob_size_ = 0;
     other.register_fn_ = nullptr;
+    // Reset source's mr_ to the default resource after the move.
+    other.mr_ = std::pmr::get_default_resource();
     return *this;
 }
 

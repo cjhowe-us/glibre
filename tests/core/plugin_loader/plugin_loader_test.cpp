@@ -29,11 +29,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory_resource>
 #include <string_view>
 #include <type_traits>
 #include <variant>
 
 #include <catch2/catch_test_macros.hpp>
+#include <glibre/alloc.hpp>
 #include <glibre/core/plugin_loader.hpp>
 #include <glibre/error.hpp>
 
@@ -50,6 +52,17 @@ namespace {
     const auto* ptr = std::get_if<glibre::core::Error>(&var);
     return (ptr != nullptr) && (*ptr == expected);
 }
+
+// File-level allocator + resource for PluginLoader::open() calls.
+//
+// PluginLoader::open() now requires a std::pmr::memory_resource& to back
+// dylib_path_ under the per-context ceiling (HIGH-1 + HIGH-2, round-2).
+// All tests in this file share the core ContextTag allocator; a single
+// PerContextAllocator + PerContextAllocatorResource pair covers all cases.
+//
+// Construction order: alloc_ before mr_ so the resource's reference is valid.
+glibre::PerContextAllocator alloc_{glibre::ContextTag::core};
+glibre::PerContextAllocatorResource mr_{alloc_};
 
 }  // namespace
 
@@ -115,7 +128,7 @@ TEST_CASE("load_returns_pmr_handle", "[core][plugin_loader]") {
     constexpr std::string_view path{GLIBRE_NOOP_DYLIB_PATH};
     REQUIRE_FALSE(path.empty());
 
-    auto result = glibre::core::PluginLoader::open(path);
+    auto result = glibre::core::PluginLoader::open(path, mr_);
     REQUIRE(result.has_value());
 
     const glibre::core::PluginLoader& loader = *result;
@@ -145,7 +158,7 @@ TEST_CASE("plugin_loader_open_loads_noop_plugin", "[core][plugin_loader]") {
     constexpr std::string_view path{GLIBRE_NOOP_DYLIB_PATH};
     REQUIRE_FALSE(path.empty());
 
-    auto result = glibre::core::PluginLoader::open(path);
+    auto result = glibre::core::PluginLoader::open(path, mr_);
 
     REQUIRE(result.has_value());
 
@@ -181,7 +194,7 @@ TEST_CASE("plugin_loader_open_loads_noop_plugin", "[core][plugin_loader]") {
 TEST_CASE("plugin_loader_open_returns_error_on_missing_path", "[core][plugin_loader]") {
     constexpr std::string_view nonexistent{"/tmp/glibre-nonexistent-plugin-229.dylib"};
 
-    auto result = glibre::core::PluginLoader::open(nonexistent);
+    auto result = glibre::core::PluginLoader::open(nonexistent, mr_);
 
     REQUIRE_FALSE(result.has_value());
     CHECK(holds_core_error(result.error(), glibre::core::Error::PluginDlopenFailed));
@@ -197,7 +210,7 @@ TEST_CASE("plugin_loader_open_returns_error_on_missing_path", "[core][plugin_loa
 // ---------------------------------------------------------------------------
 
 TEST_CASE("dlopen_failure_returns_plugin_dlopen_failed", "[core][plugin_loader]") {
-    auto result = glibre::core::PluginLoader::open("/no/such/path/plugin.dylib");
+    auto result = glibre::core::PluginLoader::open("/no/such/path/plugin.dylib", mr_);
 
     REQUIRE_FALSE(result.has_value());
     CHECK(holds_core_error(result.error(), glibre::core::Error::PluginDlopenFailed));
@@ -221,7 +234,7 @@ TEST_CASE("plugin_loader_open_returns_error_on_missing_symbols", "[core][plugin_
     constexpr std::string_view stub_path{GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH};
     REQUIRE_FALSE(stub_path.empty());
 
-    auto result = glibre::core::PluginLoader::open(stub_path);
+    auto result = glibre::core::PluginLoader::open(stub_path, mr_);
 
     REQUIRE_FALSE(result.has_value());
     CHECK(holds_core_error(result.error(), glibre::core::Error::PluginMissingEntryPoint));
@@ -244,7 +257,7 @@ TEST_CASE("missing_symbol_returns_plugin_missing_entry_point", "[core][plugin_lo
 #else
     constexpr std::string_view stub_path{GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH};
 
-    auto result = glibre::core::PluginLoader::open(stub_path);
+    auto result = glibre::core::PluginLoader::open(stub_path, mr_);
 
     REQUIRE_FALSE(result.has_value());
     CHECK(holds_core_error(result.error(), glibre::core::Error::PluginMissingEntryPoint));
@@ -277,7 +290,7 @@ TEST_CASE("success_manifest_result_is_populated_after_open", "[core][plugin_load
 #else
     constexpr std::string_view path{GLIBRE_NOOP_DYLIB_PATH};
 
-    auto result = glibre::core::PluginLoader::open(path);
+    auto result = glibre::core::PluginLoader::open(path, mr_);
     REQUIRE(result.has_value());
 
     const glibre::core::PluginLoader& loader = *result;
@@ -357,7 +370,7 @@ TEST_CASE("invalid_manifest_returns_plugin_manifest_invalid", "[core][plugin_loa
     const std::string noop_dst_str = noop_dst.string();
     const std::string_view loader_path{noop_dst_str.data(), noop_dst_str.size()};
 
-    auto result = glibre::core::PluginLoader::open(loader_path);
+    auto result = glibre::core::PluginLoader::open(loader_path, mr_);
 
     // Cleanup regardless of result.
     fs::remove_all(tmp_dir, ec);

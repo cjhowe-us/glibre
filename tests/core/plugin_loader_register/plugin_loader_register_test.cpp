@@ -113,6 +113,17 @@ glibre::core::PluginManifest make_manifest(
     return m;
 }
 
+// File-level allocator + resource for PluginLoader::open() calls.
+//
+// PluginLoader::open() requires a std::pmr::memory_resource& to back
+// dylib_path_ under the per-context ceiling (HIGH-1 + HIGH-2, round-2).
+// All tests in this file share the core ContextTag allocator.
+// Construction order: loader_alloc_ before loader_mr_ so the resource's
+// reference is valid.  Named with "loader_" prefix to avoid collision with
+// test-local PerContextAllocator instances named test_alloc.
+glibre::PerContextAllocator loader_alloc_{glibre::ContextTag::core};
+glibre::PerContextAllocatorResource loader_mr_{loader_alloc_};
+
 /// Build a minimal PluginContext from stub references.
 /// Each stub object is passed by reference; none of the test stubs dereference
 /// the fields, so the stubs' layout is irrelevant — only their address matters.
@@ -172,7 +183,7 @@ TEST_CASE("register_invokes_plugin_entry_point", "[core][register]") {
     REQUIRE_FALSE(noop_path.empty());
 
     // Step 1–2: load the noop plugin.
-    auto loader_result = glibre::core::PluginLoader::open(noop_path);
+    auto loader_result = glibre::core::PluginLoader::open(noop_path, loader_mr_);
     REQUIRE(loader_result.has_value());
 
     const glibre::core::PluginLoader& loader = *loader_result;
@@ -243,7 +254,7 @@ TEST_CASE("register_failure_cleans_up_dlopen", "[core][register]") {
     REQUIRE_FALSE(stub_path.empty());
 
     // Step 1–2: load the failing stub — dlopen + dlsym must succeed.
-    auto loader_result = glibre::core::PluginLoader::open(stub_path);
+    auto loader_result = glibre::core::PluginLoader::open(stub_path, loader_mr_);
     REQUIRE(loader_result.has_value());
 
     glibre::core::PluginLoader& loader = *loader_result;
@@ -644,7 +655,7 @@ TEST_CASE(
     REQUIRE_FALSE(noop_path.empty());
 
     // Load the noop plugin — steps 1–2 of the loader sequence.
-    auto loader_result = glibre::core::PluginLoader::open(noop_path);
+    auto loader_result = glibre::core::PluginLoader::open(noop_path, loader_mr_);
     REQUIRE(loader_result.has_value());
     const glibre::core::PluginLoader& loader = *loader_result;
     REQUIRE(loader.register_fn() != nullptr);

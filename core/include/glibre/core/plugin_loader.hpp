@@ -44,6 +44,22 @@
 //   eastl::string      → std::pmr::string  (row 1)
 //   eastl::string_view → std::string_view  (row 2)
 //   eastl::vector<T>   → std::pmr::vector<T> (row 3, not used directly here)
+//
+// ALLOCATOR CONTRACT (HIGH-1 + HIGH-2, round-2, addressed):
+//   open() requires a std::pmr::memory_resource& to back dylib_path_.
+//   The resource MUST outlive the PluginLoader (same contract as alloc.hpp
+//   §"PerContextAllocatorResource" lifetime contract).
+//   Pass *PerContextAllocatorResource backed by the core PerContextAllocator
+//   singleton for production code.  Tests may pass a local
+//   std::pmr::monotonic_buffer_resource or a PerContextAllocatorResource
+//   constructed from a local PerContextAllocator.
+//   This ensures dylib_path_ allocations land under the per-context ceiling
+//   (perf-budget.md §Allocator Rules #1) rather than the global heap
+//   (std::pmr::get_default_resource()).
+//   The mr_ pointer is stored as a member and transferred on move so that
+//   move-construction can propagate the same resource to the destination's
+//   dylib_path_, enabling the storage-steal path in std::pmr::string's move
+//   constructor (allocators are equal ↔ same memory_resource* value).
 
 #include <cstddef>
 #include <cstdint>
@@ -74,7 +90,9 @@ namespace glibre::core {
 //
 // Typical usage (plan #230 caller):
 //
-//   auto result = PluginLoader::open("plugins/render/librender.dylib");
+//   // mr must be a long-lived PerContextAllocatorResource backed by the
+//   // context's PerContextAllocator (see alloc.hpp §"ALLOCATOR CONTRACT").
+//   auto result = PluginLoader::open("plugins/render/librender.dylib", mr);
 //   if (!result) { handle_error(result.error()); return; }
 //   PluginLoader& loader = *result;
 //   // inspect loader.manifest_result(), loader.abi_hash(), etc.
@@ -108,8 +126,15 @@ public:
     // "manifest must be valid" gate; at this layer we only collect data.
     //
     // @param dylib_path  Filesystem path to the plugin .dylib.
+    // @param mr          PMR memory resource used for dylib_path_ storage.
+    //                    MUST outlive the returned PluginLoader.
+    //                    In production: pass *PerContextAllocatorResource backed
+    //                    by the core PerContextAllocator singleton.
+    //                    In tests: a local PerContextAllocatorResource or
+    //                    std::pmr::monotonic_buffer_resource is fine.
     // ------------------------------------------------------------------
-    [[nodiscard]] static glibre::Result<PluginLoader> open(std::string_view dylib_path);
+    [[nodiscard]] static glibre::Result<PluginLoader>
+    open(std::string_view dylib_path, std::pmr::memory_resource& mr);
 
     // Destructor — dlclose(handle_) if handle_ is not nullptr.
     ~PluginLoader();
@@ -153,8 +178,11 @@ public:
     [[nodiscard]] const std::pmr::string& dylib_path() const noexcept;
 
 private:
-    // Private default constructor — only open() creates valid instances.
-    PluginLoader() = default;
+    // Private constructor — only open() creates valid instances.
+    // mr must point to a live memory_resource; the pointer is stored and
+    // used to back dylib_path_ so its allocations land under the caller's
+    // per-context ceiling rather than the global heap.
+    explicit PluginLoader(std::pmr::memory_resource* mr) noexcept;
 
     // OS dylib handle.  nullptr when moved from or before open().
     void* handle_{nullptr};
@@ -165,7 +193,21 @@ private:
     std::size_t manifest_blob_size_{0};
     RegisterFn register_fn_{nullptr};
 
+    // PMR resource backing dylib_path_.  Stored as a pointer (not reference)
+    // so PluginLoader remains movable — move transfers the pointer and the
+    // destination's dylib_path_ is constructed with the same resource, enabling
+    // the storage-steal path in std::pmr::string's move constructor.
+    //
+    // Declaration order: mr_ BEFORE dylib_path_ so the resource is
+    // initialised first; the string's constructor receives a valid pointer.
+    //
+    // MUST NOT be null for any live (non-moved-from) PluginLoader.
+    // After a move the source's mr_ is set to std::pmr::get_default_resource()
+    // and dylib_path_ is empty, so no allocation through the original mr_ occurs.
+    std::pmr::memory_resource* mr_;
+
     // Filesystem path for diagnostics and plan #230 name-collision checks.
+    // Backed by mr_ (HIGH-1 + HIGH-2, round-2, addressed).
     std::pmr::string dylib_path_;
 
     // Manifest read result from step 3.

@@ -57,10 +57,16 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory_resource>
 #include <string_view>
 
+// TODO: drop <EASTL/string_view.h> after #1044 merges and PluginLoaderRegistry
+// migrates its API (validate_all, register_plugin, is_registered, etc.) from
+// eastl::string_view to std::string_view.  Until then the registry call sites
+// below use eastl::string_view and this include is required.
 #include <EASTL/string_view.h>
 #include <catch2/catch_test_macros.hpp>
+#include <glibre/alloc.hpp>
 #include <glibre/core/plugin_loader.hpp>
 #include <glibre/core/plugin_loader_registry.hpp>
 #include <glibre/core/plugin_manifest.hpp>
@@ -115,6 +121,15 @@ glibre::core::PluginManifest make_manifest(
     return m;
 }
 
+// File-level allocator + resource for PluginLoader::open() calls.
+//
+// PluginLoader::open() requires a std::pmr::memory_resource& to back
+// dylib_path_ under the per-context ceiling (HIGH-1 + HIGH-2, round-2).
+// All integration tests share the core ContextTag allocator.
+// Construction order: alloc_ before mr_ so the resource's reference is valid.
+glibre::PerContextAllocator alloc_{glibre::ContextTag::core};
+glibre::PerContextAllocatorResource mr_{alloc_};
+
 }  // namespace
 
 // ===========================================================================
@@ -136,7 +151,7 @@ TEST_CASE("integration_dlopen_failure_propagates", "[core][integration]") {
     // and eastl::string_view (registry API, still EASTL-backed pre-#1044 migration).
     const char* nonexistent = "/tmp/glibre-integration-nonexistent-plugin.dylib";
 
-    auto result = glibre::core::PluginLoader::open(nonexistent);
+    auto result = glibre::core::PluginLoader::open(nonexistent, mr_);
 
     REQUIRE_FALSE(result.has_value());
 
@@ -177,7 +192,7 @@ TEST_CASE("integration_missing_symbol_propagates", "[core][integration]") {
     REQUIRE(stub_path != nullptr);
     REQUIRE(stub_path[0] != '\0');
 
-    auto result = glibre::core::PluginLoader::open(stub_path);
+    auto result = glibre::core::PluginLoader::open(stub_path, mr_);
 
     REQUIRE_FALSE(result.has_value());
 
@@ -223,7 +238,7 @@ TEST_CASE("integration_abi_hash_mismatch_propagates", "[core][integration]") {
     REQUIRE(stub_path[0] != '\0');
 
     // Step 1-2: dlopen + dlsym must succeed — the stub exports all four symbols.
-    auto loader_result = glibre::core::PluginLoader::open(stub_path);
+    auto loader_result = glibre::core::PluginLoader::open(stub_path, mr_);
     REQUIRE(loader_result.has_value());
 
     const glibre::core::PluginLoader& loader = *loader_result;
@@ -311,7 +326,7 @@ TEST_CASE("integration_name_collision_propagates", "[core][integration]") {
     glibre::core::PluginLoaderRegistry registry{kHostVersion};
 
     // Step 1: load the noop plugin via PluginLoader::open().
-    auto loader_result = glibre::core::PluginLoader::open(noop_path);
+    auto loader_result = glibre::core::PluginLoader::open(noop_path, mr_);
     REQUIRE(loader_result.has_value());
 
     // Step 2: build a synthetic manifest for the noop plugin and register it.
@@ -394,7 +409,7 @@ TEST_CASE("integration_happy_path_loads_and_validates", "[core][integration]") {
     REQUIRE(noop_path[0] != '\0');
 
     // Step 1–2: load the noop plugin via the real OS dlopen/dlsym path.
-    auto loader_result = glibre::core::PluginLoader::open(noop_path);
+    auto loader_result = glibre::core::PluginLoader::open(noop_path, mr_);
 
     REQUIRE(loader_result.has_value());
     const glibre::core::PluginLoader& loader = *loader_result;
@@ -481,7 +496,7 @@ TEST_CASE("integration_manifest_invalid_propagates", "[core][integration]") {
     REQUIRE(stub_path[0] != '\0');
 
     // Steps 1–2: dlopen + dlsym must succeed — the stub exports all four symbols.
-    auto loader_result = glibre::core::PluginLoader::open(stub_path);
+    auto loader_result = glibre::core::PluginLoader::open(stub_path, mr_);
     REQUIRE(loader_result.has_value());
 
     const glibre::core::PluginLoader& loader = *loader_result;
@@ -557,7 +572,7 @@ TEST_CASE("integration_engine_too_old_propagates", "[core][integration]") {
 
     // Step 1–2: dlopen + dlsym must succeed — the noop plugin exports all four
     // required symbols.
-    auto loader_result = glibre::core::PluginLoader::open(noop_path);
+    auto loader_result = glibre::core::PluginLoader::open(noop_path, mr_);
     REQUIRE(loader_result.has_value());
 
     // Anchor the dlopen: verify the ABI hash symbol resolved to the noop
@@ -637,7 +652,7 @@ TEST_CASE("integration_dependency_missing_propagates", "[core][integration]") {
     REQUIRE(noop_path[0] != '\0');
 
     // Step 1–2: dlopen + dlsym must succeed.
-    auto loader_result = glibre::core::PluginLoader::open(noop_path);
+    auto loader_result = glibre::core::PluginLoader::open(noop_path, mr_);
     REQUIRE(loader_result.has_value());
 
     // Anchor the dlopen: verify the ABI hash symbol resolved to the noop
