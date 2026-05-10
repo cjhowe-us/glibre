@@ -347,7 +347,10 @@ TEST_CASE("invalid_manifest_returns_plugin_manifest_invalid", "[core][plugin_loa
 // the assert to const std::pmr::string&.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("core/plugin_loader: load_returns_eastl_string_handle_pre_pmr_migration", "[core][plugin_loader]") {
+TEST_CASE(
+    "core/plugin_loader: load_returns_eastl_string_handle_pre_pmr_migration",
+    "[core][plugin_loader]"
+) {
 #ifndef GLIBRE_NOOP_DYLIB_PATH
     SKIP("GLIBRE_NOOP_DYLIB_PATH not defined; build with GLIBRE_BUILD_EXAMPLES=ON");
 #else
