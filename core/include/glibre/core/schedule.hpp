@@ -52,9 +52,8 @@ struct SystemId {
     std::uint64_t value{0};
 
     friend constexpr bool operator==(SystemId, SystemId) noexcept = default;
-    friend constexpr bool operator<(SystemId a, SystemId b) noexcept {
-        return a.value < b.value;
-    }
+
+    friend constexpr bool operator<(SystemId a, SystemId b) noexcept { return a.value < b.value; }
 };
 
 // ---------------------------------------------------------------------------
@@ -79,9 +78,9 @@ struct TypeId {
 // ---------------------------------------------------------------------------
 
 struct AccessSet {
-    std::span<const TypeId> reads{};
-    std::span<const TypeId> writes{};
-    std::span<const TypeId> without{};
+    std::span<const TypeId> reads;
+    std::span<const TypeId> writes;
+    std::span<const TypeId> without;
 };
 
 // ---------------------------------------------------------------------------
@@ -110,12 +109,12 @@ using SystemFn = void (*)(SystemContext& ctx) noexcept;
 // ---------------------------------------------------------------------------
 
 struct SystemDesc {
-    std::string_view name{};
-    Phase phase{};
-    AccessSet access{};
+    std::string_view name;      // Fully-qualified; used as deterministic tiebreaker.
+    Phase phase{Phase::Input};  // Default to Phase::Input (first valid enum value).
+    AccessSet access;
     SystemFn body{nullptr};
-    std::span<const std::string_view> after{};
-    std::span<const std::string_view> before{};
+    std::span<const std::string_view> after;
+    std::span<const std::string_view> before;
 };
 
 // ---------------------------------------------------------------------------

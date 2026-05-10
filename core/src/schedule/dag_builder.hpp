@@ -33,13 +33,13 @@ namespace glibre::core::detail {
 // ---------------------------------------------------------------------------
 
 struct SystemNode {
-    SystemId id;
-    std::string_view name;        // Non-owning; points into Schedule::Impl storage.
-    std::vector<TypeId> reads;    // Copied from AccessSet.
-    std::vector<TypeId> writes;   // Copied from AccessSet.
+    SystemId id{};
+    std::string_view name;                 // Non-owning; points into Schedule::Impl storage.
+    std::vector<TypeId> reads;             // Copied from AccessSet.
+    std::vector<TypeId> writes;            // Copied from AccessSet.
     std::vector<std::string_view> after;   // Non-owning name spans.
     std::vector<std::string_view> before;  // Non-owning name spans.
-    SystemFn body;
+    SystemFn body{nullptr};
 };
 
 // ---------------------------------------------------------------------------
@@ -51,8 +51,8 @@ struct SystemNode {
 // ---------------------------------------------------------------------------
 
 enum class EdgeKind : std::uint8_t {
-    AccessSet,   // Edge arose from writes∩reads or writes∩writes intersection.
-    Explicit,    // Edge arose from after/before declarations.
+    AccessSet,  // Edge arose from writes∩reads or writes∩writes intersection.
+    Explicit,   // Edge arose from after/before declarations.
 };
 
 // ---------------------------------------------------------------------------
@@ -73,7 +73,6 @@ enum class EdgeKind : std::uint8_t {
 // PMR allocator (build scratch is transient and freed after each compile).
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] Result<std::vector<SystemId>>
-build_phase(std::span<const SystemNode> nodes) noexcept;
+[[nodiscard]] Result<std::vector<SystemId>> build_phase(std::span<const SystemNode> nodes) noexcept;
 
 }  // namespace glibre::core::detail
