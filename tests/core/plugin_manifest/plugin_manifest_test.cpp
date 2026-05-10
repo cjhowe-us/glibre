@@ -200,8 +200,10 @@ TEST_CASE("core/plugin_manifest: pmr_string_fields_thread_allocator", "[core][pl
         PluginManifest manifest{pa};
 
         // Populate string fields with values long enough to exceed any SSO
-        // buffer (std::pmr::string typically has a 15-byte SSO on libc++).
-        manifest.name = "glibre.render.plugin";  // 20 chars — above SSO threshold
+        // buffer (std::pmr::string SSO on libc++ ≥ 19 is 22 bytes; this name
+        // is 35 chars, well above that threshold, so the assignment routes
+        // through the polymorphic_allocator and charges mr).
+        manifest.name = "glibre.render.example.plugin.module";  // 35 chars — above SSO
         manifest.abi_hash =
             "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";  // 64 chars
         manifest.depends_on.push_back("glibre.core");
@@ -213,7 +215,7 @@ TEST_CASE("core/plugin_manifest: pmr_string_fields_thread_allocator", "[core][pl
         REQUIRE(bytes_after > bytes_before);
 
         // Field values are preserved through the PMR allocation.
-        REQUIRE(manifest.name == "glibre.render.plugin");
+        REQUIRE(manifest.name == "glibre.render.example.plugin.module");
         REQUIRE(manifest.abi_hash.size() == 64u);
         REQUIRE(manifest.depends_on.size() == 2u);
         REQUIRE(manifest.depends_on[0] == "glibre.core");
