@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -86,7 +87,9 @@ struct S1ArchetypeCounts {
 struct S1Scene {
     std::uint32_t entity_count = 0u;
     std::uint32_t archetype_count = 0u;
-    std::uint32_t system_count = 0u;
+    // system_count is NOT part of S1Scene: perf-budget.md §Justification Per Cell (S1)
+    // does not specify a system count for the S1 scenario.  System topology is an
+    // implementation detail of each plugin context, not a fixture invariant.
     S1ArchetypeCounts archetypes = {};
     S1Viewport viewport = {};
     std::uint32_t placement_seed = 0u;
@@ -139,8 +142,16 @@ inline std::uint64_t parse_uint64(const std::string& s) {
 }
 
 // parse_uint32: parse decimal or 0x-prefixed hex uint32 from a non-empty string.
+// Throws std::out_of_range if the value exceeds 0xFFFF'FFFF so truncation is
+// never silent — callers that need 64-bit values must use parse_uint64 instead.
 inline std::uint32_t parse_uint32(const std::string& s) {
-    return static_cast<std::uint32_t>(std::stoull(s, nullptr, 0));
+    const std::uint64_t v = std::stoull(s, nullptr, 0);
+    if (v > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
+        throw std::out_of_range(
+            "glibre::testing parse_uint32: value exceeds uint32 max: " + s
+        );
+    }
+    return static_cast<std::uint32_t>(v);
 }
 
 // ParsedLine: result of stripping a single line from the manifest.
@@ -207,20 +218,26 @@ inline ParsedLine parse_line(std::string line) {
     // ---------------------------------------------------------------------------
     // Parser state
     //
-    // The manifest uses a simple structured YAML format:
-    //   - Top-level scalar fields (entity_count, system_count, placement_seed)
-    //   - Two-level blocks (archetypes > archetype_name > count:)
-    //   - One-level blocks (viewport > width/height, budgets > key: value)
+    // The manifest uses a simple structured YAML subset:
+    //   - Top-level scalar fields: indent == 0, has_val == true
+    //   - Top-level block headers: indent == 0, has_val == false
+    //   - Archetype-block sub-headers: indent == 2, has_val == false
+    //   - Archetype count fields: indent == 4, key == "count", has_val == true
+    //   - Viewport / budget fields: indent > 0, has_val == true
     //
-    // Strategy: single-pass parser that tracks current section and nesting.
-    // When a block header is encountered (non-empty key, empty value), we
-    // switch sections.  When a value is encountered inside a section, we
-    // dispatch to the appropriate field.
+    // Indent contract (spaces only — tabs also count as 1 per parse_line):
+    //   Indent 0 = top-level; Indent 2 = block member; Indent 4 = block sub-member.
+    //
+    // Strategy: single-pass parser that tracks current section.  Any key not
+    // matching the known schema within a section throws std::runtime_error so
+    // format drift (renamed key, wrong nesting) fails loudly rather than
+    // silently producing zero values.
     // ---------------------------------------------------------------------------
 
     enum class Section { None, Archetypes, Viewport, Budgets };
     Section section = Section::None;
     std::string arch_name;  // tracks the current archetype name in the Archetypes block
+    std::uint64_t manifest_version = 0u;
 
     std::string raw;
     while (std::getline(ifs, raw)) {
@@ -251,14 +268,22 @@ inline ParsedLine parse_line(std::string line) {
             } else {
                 // Top-level scalar field.
                 section = Section::None;
-                if (p.key == "entity_count") {
+                if (p.key == "version") {
+                    manifest_version = detail::parse_uint64(p.val);
+                    if (manifest_version != 1u) {
+                        throw std::runtime_error(
+                            "glibre::testing::load_s1(): unsupported manifest version " +
+                            p.val + " (expected 1); schema glibre/e2e/perf/s1/scene-v1"
+                        );
+                    }
+                } else if (p.key == "entity_count") {
                     scene.entity_count = detail::parse_uint32(p.val);
-                } else if (p.key == "system_count") {
-                    scene.system_count = detail::parse_uint32(p.val);
                 } else if (p.key == "placement_seed") {
                     scene.placement_seed = detail::parse_uint32(p.val);
                 }
-                // "version" is parsed but not stored (schema version, reserved for future use).
+                // Unrecognised top-level scalars are silently ignored so the
+                // parser is forward-compatible with additive keys (e.g. comments
+                // or metadata that the v1 struct does not consume).
             }
             continue;
         }
@@ -273,17 +298,31 @@ inline ParsedLine parse_line(std::string line) {
 
         case Section::Archetypes:
             if (p.indent == 2u && !p.has_val) {
-                // Archetype block header (e.g. "  character:").
+                // Archetype block sub-header (e.g. "  character:").
+                // Only the three canonical archetypes are expected; unrecognised
+                // names are silently skipped (forward-compat for additive archetypes).
                 arch_name = p.key;
-            } else if (p.indent == 4u && p.has_val && p.key == "count" && !arch_name.empty()) {
-                // Count field nested under an archetype name.
-                const std::uint32_t n = detail::parse_uint32(p.val);
-                if (arch_name == "character") {
-                    scene.archetypes.character = n;
-                } else if (arch_name == "prop") {
-                    scene.archetypes.prop = n;
-                } else if (arch_name == "dynamic_light") {
-                    scene.archetypes.dynamic_light = n;
+            } else if (p.indent == 4u && p.has_val && !arch_name.empty()) {
+                // Field nested under an archetype name.
+                if (p.key == "count") {
+                    const std::uint32_t n = detail::parse_uint32(p.val);
+                    if (arch_name == "character") {
+                        scene.archetypes.character = n;
+                    } else if (arch_name == "prop") {
+                        scene.archetypes.prop = n;
+                    } else if (arch_name == "dynamic_light") {
+                        scene.archetypes.dynamic_light = n;
+                    }
+                    // Unknown archetype names are silently skipped (forward-compat).
+                } else {
+                    // Unknown field inside an archetype block — fail loudly so
+                    // schema drift is caught immediately rather than silently
+                    // yielding stale zero counts.
+                    throw std::runtime_error(
+                        "glibre::testing::load_s1(): unknown archetype field '" +
+                        p.key + "' under archetype '" + arch_name +
+                        "' (expected 'count')"
+                    );
                 }
             }
             break;
@@ -295,6 +334,7 @@ inline ParsedLine parse_line(std::string line) {
                 } else if (p.key == "height") {
                     scene.viewport.height = detail::parse_uint32(p.val);
                 }
+                // Unknown viewport fields silently skipped (forward-compat).
             }
             break;
 
@@ -318,9 +358,19 @@ inline ParsedLine parse_line(std::string line) {
                 } else if (p.key == "physics_cpu_submit_ns") {
                     b.physics_cpu_submit_ns = detail::parse_uint64(p.val);
                 }
+                // Unknown budget keys silently skipped (forward-compat for additive
+                // context cells once new contexts are introduced).
             }
             break;
         }
+    }
+
+    // Require version field was present.
+    if (manifest_version == 0u) {
+        throw std::runtime_error(
+            "glibre::testing::load_s1(): manifest missing 'version' field; "
+            "schema glibre/e2e/perf/s1/scene-v1 requires version: 1"
+        );
     }
 
     // ---------------------------------------------------------------------------

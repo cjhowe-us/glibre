@@ -29,10 +29,6 @@ archetypes:
   dynamic_light:
     count: 8
 
-# System count = 2 (core transform sweep + render visibility sweep).
-# Matches the system_count invariant carried over from the synthetic placeholder.
-system_count: 2
-
 # ---------------------------------------------------------------------------
 # Viewport descriptor
 # ---------------------------------------------------------------------------

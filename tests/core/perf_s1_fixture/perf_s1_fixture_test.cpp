@@ -23,15 +23,17 @@
 // Verifies that load_s1() returns the canonical 209-entity S1 scene:
 //   - entity_count == 209 (1 char + 200 props + 8 lights)
 //   - archetype_count == 3 (character, prop, dynamic_light are distinct archetypes)
-//   - system_count == 2 (core transform sweep + render visibility sweep)
 //   - viewport == 1920x1080
+//
+// Note: system_count is NOT a fixture invariant — perf-budget.md §Justification
+// Per Cell (S1) does not fix a system count.  System topology is an
+// implementation detail of each plugin context.
 // ---------------------------------------------------------------------------
 TEST_CASE("fixture_loads_with_expected_entity_count", "[s1][fixture][core]") {
     const auto scene = glibre::testing::load_s1();
 
     REQUIRE(scene.entity_count == 209u);
     REQUIRE(scene.archetype_count == 3u);
-    REQUIRE(scene.system_count == 2u);
     REQUIRE(scene.viewport.width == 1920u);
     REQUIRE(scene.viewport.height == 1080u);
 }
@@ -47,6 +49,15 @@ TEST_CASE("fixture_loads_with_expected_entity_count", "[s1][fixture][core]") {
 // or address-space layout.  The placement_seed is read from the manifest
 // (not generated from time or address), so identical seeds across calls
 // is the expected outcome.
+//
+// NOTE — scope of this assertion: this test verifies LOADER PURITY only —
+// that the same manifest file parsed twice yields identical structs.  It
+// does not verify cross-host transform determinism (i.e. that
+// f(seed, entity_index) produces the same float positions on different
+// platforms / compilers).  Cross-host determinism of the transform expansion
+// arithmetic will be tested in a follow-up plan once transform expansion
+// is implemented (PHILOSOPHY §7 "physics + ECS world snapshots byte-equal
+// across hosts and runs").
 // ---------------------------------------------------------------------------
 TEST_CASE("fixture_is_deterministic_across_runs", "[s1][fixture][core]") {
     const auto scene_a = glibre::testing::load_s1();
@@ -55,7 +66,6 @@ TEST_CASE("fixture_is_deterministic_across_runs", "[s1][fixture][core]") {
     // Entity composition must be identical.
     REQUIRE(scene_a.entity_count == scene_b.entity_count);
     REQUIRE(scene_a.archetype_count == scene_b.archetype_count);
-    REQUIRE(scene_a.system_count == scene_b.system_count);
 
     // Archetype breakdown must be identical.
     REQUIRE(scene_a.archetypes.character == scene_b.archetypes.character);
