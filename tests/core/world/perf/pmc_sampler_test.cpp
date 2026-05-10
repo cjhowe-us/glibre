@@ -34,6 +34,7 @@
 // ---------------------------------------------------------------------------
 
 #include <catch2/catch_test_macros.hpp>
+
 #include "pmc_sampler.hpp"
 
 // ---------------------------------------------------------------------------
@@ -44,8 +45,7 @@
 // the KPC implementation is a zero-stub pending the entitlement integration
 // spike (see pmc_sampler.cpp §Integration Notes).
 // ---------------------------------------------------------------------------
-TEST_CASE("world/perf: pmc_sampler_smoke_returns_nonzero_loads",
-          "[world][perf][pmc][smoke]") {
+TEST_CASE("world/perf: pmc_sampler_smoke_returns_nonzero_loads", "[world][perf][pmc][smoke]") {
     bool called = false;
 
     const auto counters = glibre::testing::PmcSampler::measure([&] {
@@ -64,20 +64,20 @@ TEST_CASE("world/perf: pmc_sampler_smoke_returns_nonzero_loads",
 
     // Counter fields must be accessible and of the correct type.
     // (Verifies struct layout and field names compile correctly.)
-    [[maybe_unused]] std::uint64_t l1d  = counters.l1d_misses;
-    [[maybe_unused]] std::uint64_t ld   = counters.loads_retired;
-    [[maybe_unused]] std::uint64_t l2   = counters.l2_misses;
+    [[maybe_unused]] std::uint64_t l1d = counters.l1d_misses;
+    [[maybe_unused]] std::uint64_t ld = counters.loads_retired;
+    [[maybe_unused]] std::uint64_t l2 = counters.l2_misses;
     [[maybe_unused]] std::uint64_t inst = counters.instructions;
 
     // Verify the measurement did not produce obviously corrupt values.
     // On the zero-stub path all counters are 0; on a future real-KPC path
     // they would be small positive integers.  We only reject implausibly
     // large values that would indicate a read of uninitialised memory.
-    const std::uint64_t k_sanity_cap = 1ULL << 40; // 1 trillion
-    CHECK(counters.l1d_misses    < k_sanity_cap);
+    const std::uint64_t k_sanity_cap = 1ULL << 40;  // 1 trillion
+    CHECK(counters.l1d_misses < k_sanity_cap);
     CHECK(counters.loads_retired < k_sanity_cap);
-    CHECK(counters.l2_misses     < k_sanity_cap);
-    CHECK(counters.instructions  < k_sanity_cap);
+    CHECK(counters.l2_misses < k_sanity_cap);
+    CHECK(counters.instructions < k_sanity_cap);
 
     // --- Future: re-enable when KPC entitlement integration lands ---
     // CHECK(counters.loads_retired > 0u);

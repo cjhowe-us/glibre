@@ -95,9 +95,9 @@ public:
     // Returns a PmcCounters whose fields are the delta from before to after
     // the callable invocation on the current OS thread.  On platforms or
     // environments where KPC is unavailable all fields are 0.
-    template <typename F>
+    template<typename F>
         requires std::is_invocable_v<F>
-    [[nodiscard]] static PmcCounters measure(F &&fn);
+    [[nodiscard]] static PmcCounters measure(F&& fn);
 
 private:
     // Internal helpers declared in pmc_sampler.cpp; forward-declared here so
@@ -107,7 +107,7 @@ private:
     static PmcCounters stop_sampling() noexcept;
 };
 
-} // namespace glibre::testing
+}  // namespace glibre::testing
 
 // ---------------------------------------------------------------------------
 // Inline template definition — must appear after the class definition.
@@ -117,12 +117,12 @@ private:
 
 namespace glibre::testing {
 
-template <typename F>
+template<typename F>
     requires std::is_invocable_v<F>
-[[nodiscard]] PmcCounters PmcSampler::measure(F &&fn) {
+[[nodiscard]] PmcCounters PmcSampler::measure(F&& fn) {
     PmcSampler::start_sampling();
     std::forward<F>(fn)();
     return PmcSampler::stop_sampling();
 }
 
-} // namespace glibre::testing
+}  // namespace glibre::testing

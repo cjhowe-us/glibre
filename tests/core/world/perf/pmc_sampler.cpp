@@ -70,7 +70,7 @@ namespace {
 // stop_sampling().
 thread_local glibre::testing::PmcCounters g_snapshot{};
 
-} // namespace
+}  // namespace
 
 namespace glibre::testing {
 
@@ -93,19 +93,17 @@ PmcCounters PmcSampler::stop_sampling() noexcept {
     return {};
 }
 
-} // namespace glibre::testing
+}  // namespace glibre::testing
 
-#else // !__APPLE__
+#else  // !__APPLE__
 
 // Non-Apple stub — zero-count unconditionally.
 namespace glibre::testing {
 
 void PmcSampler::start_sampling() noexcept {}
 
-PmcCounters PmcSampler::stop_sampling() noexcept {
-    return {};
-}
+PmcCounters PmcSampler::stop_sampling() noexcept { return {}; }
 
-} // namespace glibre::testing
+}  // namespace glibre::testing
 
-#endif // __APPLE__
+#endif  // __APPLE__
