@@ -97,6 +97,14 @@ enum class Error : std::uint16_t {
     // Spec authority: specs/core/SPEC.md §4.9 invariant 1, §10 error table row
     // "TypeRegistryClosed".
     TypeRegistryClosed,
+    // TypeRegistry register_type() / extend_during_load() called with an id.value
+    // that is not the next contiguous slot (id.value != entries_.size()).
+    // This signals a codegen contract violation — the emitter is expected to
+    // assign TypeId values in ascending order with no gaps.  SPEC §10 reserves
+    // TypeUnregistered for lookup-only failures; this distinct arm covers the
+    // registration-time gap check so callers can distinguish the two cases.
+    // (plan #597 review round 1, MED-3 fix)
+    TypeRegistryGap,
 };
 }  // namespace core
 

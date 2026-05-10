@@ -93,6 +93,8 @@ namespace glibre::core {
         return "TypeUnregistered";
     case Error::TypeRegistryClosed:
         return "TypeRegistryClosed";
+    case Error::TypeRegistryGap:
+        return "TypeRegistryGap";
     }
     return "Unknown";
 }

@@ -17,14 +17,31 @@
 //   declaration for PluginLoader and bypasses the seal for plugin-load-time
 //   registration only (§4.9 invariant 1 + §6.9 append-only hot-reload rule).
 //
+//   extend_during_load() is further gated by is_loading_ — a bool set true
+//   only while PluginLoader's loading critical section is executing.  This
+//   prevents accidental calls that arrive outside the load window from
+//   mutating a sealed registry mid-frame (round-1 review MED-4 fix).
+//
 //   Storage grows via push_back into the PMR vector; the capacity is bounded
 //   by the 64 MiB core heap ceiling (perf-budget.md Allocator Rules).
 //
-// ## PMR allocator
+// ## PMR allocator (HIGH-1 round-1 review fix)
 //
-//   The constructor accepts a std::pmr::memory_resource* from the caller
-//   (typically the core PerContextAllocator's backing resource).  Passing
-//   nullptr selects std::pmr::get_default_resource().
+//   The constructor requires a PerContextAllocator& stamped with ContextTag::core.
+//   All TypeRegistry storage is tracked under the 64 MiB core heap ceiling
+//   (perf-budget.md Allocator Rule #1).  Bypassing PerContextAllocator by
+//   passing a raw std::pmr::memory_resource* directly is not supported and would
+//   escape the ceiling enforcement.  The nested PerContextAllocatorResource class
+//   adapts the PerContextAllocator to the std::pmr::memory_resource interface
+//   required by std::pmr::vector.
+//
+// ## TypeId duplication note (MED-5 round-1 review)
+//
+//   TypeId is declared below as a local copy so this header is self-contained.
+//   The canonical definition lives in specs/core/SPEC.md §5.2.  The
+//   static_asserts immediately after the struct verify that both definitions
+//   agree on underlying type and byte width.  A follow-up spike
+//   [SPIKE] iterate-type-id-canonical-home will consolidate to a single header.
 //
 // ## Thread safety (MVP)
 //
@@ -38,9 +55,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory_resource>
-#include <span>
+#include <type_traits>
 #include <vector>
 
+#include "glibre/alloc.hpp"  // PerContextAllocator, ContextTag
 #include "glibre/error.hpp"
 
 namespace glibre {
@@ -49,7 +67,8 @@ namespace core {
 // ---------------------------------------------------------------------------
 // Forward declarations
 // ---------------------------------------------------------------------------
-class PluginLoader;  // friend — may call extend_during_load() after seal().
+class PluginLoader;          // friend — may call extend_during_load() + set_loading_().
+class TypeRegistryTestHook;  // friend test-hook for set_loading_() access in tests.
 
 // ---------------------------------------------------------------------------
 // ColumnDescriptor — type descriptor stored in the registry for each TypeId.
@@ -75,22 +94,37 @@ struct ColumnDescriptor {
 // ---------------------------------------------------------------------------
 // TypeId — stable codegen-emitted identifier (mirrors §5.2 struct).
 //
-// Declared separately here so type_registry.hpp is self-contained;
-// the canonical definition lives in specs/core/SPEC.md §5.2 and the
-// full §5 stub header.  This duplicate must stay in sync.
+// Local copy so type_registry.hpp is self-contained.  The canonical definition
+// lives in specs/core/SPEC.md §5.2.  The static_asserts below verify that this
+// copy agrees with the canonical on underlying type and byte width.
+// See [SPIKE] iterate-type-id-canonical-home for the follow-up consolidation.
 // ---------------------------------------------------------------------------
 struct TypeId {
     std::uint64_t value{};
     friend constexpr bool operator==(TypeId, TypeId) noexcept = default;
 };
 
+// Compile-time agreement checks between this TypeId and the §5.2 canonical.
+// If the canonical changes its layout, these fail and flag the divergence.
+static_assert(
+    std::is_trivially_copyable_v<TypeId>,
+    "TypeId must be trivially copyable — agrees with SPEC §5.2 canonical."
+);
+static_assert(
+    sizeof(TypeId) == sizeof(std::uint64_t),
+    "TypeId size must match SPEC §5.2 canonical (single uint64_t value, no padding)."
+);
+static_assert(
+    alignof(TypeId) == alignof(std::uint64_t), "TypeId alignment must match SPEC §5.2 canonical."
+);
+
 // ---------------------------------------------------------------------------
 // TypeRegistry
 //
 // Public API (from plan #597 Scope):
-//   lookup(TypeId)       -> Result<const ColumnDescriptor*>
+//   lookup(TypeId)        -> Result<const ColumnDescriptor*>
 //   is_registered(TypeId) -> bool
-//   count()              -> size_t
+//   count()               -> size_t
 //
 // Lifecycle (called by World, PluginLoader):
 //   register_type(TypeId, ColumnDescriptor) -> Result<void>
@@ -101,13 +135,19 @@ struct TypeId {
 //
 // Friend hook (called by PluginLoader only):
 //   extend_during_load(TypeId, ColumnDescriptor) -> Result<void>
-//      -- bypasses seal() check; used during glibre_plugin_register.
+//      -- bypasses seal() check; only valid while is_loading_ is true.
 // ---------------------------------------------------------------------------
 class TypeRegistry {
 public:
-    // Construct an empty registry backed by `resource`.
-    // Passing nullptr selects std::pmr::get_default_resource().
-    explicit TypeRegistry(std::pmr::memory_resource* resource = nullptr) noexcept;
+    // Construct an empty registry backed by the given PerContextAllocator.
+    //
+    // The allocator MUST be stamped with ContextTag::core so that all
+    // TypeRegistry storage is counted against the 64 MiB core heap ceiling
+    // (perf-budget.md Allocator Rule #1, HIGH-1 round-1 review fix).
+    //
+    // The PerContextAllocator must outlive the TypeRegistry (context singleton
+    // lifetime invariant — same as PerContextAllocator's own contract).
+    explicit TypeRegistry(PerContextAllocator& alloc) noexcept;
 
     // Non-copyable, non-movable — the registry is a long-lived singleton
     // owned by World; no ownership transfer after construction.
@@ -121,7 +161,7 @@ public:
     // lookup(id) — O(1) index into the flat descriptor vector.
     //
     // Returns:
-    //   Ok(&descriptor)               — id is registered.
+    //   Ok(&descriptor)                    — id is registered.
     //   Err(core::Error::TypeUnregistered) — id.value is out of range or the
     //                                        slot was never populated.
     [[nodiscard]] Result<const ColumnDescriptor*> lookup(TypeId id) const noexcept;
@@ -141,13 +181,11 @@ public:
     // register_type(id, desc) — append a new descriptor.
     //
     // Returns:
-    //   Ok(void)                         — registration succeeded.
-    //   Err(core::Error::TypeRegistryClosed) — seal() has been called.
-    //
-    // The TypeId must equal count() before the call (the next available
-    // slot).  Sparse or out-of-order registration is rejected with
-    // core::Error::TypeUnregistered to signal a codegen contract violation
-    // (the caller should assert rather than handle this in production code).
+    //   Ok(void)                              — registration succeeded.
+    //   Err(core::Error::TypeRegistryClosed)  — seal() has been called.
+    //   Err(core::Error::TypeRegistryGap)     — id.value != count() (codegen
+    //                                           contract violation: out-of-order
+    //                                           or sparse registration).
     //
     // Called by World bootstrap code and plugin registration before seal().
     [[nodiscard]] Result<void> register_type(TypeId id, ColumnDescriptor desc) noexcept;
@@ -170,24 +208,64 @@ private:
     // so that plugins loaded after World creation may still register types
     // (SPEC §6.9 append-only hot-reload rule; §4.9 invariant 1 carve-out).
     //
-    // Preconditions (same as register_type):
-    //   id.value == entries_.size()  — must be the next slot.
-    //   desc.size > 0 && desc.align > 0
+    // GATED by is_loading_: this method asserts(is_loading_) so that any
+    // caller outside PluginLoader's load critical section is caught early
+    // (round-1 review MED-4 fix).
     //
     // Returns:
-    //   Ok(void)                        — registration succeeded.
-    //   Err(core::Error::TypeUnregistered) — id.value is not the next slot
+    //   Ok(void)                          — registration succeeded.
+    //   Err(core::Error::TypeRegistryGap) — id.value is not the next slot
     //                                       (codegen contract violation).
     [[nodiscard]] Result<void> extend_during_load(TypeId id, ColumnDescriptor desc) noexcept;
 
+    // set_loading_(flag) — set/clear the is_loading_ latch.
+    //
+    // Called by PluginLoader at the entry and exit of its loading critical
+    // section.  Only PluginLoader and TypeRegistryTestHook (friends) may call
+    // this; all other callers are prevented by the friend guard.
+    void set_loading_(bool flag) noexcept { is_loading_ = flag; }
+
     friend class PluginLoader;
+    friend class TypeRegistryTestHook;
+
+    // PerContextAllocatorResource — thin std::pmr::memory_resource adaptor.
+    //
+    // Forwards do_allocate / do_deallocate to a PerContextAllocator so that
+    // all TypeRegistry storage is tracked under the 64 MiB core ceiling.
+    // Defined as a nested class here so TypeRegistry can store it by value
+    // and declare it before entries_ (construction order matters).
+    //
+    // Virtual dispatch through std::pmr::memory_resource is acceptable here
+    // because construction is one-time (not per-frame).
+    // PerContextAllocatorResource — adapts PerContextAllocator to
+    // std::pmr::memory_resource so std::pmr::vector uses the ceiling-tracked
+    // allocator.  do_is_equal uses pointer identity (this == &other) because
+    // -fno-rtti disables dynamic_cast; each TypeRegistry owns exactly one
+    // alloc_resource_ so self-equality is the only meaningful case.
+    class PerContextAllocatorResource final : public std::pmr::memory_resource {
+    public:
+        explicit PerContextAllocatorResource(PerContextAllocator& alloc) noexcept
+            : alloc_{alloc} {}
+
+    protected:
+        void* do_allocate(std::size_t bytes, std::size_t alignment) override;
+        void do_deallocate(void* p, std::size_t bytes, std::size_t alignment) noexcept override;
+        bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override;
+
+    private:
+        PerContextAllocator& alloc_;
+    };
+
+    // alloc_resource_ must be declared before entries_ so the resource is
+    // constructed before the vector that references it.
+    PerContextAllocatorResource alloc_resource_;
 
     // Flat descriptor table: slot i holds the descriptor for TypeId{i}.
-    // Null entry (size==0) is the sentinel for an unpopulated slot (the
-    // vector is only ever grown by appending; no sparse gaps are permitted).
+    // The vector is only ever grown by appending; no sparse gaps are permitted.
     std::pmr::vector<ColumnDescriptor> entries_;
 
     bool sealed_{false};
+    bool is_loading_{false};  // true only inside PluginLoader's load critical section
 };
 
 }  // namespace core

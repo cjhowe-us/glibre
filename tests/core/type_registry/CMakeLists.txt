@@ -11,7 +11,7 @@ cmake_minimum_required(VERSION 4.3.0)
 #   - core/type_registry: lookup_unregistered_yields_TypeUnregistered
 #   - core/type_registry: register_after_seal_yields_TypeRegistryClosed
 #   - core/type_registry: register_during_plugin_register_admitted
-#   - core/type_registry: lookup_o1_no_string_no_reflection
+#   - core/type_registry: lookup_index_based_no_string_no_reflection  (renamed from lookup_o1_*)
 #   - core/type_registry: bootstrap_from_static_init_populates_count
 # ---------------------------------------------------------------------------
 

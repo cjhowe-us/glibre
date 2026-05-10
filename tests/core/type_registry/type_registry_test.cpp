@@ -8,7 +8,7 @@
 //   - core/type_registry: lookup_unregistered_yields_TypeUnregistered
 //   - core/type_registry: register_after_seal_yields_TypeRegistryClosed
 //   - core/type_registry: register_during_plugin_register_admitted
-//   - core/type_registry: lookup_o1_no_string_no_reflection
+//   - core/type_registry: lookup_index_based_no_string_no_reflection
 //   - core/type_registry: bootstrap_from_static_init_populates_count
 //
 // Design constraints:
@@ -17,16 +17,75 @@
 //   - No std:: containers in test helpers (PHILOSOPHY §11).
 //   - Tests exercise the public API surface only; internals (entries_ vector)
 //     are not accessed directly.
+//
+// ## Friend access for extend_during_load() (HIGH-2 round-1 review fix)
+//
+//   The prior approach defined a stub `class PluginLoader` in namespace
+//   glibre::core inside this TU.  That stub shared the real PluginLoader's
+//   name and namespace, which is an ODR violation against the real
+//   plugin_loader.hpp definition — the stub linked today only because it
+//   contained a single static method, but any COMDAT merge or LTO pass
+//   could silently pick the wrong definition.
+//
+//   The fix: the real plugin_loader.hpp is included here.  Access to the
+//   private extend_during_load() is provided by the `TypeRegistryTestHook`
+//   friend class, which is declared as a friend in type_registry.hpp.
+//   TypeRegistryTestHook is defined here in this TU; it calls set_loading_()
+//   (the latch) and extend_during_load() directly via the friend grant.
+//
+// ## is_loading_ latch in tests (MED-4 round-1 review fix)
+//
+//   extend_during_load() now asserts is_loading_ == true.  Tests must call
+//   TypeRegistryTestHook::begin_load(reg) before any extend_during_load call
+//   and TypeRegistryTestHook::end_load(reg) afterward to keep the state
+//   consistent.
 
 #include <cstddef>
 #include <cstdint>
-#include <memory_resource>
 #include <type_traits>
 
 #include <EASTL/variant.h>
 #include <catch2/catch_test_macros.hpp>
+#include <glibre/alloc.hpp>               // PerContextAllocator, ContextTag
+#include <glibre/core/plugin_loader.hpp>  // real PluginLoader — included to avoid ODR violation
 #include <glibre/core/type_registry.hpp>
 #include <glibre/error.hpp>
+
+// ---------------------------------------------------------------------------
+// TypeRegistryTestHook — friend test accessor for extend_during_load() and
+// the is_loading_ latch (set_loading_()).
+//
+// Declared as a friend in type_registry.hpp.  This class exists ONLY in test
+// builds (compiled only when GLIBRE_TESTING=1, or here in the test TU).
+// The real production build never sees this class.
+// ---------------------------------------------------------------------------
+
+namespace glibre::core {
+
+class TypeRegistryTestHook {
+public:
+    // begin_load(reg) — set the is_loading_ latch to true.
+    //
+    // Call before any extend_during_load() invocation in a test to satisfy
+    // the MED-4 assert.  Mirrors what PluginLoader does at the entry of its
+    // loading critical section.
+    static void begin_load(TypeRegistry& reg) noexcept { reg.set_loading_(true); }
+
+    // end_load(reg) — clear the is_loading_ latch.
+    //
+    // Call after all extend_during_load() invocations to mirror PluginLoader's
+    // exit from the loading critical section.
+    static void end_load(TypeRegistry& reg) noexcept { reg.set_loading_(false); }
+
+    // extend(reg, id, desc) — call extend_during_load() directly.
+    //
+    // Precondition: begin_load(reg) has been called (is_loading_ == true).
+    static Result<void> extend(TypeRegistry& reg, TypeId id, ColumnDescriptor desc) noexcept {
+        return reg.extend_during_load(id, desc);
+    }
+};
+
+}  // namespace glibre::core
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -62,6 +121,15 @@ bool is_type_registry_closed(const glibre::Error& err) noexcept {
     return false;
 }
 
+/// Returns true iff the glibre::Error wraps core::Error::TypeRegistryGap.
+bool is_type_registry_gap(const glibre::Error& err) noexcept {
+    using glibre::core::Error;
+    if (auto* e = eastl::get_if<Error>(&err.code())) {
+        return *e == Error::TypeRegistryGap;
+    }
+    return false;
+}
+
 }  // anonymous namespace
 
 // ===========================================================================
@@ -80,8 +148,8 @@ bool is_type_registry_closed(const glibre::Error& err) noexcept {
 TEST_CASE(
     "core/type_registry: lookup_unregistered_yields_TypeUnregistered", "[core][type_registry]"
 ) {
-    std::pmr::monotonic_buffer_resource buf{4096};
-    glibre::core::TypeRegistry reg{&buf};
+    glibre::PerContextAllocator alloc{glibre::ContextTag::core};
+    glibre::core::TypeRegistry reg{alloc};
 
     SECTION("empty registry — any lookup yields TypeUnregistered") {
         auto result = reg.lookup(glibre::core::TypeId{0});
@@ -131,8 +199,8 @@ TEST_CASE(
 TEST_CASE(
     "core/type_registry: register_after_seal_yields_TypeRegistryClosed", "[core][type_registry]"
 ) {
-    std::pmr::monotonic_buffer_resource buf{4096};
-    glibre::core::TypeRegistry reg{&buf};
+    glibre::PerContextAllocator alloc{glibre::ContextTag::core};
+    glibre::core::TypeRegistry reg{alloc};
 
     // Pre-seal: register two types.
     REQUIRE(reg.register_type(glibre::core::TypeId{0}, make_desc(4, 4)).has_value());
@@ -166,54 +234,19 @@ TEST_CASE(
 // register types even after the registry is sealed, via the loader's
 // friend hook extend_during_load().
 //
-// This test exercises the friend hook through a tiny shim that simulates
-// what PluginLoader does: it holds a reference to the TypeRegistry and
-// calls extend_during_load() after seal().
+// This test exercises the friend hook through TypeRegistryTestHook, the
+// dedicated test accessor declared as a friend in type_registry.hpp.
+// TypeRegistryTestHook::begin_load() sets the is_loading_ latch (MED-4 fix)
+// before calling extend_during_load(); end_load() clears it afterward.
 //
-// Because PluginLoader is not yet implemented in full, we use a local test
-// shim declared as a friend of TypeRegistry by the class definition.
-// The friend declaration in type_registry.hpp is `friend class PluginLoader;`
-// (in namespace glibre::core).  This test does NOT use PluginLoader; instead
-// it calls the private extend_during_load() directly through a helper struct
-// that is declared in the same namespace so it can be a transitively-friend
-// participant.
-//
-// Approach: expose extend_during_load via a thin test accessor declared in
-// the same translation unit, invoking it through explicit friend-access to
-// the TypeRegistry class.  We call the method through a pointer-to-member
-// function obtained via the friend class PluginLoader mechanism by defining
-// a surrogate in namespace glibre::core that is granted friend access.
-//
-// Simpler approach (adopted): define a free-standing test helper in
-// namespace glibre::core that takes a TypeRegistry& and calls the private
-// member; the compiler allows this because the helper is compiled in the
-// same TU that includes the class definition.  However, C++ does not
-// extend friend access to free functions in the same TU — only the
-// named PluginLoader class is a friend.
-//
-// Actual approach: we define a minimal stub PluginLoader in this TU
-// (inside namespace glibre::core) with only the method needed to call
-// extend_during_load().  Because the stub shares the name and namespace
-// of the friend-declared class, the compiler grants it friend access.
+// The old approach (stub PluginLoader in namespace glibre::core) was an ODR
+// violation against the real plugin_loader.hpp definition and has been
+// replaced (HIGH-2 round-1 review fix).
 // ===========================================================================
 
-namespace glibre::core {
-
-// Minimal stub for PluginLoader — grants friend access to extend_during_load.
-// This stub is compiled only in this test TU and is distinct from any future
-// real PluginLoader implementation.
-class PluginLoader {
-public:
-    static Result<void> test_extend(TypeRegistry& reg, TypeId id, ColumnDescriptor desc) noexcept {
-        return reg.extend_during_load(id, desc);
-    }
-};
-
-}  // namespace glibre::core
-
 TEST_CASE("core/type_registry: register_during_plugin_register_admitted", "[core][type_registry]") {
-    std::pmr::monotonic_buffer_resource buf{4096};
-    glibre::core::TypeRegistry reg{&buf};
+    glibre::PerContextAllocator alloc{glibre::ContextTag::core};
+    glibre::core::TypeRegistry reg{alloc};
 
     // Bootstrap: register one type pre-seal.
     REQUIRE(reg.register_type(glibre::core::TypeId{0}, make_desc(4, 4)).has_value());
@@ -222,11 +255,16 @@ TEST_CASE("core/type_registry: register_during_plugin_register_admitted", "[core
     CHECK(reg.count() == 1u);
 
     SECTION("extend_during_load admits registration after seal") {
-        // Simulate PluginLoader calling extend_during_load for a newly-loaded plugin type.
-        auto result =
-            glibre::core::PluginLoader::test_extend(reg, glibre::core::TypeId{1}, make_desc(16, 8));
+        // Set the is_loading_ latch to satisfy the MED-4 assert.
+        glibre::core::TypeRegistryTestHook::begin_load(reg);
+
+        auto result = glibre::core::TypeRegistryTestHook::extend(
+            reg, glibre::core::TypeId{1}, make_desc(16, 8)
+        );
         REQUIRE(result.has_value());
         CHECK(reg.count() == 2u);
+
+        glibre::core::TypeRegistryTestHook::end_load(reg);
 
         // The new type is immediately reachable via lookup.
         auto d = reg.lookup(glibre::core::TypeId{1});
@@ -236,11 +274,16 @@ TEST_CASE("core/type_registry: register_during_plugin_register_admitted", "[core
     }
 
     SECTION("extend_during_load enforces contiguous slot requirement") {
-        // Slot 1 is the next valid slot; slot 3 skips over slots 1 and 2 → error.
-        auto result =
-            glibre::core::PluginLoader::test_extend(reg, glibre::core::TypeId{3}, make_desc(4, 4));
+        glibre::core::TypeRegistryTestHook::begin_load(reg);
+
+        // Slot 1 is the next valid slot; slot 3 skips over slots 1 and 2 → TypeRegistryGap.
+        auto result = glibre::core::TypeRegistryTestHook::extend(
+            reg, glibre::core::TypeId{3}, make_desc(4, 4)
+        );
         REQUIRE_FALSE(result.has_value());
-        CHECK(is_type_unregistered(result.error()));
+        CHECK(is_type_registry_gap(result.error()));
+
+        glibre::core::TypeRegistryTestHook::end_load(reg);
     }
 
     SECTION("register_type is still refused after seal even for valid slot") {
@@ -252,21 +295,27 @@ TEST_CASE("core/type_registry: register_during_plugin_register_admitted", "[core
 }
 
 // ===========================================================================
-// Test: lookup_o1_no_string_no_reflection
+// Test: lookup_index_based_no_string_no_reflection
+//
+// Renamed from lookup_o1_no_string_no_reflection (round-1 review LOW-9 fix).
+// The previous name claimed O(1) verification which this test does not
+// actually measure; the test verifies structural properties — index-based
+// lookup with no string keys and no virtual dispatch — which this name
+// accurately reflects.
 //
 // §6.9: "No reflection, no string lookup on the hot path: TypeId is a
 // stable codegen-emitted integer."
 //
-// This test verifies the O(1) property structurally — lookup() uses a flat
-// vector index (TypeId.value), not a hash map, string comparison, or
-// any dynamic dispatch.  We verify:
+// Verifies:
 //   A. Lookup of N registered types completes in N sequential calls with no
 //      failures (proving the index path, not a linear scan).
 //   B. ColumnDescriptor carries no string fields (compile-time check).
 //   C. TypeRegistry carries no virtual functions (compile-time check).
 // ===========================================================================
 
-TEST_CASE("core/type_registry: lookup_o1_no_string_no_reflection", "[core][type_registry]") {
+TEST_CASE(
+    "core/type_registry: lookup_index_based_no_string_no_reflection", "[core][type_registry]"
+) {
     // Compile-time: TypeRegistry must not have virtual functions.
     static_assert(
         !std::is_polymorphic_v<glibre::core::TypeRegistry>,
@@ -284,8 +333,8 @@ TEST_CASE("core/type_registry: lookup_o1_no_string_no_reflection", "[core][type_
         std::is_trivially_copyable_v<glibre::core::TypeId>, "TypeId must be trivially copyable."
     );
 
-    std::pmr::monotonic_buffer_resource buf{8192};
-    glibre::core::TypeRegistry reg{&buf};
+    glibre::PerContextAllocator alloc{glibre::ContextTag::core};
+    glibre::core::TypeRegistry reg{alloc};
 
     constexpr std::size_t kN = 8;
     for (std::size_t i = 0; i < kN; ++i) {
@@ -293,7 +342,7 @@ TEST_CASE("core/type_registry: lookup_o1_no_string_no_reflection", "[core][type_
         REQUIRE(r.has_value());
     }
 
-    SECTION("sequential O(1) index lookups all succeed") {
+    SECTION("sequential index-based lookups all succeed with correct descriptors") {
         for (std::size_t i = 0; i < kN; ++i) {
             auto d = reg.lookup(glibre::core::TypeId{i});
             REQUIRE(d.has_value());
@@ -327,8 +376,8 @@ TEST_CASE("core/type_registry: lookup_o1_no_string_no_reflection", "[core][type_
 TEST_CASE(
     "core/type_registry: bootstrap_from_static_init_populates_count", "[core][type_registry]"
 ) {
-    std::pmr::monotonic_buffer_resource buf{8192};
-    glibre::core::TypeRegistry reg{&buf};
+    glibre::PerContextAllocator alloc{glibre::ContextTag::core};
+    glibre::core::TypeRegistry reg{alloc};
 
     // Simulate glibre-types.dylib _registry.cpp static-init output:
     // three component types with typical ECS sizes.
