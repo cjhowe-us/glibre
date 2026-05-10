@@ -105,8 +105,8 @@ glibre::core::PluginManifest make_manifest(
     glibre::core::SemVer min_engine = {0, 1, 0}
 ) {
     glibre::core::PluginManifest m;
-    m.name = eastl::string{name};
-    m.abi_hash = eastl::string{abi_hash};
+    m.name = name;          // std::pmr::string from const char*
+    m.abi_hash = abi_hash;  // std::pmr::string from const char*
     m.version = version;
     m.min_engine_version = min_engine;
     return m;

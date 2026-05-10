@@ -17,13 +17,10 @@
 
 namespace glibre::core {
 
-Result<PluginManifest> PluginManifest::open(eastl::string_view path) {
-    // Convert eastl::string_view to std::filesystem::path for OS stat call.
-    // std::filesystem is an explicit std:: carve-out per PHILOSOPHY §11
-    // ("std::filesystem" is in the permitted-std list).
-    // Bridge through std::string_view so std::filesystem::path can accept the
-    // character range without requiring a NUL terminator.
-    const std::filesystem::path fs_path(std::string_view{path.data(), path.size()});
+Result<PluginManifest> PluginManifest::open(std::string_view path) {
+    // Convert std::string_view to std::filesystem::path for OS stat call.
+    // std::filesystem::path accepts std::string_view directly (C++17).
+    const std::filesystem::path fs_path(path);
 
     // Use the error_code overload to avoid potential filesystem_error throws
     // in -fno-exceptions builds.  Any OS error (permissions, etc.) maps to

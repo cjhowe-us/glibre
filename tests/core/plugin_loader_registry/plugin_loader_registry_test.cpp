@@ -22,6 +22,7 @@
 //     the registry is NOT a singleton (plugin_loader_registry.hpp contract).
 
 #include <cstdint>
+#include <memory_resource>
 #include <type_traits>
 
 #include <EASTL/string_view.h>
@@ -62,9 +63,9 @@ glibre::core::PluginManifest make_manifest(
 ) {
 
     glibre::core::PluginManifest m;
-    m.name = eastl::string{name};
+    m.name = name;  // std::pmr::string accepts const char* directly
     m.version = version;
-    m.abi_hash = eastl::string{abi_hash};
+    m.abi_hash = abi_hash;  // std::pmr::string accepts const char* directly
     m.min_engine_version = min_engine;
     // depends_on is empty by default (no dependencies).
     return m;
@@ -78,7 +79,7 @@ template<typename... Deps>
 glibre::core::PluginManifest make_manifest_with_deps(const char* name, Deps... deps) {
 
     auto m = make_manifest(name);
-    (m.depends_on.push_back(eastl::string{deps}), ...);
+    (m.depends_on.push_back(std::pmr::string{deps}), ...);
     return m;
 }
 
@@ -329,7 +330,7 @@ TEST_CASE("validate_all_gate_ordering_hash_first", "[core][plugin_loader_registr
     //   • has a WRONG abi_hash (gate 1 fails)
     //   • depends on "glibre.base" which IS registered (gate 4 would pass)
     auto manifest = make_manifest_with_deps("glibre.test.order", "glibre.base");
-    manifest.abi_hash = eastl::string{kWrongHash};  // gate 1 fails
+    manifest.abi_hash = kWrongHash;  // std::pmr::string from const char*; gate 1 fails
 
     auto result = registry.validate_all(
         manifest,

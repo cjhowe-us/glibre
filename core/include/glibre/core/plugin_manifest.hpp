@@ -11,9 +11,9 @@
 //
 // Wire-format stability: scalar fields (uint8_t, uint16_t) are fixed-width, so
 // the Fory tag-sorted layout is stable across builds on the same ABI.
-// eastl::string and eastl::vector members are pointer-indirected — they are NOT
-// part of the in-memory POD footprint.  The wire format (Fory blob) is stable;
-// the in-memory layout is not byte-transferable across address spaces.
+// std::pmr::string and std::pmr::vector members are pointer-indirected — they
+// are NOT part of the in-memory POD footprint.  The wire format (Fory blob) is
+// stable; the in-memory layout is not byte-transferable across address spaces.
 // Serialization / deserialization of these fields is the responsibility of the
 // glibre-foryc codegen pipeline (plan #225); the loader (plan #229..#231) reads
 // the Fory blob and populates these fields correctly.
@@ -28,21 +28,23 @@
 // immutable once shipped.  New fields must use the next available tag number.
 // Never reuse a retired tag; mark it `// RESERVED tag N` instead.
 //
-// EASTL per PHILOSOPHY §11:
-//   All containers and strings are eastl:: not std::.  std:: is retained
-//   only for std::expected (Result alias), std::filesystem, std::span.
+// Container and string types per reviews/decisions/eastl-removal.md:
+//   std::pmr::string  — matrix row 1 (engine code → PMR variant)
+//   std::string_view  — matrix row 2 (non-PMR; string_view does not own storage)
+//   std::pmr::vector  — matrix row 3 (engine code → PMR variant)
+//   Backed by glibre::PerContextAllocatorResource (alloc.hpp §3).
 //
-// Public plugin ABI surfaces never expose eastl:: containers directly — they
+// Public plugin ABI surfaces never expose std::pmr:: containers directly — they
 // cross the boundary as POD spans / handles only (plugin-abi.md §rationale).
 // The struct members here are the in-memory representation used by core after
 // deserialisation; they are not the wire boundary.
 
 #include <cstdint>
 #include <filesystem>
-
-#include <EASTL/string.h>
-#include <EASTL/string_view.h>
-#include <EASTL/vector.h>
+#include <memory_resource>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include "glibre/error.hpp"
 
@@ -87,8 +89,8 @@ struct SemVer {
 // ---------------------------------------------------------------------------
 
 struct ComponentDecl {
-    eastl::string fqn;             // tag 1
-    eastl::string schema_hash;     // tag 2 — 64-char blake3 hex
+    std::pmr::string fqn;          // tag 1
+    std::pmr::string schema_hash;  // tag 2 — 64-char blake3 hex
     std::uint8_t storage_hint{0};  // tag 3 — archetype=0, sparse=1, singleton=2
 
     [[nodiscard]] bool operator==(const ComponentDecl&) const noexcept = default;
@@ -107,12 +109,12 @@ struct ComponentDecl {
 // ---------------------------------------------------------------------------
 
 struct SystemDecl {
-    eastl::string name;                   // tag 1
-    std::uint8_t phase{0};                // tag 2 — 1..=9
-    eastl::vector<eastl::string> reads;   // tag 3
-    eastl::vector<eastl::string> writes;  // tag 4
-    eastl::vector<eastl::string> after;   // tag 5
-    eastl::vector<eastl::string> before;  // tag 6
+    std::pmr::string name;                      // tag 1
+    std::uint8_t phase{0};                      // tag 2 — 1..=9
+    std::pmr::vector<std::pmr::string> reads;   // tag 3
+    std::pmr::vector<std::pmr::string> writes;  // tag 4
+    std::pmr::vector<std::pmr::string> after;   // tag 5
+    std::pmr::vector<std::pmr::string> before;  // tag 6
 
     [[nodiscard]] bool operator==(const SystemDecl&) const noexcept = default;
 };
@@ -131,10 +133,10 @@ struct SystemDecl {
 // ---------------------------------------------------------------------------
 
 struct PassDecl {
-    eastl::string name;                    // tag 1
-    std::uint8_t render_phase{0};          // tag 2 — 6 or 7
-    eastl::vector<eastl::string> inputs;   // tag 3
-    eastl::vector<eastl::string> outputs;  // tag 4
+    std::pmr::string name;                       // tag 1
+    std::uint8_t render_phase{0};                // tag 2 — 6 or 7
+    std::pmr::vector<std::pmr::string> inputs;   // tag 3
+    std::pmr::vector<std::pmr::string> outputs;  // tag 4
 
     [[nodiscard]] bool operator==(const PassDecl&) const noexcept = default;
 };
@@ -151,9 +153,9 @@ struct PassDecl {
 // ---------------------------------------------------------------------------
 
 struct PanelDecl {
-    eastl::string id;      // tag 1
-    eastl::string title;   // tag 2
-    std::uint8_t area{0};  // tag 3 — docked-area byte enum
+    std::pmr::string id;     // tag 1
+    std::pmr::string title;  // tag 2
+    std::uint8_t area{0};    // tag 3 — docked-area byte enum
 
     [[nodiscard]] bool operator==(const PanelDecl&) const noexcept = default;
 };
@@ -176,12 +178,20 @@ struct PanelDecl {
 //   passes             tag 7 since 1
 //   panels             tag 8 since 1
 //   depends_on         tag 9 since 1
+//
+// PMR allocator threading (reviews/decisions/eastl-removal.md §3):
+//   PluginManifest members allocate from std::pmr::get_default_resource()
+//   when default-constructed — acceptable for tests and stub callers.
+//   Production callers (plan #229 loader) should wire a
+//   glibre::PerContextAllocatorResource backed by ContextTag::core so
+//   that manifest string/vector storage is tracked under the core context
+//   ceiling per perf-budget.md §Allocator Rules #1.
 // ---------------------------------------------------------------------------
 
 struct PluginManifest {
     // tag 1 — fully-qualified plugin id, e.g. "glibre.render".
     // Unique across loaded plugins; collision → core::Error::PluginNameCollision.
-    eastl::string name;
+    std::pmr::string name;
 
     // tag 2 — plugin's own SemVer.  Independent of abi_hash (see
     //   plugin-abi.md §"Versioning Rules").
@@ -190,28 +200,28 @@ struct PluginManifest {
     // tag 3 — 64-char lowercase blake3 hex, copied from
     //   glibre_types_abi_hash() at plugin compile time.
     //   Loader compares this against the host's hash at load time.
-    eastl::string abi_hash;
+    std::pmr::string abi_hash;
 
     // tag 4 — minimum glibre-core SemVer this plugin tolerates.
     //   Loader refuses load if engine version < min_engine_version.
     SemVer min_engine_version{};
 
     // tag 5 — every component type the plugin registers into the type registry.
-    eastl::vector<ComponentDecl> components;
+    std::pmr::vector<ComponentDecl> components;
 
     // tag 6 — every ECS system the plugin registers.
-    eastl::vector<SystemDecl> systems;
+    std::pmr::vector<SystemDecl> systems;
 
     // tag 7 — render-graph passes (meaningful only for render-phase plugins).
-    eastl::vector<PassDecl> passes;
+    std::pmr::vector<PassDecl> passes;
 
     // tag 8 — editor-UI panels (no-op for non-editor builds).
-    eastl::vector<PanelDecl> panels;
+    std::pmr::vector<PanelDecl> panels;
 
     // tag 9 — plugin names that must already be registered before this
     //   plugin's register() runs.  Ordering only; cross-plugin communication
     //   goes through the type registry, not direct calls.
-    eastl::vector<eastl::string> depends_on;
+    std::pmr::vector<std::pmr::string> depends_on;
 
     [[nodiscard]] bool operator==(const PluginManifest&) const noexcept = default;
 
@@ -233,13 +243,13 @@ struct PluginManifest {
     //   core::Error::PluginManifestInvalid   — file exists but Fory
     //     deserialization fails (corrupt, wrong schema version, truncated).
     //
-    // Takes eastl::string_view so callers holding string literals, eastl::string,
-    // or std::string do not need to materialise an extra eastl::string copy.
+    // Takes std::string_view so callers holding string literals, std::string,
+    // std::pmr::string, or char arrays do not need to materialise an extra copy.
     //
     // Note: implementation stub in core/src/plugin_manifest.cpp; full
     //   deserialization lands when glibre-foryc emits manifest.cpp (#225).
     // -----------------------------------------------------------------------
-    [[nodiscard]] static Result<PluginManifest> open(eastl::string_view path);
+    [[nodiscard]] static Result<PluginManifest> open(std::string_view path);
 };
 
 // static_assert: PluginManifest is an aggregate (no user-provided ctor,

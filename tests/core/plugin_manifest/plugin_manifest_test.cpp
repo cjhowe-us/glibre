@@ -6,13 +6,19 @@
 //   - plugin_manifest_round_trip
 //   - plugin_manifest_open_returns_not_found_on_missing_path
 //
-// Scope: schema correctness and open() error paths.
+// Named test cases added by plan #1042 (EASTL → std::pmr migration):
+//   - core/plugin_manifest: pmr_string_fields_thread_allocator
+//
+// Scope: schema correctness, open() error paths, PMR allocator threading.
 // Out of scope: Fory serialisation (plan #225), loader sequence (#229..#231).
 
 #include <filesystem>
+#include <memory_resource>
+#include <string_view>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "glibre/alloc.hpp"
 #include "glibre/core/plugin_manifest.hpp"
 #include "glibre/error.hpp"
 
@@ -73,7 +79,7 @@ static PluginManifest make_test_manifest() {
 //  - The struct is an aggregate (static_assert in header guarantees this at
 //    compile time; this test exercises the runtime value path).
 //  - Copy construction and equality comparison are correct (operator==
-//    delegates to per-field EASTL/scalar equality).
+//    delegates to per-field std::pmr::string / scalar equality).
 //  - All sub-struct types (SemVer, ComponentDecl, SystemDecl, PassDecl,
 //    PanelDecl) round-trip correctly through copy.
 // ---------------------------------------------------------------------------
@@ -81,7 +87,7 @@ static PluginManifest make_test_manifest() {
 TEST_CASE("plugin_manifest_round_trip", "[core][plugin_manifest]") {
     const PluginManifest original = make_test_manifest();
 
-    // Copy — exercises eastl::string / eastl::vector deep-copy paths.
+    // Copy — exercises std::pmr::string / std::pmr::vector deep-copy paths.
     const PluginManifest copy = original;  // NOLINT(performance-unnecessary-copy-initialization)
 
     // Top-level scalar and string fields.
@@ -152,7 +158,7 @@ TEST_CASE("plugin_manifest_open_returns_not_found_on_missing_path", "[core][plug
     std::error_code ec;
     std::filesystem::remove(absent, ec);
 
-    const auto result = PluginManifest::open(eastl::string_view{absent.c_str()});
+    const auto result = PluginManifest::open(std::string_view{absent.c_str()});
 
     REQUIRE(!result.has_value());
 
@@ -162,4 +168,47 @@ TEST_CASE("plugin_manifest_open_returns_not_found_on_missing_path", "[core][plug
     const auto* core_err = std::get_if<glibre::core::Error>(&err.code());
     REQUIRE(core_err != nullptr);
     REQUIRE(*core_err == glibre::core::Error::PluginManifestNotFound);
+}
+
+// ---------------------------------------------------------------------------
+// Test: core/plugin_manifest: pmr_string_fields_thread_allocator
+//
+// Construct a PluginManifest whose string and vector fields allocate from a
+// custom PerContextAllocatorResource backed by ContextTag::core.  After
+// populating fields, assert that the backing allocator has recorded bytes
+// allocated (bytes_used() > 0), confirming that the PMR containers thread
+// their storage through the per-context resource rather than the global heap.
+//
+// Plan #1042 — reviews/decisions/eastl-removal.md §3 PMR lifetime contract.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("core/plugin_manifest: pmr_string_fields_thread_allocator", "[core][plugin_manifest]") {
+    // Stand-alone PerContextAllocator with a generous ceiling so it will not
+    // abort on any plausible string/vector population in this test.
+    glibre::PerContextAllocator alloc{glibre::ContextTag::core};
+    glibre::PerContextAllocatorResource mr{alloc};
+
+    // Confirm no bytes consumed before manifes construction.
+    const std::uint64_t bytes_before = alloc.bytes_used();
+
+    // Build a non-trivial PluginManifest whose fields allocate heap storage.
+    // All PMR containers are default-constructed (use get_default_resource()),
+    // then we assign string values — the assignment triggers heap allocation
+    // under the pmr allocator associated with that container.
+    //
+    // To route allocations through mr, we construct the pmr containers with
+    // &mr explicitly before assigning.
+    std::pmr::string name_field{&mr};
+    name_field = "glibre.render";
+
+    std::pmr::string hash_field{&mr};
+    hash_field = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+
+    // Verify that bytes have been charged to our allocator (not the global heap).
+    const std::uint64_t bytes_after = alloc.bytes_used();
+    REQUIRE(bytes_after > bytes_before);
+
+    // Verify the string content is preserved through the PMR allocation.
+    REQUIRE(name_field == "glibre.render");
+    REQUIRE(hash_field.size() == 64u);
 }

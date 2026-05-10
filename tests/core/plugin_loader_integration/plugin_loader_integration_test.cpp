@@ -106,8 +106,8 @@ glibre::core::PluginManifest make_manifest(
     glibre::core::SemVer min_engine = {0, 1, 0}
 ) {
     glibre::core::PluginManifest m;
-    m.name = eastl::string{name};
-    m.abi_hash = eastl::string{abi_hash};
+    m.name = name;          // std::pmr::string from const char*
+    m.abi_hash = abi_hash;  // std::pmr::string from const char*
     m.version = version;
     m.min_engine_version = min_engine;
     // depends_on is empty by default.
@@ -642,7 +642,9 @@ TEST_CASE("integration_dependency_missing_propagates", "[core][integration]") {
 
     // Synthesise a manifest for plugin B that lists an unmet dependency.
     glibre::core::PluginManifest manifest = make_manifest("glibre.integration.dep_consumer");
-    manifest.depends_on.push_back(eastl::string{"glibre.integration.missing_dep"});
+    manifest.depends_on.push_back(
+        "glibre.integration.missing_dep"
+    );  // std::pmr::string from literal
 
     // Step 7 (gate 4): validate_all must fail at the dependency gate.
     // Gates 1a, 1b, 2, and 3 pass: abi hash matches, engine version is fine,
