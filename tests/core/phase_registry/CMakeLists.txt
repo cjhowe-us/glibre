@@ -7,10 +7,14 @@ cmake_minimum_required(VERSION 4.3.0)
 #   - core/phase_registry: register_system_idempotent
 #   - core/phase_registry: iteration_order_matches_registration_order
 #   - core/phase_registry: per_phase_isolation
+#
+# Named test cases (plan #1070 Unit Test Plan / DoD):
+#   - core/phase_registry: allocator_ceiling_enforced
 # ---------------------------------------------------------------------------
 
 add_executable(glibre-core-phase-registry-tests
     phase_registry_test.cpp
+    phase_registry_allocator_test.cpp   # plan #1070: allocator_ceiling_enforced
 )
 
 target_link_libraries(glibre-core-phase-registry-tests
