@@ -656,6 +656,35 @@ emitted. Holds no state across runs.
    status is `Failed` with the failing op identifier,
    captured artefacts, and `FrameIndex`. There is no
    "continue-on-fail" mode in MVP.
+
+   *Author obligation — frame-split for diagnostic-pair
+   asserts.* Inv 4 makes "subsequent ops on the same
+   frame are skipped" structural (see §6.2 step 3). When
+   an `AssertLogContains` is authored as the **diagnostic
+   companion** of a preceding `AssertState` (i.e. the log
+   line is the second axis that explains *why* the state
+   check fails), the two ops MUST be placed on distinct
+   `FrameIndex` values — the `AssertState` on frame N,
+   the `AssertLogContains` on frame N+k for some k ≥ 1.
+   Co-locating both ops on frame N makes the log-channel
+   axis unreachable precisely when the state-check fails,
+   which is the moment the diagnostic is needed. The
+   `AssertLogContains` evaluator's "between the previous
+   assert and this frame" window (§6.4
+   `assert/log_contains.cpp` step 1) makes the successor
+   frame correct by construction: the log slice still
+   spans the relevant handler emission. Concrete
+   precedent: `tests/e2e/core/entity-lifecycle.glibre-trace`
+   after PR #866; trace audit in spike #867. The inverse
+   pattern — an `AssertLogContains` placed *before* the
+   first `AssertState` of a frame, scoping a window over
+   the previous frame's input-driven log emission — is
+   permitted because the log assert *is* the diagnostic
+   in that case (see
+   `tests/e2e/shader/permutation-key-codec.glibre-trace`,
+   frame 1, op id 12). The obligation generalizes: the
+   diagnostic-providing assert must run independently of
+   the state-validating assert it explains.
 5. **Always emits a report.** Pass, fail, parse error, env
    drift, golden-missing, driver-install, injection-refused,
    timeout, binary-crash — every terminating outcome is
