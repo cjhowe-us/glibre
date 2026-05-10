@@ -15,7 +15,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     return()
 endif()
 
-find_package(EASTL CONFIG REQUIRED)
 find_package(blake3 CONFIG REQUIRED)
 
 # ---------------------------------------------------------------------------
@@ -52,7 +51,6 @@ target_include_directories(glibre-shader
 target_link_libraries(glibre-shader
     PUBLIC
         glibre::core          # error.hpp, GLIBRE_TRY, glibre::Result<T>
-        EASTL
     PRIVATE
         BLAKE3::blake3        # BLAKE3 content hashing (SPEC §4.1)
         # Compile-flag contract: enforces -fno-exceptions, -fno-rtti,

@@ -15,17 +15,21 @@
 // and registered in the engine-wide glibre::Error variant (error-model.md §Decision 2).
 // Include glibre/error.hpp to get the enum; this header re-exports it via the
 // include below.
+//
+// Migration note: EASTL replaced by libc++ std::pmr per
+// reviews/decisions/eastl-removal.md (initiative #1032, plan #1047).
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
-
-#include <EASTL/array.h>
-#include <EASTL/span.h>
-#include <EASTL/string.h>
-#include <EASTL/string_view.h>
-#include <EASTL/vector.h>
+#include <memory_resource>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
 
 // glibre::shader::Error is defined in error.hpp (central registration point).
 // This also gives callers glibre::Result<T> and the GLIBRE_TRY macros.
@@ -118,7 +122,7 @@ struct PermutationKey {
     friend constexpr bool operator==(PermutationKey, PermutationKey) noexcept = default;
 
     // Total, injective, bit-stable encoding (§4.2 invariant 1).
-    using PackedBytes = eastl::array<std::byte, 6>;
+    using PackedBytes = std::array<std::byte, 6>;
     PackedBytes to_bytes() const noexcept;
     static glibre::Result<PermutationKey> from_bytes(const PackedBytes&) noexcept;
 
@@ -160,7 +164,7 @@ enum class CompileTarget : std::uint8_t { MetalLib, DXIL };
 
 // BLAKE3 of (preprocessed source union resolved key union canonical flags union target).
 struct ShaderHash {
-    eastl::array<std::byte, 32> bytes{};
+    std::array<std::byte, 32> bytes{};
     friend constexpr bool operator==(ShaderHash, ShaderHash) noexcept = default;
 };
 
@@ -169,24 +173,24 @@ struct ShaderHash {
 // ---------------------------------------------------------------------------
 
 struct SourceId {
-    eastl::string project_relative_path;
+    std::pmr::string project_relative_path;
     friend bool operator==(const SourceId&, const SourceId&) noexcept = default;
 };
 
 struct EntryPoint {
-    eastl::string name;
+    std::pmr::string name;
     Stage stage{Stage::Vertex};
     friend bool operator==(const EntryPoint&, const EntryPoint&) noexcept = default;
 };
 
 struct IncludeNode {
-    eastl::string project_relative_path;
+    std::pmr::string project_relative_path;
     ShaderHash content_hash{};
 };
 
 struct PreprocessedSource {
-    eastl::vector<std::byte> bytes;              // post-include byte stream
-    eastl::vector<IncludeNode> include_closure;  // ordered, acyclic, project-rooted
+    std::pmr::vector<std::byte> bytes;              // post-include byte stream
+    std::pmr::vector<IncludeNode> include_closure;  // ordered, acyclic, project-rooted
     ShaderHash total_hash{};
 };
 
@@ -200,6 +204,14 @@ public:
     ///
     /// project_root     — absolute path to the project source root.
     /// project_relative — path of the .slang file relative to project_root.
+    /// mr               — PMR memory resource used for all internal string and
+    ///                    vector allocations (include_closure, entry_points,
+    ///                    preprocessed bytes).  MUST be a
+    ///                    glibre::PerContextAllocatorResource backed by the
+    ///                    shader context's PerContextAllocator so that all
+    ///                    allocations are accounted under ContextTag::shader
+    ///                    (perf-budget.md §Allocator Rules #1).
+    ///                    Must outlive the returned ShaderSource.
     ///
     /// Returns shader::Error::SourceNotFound if the file does not exist.
     /// Returns shader::Error::IncludeEscape if any resolved include lies outside
@@ -210,18 +222,28 @@ public:
     ///
     /// The return type is glibre::Result<ShaderSource> = std::expected<ShaderSource,
     /// glibre::Error> per reviews/decisions/error-model.md §Decision 1.
-    static glibre::Result<ShaderSource>
-    open(const std::filesystem::path& project_root, const std::filesystem::path& project_relative);
+    static glibre::Result<ShaderSource> open(
+        const std::filesystem::path& project_root,
+        const std::filesystem::path& project_relative,
+        std::pmr::memory_resource* mr
+    );
 
     [[nodiscard]] const SourceId& id() const noexcept;
-    [[nodiscard]] eastl::span<const EntryPoint> entry_points() const noexcept;
+    [[nodiscard]] std::span<const EntryPoint> entry_points() const noexcept;
     [[nodiscard]] const PreprocessedSource& preprocessed() const noexcept;
 
 private:
-    ShaderSource() = default;
+    // Construct with an explicit memory resource so all PMR container members
+    // allocate under the provided resource (ContextTag::shader per
+    // perf-budget.md §Allocator Rules #1).  Called only from open().
+    // mr must outlive this ShaderSource.
+    explicit ShaderSource(std::pmr::memory_resource* mr)
+        : id_{SourceId{std::pmr::string{mr}}},
+          entry_points_{mr},
+          preprocessed_{std::pmr::vector<std::byte>{mr}, std::pmr::vector<IncludeNode>{mr}} {}
 
     SourceId id_{};
-    eastl::vector<EntryPoint> entry_points_{};
+    std::pmr::vector<EntryPoint> entry_points_{};
     PreprocessedSource preprocessed_{};
 };
 
@@ -259,20 +281,20 @@ struct BindingSlot {
     std::uint32_t array_size{1};
     StageMask stages{};
     DescriptorFrequencyGroup frequency{DescriptorFrequencyGroup::PerDraw};
-    eastl::string name;
+    std::pmr::string name;
 
     friend bool operator==(const BindingSlot&, const BindingSlot&) noexcept = default;
 };
 
 struct VertexInputElement {
-    eastl::string semantic;
+    std::pmr::string semantic;
     std::uint32_t semantic_index{0};
     std::uint32_t location{0};
     std::uint32_t format_code{0};  // backend-neutral format ordinal
 };
 
 struct VertexIOLayout {
-    eastl::vector<VertexInputElement> elements;
+    std::pmr::vector<VertexInputElement> elements;
 };
 
 struct PushConstantRange {
@@ -283,24 +305,24 @@ struct PushConstantRange {
 };
 
 struct MaterialParameterBlock {
-    eastl::string name;
+    std::pmr::string name;
     std::uint32_t size_bytes{0};
-    eastl::vector<BindingSlot> members;
+    std::pmr::vector<BindingSlot> members;
 };
 
 struct SpecializationConstantSlot {
-    eastl::string name;
+    std::pmr::string name;
     std::uint32_t id{0};
     std::uint32_t size_bytes{0};
 };
 
 struct ReflectionBlob {
-    eastl::vector<EntryPoint> entry_points;
-    eastl::vector<BindingSlot> bindings;
+    std::pmr::vector<EntryPoint> entry_points;
+    std::pmr::vector<BindingSlot> bindings;
     VertexIOLayout vertex_io;
-    eastl::vector<PushConstantRange> push_constants;
+    std::pmr::vector<PushConstantRange> push_constants;
     MaterialParameterBlock material_parameters;
-    eastl::vector<SpecializationConstantSlot> spec_constants;
+    std::pmr::vector<SpecializationConstantSlot> spec_constants;
     std::uint32_t rt_payload_bytes{0};
 };
 
@@ -310,7 +332,7 @@ struct ReflectionBlob {
 
 struct DescriptorTable {
     // Ordered by (register_space, register_index, stage_mask) — §4.5 inv 3.
-    eastl::vector<BindingSlot> slots;
+    std::pmr::vector<BindingSlot> slots;
     friend bool operator==(const DescriptorTable&, const DescriptorTable&) noexcept = default;
 };
 
@@ -326,8 +348,8 @@ struct RootSignatureSchema {
     DescriptorTable per_pass;
     DescriptorTable per_material;
     DescriptorTable per_draw;
-    eastl::vector<StaticSampler> static_samplers;
-    eastl::vector<PushConstantRange> push_constants;
+    std::pmr::vector<StaticSampler> static_samplers;
+    std::pmr::vector<PushConstantRange> push_constants;
 
     friend bool
     operator==(const RootSignatureSchema&, const RootSignatureSchema&) noexcept = default;
@@ -335,6 +357,11 @@ struct RootSignatureSchema {
 
 class DescriptorLayout {
 public:
+    // TODO(#1087): add `std::pmr::memory_resource* mr` parameter so that
+    // reflection-blob assembly (future slangc harvest plan) does not silently
+    // bind to std::pmr::get_default_resource() — same per-tag ceiling escape
+    // that PR #1085 fixed for ShaderSource::open().  Track in
+    // [PLAN] iterate-shader-descriptor-allocator-threading (#1087).
     static glibre::Result<DescriptorLayout> derive(const ReflectionBlob&, CompileTarget) noexcept;
 
     [[nodiscard]] const DescriptorTable& table(DescriptorFrequencyGroup g) const noexcept;

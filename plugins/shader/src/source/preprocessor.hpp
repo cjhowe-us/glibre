@@ -20,36 +20,59 @@
 
 #include <expected>
 #include <filesystem>
+#include <string>
+#include <string_view>
+#include <vector>
 
-#include <EASTL/string.h>
-#include <EASTL/vector.h>
 #include <glibre/shader/shader.hpp>
 
 namespace glibre::shader::detail {
 
+/// Entry on the cycle-detection visit stack.
+/// Both `path` and `path_lower` are allocated under `PreprocessContext::mr`.
+/// Storing the lowercased form alongside the original avoids re-allocating a
+/// fresh lowercase copy for every element of the stack on every include
+/// directive encountered (LOW-1 R2: cache once at push time).
+struct VisitEntry {
+    std::pmr::string path;        // project-relative path, original case
+    std::pmr::string path_lower;  // ASCII-lowercased for case-insensitive comparison
+};
+
 /// State passed through the recursive include resolution.
 ///
 /// Lifetime contract: PreprocessContext is a call-scoped aggregate.
-/// It MUST NOT outlive the path and vector arguments passed at construction.
+/// It MUST NOT outlive the path, vector, and memory_resource arguments passed
+/// at construction.
 ///   - project_root  : borrowed; caller owns the path object for the full
 ///                     duration of expand_includes (and any recursive calls).
 ///                     Do NOT store a PreprocessContext in a member field or
 ///                     return it from a function — that would dangle this ref.
 ///   - include_closure: borrowed reference into the caller's accumulator.
+///   - mr            : memory resource used for visit_stack strings and all
+///                     PMR containers inside expand_includes / read_file.
+///                     Must be the same resource passed to ShaderSource::open()
+///                     so that every allocation is tagged under ContextTag::shader
+///                     (perf-budget.md §Allocator Rules #1).
+
 struct PreprocessContext {
     // caller owns; do not extend lifetime beyond the enclosing expand_includes call.
     const std::filesystem::path& project_root;
-    eastl::vector<IncludeNode>& include_closure;  // accumulates as we expand
-    eastl::vector<eastl::string> visit_stack;     // for cycle detection
+    std::pmr::vector<IncludeNode>& include_closure;  // accumulates as we expand
+    std::pmr::memory_resource* mr;                   // allocation resource (never null)
+    std::pmr::vector<VisitEntry> visit_stack;        // for cycle detection
 };
+
+/// ASCII-lowercase `sv` into a new `std::pmr::string` allocated under `mr`.
+/// Used to compare include paths in a case-insensitive manner (macOS HFS+/APFS).
+[[nodiscard]] std::pmr::string ascii_lower(std::string_view sv, std::pmr::memory_resource* mr);
 
 /// Expand the contents of `source_bytes` by resolving all #include "..."
 /// directives recursively into `ctx`.
 ///
-/// On success, returns the fully expanded text (UTF-8 bytes as eastl::string).
+/// On success, returns the fully expanded text (UTF-8 bytes as std::pmr::string).
 /// On error, returns Error::IncludeEscape or Error::IncludeCycle.
-[[nodiscard]] std::expected<eastl::string, Error> expand_includes(
-    const eastl::string& source_bytes,
+[[nodiscard]] std::expected<std::pmr::string, Error> expand_includes(
+    const std::pmr::string& source_bytes,
     const std::filesystem::path& current_file,
     PreprocessContext& ctx
 );
@@ -58,7 +81,10 @@ struct PreprocessContext {
 /// empty files.  Returns Error::SourceNotFound if the path does not exist
 /// or cannot be read.  Returns Error::EncodingInvalid for non-UTF-8 or empty
 /// content.
-[[nodiscard]] std::expected<eastl::string, Error>
-read_and_normalize_file(const std::filesystem::path& path);
+///
+/// mr — allocates the returned string under this resource so the allocation
+///      is counted under ContextTag::shader (perf-budget.md §Allocator Rules #1).
+[[nodiscard]] std::expected<std::pmr::string, Error>
+read_and_normalize_file(const std::filesystem::path& path, std::pmr::memory_resource* mr);
 
 }  // namespace glibre::shader::detail

@@ -32,10 +32,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
-
-#include <EASTL/algorithm.h>
-#include <EASTL/optional.h>
-#include <EASTL/string.h>
+#include <optional>
 
 #include "include_resolver.hpp"
 // BLAKE3 per-include content hashing — shared helper (R2 HIGH-1).
@@ -50,7 +47,8 @@ namespace {
 // Returns Error::SourceNotFound if the file cannot be opened.
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] std::expected<eastl::string, Error> read_file_raw(const std::filesystem::path& path) {
+[[nodiscard]] std::expected<std::pmr::string, Error>
+read_file_raw(const std::filesystem::path& path, std::pmr::memory_resource* mr) {
     // Open binary — we handle newline normalisation at the UTF-8 validation
     // layer rather than in the OS read.
     FILE* f = std::fopen(path.c_str(), "rb");  // NOLINT(cppcoreguidelines-owning-memory)
@@ -73,7 +71,7 @@ namespace {
 
     std::size_t file_size = static_cast<std::size_t>(file_size_l);
 
-    eastl::string buf;
+    std::pmr::string buf{mr};
     buf.resize(file_size);
 
     if (file_size > 0 && std::fread(buf.data(), 1, file_size, f) != file_size) {
@@ -133,7 +131,10 @@ namespace {
 }
 
 /// Strip UTF-8 BOM if present, validate remaining bytes, reject empty files.
-[[nodiscard]] std::expected<eastl::string, Error> normalize_source_bytes(eastl::string bytes) {
+/// The input `bytes` already carries the mr from read_file_raw; no additional
+/// mr parameter needed here.
+[[nodiscard]] std::expected<std::pmr::string, Error>
+normalize_source_bytes(std::pmr::string bytes) {
     // Strip BOM (EF BB BF).
     constexpr unsigned char kBom[3] = {0xEFu, 0xBBu, 0xBFu};
     if (bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == kBom[0] &&
@@ -157,28 +158,12 @@ namespace {
 // Unified file-read entry point — raw read + normalization.
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] std::expected<eastl::string, Error> read_file(const std::filesystem::path& path) {
-    auto raw = read_file_raw(path);
+[[nodiscard]] std::expected<std::pmr::string, Error>
+read_file(const std::filesystem::path& path, std::pmr::memory_resource* mr) {
+    auto raw = read_file_raw(path, mr);
     if (!raw)
         return raw;
     return normalize_source_bytes(std::move(*raw));
-}
-
-// ---------------------------------------------------------------------------
-// Case-fold helper for cycle detection (MED-2).
-//
-// macOS HFS+/APFS is case-preserving but case-insensitive by default.
-// `#include "Foo.slang"` and `#include "foo.slang"` resolve to the same
-// file; we lowercase path strings before comparison to catch such cases.
-// ---------------------------------------------------------------------------
-
-[[nodiscard]] eastl::string ascii_lower(eastl::string_view sv) {
-    eastl::string out;
-    out.resize(sv.size());
-    for (std::size_t i = 0; i < sv.size(); ++i) {
-        out[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(sv[i])));
-    }
-    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,8 +175,8 @@ namespace {
 // Returns the include path string if matched, or an empty optional.
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] eastl::optional<eastl::string>
-scan_include_line(const char* line, std::size_t len) noexcept {
+[[nodiscard]] std::optional<std::pmr::string>
+scan_include_line(const char* line, std::size_t len, std::pmr::memory_resource* mr) noexcept {
     std::size_t pos = 0;
 
     // Skip leading horizontal whitespace.
@@ -200,7 +185,7 @@ scan_include_line(const char* line, std::size_t len) noexcept {
 
     // '#'
     if (pos >= len || line[pos] != '#')
-        return eastl::nullopt;
+        return std::nullopt;
     ++pos;
 
     // Optional whitespace after '#'.
@@ -211,20 +196,20 @@ scan_include_line(const char* line, std::size_t len) noexcept {
     constexpr const char kInclude[] = "include";
     constexpr std::size_t kIncludeLen = 7;
     if (pos + kIncludeLen > len)
-        return eastl::nullopt;
+        return std::nullopt;
     if (std::memcmp(line + pos, kInclude, kIncludeLen) != 0)
-        return eastl::nullopt;
+        return std::nullopt;
     pos += kIncludeLen;
 
     // At least one whitespace after "include".
     if (pos >= len || (line[pos] != ' ' && line[pos] != '\t'))
-        return eastl::nullopt;
+        return std::nullopt;
     while (pos < len && (line[pos] == ' ' || line[pos] == '\t'))
         ++pos;
 
     // Opening '"'.
     if (pos >= len || line[pos] != '"')
-        return eastl::nullopt;
+        return std::nullopt;
     ++pos;
 
     // Path content until closing '"'.
@@ -232,24 +217,44 @@ scan_include_line(const char* line, std::size_t len) noexcept {
     while (pos < len && line[pos] != '"')
         ++pos;
     if (pos >= len)
-        return eastl::nullopt;  // no closing '"'
+        return std::nullopt;  // no closing '"'
 
     std::size_t path_len = pos - path_start;
     if (path_len == 0)
-        return eastl::nullopt;  // empty include path
+        return std::nullopt;  // empty include path
 
-    return eastl::string{line + path_start, path_len};
+    return std::pmr::string{line + path_start, path_len, mr};
 }
 
 }  // namespace
 
-std::expected<eastl::string, Error> expand_includes(
-    const eastl::string& source_bytes,
+// ---------------------------------------------------------------------------
+// Case-fold helper for cycle detection (MED-2).
+//
+// macOS HFS+/APFS is case-preserving but case-insensitive by default.
+// `#include "Foo.slang"` and `#include "foo.slang"` resolve to the same
+// file; we lowercase path strings before comparison to catch such cases.
+//
+// Declared in preprocessor.hpp so shader_source.cpp can pre-lowercase the
+// root file path at VisitEntry push time (LOW-1 R2: cache once on push).
+// ---------------------------------------------------------------------------
+
+[[nodiscard]] std::pmr::string ascii_lower(std::string_view sv, std::pmr::memory_resource* mr) {
+    std::pmr::string out{mr};
+    out.resize(sv.size());
+    for (std::size_t i = 0; i < sv.size(); ++i) {
+        out[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(sv[i])));
+    }
+    return out;
+}
+
+std::expected<std::pmr::string, Error> expand_includes(
+    const std::pmr::string& source_bytes,
     const std::filesystem::path& current_file,
     PreprocessContext& ctx
 ) {
     std::filesystem::path current_dir = current_file.parent_path();
-    eastl::string expanded;
+    std::pmr::string expanded{ctx.mr};
     expanded.reserve(source_bytes.size());
 
     // Walk source bytes line-by-line without <sstream> or std::getline.
@@ -275,7 +280,7 @@ std::expected<eastl::string, Error> expand_includes(
         line_start = line_end + 1u;  // always advances: past '\n' or to src_len+1
 
         // Attempt to match a #include "..." directive.
-        auto include_path_opt = scan_include_line(line, line_len);
+        auto include_path_opt = scan_include_line(line, line_len, ctx.mr);
         if (include_path_opt) {
             std::filesystem::path include_rel{include_path_opt->c_str()};
 
@@ -289,19 +294,20 @@ std::expected<eastl::string, Error> expand_includes(
             // Step 2: compute project-relative path for the include node.
             std::filesystem::path proj_rel =
                 abs_path.lexically_relative(ctx.project_root).lexically_normal();
-            eastl::string proj_rel_str{proj_rel.native().c_str()};
+            std::pmr::string proj_rel_str{proj_rel.native().c_str(), ctx.mr};
 
             // Step 3: cycle detection — case-insensitive comparison (MED-2).
-            eastl::string proj_rel_lower = ascii_lower(proj_rel_str);
-            for (const auto& visited : ctx.visit_stack) {
-                eastl::string visited_lower = ascii_lower(visited);
-                if (visited_lower == proj_rel_lower) {
+            // Lowercase proj_rel once; compare against pre-computed path_lower cached
+            // in each VisitEntry (LOW-1 R2: avoid O(N*M) ascii_lower allocations).
+            std::pmr::string proj_rel_lower = ascii_lower(proj_rel_str, ctx.mr);
+            for (const auto& entry : ctx.visit_stack) {
+                if (entry.path_lower == proj_rel_lower) {
                     return std::unexpected(Error::IncludeCycle);
                 }
             }
 
             // Step 4: read included file.
-            auto file_result = read_file(abs_path);
+            auto file_result = read_file(abs_path, ctx.mr);
             if (!file_result) {
                 // MED-4: §10 SourceNotFound covers both root-file and include-target
                 // failures.  The distinction is carried by context: callers of
@@ -312,14 +318,28 @@ std::expected<eastl::string, Error> expand_includes(
                 // is wrapped into glibre::Error with an ErrorContext by the caller.
                 return std::unexpected(file_result.error());
             }
-            eastl::string included_bytes = std::move(*file_result);
+            std::pmr::string included_bytes = std::move(*file_result);
 
             // Step 5: build include node with content hash (R2 HIGH-1: shared helper).
             ShaderHash content_hash = blake3_hash(included_bytes.data(), included_bytes.size());
-            ctx.include_closure.push_back(IncludeNode{proj_rel_str, content_hash});
+            // Construct IncludeNode with the context mr so the string member also
+            // allocates under ContextTag::shader (perf-budget.md §Allocator Rules #1).
+            // PMR string copy uses the destination's allocator by default; supply mr
+            // explicitly so the IncludeNode's path string does not escape to the
+            // default resource.
+            ctx.include_closure.push_back(
+                IncludeNode{std::pmr::string{proj_rel_str.c_str(), ctx.mr}, content_hash}
+            );
 
             // Step 6: push onto visit stack and recurse.
-            ctx.visit_stack.push_back(proj_rel_str);
+            // Cache the lowercased form at push time so cycle detection does not
+            // need to re-allocate per-iteration (LOW-1 R2: O(N) allocs total).
+            ctx.visit_stack.push_back(
+                VisitEntry{
+                    std::pmr::string{proj_rel_str.c_str(), ctx.mr},
+                    std::pmr::string{proj_rel_lower.c_str(), ctx.mr},
+                }
+            );
             auto sub_result = expand_includes(included_bytes, abs_path, ctx);
             ctx.visit_stack.pop_back();
             if (!sub_result) {
@@ -343,11 +363,13 @@ std::expected<eastl::string, Error> expand_includes(
 }
 
 // ---------------------------------------------------------------------------
-// read_file: public entry point for shader_source.cpp (HIGH-4 normalisation).
+// read_and_normalize_file: public entry point for shader_source.cpp
+// (HIGH-4 normalisation).  Allocates the returned string under `mr`.
 // ---------------------------------------------------------------------------
 
-std::expected<eastl::string, Error> read_and_normalize_file(const std::filesystem::path& path) {
-    return read_file(path);
+std::expected<std::pmr::string, Error>
+read_and_normalize_file(const std::filesystem::path& path, std::pmr::memory_resource* mr) {
+    return read_file(path, mr);
 }
 
 }  // namespace glibre::shader::detail

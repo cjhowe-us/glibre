@@ -15,8 +15,8 @@
 
 #include <expected>
 #include <filesystem>
+#include <string_view>
 
-#include <EASTL/string_view.h>
 #include <glibre/shader/shader.hpp>
 
 namespace glibre::shader::detail {
