@@ -42,10 +42,11 @@
 //
 // Authority: plan #977, fory-codegen.md §"Migration Mechanic" points 3/5.
 //
-// PHILOSOPHY §11: EASTL replaces std containers/strings in the IR.
-//   std:: retained for: std::expected (glibre::Result), std::string_view,
-//   std::filesystem, std::system (subprocess invocation), dlfcn.h,
-//   std::format (no EASTL equivalent), std::string (detail_scratch buffers).
+// PHILOSOPHY §11 (post eastl-removal.md): libc++ stdlib is canonical.
+//   EASTL headers removed; emit_migration return value is bound via auto& to
+//   avoid naming eastl::string directly.  npos comparison uses std::string::npos
+//   (same value as eastl::string::npos — both are size_type(-1)).
+//   Migrated per plan #1052 (reviews/decisions/eastl-removal.md rows 1, 2, 3).
 
 #include <atomic>
 #include <cstddef>
@@ -60,7 +61,6 @@
 #include <string_view>
 #include <unistd.h>
 
-#include <EASTL/string.h>
 #include <catch2/catch_test_macros.hpp>
 
 #include "glibre/error.hpp"
@@ -321,11 +321,13 @@ schema glibre.test.Sample {
     auto emit_result = emit_migration(schema, "test/Sample.fory");
     REQUIRE(emit_result.has_value());
 
-    const eastl::string& gen_text = *emit_result;
+    // auto& avoids naming eastl::string directly; the IR return type may remain
+    // eastl::string until tools/foryc is migrated (plan #1052 scope: tests only).
+    const auto& gen_text = *emit_result;
 
     // Confirm the table symbol name appears in the generated TU.
     // Mangled FQN: "glibre.test.Sample" → "glibre__test__Sample"
-    CHECK(gen_text.find("glibre_plugin_migrations_glibre__test__Sample") != eastl::string::npos);
+    CHECK(gen_text.find("glibre_plugin_migrations_glibre__test__Sample") != std::string::npos);
 
     // --- Write and compile the stub dylib. ---
     const fs::path tmp_base = fs::temp_directory_path() / "glibre_schema_mig_test";
@@ -560,12 +562,11 @@ schema glibre.test.Stable {
 
     auto emit_result = emit_migration(schema, "test/Stable.fory");
     REQUIRE(emit_result.has_value());
-    const eastl::string& gen_text = *emit_result;
+    // auto& avoids naming eastl::string directly (plan #1052 migration).
+    const auto& gen_text = *emit_result;
 
     // Mangled FQN: "glibre.test.Stable" → "glibre__test__Stable"
-    CHECK(
-        gen_text.find("glibre_plugin_current_version_glibre__test__Stable") != eastl::string::npos
-    );
+    CHECK(gen_text.find("glibre_plugin_current_version_glibre__test__Stable") != std::string::npos);
 
     // --- Write and compile the stub dylib. ---
     const fs::path tmp_base = fs::temp_directory_path() / "glibre_schema_mig_test";
@@ -688,7 +689,8 @@ schema glibre.test.Broken {
 
     auto emit_result = emit_migration(schema, "test/Broken.fory");
     REQUIRE(emit_result.has_value());
-    const eastl::string& gen_text = *emit_result;
+    // auto& avoids naming eastl::string directly (plan #1052 migration).
+    const auto& gen_text = *emit_result;
 
     // --- Write and compile the stub dylib. ---
     const fs::path tmp_base = fs::temp_directory_path() / "glibre_schema_mig_test";
