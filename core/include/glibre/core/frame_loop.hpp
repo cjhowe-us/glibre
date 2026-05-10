@@ -171,6 +171,10 @@ private:
 
     // frame_counter_ — incremented by Phase::Present (plan #247).
     // Advances only when Phase::Present executes successfully.
+    //
+    // FOLLOWUP(ecs-world): move world_tick_ + frame_counter_ ownership into
+    // World; FrameLoop holds World& and calls world.advance_tick() at Phase::Present
+    // once the ECS plan lands. See world_tick.hpp for the companion FOLLOWUP marker.
     std::uint64_t frame_counter_{0};
 
     // world_tick_ — ECS world tick descriptor; advanced by Phase::Present.

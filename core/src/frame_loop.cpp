@@ -192,6 +192,12 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
                            // rebuild_schedule, migrate_components) run here, guarded by
                            // PluginLoaderRegistry::validate_drain_phase (plan #981 / PR #1012).
                            //
+                           // FOLLOWUP(plan-981-wiring): call PluginLoaderRegistry::validate_drain_phase
+                           // here once FramePhaseTracker is wired (see plan #981). The call site is
+                           // this exact seam — the GLIBRE_TESTING branch below simulates the same
+                           // FramePhaseMisordered return path that the real validate_drain_phase
+                           // guard emits when phase ordering is violated.
+                           //
                            // GLIBRE_TESTING injection: when inject_phase8_failure_ is armed,
                            // simulate a drain-phase refusal so tests can verify that
                            // frame_counter_ and world_tick_ do not advance when Phase 8 fails.
