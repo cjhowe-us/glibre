@@ -56,6 +56,27 @@ in once GitHub repo is provisioned.
 |11 | tools    | Editor shell + scene tree + inspector + gizmo     | TBD   |
 |12 | e2e      | InputDriver + trace replay + golden assertions    | TBD   |
 
+## Cross-cutting initiatives
+
+### EASTL removal (initiative #1032)
+
+Engine-wide reversal of PHILOSOPHY.md §11 (EASTL adoption). Per the
+decision record `reviews/decisions/eastl-removal.md`, every
+`#include <EASTL/...>` is replaced with the libc++ stdlib equivalent
+(`std::pmr::*` for engine code, plain `std::*` for tools). Breakdown
+spike #1037 partitioned the migration into 16 per-directory `[PLAN]`
+leaves + 2 build-cleanup chores:
+
+- core production: #1040 (error/variant keystone), #1041 (alloc), #1042
+  (plugin-manifest), #1043 (plugin-loader), #1044 (plugin-loader-registry),
+  #1045 (phase-registry), #1046 (context-tag-resolver)
+- plugins / tools: #1047 (plugin/shader), #1048 (tools/foryc)
+- tests: #1049 (tests/core/error — blocked_by #1040), #1050 (tests/core/plugin),
+  #1051 (tests/core/runtime), #1052 (tests/data), #1053 (tests/perf),
+  #1054 (tests/shader), #1055 (tests/tools/foryc)
+- build cleanup (blocked_by every migration plan above): #1056
+  (vcpkg-drop-eastl), #1057 (cmake-drop-eastl-link)
+
 ## Cross-cutting story imports
 
 Initial user-story batch mined from harmonius `US-*` candidates;
