@@ -72,9 +72,9 @@ static constexpr BuiltinEntry k_builtin_scalar_map[] = {
     {"quatf",  "glibre::math::Quatf",        true},
     // ECS handle — declared in glibre/types/_builtins.hpp
     {"entity", "glibre::core::EntityId",     true},
-    // Variable-length primitives — EASTL per PHILOSOPHY §11
-    {"string", "eastl::string",              false},
-    {"bytes",  "eastl::vector<std::byte>",   false},
+    // Variable-length primitives — libc++ per PHILOSOPHY §11
+    {"string", "std::string",              false},
+    {"bytes",  "std::vector<std::byte>",   false},
 };
 // clang-format on
 
@@ -87,9 +87,9 @@ static constexpr std::size_t k_builtin_scalar_count =
 // -----------------------------------------------------------------------
 
 static constexpr std::string_view k_generic_prefixes[] = {
-    "list",    // list<T>   → eastl::vector<T_cpp>
-    "map",     // map<K,V>  → eastl::unordered_map<K_cpp, V_cpp>
-    "option",  // option<T> → eastl::optional<T_cpp>
+    "list",    // list<T>   → std::vector<T_cpp>
+    "map",     // map<K,V>  → std::unordered_map<K_cpp, V_cpp>
+    "option",  // option<T> → std::optional<T_cpp>
 };
 
 }  // namespace glibre::tools::foryc

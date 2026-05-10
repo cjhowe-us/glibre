@@ -25,7 +25,6 @@
 #include <memory>
 #include <string>
 
-#include <EASTL/vector.h>
 #include <catch2/catch_test_macros.hpp>
 #include <glibre/alloc.hpp>
 #include <spdlog/sinks/ostream_sink.h>

@@ -56,11 +56,12 @@
 #include <format>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
-#include <EASTL/optional.h>
-#include <EASTL/vector.h>
+#include "glibre/log_error.hpp"
 
 #include "emit_header.hpp"
 #include "emit_manifest.hpp"
@@ -99,35 +100,35 @@ static void usage(std::string_view program) {
                  " [--emit=header|--emit=migration|--emit=manifest]\n";
 }
 
-static eastl::optional<Args> parse_args(int argc, char** argv) {
+static std::optional<Args> parse_args(int argc, char** argv) {
     Args args;
-    eastl::vector<std::string_view> tokens(argv + 1, argv + argc);
+    std::vector<std::string_view> tokens(argv + 1, argv + argc);
     for (std::size_t i = 0; i < tokens.size(); ++i) {
         const auto tok = tokens[i];
-        auto next = [&]() -> eastl::optional<std::string_view> {
+        auto next = [&]() -> std::optional<std::string_view> {
             if (i + 1 >= tokens.size())
-                return eastl::nullopt;
+                return std::nullopt;
             return tokens[++i];
         };
         if (tok == "--in") {
             auto v = next();
             if (!v)
-                return eastl::nullopt;
+                return std::nullopt;
             args.in_dir = *v;
         } else if (tok == "--file") {
             auto v = next();
             if (!v)
-                return eastl::nullopt;
+                return std::nullopt;
             args.single_file = *v;
         } else if (tok == "--out") {
             auto v = next();
             if (!v)
-                return eastl::nullopt;
+                return std::nullopt;
             args.out_dir = *v;
         } else if (tok == "--stamp") {
             auto v = next();
             if (!v)
-                return eastl::nullopt;
+                return std::nullopt;
             args.stamp_file = *v;
         } else if (tok == "--emit=header") {
             args.emit = EmitMode::Header;
@@ -137,43 +138,34 @@ static eastl::optional<Args> parse_args(int argc, char** argv) {
             args.emit = EmitMode::Manifest;
         } else {
             std::cerr << "foryc: unknown flag: " << tok << "\n";
-            return eastl::nullopt;
+            return std::nullopt;
         }
     }
     // Either --in (directory) or --file (single file) must be provided, not both.
     if (args.in_dir.empty() == args.single_file.empty()) {
         std::cerr << "foryc: exactly one of --in or --file must be specified\n";
-        return eastl::nullopt;
+        return std::nullopt;
     }
     if (args.out_dir.empty() || args.stamp_file.empty())
-        return eastl::nullopt;
+        return std::nullopt;
     return args;
 }
 
 // -----------------------------------------------------------------------
 // Error code to human-readable message
+//
+// Routes through glibre::tools::to_string(Error) (log_error.hpp:126)
+// which is exhaustive by construction (no default clause; -Werror=switch
+// enforces coverage).  This avoids the dual-maintenance risk of keeping a
+// parallel switch that can silently miss new arms (deferred defect from
+// PR #1060 R2: ForycInvalidIdentifier was absent from the previous switch;
+// fixes the UB that default:__builtin_unreachable() was masking).
 // -----------------------------------------------------------------------
 
 static std::string_view error_name(const glibre::Error& e) noexcept {
     using glibre::tools::Error;
-    if (const auto* te = std::get_if<Error>(&e.code())) {
-        switch (*te) {
-        case Error::ForycSyntaxError:
-            return "syntax error";
-        case Error::ForycDuplicateTag:
-            return "duplicate tag";
-        case Error::ForycNonMonotoneVersion:
-            return "non-monotone version";
-        case Error::ForycUnknownType:
-            return "unknown type";
-        case Error::ForycIOError:
-            return "I/O error";
-        case Error::ForycEmptySchema:
-            return "schema has zero TypeDecl blocks";
-        default:
-            __builtin_unreachable();
-        }
-    }
+    if (const auto* te = std::get_if<Error>(&e.code()))
+        return glibre::tools::to_string(*te);
     return "unknown error";
 }
 
@@ -233,9 +225,9 @@ static bool emit_headers_for_schema(
     for (const auto& td : schema.types) {
         // Extract the type name (last FQN component).
         // FQN format: "glibre.core.Transform" — type name is "Transform".
-        const eastl::string& fqn = td.fqn;
+        const std::string& fqn = td.fqn;
         const std::size_t dot = fqn.rfind('.');
-        const eastl::string type_name = (dot == eastl::string::npos) ? fqn : fqn.substr(dot + 1);
+        const std::string type_name = (dot == std::string::npos) ? fqn : fqn.substr(dot + 1);
 
         // Build the per-type output directory.
         fs::path type_dir = include_base;
@@ -271,7 +263,7 @@ static bool emit_headers_for_schema(
             return false;
         }
 
-        const eastl::string& text = *result;
+        const std::string& text = *result;
         ofs.write(text.data(), static_cast<std::streamsize>(text.size()));
         if (!ofs) {
             std::cerr << std::format("foryc: write error: {}\n", out_path.native());
@@ -360,7 +352,7 @@ static bool emit_migration_for_schema(
         return false;
     }
 
-    const eastl::string& text = *result;
+    const std::string& text = *result;
     ofs.write(text.data(), static_cast<std::streamsize>(text.size()));
     if (!ofs) {
         std::cerr << std::format("foryc: write error: {}\n", out_path.native());
@@ -404,20 +396,16 @@ static bool emit_migration_for_schema(
 // ".PluginManifest" (including the case of a single-component FQN with no dot,
 // which would otherwise silently return the FQN as-is and produce a non-namespaced
 // plugin name).
-static eastl::string
-plugin_name_from_fqn(const eastl::string& fqn, eastl::string* error_msg) noexcept {
+static std::string plugin_name_from_fqn(const std::string& fqn, std::string* error_msg) noexcept {
     static constexpr std::string_view kSuffix = ".PluginManifest";
     const std::string_view fqn_sv{fqn.data(), fqn.size()};
 
     if (!fqn_sv.ends_with(kSuffix)) {
         if (error_msg) {
-            *error_msg = eastl::string(
-                std::format(
-                    "first TypeDecl FQN \"{}\" does not end with \".PluginManifest\"; "
-                    "rename the type or update the schema convention",
-                    fqn_sv
-                )
-                    .c_str()
+            *error_msg = std::format(
+                "first TypeDecl FQN \"{}\" does not end with \".PluginManifest\"; "
+                "rename the type or update the schema convention",
+                fqn_sv
             );
         }
         return {};
@@ -441,8 +429,8 @@ static bool emit_manifest_for_file(
     // Convention: FQN must end with ".PluginManifest" (enforced by plugin_name_from_fqn).
     // e.g. "glibre.render.PluginManifest" → plugin name "glibre.render".
     // plugin-abi.md §"name" field: "fully-qualified plugin id (e.g. glibre.render)".
-    eastl::string fqn_error;
-    const eastl::string plugin_fqn = plugin_name_from_fqn(schema.types[0].fqn, &fqn_error);
+    std::string fqn_error;
+    const std::string plugin_fqn = plugin_name_from_fqn(schema.types[0].fqn, &fqn_error);
     if (plugin_fqn.empty()) {
         std::cerr << std::format(
             "foryc: {}: {}\n",
@@ -466,7 +454,7 @@ static bool emit_manifest_for_file(
     // (pre-#222) from a missing field.  The loader falls back to the sidecar path
     // per plugin-abi.md §"Step-3 deferral".  When #222 lands, wire
     // compute_collection_abi_hash() + format_as_full_hex() here.
-    spec.abi_hash = eastl::string(64, '0');
+    spec.abi_hash = std::string(64, '0');
     spec.min_engine_version = ManifestSemVer{0, 0, 0};
     // depends_on: not yet encoded in the .fory IR; deferred to plan #231.
 
@@ -496,7 +484,7 @@ static bool emit_manifest_for_file(
         return false;
     }
 
-    const eastl::string& text = *result;
+    const std::string& text = *result;
     ofs.write(text.data(), static_cast<std::streamsize>(text.size()));
     if (!ofs) {
         std::cerr << std::format("foryc: write error: {}\n", out_path.native());
@@ -522,7 +510,7 @@ int main(int argc, char** argv) {
     // Collect .fory files to process.
     // In single-file mode (--file), process exactly the one specified path.
     // In directory mode (--in), recursively scan for all .fory files.
-    eastl::vector<fs::path> schema_files;
+    std::vector<fs::path> schema_files;
     if (!args.single_file.empty()) {
         // Single-file mode (MED-7 fix): used for --emit=manifest to avoid races
         // when multiple plugins invoke the codegen helper concurrently.

@@ -250,8 +250,14 @@ TEST_CASE("register_failure_cleans_up_dlopen", "[core][register]") {
         "CMakeLists.txt must inject this macro for stub_register_fails target"
     );
 #else
+<<<<<<< HEAD
     constexpr std::string_view stub_path{GLIBRE_STUB_REGISTER_FAILS_DYLIB_PATH};
     REQUIRE_FALSE(stub_path.empty());
+=======
+    constexpr const char* stub_path = GLIBRE_STUB_REGISTER_FAILS_DYLIB_PATH;
+    REQUIRE(stub_path != nullptr);
+    REQUIRE(*stub_path != '\0');
+>>>>>>> origin/main
 
     // Step 1–2: load the failing stub — dlopen + dlsym must succeed.
     auto loader_result = glibre::core::PluginLoader::open(stub_path, loader_mr_);

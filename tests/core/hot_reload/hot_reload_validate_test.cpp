@@ -17,9 +17,9 @@
 //   - -fno-exceptions (error-model.md §Decision 3).
 //   - No REQUIRE_THROWS usage.
 //   - No filesystem access — manifests are constructed in-memory.
-//   - EASTL per PHILOSOPHY §11 (eastl::string for manifest fields).
+//   - libc++ std::pmr per PHILOSOPHY §11 (reviews/decisions/eastl-removal.md);
+//     PluginManifest fields are std::pmr::string (migrated in plan #1042).
 
-#include <EASTL/string.h>
 #include <catch2/catch_test_macros.hpp>
 
 #include "glibre/core/plugin_loader_actions.hpp"

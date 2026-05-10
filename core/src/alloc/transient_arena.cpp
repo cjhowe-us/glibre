@@ -10,17 +10,32 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-
-#include <EASTL/unique_ptr.h>
+#include <memory>
 
 namespace glibre {
 
 // ---------------------------------------------------------------------------
 // Constructor
+//
+// OOM behaviour: `std::make_unique_for_overwrite<std::byte[]>` calls
+// `::operator new[]`, which throws `std::bad_alloc` on allocation failure
+// (per [expr.new]/17).  Under `-fno-exceptions` (Glibre's compile flag),
+// clang's ABI converts any unhandled `throw` expression to a call to
+// `std::terminate()` (per [except.terminate]/1; cppreference: "if exceptions
+// are disabled, std::terminate is called directly").  The process therefore
+// terminates — not `abort()` directly, but `std::terminate()` which by
+// default calls `std::abort()` unless the terminate handler has been replaced.
+// This matches the prior `eastl::make_unique<std::byte[]>` abort-on-OOM
+// posture; both paths terminate the process on backing-store OOM.
+//
+// Fallible / recoverable arena construction (returning Result<TransientArena>)
+// is tracked as spike #1064 (deferred; post-MVP).
 // ---------------------------------------------------------------------------
 
 TransientArena::TransientArena(std::size_t capacity_bytes)
-    : storage_{capacity_bytes > 0 ? eastl::make_unique<std::byte[]>(capacity_bytes) : nullptr},
+    : storage_{
+          capacity_bytes > 0 ? std::make_unique_for_overwrite<std::byte[]>(capacity_bytes) : nullptr
+      },
       capacity_{capacity_bytes},
       cursor_{0},
       high_watermark_{0} {}

@@ -8,10 +8,10 @@
 #include <cstdint>
 #include <cstddef>
 
-#include <EASTL/optional.h>
-#include <EASTL/string.h>
-#include <EASTL/unordered_map.h>
-#include <EASTL/vector.h>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace data {
 namespace shapes {
@@ -39,10 +39,10 @@ struct Circle final {
 #include <cstdint>
 #include <cstddef>
 
-#include <EASTL/optional.h>
-#include <EASTL/string.h>
-#include <EASTL/unordered_map.h>
-#include <EASTL/vector.h>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace data {
 namespace shapes {

@@ -16,8 +16,12 @@
 //   - missing_symbol_returns_plugin_missing_entry_point
 //     (alias / equivalent to plugin_loader_open_returns_error_on_missing_symbols)
 //
+// Named test cases (plan #1050 Unit Test Plan, DoD):
+//   - core/plugin_loader: load_returns_eastl_string_handle_pre_pmr_migration
+//
 // Design constraints:
 //   • -fno-exceptions (error-model.md §Decision 3).
+<<<<<<< HEAD
 //   • std::string_view / std::pmr::string per reviews/decisions/eastl-removal.md
 //     matrix rows 1–2 (migrated from EASTL by plan #1043).
 //   • GLIBRE_NOOP_DYLIB_PATH — compile-time path to glibre-plugin-noop.dylib,
@@ -386,5 +390,60 @@ TEST_CASE("invalid_manifest_returns_plugin_manifest_invalid", "[core][plugin_loa
     const auto& manifest_res = loader.manifest_result();
     REQUIRE_FALSE(manifest_res.has_value());
     CHECK(holds_core_error(manifest_res.error(), glibre::core::Error::PluginManifestInvalid));
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Test: core/plugin_loader: load_returns_eastl_string_handle_pre_pmr_migration
+//
+// (Satisfies plan #1050 DoD assertion:
+//   unit_test_named:
+//     "core/plugin_loader: load_returns_eastl_string_handle_pre_pmr_migration")
+//
+// Pre-#1073 contract witness: PluginLoader::open() succeeds on the noop plugin
+// and dylib_path() returns a non-empty const eastl::string& (EASTL storage,
+// not std::pmr::string yet).  The static_assert below pins this contract at
+// compile time so any inadvertent type change fails loudly.
+//
+// After PR #1073 migrates PluginLoader storage to std::pmr, the follow-up plan
+// ([PLAN] iterate-rename-load-returns-handle-test-after-1073-migration) will
+// rename this test to "core/plugin_loader: load_returns_pmr_handle" and update
+// the assert to const std::pmr::string&.
+// ---------------------------------------------------------------------------
+
+TEST_CASE(
+    "core/plugin_loader: load_returns_eastl_string_handle_pre_pmr_migration",
+    "[core][plugin_loader]"
+) {
+#ifndef GLIBRE_NOOP_DYLIB_PATH
+    SKIP("GLIBRE_NOOP_DYLIB_PATH not defined; build with GLIBRE_BUILD_EXAMPLES=ON");
+#else
+    constexpr std::string_view path{GLIBRE_NOOP_DYLIB_PATH};
+    REQUIRE_FALSE(path.empty());
+
+    auto result = glibre::core::PluginLoader::open(path, loader_mr_);
+
+    // Load must succeed on a well-formed plugin dylib.
+    REQUIRE(result.has_value());
+
+    const glibre::core::PluginLoader& loader = *result;
+
+    // After PR #1073 migrates PluginLoader storage to std::pmr, dylib_path()
+    // returns const std::pmr::string& (was eastl::string pre-migration).
+    // This assert pins the post-migration contract.
+    static_assert(
+        std::is_same_v<decltype(loader.dylib_path()), const std::pmr::string&>,
+        "PluginLoader::dylib_path() must return const std::pmr::string& "
+        "(post-#1073 migration)"
+    );
+
+    // The ABI hash symbol must have resolved.
+    REQUIRE(loader.abi_hash() != nullptr);
+
+    // dylib_path must be non-empty (the path was threaded into the loader).
+    REQUIRE_FALSE(loader.dylib_path().empty());
+
+    // The path stored in the loader must match the path we opened.
+    CHECK(loader.dylib_path() == std::pmr::string{path});
 #endif
 }

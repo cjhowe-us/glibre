@@ -10,9 +10,9 @@
 //   "Every emitted EntryPoint has exactly one stage attribute."
 
 #include <expected>
+#include <string>
+#include <vector>
 
-#include <EASTL/string.h>
-#include <EASTL/vector.h>
 #include <glibre/shader/shader.hpp>
 
 namespace glibre::shader::detail {
@@ -27,7 +27,12 @@ namespace glibre::shader::detail {
 ///
 /// Stage strings recognised (case-sensitive, matching Slang conventions):
 ///   "vertex", "pixel", "compute", "mesh", "amplification", "library"
-[[nodiscard]] std::expected<eastl::vector<EntryPoint>, Error>
-scan_entry_points(const eastl::string& source);
+///
+/// mr — memory resource used for the returned vector and all intermediate
+///      strings inside the scan.  Must be the ContextTag::shader resource
+///      so that all allocations are accounted under the shader ceiling
+///      (perf-budget.md §Allocator Rules #1).
+[[nodiscard]] std::expected<std::pmr::vector<EntryPoint>, Error>
+scan_entry_points(const std::pmr::string& source, std::pmr::memory_resource* mr);
 
 }  // namespace glibre::shader::detail

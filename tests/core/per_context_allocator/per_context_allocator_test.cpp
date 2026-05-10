@@ -23,16 +23,16 @@
 //   - No REQUIRE_THROWS.
 //   - GLIBRE_ALLOC_STRICT=1 is set by the CMakeLists so strict-mode ceiling
 //     enforcement is active in all test cases.
-//   - Thread-safety test uses std::thread (PHILOSOPHY §11: std::thread is
-//     retained; EASTL does not provide thread primitives).
+//   - Thread-safety test uses std::thread; std::vector<T> for test fixtures
+//     per reviews/decisions/eastl-removal.md §Consequences/Test-fixtures.
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <thread>
 #include <variant>
+#include <vector>
 
-#include <EASTL/vector.h>
 #include <catch2/catch_test_macros.hpp>
 #include <glibre/alloc.hpp>
 
@@ -216,11 +216,11 @@ TEST_CASE("per_context_allocator_threadsafe_allocations", "[core][alloc]") {
     // Each thread allocates kBytesPerThread and stores its pointer here.
     // Protected by the thread join barrier (no mutex needed: each element is
     // written by exactly one thread and read only after join).
-    // eastl::vector per PHILOSOPHY §11 (EASTL replaces std:: containers).
-    eastl::vector<void*> ptrs(kThreadCount, nullptr);
+    // std::vector per reviews/decisions/eastl-removal.md §Consequences/Test-fixtures.
+    std::vector<void*> ptrs(kThreadCount, nullptr);
 
     {
-        eastl::vector<std::thread> threads;
+        std::vector<std::thread> threads;
         threads.reserve(kThreadCount);
         for (int i = 0; i < kThreadCount; ++i) {
             threads.emplace_back([&alloc, &ptrs, i]() {

@@ -9,10 +9,9 @@
 
 #include <algorithm>
 #include <format>
+#include <string>
 #include <string_view>
-
-#include <EASTL/string.h>
-#include <EASTL/vector.h>
+#include <vector>
 
 #include "builtin_map.hpp"
 
@@ -43,7 +42,7 @@ namespace {
 // -----------------------------------------------------------------------
 
 // Forward declaration.
-[[nodiscard]] glibre::Result<eastl::string>
+[[nodiscard]] glibre::Result<std::string>
 map_builtin_to_cpp_impl(std::string_view fory_type, bool& needs_builtins) noexcept;
 
 // Split "A,B" → {"A", "B"}.  Returns false if the split is ambiguous
@@ -75,30 +74,30 @@ split_two(std::string_view params, std::string_view& out_a, std::string_view& ou
     return sv;
 }
 
-[[nodiscard]] static glibre::Result<eastl::string>
+[[nodiscard]] static glibre::Result<std::string>
 map_generic_to_cpp(std::string_view base, std::string_view params, bool& needs_builtins) noexcept {
     if (base == "list") {
-        // list<T> → eastl::vector<T_cpp>
+        // list<T> → std::vector<T_cpp>
         auto inner = map_builtin_to_cpp_impl(trim(params), needs_builtins);
         if (!inner)
             return std::unexpected{inner.error()};
-        eastl::string out{"eastl::vector<"};
+        std::string out{"std::vector<"};
         out += *inner;
         out += '>';
         return out;
     }
     if (base == "option") {
-        // option<T> → eastl::optional<T_cpp>
+        // option<T> → std::optional<T_cpp>
         auto inner = map_builtin_to_cpp_impl(trim(params), needs_builtins);
         if (!inner)
             return std::unexpected{inner.error()};
-        eastl::string out{"eastl::optional<"};
+        std::string out{"std::optional<"};
         out += *inner;
         out += '>';
         return out;
     }
     if (base == "map") {
-        // map<K,V> → eastl::unordered_map<K_cpp, V_cpp>
+        // map<K,V> → std::unordered_map<K_cpp, V_cpp>
         std::string_view ka, vb;
         if (!split_two(params, ka, vb))
             return std::unexpected{glibre::Error{tools::Error::ForycSyntaxError}};
@@ -108,7 +107,7 @@ map_generic_to_cpp(std::string_view base, std::string_view params, bool& needs_b
         auto val = map_builtin_to_cpp_impl(trim(vb), needs_builtins);
         if (!val)
             return std::unexpected{val.error()};
-        eastl::string out{"eastl::unordered_map<"};
+        std::string out{"std::unordered_map<"};
         out += *key;
         out += ", ";
         out += *val;
@@ -126,7 +125,7 @@ map_generic_to_cpp(std::string_view base, std::string_view params, bool& needs_b
 // #include <glibre/types/_builtins.hpp>.
 // -----------------------------------------------------------------------
 
-[[nodiscard]] glibre::Result<eastl::string>
+[[nodiscard]] glibre::Result<std::string>
 map_builtin_to_cpp_impl(std::string_view fory_type, bool& needs_builtins) noexcept {
     // Strip surrounding whitespace (robustness for recursive calls).
     fory_type = trim(fory_type);
@@ -148,7 +147,7 @@ map_builtin_to_cpp_impl(std::string_view fory_type, bool& needs_builtins) noexce
         return std::unexpected{glibre::Error{tools::Error::ForycUnknownType}};
     if (entry->needs_builtins_include)
         needs_builtins = true;
-    return eastl::string{entry->cpp.data(), entry->cpp.size()};
+    return std::string{entry->cpp.data(), entry->cpp.size()};
 }
 
 // -----------------------------------------------------------------------
@@ -160,16 +159,16 @@ map_builtin_to_cpp_impl(std::string_view fory_type, bool& needs_builtins) noexce
 // -----------------------------------------------------------------------
 
 struct FqnParts {
-    eastl::vector<eastl::string> namespaces;  // all but the last component
-    eastl::string type_name;                  // last component
+    std::vector<std::string> namespaces;  // all but the last component
+    std::string type_name;                // last component
 };
 
-[[nodiscard]] static FqnParts decompose_fqn(const eastl::string& fqn) noexcept {
+[[nodiscard]] static FqnParts decompose_fqn(const std::string& fqn) noexcept {
     FqnParts parts;
     std::size_t start = 0;
     while (true) {
         const std::size_t dot = fqn.find('.', start);
-        if (dot == eastl::string::npos) {
+        if (dot == std::string::npos) {
             parts.type_name = fqn.substr(start);
             break;
         }
@@ -186,10 +185,10 @@ struct FqnParts {
 // Returns only the struct body text (namespaces + struct, no preamble).
 // -----------------------------------------------------------------------
 
-[[nodiscard]] static glibre::Result<eastl::string>
+[[nodiscard]] static glibre::Result<std::string>
 emit_type_decl_body(const TypeDecl& td, bool& needs_builtins) noexcept {
     // Sort fields by tag (ascending) — ABI rule 1.
-    eastl::vector<const FieldDecl*> sorted;
+    std::vector<const FieldDecl*> sorted;
     sorted.reserve(td.fields.size());
     for (const auto& f : td.fields)
         sorted.push_back(&f);
@@ -199,7 +198,7 @@ emit_type_decl_body(const TypeDecl& td, bool& needs_builtins) noexcept {
 
     const FqnParts fqn = decompose_fqn(td.fqn);
 
-    eastl::string out;
+    std::string out;
 
     // Open namespaces.
     for (const auto& ns : fqn.namespaces) {
@@ -211,13 +210,10 @@ emit_type_decl_body(const TypeDecl& td, bool& needs_builtins) noexcept {
         out += "\n";
 
     // Struct comment with version via std::format.
-    out += eastl::string(
-        std::format(
-            "// Generated by glibre-foryc from schema {} v{}\n",
-            std::string_view(td.fqn.data(), td.fqn.size()),
-            td.version
-        )
-            .c_str()
+    out += std::format(
+        "// Generated by glibre-foryc from schema {} v{}\n",
+        std::string_view(td.fqn.data(), td.fqn.size()),
+        td.version
     );
     out += "// TODO(#222): insert ABI hash here once plan #222 lands.\n";
 
@@ -266,8 +262,7 @@ emit_type_decl_body(const TypeDecl& td, bool& needs_builtins) noexcept {
 // Public API — map_builtin_to_cpp
 // -----------------------------------------------------------------------
 
-[[nodiscard]] glibre::Result<eastl::string>
-map_builtin_to_cpp(std::string_view fory_type) noexcept {
+[[nodiscard]] glibre::Result<std::string> map_builtin_to_cpp(std::string_view fory_type) noexcept {
     bool ignored = false;
     return map_builtin_to_cpp_impl(fory_type, ignored);
 }
@@ -280,7 +275,7 @@ map_builtin_to_cpp(std::string_view fory_type) noexcept {
 // Schema construction needed.
 // -----------------------------------------------------------------------
 
-[[nodiscard]] glibre::Result<eastl::string>
+[[nodiscard]] glibre::Result<std::string>
 emit_header_for_type(const TypeDecl& td, std::string_view source_path) noexcept {
     if (td.fqn.empty())
         return std::unexpected{glibre::Error{tools::Error::ForycSyntaxError}};
@@ -293,12 +288,12 @@ emit_header_for_type(const TypeDecl& td, std::string_view source_path) noexcept 
         return std::unexpected{type_out.error()};
 
     // Build the preamble.
-    eastl::string out;
+    std::string out;
 
     // File-level header comment.
     out += "// GENERATED FILE — do not edit by hand.\n";
     out += "// Source: ";
-    out += eastl::string(source_path.data(), source_path.size());
+    out += std::string(source_path.data(), source_path.size());
     out += "\n";
     out += "// Generator: glibre-foryc (plan #220)\n";
     out += "// TODO(#222): ABI hash export not yet wired (plan #222).\n";
@@ -317,10 +312,10 @@ emit_header_for_type(const TypeDecl& td, std::string_view source_path) noexcept 
     }
 
     out += "\n";
-    out += "#include <EASTL/optional.h>\n";
-    out += "#include <EASTL/string.h>\n";
-    out += "#include <EASTL/unordered_map.h>\n";
-    out += "#include <EASTL/vector.h>\n";
+    out += "#include <optional>\n";
+    out += "#include <string>\n";
+    out += "#include <unordered_map>\n";
+    out += "#include <vector>\n";
     out += "\n";
 
     out += *type_out;
@@ -335,13 +330,13 @@ emit_header_for_type(const TypeDecl& td, std::string_view source_path) noexcept 
 // Returns ForycEmptySchema if schema.types is empty.
 // -----------------------------------------------------------------------
 
-[[nodiscard]] glibre::Result<eastl::string> emit_header(const Schema& schema) noexcept {
+[[nodiscard]] glibre::Result<std::string> emit_header(const Schema& schema) noexcept {
     if (schema.types.empty())
         return std::unexpected{glibre::Error{tools::Error::ForycEmptySchema}};
 
     const std::string_view src_path(schema.source_path.data(), schema.source_path.size());
 
-    eastl::string out;
+    std::string out;
     for (const auto& td : schema.types) {
         auto result = emit_header_for_type(td, src_path);
         if (!result)

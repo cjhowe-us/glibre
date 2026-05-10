@@ -39,7 +39,11 @@
 //
 // Design constraints:
 //   • -fno-exceptions (error-model.md §Decision 3).
-//   • EASTL for containers and string_view (PHILOSOPHY §11).
+//   • libc++ std::string_view throughout (reviews/decisions/eastl-removal.md row 2).
+//     PluginLoaderRegistry API: std::string_view (plan #1044 migration, PR #1072).
+//     PluginLoader::open(): eastl::string_view on this branch; migrated in
+//     plan #1043 / PR #1073 (auto-merge pending).  Pass const char* literals
+//     directly so the EASTL include is not required in test scope.
 //   • Each test owns its own PluginLoaderRegistry (not a singleton).
 //
 // Coverage vs. plugin-abi.md §"Loader Sequence":
@@ -65,6 +69,7 @@
 // eastl::string_view to std::string_view.  Until then the registry call sites
 // below use eastl::string_view and this include is required.
 #include <EASTL/string_view.h>
+
 #include <catch2/catch_test_macros.hpp>
 #include <glibre/alloc.hpp>
 #include <glibre/core/plugin_loader.hpp>
@@ -233,9 +238,15 @@ TEST_CASE("integration_abi_hash_mismatch_propagates", "[core][integration]") {
         "this macro is unconditional; check CMakeLists.txt for glibre-plugin-stub-wrong-abi"
     );
 #else
+<<<<<<< HEAD
     const char* stub_path = GLIBRE_STUB_WRONG_ABI_DYLIB_PATH;
     REQUIRE(stub_path != nullptr);
     REQUIRE(stub_path[0] != '\0');
+=======
+    constexpr const char* stub_path = GLIBRE_STUB_WRONG_ABI_DYLIB_PATH;
+    REQUIRE(stub_path != nullptr);
+    REQUIRE(*stub_path != '\0');
+>>>>>>> origin/main
 
     // Step 1-2: dlopen + dlsym must succeed — the stub exports all four symbols.
     auto loader_result = glibre::core::PluginLoader::open(stub_path, mr_);
@@ -246,18 +257,21 @@ TEST_CASE("integration_abi_hash_mismatch_propagates", "[core][integration]") {
     // Verify that the loaded stub's ABI hash is the wrong sentinel ("ffff...").
     // This confirms we loaded the stub and not some other dylib.
     REQUIRE(loader.abi_hash() != nullptr);
-    const eastl::string_view symbol_hash{loader.abi_hash()};
+    // Compare using std::string_view (eastl-removal.md row 2).
     CHECK(
-        symbol_hash ==
-        eastl::string_view{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}
+        std::string_view{loader.abi_hash()} ==
+        std::string_view{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}
     );
 
     // Step 4 (symbol-side gate): validate_symbol_abi_hash must reject the stub.
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    // PluginLoaderRegistry API now takes std::string_view (plan #1044).
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     SECTION("validate_symbol_abi_hash rejects wrong hash") {
-        auto result =
-            registry.validate_symbol_abi_hash(symbol_hash, eastl::string_view{kRealExpectedHash});
+        auto result = registry.validate_symbol_abi_hash(
+            std::string_view{loader.abi_hash()},  // symbol hash via std::string_view
+            kRealExpectedHash                     // const char* -> std::string_view
+        );
         REQUIRE_FALSE(result.has_value());
         const auto* core_err = as_core_error(result.error());
         REQUIRE(core_err != nullptr);
@@ -274,9 +288,9 @@ TEST_CASE("integration_abi_hash_mismatch_propagates", "[core][integration]") {
 
         auto result = registry.validate_all(
             manifest,
-            eastl::string_view{kRealExpectedHash},  // expected
-            symbol_hash,                            // symbol value (also wrong)
-            stub_path
+            kRealExpectedHash,                    // expected (const char* -> std::string_view)
+            std::string_view{loader.abi_hash()},  // symbol value (also wrong)
+            stub_path                             // const char* → std::string_view
         );
         REQUIRE_FALSE(result.has_value());
         const auto* core_err = as_core_error(result.error());
@@ -323,7 +337,7 @@ TEST_CASE("integration_name_collision_propagates", "[core][integration]") {
     REQUIRE(noop_path != nullptr);
     REQUIRE(noop_path[0] != '\0');
 
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     // Step 1: load the noop plugin via PluginLoader::open().
     auto loader_result = glibre::core::PluginLoader::open(noop_path, mr_);
@@ -338,9 +352,9 @@ TEST_CASE("integration_name_collision_propagates", "[core][integration]") {
     {
         auto vr = registry.validate_all(
             manifest_a,
-            eastl::string_view{kNoopAbiHash},  // expected = noop's hash
-            eastl::string_view{kNoopAbiHash},  // symbol   = noop's hash
-            noop_path
+            kNoopAbiHash,  // expected = noop's hash (const char* → std::string_view)
+            kNoopAbiHash,  // symbol   = noop's hash (const char* → std::string_view)
+            noop_path      // const char* → std::string_view
         );
         REQUIRE(vr.has_value());
     }
@@ -349,14 +363,14 @@ TEST_CASE("integration_name_collision_propagates", "[core][integration]") {
 
     // Step 3: attempt to load a second plugin with the SAME manifest name but
     // a different file path.  Gate-3 (name uniqueness) must fire.
-    const eastl::string_view other_path{"/tmp/glibre-integration-other-collision.dylib"};
+    constexpr std::string_view other_path{"/tmp/glibre-integration-other-collision.dylib"};
     auto manifest_b = make_manifest("glibre.integration.collision");  // same name
 
     auto result = registry.validate_all(
         manifest_b,
-        eastl::string_view{kNoopAbiHash},
-        eastl::string_view{kNoopAbiHash},
-        other_path  // different path → collision
+        kNoopAbiHash,  // expected (const char* → std::string_view)
+        kNoopAbiHash,  // symbol value (const char* → std::string_view)
+        other_path     // different path → collision
     );
 
     REQUIRE_FALSE(result.has_value());
@@ -427,7 +441,7 @@ TEST_CASE("integration_happy_path_loads_and_validates", "[core][integration]") {
     // Step 3 (registry): construct a manifest whose abi_hash matches the noop
     // plugin's exported value.  Since the noop exports all-zeros, we use
     // kNoopAbiHash for both the manifest field and the expected_abi_hash arg.
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     auto manifest = make_manifest("glibre.integration.happy");
 
@@ -438,9 +452,9 @@ TEST_CASE("integration_happy_path_loads_and_validates", "[core][integration]") {
     // Gate 4:  depends_on is empty → pass (step 7 vacuously satisfied).
     auto validate_result = registry.validate_all(
         manifest,
-        eastl::string_view{kNoopAbiHash},       // expected hash
-        eastl::string_view{loader.abi_hash()},  // symbol hash
-        noop_path
+        kNoopAbiHash,                         // expected hash (const char* → std::string_view)
+        std::string_view{loader.abi_hash()},  // symbol hash (std::string_view)
+        noop_path                             // const char* → std::string_view
     );
 
     REQUIRE(validate_result.has_value());
@@ -449,7 +463,7 @@ TEST_CASE("integration_happy_path_loads_and_validates", "[core][integration]") {
     REQUIRE(registry.register_plugin(manifest, noop_path).has_value());
 
     CHECK(registry.loaded_count() == 1u);
-    CHECK(registry.is_registered(eastl::string_view{"glibre.integration.happy"}));
+    CHECK(registry.is_registered("glibre.integration.happy"));
 #endif
 }
 
@@ -491,9 +505,15 @@ TEST_CASE("integration_manifest_invalid_propagates", "[core][integration]") {
         "glibre-plugin-stub-invalid-manifest"
     );
 #else
+<<<<<<< HEAD
     const char* stub_path = GLIBRE_STUB_INVALID_MANIFEST_DYLIB_PATH;
     REQUIRE(stub_path != nullptr);
     REQUIRE(stub_path[0] != '\0');
+=======
+    constexpr const char* stub_path = GLIBRE_STUB_INVALID_MANIFEST_DYLIB_PATH;
+    REQUIRE(stub_path != nullptr);
+    REQUIRE(*stub_path != '\0');
+>>>>>>> origin/main
 
     // Steps 1–2: dlopen + dlsym must succeed — the stub exports all four symbols.
     auto loader_result = glibre::core::PluginLoader::open(stub_path, mr_);
@@ -580,10 +600,10 @@ TEST_CASE("integration_engine_too_old_propagates", "[core][integration]") {
     // assertion confirms dlsym reached the correct dylib before we feed the
     // synthetic manifest into the registry gates below.
     REQUIRE(loader_result->abi_hash() != nullptr);
-    CHECK(eastl::string_view{loader_result->abi_hash()} == eastl::string_view{kNoopAbiHash});
+    CHECK(std::string_view{loader_result->abi_hash()} == std::string_view{kNoopAbiHash});
 
     // Registry with host engine version {1, 0, 0}.
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     // Synthesise a manifest whose min_engine_version far exceeds the host.
     // min_engine_version {99, 0, 0} > host {1, 0, 0} → gate 2 fires.
@@ -598,9 +618,9 @@ TEST_CASE("integration_engine_too_old_propagates", "[core][integration]") {
     // Gates 1a and 1b pass because the manifest and symbol both carry kNoopAbiHash.
     auto result = registry.validate_all(
         manifest,
-        eastl::string_view{kNoopAbiHash},  // expected
-        eastl::string_view{kNoopAbiHash},  // symbol value (noop hash)
-        noop_path
+        kNoopAbiHash,  // expected (const char* → std::string_view)
+        kNoopAbiHash,  // symbol value (const char* → std::string_view)
+        noop_path      // const char* → std::string_view
     );
 
     REQUIRE_FALSE(result.has_value());
@@ -660,10 +680,10 @@ TEST_CASE("integration_dependency_missing_propagates", "[core][integration]") {
     // assertion confirms dlsym reached the correct dylib before we feed the
     // synthetic manifest into the registry gates below.
     REQUIRE(loader_result->abi_hash() != nullptr);
-    CHECK(eastl::string_view{loader_result->abi_hash()} == eastl::string_view{kNoopAbiHash});
+    CHECK(std::string_view{loader_result->abi_hash()} == std::string_view{kNoopAbiHash});
 
     // Registry is empty — "glibre.integration.missing_dep" is not registered.
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     // Synthesise a manifest for plugin B that lists an unmet dependency.
     glibre::core::PluginManifest manifest = make_manifest("glibre.integration.dep_consumer");
@@ -676,9 +696,9 @@ TEST_CASE("integration_dependency_missing_propagates", "[core][integration]") {
     // and "glibre.integration.dep_consumer" is not yet registered.
     auto result = registry.validate_all(
         manifest,
-        eastl::string_view{kNoopAbiHash},  // expected
-        eastl::string_view{kNoopAbiHash},  // symbol value (noop hash)
-        noop_path
+        kNoopAbiHash,  // expected (const char* → std::string_view)
+        kNoopAbiHash,  // symbol value (const char* → std::string_view)
+        noop_path      // const char* → std::string_view
     );
 
     REQUIRE_FALSE(result.has_value());

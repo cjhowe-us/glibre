@@ -1,6 +1,6 @@
 // tests/core/plugin_loader_registry/plugin_loader_registry_test.cpp
 //
-// Catch2 unit tests for glibre::core::PluginLoaderRegistry (plan #230, #981).
+// Catch2 unit tests for glibre::core::PluginLoaderRegistry (plan #230, #981, #1044).
 //
 // Named test cases (plan #230 Unit Test Plan + DoD):
 //   - plugin_loader_rejects_abi_hash_mismatch
@@ -13,20 +13,36 @@
 //   - validate_drain_phase_outside_hotreload_returns_error
 //   - validate_drain_phase_at_phase_8_succeeds
 //
+// Named test cases (plan #1044 Unit Test Plan + DoD):
+//   - core/plugin_loader_registry: lookup_o_log_n
+//   - core/compat/transparent_string_hash: heterogeneous_lookup_string_view
+//   - core/plugin_loader_registry: allocator_aware_plugin_record
+//
 // Design constraints:
-//   • -fno-exceptions (error-model.md §Decision 3).
-//   • No dylib is loaded in any of these tests.  All four gates operate
+//   * -fno-exceptions (error-model.md §Decision 3).
+//   * No dylib is loaded in any of these tests.  All four gates operate
 //     purely on in-memory PluginManifest values and the registry state.
 //     dlopen/dlsym is already covered by tests/core/plugin_loader (plan #229).
-//   • Tests construct and own PluginLoaderRegistry instances directly —
+//   * Tests construct and own PluginLoaderRegistry instances directly --
 //     the registry is NOT a singleton (plugin_loader_registry.hpp contract).
+//   * All eastl::string_view call sites replaced with std::string_view
+//     (plan #1044 migration, eastl-removal.md matrix row 2).
+//   * All PluginLoaderRegistry constructions pass mr explicitly (MED-4 fix:
+//     no default arg on the constructor; per-context tracking is opt-in by
+//     explicit decision, not by default fallthrough).
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory_resource>
+#include <string>
+#include <string_view>
 #include <type_traits>
+#include <unordered_map>
 
-#include <EASTL/string_view.h>
 #include <catch2/catch_test_macros.hpp>
+#include <glibre/alloc.hpp>
+#include <glibre/compat/transparent_string_hash.hpp>
 #include <glibre/core/frame_phase.hpp>
 #include <glibre/core/plugin_loader_registry.hpp>
 #include <glibre/core/plugin_manifest.hpp>
@@ -96,16 +112,16 @@ glibre::core::PluginManifest make_manifest_with_deps(const char* name, Deps... d
 //
 // Gate 1 (plugin-abi.md §"Loader Sequence" step 4):
 //   manifest.abi_hash AND the exported symbol must both equal the expected
-//   (host) ABI hash.  Mismatch → core::Error::PluginAbiHashMismatch.
+//   (host) ABI hash.  Mismatch -> core::Error::PluginAbiHashMismatch.
 //
 // Three sub-cases:
-//   a) manifest.abi_hash mismatches  → rejected via validate_manifest_abi_hash.
-//   b) symbol_abi_hash mismatches    → rejected via validate_all gate-1a.
-//   c) both hashes wrong             → still PluginAbiHashMismatch (not masked).
+//   a) manifest.abi_hash mismatches  -> rejected via validate_manifest_abi_hash.
+//   b) symbol_abi_hash mismatches    -> rejected via validate_all gate-1a.
+//   c) both hashes wrong             -> still PluginAbiHashMismatch (not masked).
 // ===========================================================================
 
 TEST_CASE("plugin_loader_rejects_abi_hash_mismatch", "[core][plugin_loader_registry]") {
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     SECTION("manifest abi_hash mismatch") {
         // Build a manifest whose abi_hash differs from the expected value.
@@ -116,9 +132,8 @@ TEST_CASE("plugin_loader_rejects_abi_hash_mismatch", "[core][plugin_loader_regis
             {0, 1, 0}
         );
 
-        // Validate through the standalone manifest gate — should reject.
-        const eastl::string_view expected{kExpectedHash};
-        auto result = registry.validate_manifest_abi_hash(manifest, expected);
+        // Validate through the standalone manifest gate -- should reject.
+        auto result = registry.validate_manifest_abi_hash(manifest, kExpectedHash);
 
         REQUIRE_FALSE(result.has_value());
         const auto* core_err = as_core_error(result.error());
@@ -135,13 +150,9 @@ TEST_CASE("plugin_loader_rejects_abi_hash_mismatch", "[core][plugin_loader_regis
             {0, 1, 0}
         );
 
-        // Pass the wrong symbol hash → gate-1a in validate_all fires.
-        const eastl::string_view expected{kExpectedHash};
-        const eastl::string_view wrong_symbol{kWrongHash};
-
-        auto result = registry.validate_all(
-            manifest, expected, wrong_symbol, eastl::string_view{"/fake/path.dylib"}
-        );
+        // Pass the wrong symbol hash -> gate-1a in validate_all fires.
+        auto result =
+            registry.validate_all(manifest, kExpectedHash, kWrongHash, "/fake/path.dylib");
 
         REQUIRE_FALSE(result.has_value());
         const auto* core_err = as_core_error(result.error());
@@ -149,7 +160,7 @@ TEST_CASE("plugin_loader_rejects_abi_hash_mismatch", "[core][plugin_loader_regis
         CHECK(*core_err == glibre::core::Error::PluginAbiHashMismatch);
     }
 
-    SECTION("both hashes wrong → still PluginAbiHashMismatch (not masked)") {
+    SECTION("both hashes wrong -> still PluginAbiHashMismatch (not masked)") {
         auto manifest = make_manifest(
             "glibre.test.plugin",
             {1, 0, 0},
@@ -157,12 +168,8 @@ TEST_CASE("plugin_loader_rejects_abi_hash_mismatch", "[core][plugin_loader_regis
             {0, 1, 0}
         );
 
-        const eastl::string_view expected{kExpectedHash};
-        const eastl::string_view wrong_symbol{kWrongHash};
-
-        auto result = registry.validate_all(
-            manifest, expected, wrong_symbol, eastl::string_view{"/fake/path.dylib"}
-        );
+        auto result =
+            registry.validate_all(manifest, kExpectedHash, kWrongHash, "/fake/path.dylib");
 
         REQUIRE_FALSE(result.has_value());
         const auto* core_err = as_core_error(result.error());
@@ -176,11 +183,11 @@ TEST_CASE("plugin_loader_rejects_abi_hash_mismatch", "[core][plugin_loader_regis
 //
 // Gate 4 (plugin-abi.md §"Loader Sequence" step 7):
 //   Every entry in manifest.depends_on must already be registered.
-//   Any missing dependency → core::Error::PluginDependencyMissing.
+//   Any missing dependency -> core::Error::PluginDependencyMissing.
 // ===========================================================================
 
 TEST_CASE("plugin_loader_rejects_unknown_dependency", "[core][plugin_loader_registry]") {
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     // Build a manifest that depends on "glibre.base" which is not registered.
     auto manifest = make_manifest_with_deps("glibre.test.plugin", "glibre.base");
@@ -204,19 +211,18 @@ TEST_CASE("plugin_loader_rejects_unknown_dependency", "[core][plugin_loader_regi
 // ===========================================================================
 
 TEST_CASE("plugin_loader_accepts_compatible_plugin", "[core][plugin_loader_registry]") {
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     // Build a manifest that satisfies all gates:
-    //   • abi_hash == kExpectedHash
-    //   • min_engine_version {0,1,0} ≤ host {1,0,0}
-    //   • name "glibre.test.plugin" is not registered
-    //   • depends_on is empty (no unmet dependencies)
+    //   * abi_hash == kExpectedHash
+    //   * min_engine_version {0,1,0} <= host {1,0,0}
+    //   * name "glibre.test.plugin" is not registered
+    //   * depends_on is empty (no unmet dependencies)
     auto manifest = make_manifest();
 
-    const eastl::string_view expected{kExpectedHash};
-    const eastl::string_view path{"/fake/path/plugin.dylib"};
+    constexpr std::string_view path{"/fake/path/plugin.dylib"};
 
-    auto result = registry.validate_all(manifest, expected, expected, path);
+    auto result = registry.validate_all(manifest, kExpectedHash, kExpectedHash, path);
 
     REQUIRE(result.has_value());
 
@@ -225,7 +231,7 @@ TEST_CASE("plugin_loader_accepts_compatible_plugin", "[core][plugin_loader_regis
 
     // Registry should now have one loaded plugin.
     CHECK(registry.loaded_count() == 1u);
-    CHECK(registry.is_registered(eastl::string_view{manifest.name.c_str()}));
+    CHECK(registry.is_registered(std::string_view{manifest.name}));
 }
 
 // ===========================================================================
@@ -233,26 +239,24 @@ TEST_CASE("plugin_loader_accepts_compatible_plugin", "[core][plugin_loader_regis
 //
 // Gate 3 (plugin-abi.md §"Loader Sequence" step 6):
 //   manifest.name must be unique across already-loaded plugins.
-//   Collision → core::Error::PluginNameCollision.
+//   Collision -> core::Error::PluginNameCollision.
 // ===========================================================================
 
 TEST_CASE("plugin_loader_rejects_duplicate_name", "[core][plugin_loader_registry]") {
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
-    const eastl::string_view expected{kExpectedHash};
-
-    const eastl::string_view first_path{"/fake/path/first.dylib"};
-    const eastl::string_view second_path{"/fake/path/second.dylib"};  // different path
+    constexpr std::string_view first_path{"/fake/path/first.dylib"};
+    constexpr std::string_view second_path{"/fake/path/second.dylib"};  // different path
 
     // Register the first plugin successfully.
     auto first = make_manifest("glibre.test.duplicate", {1, 0, 0}, kExpectedHash, {0, 1, 0});
-    auto r1 = registry.validate_all(first, expected, expected, first_path);
+    auto r1 = registry.validate_all(first, kExpectedHash, kExpectedHash, first_path);
     REQUIRE(r1.has_value());
     REQUIRE(registry.register_plugin(first, first_path).has_value());
 
     // Attempt to register a second plugin with the same name but different path.
     auto second = make_manifest("glibre.test.duplicate", {1, 1, 0}, kExpectedHash, {0, 1, 0});
-    auto r2 = registry.validate_all(second, expected, expected, second_path);
+    auto r2 = registry.validate_all(second, kExpectedHash, kExpectedHash, second_path);
 
     REQUIRE_FALSE(r2.has_value());
     const auto* core_err = as_core_error(r2.error());
@@ -264,15 +268,17 @@ TEST_CASE("plugin_loader_rejects_duplicate_name", "[core][plugin_loader_registry
 // Test: plugin_loader_rejects_incompatible_version
 //
 // Gate 2 (plugin-abi.md §"Loader Sequence" step 5):
-//   manifest.min_engine_version must be ≤ host engine version.
-//   Plugin requiring a newer engine → core::Error::PluginEngineTooOld.
+//   manifest.min_engine_version must be <= host engine version.
+//   Plugin requiring a newer engine -> core::Error::PluginEngineTooOld.
 // ===========================================================================
 
 TEST_CASE("plugin_loader_rejects_incompatible_version", "[core][plugin_loader_registry]") {
-    // Host engine version {1, 0, 0} — older than the plugin requires.
-    glibre::core::PluginLoaderRegistry registry{glibre::core::SemVer{1, 0, 0}};
+    // Host engine version {1, 0, 0} -- older than the plugin requires.
+    glibre::core::PluginLoaderRegistry registry{
+        glibre::core::SemVer{1, 0, 0}, std::pmr::get_default_resource()
+    };
 
-    // Plugin requires engine {2, 0, 0} — newer than the host.
+    // Plugin requires engine {2, 0, 0} -- newer than the host.
     auto manifest = make_manifest(
         "glibre.test.future", {1, 0, 0}, kExpectedHash, {2, 0, 0}
         // min_engine_version = 2.0.0 > host 1.0.0
@@ -286,14 +292,18 @@ TEST_CASE("plugin_loader_rejects_incompatible_version", "[core][plugin_loader_re
     CHECK(*core_err == glibre::core::Error::PluginEngineTooOld);
 
     SECTION("host exactly meets minimum version") {
-        // host == min_engine_version → must succeed (≤ condition).
-        glibre::core::PluginLoaderRegistry reg_exact{glibre::core::SemVer{2, 0, 0}};
+        // host == min_engine_version -> must succeed (<= condition).
+        glibre::core::PluginLoaderRegistry reg_exact{
+            glibre::core::SemVer{2, 0, 0}, std::pmr::get_default_resource()
+        };
         auto r2 = reg_exact.validate_engine_version(manifest);
         CHECK(r2.has_value());
     }
 
     SECTION("host exceeds minimum version") {
-        glibre::core::PluginLoaderRegistry reg_newer{glibre::core::SemVer{3, 5, 2}};
+        glibre::core::PluginLoaderRegistry reg_newer{
+            glibre::core::SemVer{3, 5, 2}, std::pmr::get_default_resource()
+        };
         auto r3 = reg_newer.validate_engine_version(manifest);
         CHECK(r3.has_value());
     }
@@ -303,40 +313,35 @@ TEST_CASE("plugin_loader_rejects_incompatible_version", "[core][plugin_loader_re
 // Additional: gate ordering in validate_all
 //
 // Verifies that validate_all checks gates in the mandated order:
-//   hash → engine version → name → deps.
+//   hash -> engine version -> name -> deps.
 //
 // A manifest that fails gate 1 (hash) should not proceed to check name/deps.
 // ===========================================================================
 
 TEST_CASE("validate_all_gate_ordering_hash_first", "[core][plugin_loader_registry]") {
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     // Register "glibre.base" first so a dependency check would pass.
     auto base = make_manifest("glibre.base");
     {
         // validate_all would succeed here; we discard the result intentionally
         // because we're setting up state, not testing this call.
-        auto r = registry.validate_all(
-            base,
-            eastl::string_view{kExpectedHash},
-            eastl::string_view{kExpectedHash},
-            eastl::string_view{"/fake/base.dylib"}
-        );
+        auto r = registry.validate_all(base, kExpectedHash, kExpectedHash, "/fake/base.dylib");
         REQUIRE(r.has_value());
     }
-    REQUIRE(registry.register_plugin(base, eastl::string_view{"/fake/base.dylib"}).has_value());
+    REQUIRE(registry.register_plugin(base, "/fake/base.dylib").has_value());
 
     // Now build a manifest that:
-    //   • has a WRONG abi_hash (gate 1 fails)
-    //   • depends on "glibre.base" which IS registered (gate 4 would pass)
+    //   * has a WRONG abi_hash (gate 1 fails)
+    //   * depends on "glibre.base" which IS registered (gate 4 would pass)
     auto manifest = make_manifest_with_deps("glibre.test.order", "glibre.base");
     manifest.abi_hash = kWrongHash;  // std::pmr::string from const char*; gate 1 fails
 
     auto result = registry.validate_all(
         manifest,
-        eastl::string_view{kExpectedHash},
-        eastl::string_view{kExpectedHash},  // symbol hash matches, but manifest hash does not
-        eastl::string_view{"/fake/order.dylib"}
+        kExpectedHash,
+        kExpectedHash,  // symbol hash matches, but manifest hash does not
+        "/fake/order.dylib"
     );
 
     // Gate 1 (manifest hash check) must fire, not gate 4.
@@ -354,30 +359,28 @@ TEST_CASE("validate_all_gate_ordering_hash_first", "[core][plugin_loader_registr
 // ===========================================================================
 
 TEST_CASE("validate_all_gate_ordering_version_before_name", "[core][plugin_loader_registry]") {
-    glibre::core::PluginLoaderRegistry registry{glibre::core::SemVer{1, 0, 0}};
+    glibre::core::PluginLoaderRegistry registry{
+        glibre::core::SemVer{1, 0, 0}, std::pmr::get_default_resource()
+    };
 
     // Register "glibre.base" so a name-collision would be possible if gate 3 ran.
     auto base = make_manifest("glibre.collision.victim");
-    REQUIRE(registry.register_plugin(base, eastl::string_view{"/fake/base.dylib"}).has_value());
+    REQUIRE(registry.register_plugin(base, "/fake/base.dylib").has_value());
 
     // Manifest: same name as registered plugin (gate 3 would fail) AND
     // min_engine_version newer than host (gate 2 fails).  Gate 2 must fire.
     auto manifest = make_manifest(
-        "glibre.collision.victim",  // same name → gate 3 would fire if reached
+        "glibre.collision.victim",  // same name -> gate 3 would fire if reached
         {1, 0, 0},
         kExpectedHash,
-        {2, 0, 0}  // requires engine 2.0.0, host is 1.0.0 → gate 2 fires
+        {2, 0, 0}  // requires engine 2.0.0, host is 1.0.0 -> gate 2 fires
     );
 
     // Different path so gate 3 would produce PluginNameCollision if reached.
-    auto result = registry.validate_all(
-        manifest,
-        eastl::string_view{kExpectedHash},
-        eastl::string_view{kExpectedHash},
-        eastl::string_view{"/fake/other.dylib"}
-    );
+    auto result =
+        registry.validate_all(manifest, kExpectedHash, kExpectedHash, "/fake/other.dylib");
 
-    // Gate 2 must fire first — PluginEngineTooOld, not PluginNameCollision.
+    // Gate 2 must fire first -- PluginEngineTooOld, not PluginNameCollision.
     REQUIRE_FALSE(result.has_value());
     const auto* core_err = as_core_error(result.error());
     REQUIRE(core_err != nullptr);
@@ -391,28 +394,24 @@ TEST_CASE("validate_all_gate_ordering_version_before_name", "[core][plugin_loade
 // ===========================================================================
 
 TEST_CASE("validate_all_gate_ordering_name_before_deps", "[core][plugin_loader_registry]") {
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     // Register "glibre.taken" so name-collision fires for gate 3.
     auto taken = make_manifest("glibre.taken");
-    REQUIRE(registry.register_plugin(taken, eastl::string_view{"/fake/taken.dylib"}).has_value());
+    REQUIRE(registry.register_plugin(taken, "/fake/taken.dylib").has_value());
 
     // Manifest: same name + different path (gate 3 fails) AND missing dep
     // "glibre.missing" which is not registered (gate 4 would fail).
     // Gate 3 must fire before gate 4.
     auto manifest = make_manifest_with_deps(
-        "glibre.taken",   // same name → gate 3 fires
-        "glibre.missing"  // missing dep → gate 4 would fire if reached
+        "glibre.taken",   // same name -> gate 3 fires
+        "glibre.missing"  // missing dep -> gate 4 would fire if reached
     );
 
-    auto result = registry.validate_all(
-        manifest,
-        eastl::string_view{kExpectedHash},
-        eastl::string_view{kExpectedHash},
-        eastl::string_view{"/fake/different.dylib"}
-    );
+    auto result =
+        registry.validate_all(manifest, kExpectedHash, kExpectedHash, "/fake/different.dylib");
 
-    // Gate 3 must fire first — PluginNameCollision, not PluginDependencyMissing.
+    // Gate 3 must fire first -- PluginNameCollision, not PluginDependencyMissing.
     REQUIRE_FALSE(result.has_value());
     const auto* core_err = as_core_error(result.error());
     REQUIRE(core_err != nullptr);
@@ -426,17 +425,17 @@ TEST_CASE("validate_all_gate_ordering_name_before_deps", "[core][plugin_loader_r
 // ===========================================================================
 
 TEST_CASE("registry_is_registered_and_loaded_count", "[core][plugin_loader_registry]") {
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     CHECK(registry.loaded_count() == 0u);
-    CHECK_FALSE(registry.is_registered(eastl::string_view{"glibre.absent"}));
+    CHECK_FALSE(registry.is_registered("glibre.absent"));
 
     auto m = make_manifest("glibre.test.accessor");
-    REQUIRE(registry.register_plugin(m, eastl::string_view{""}).has_value());
+    REQUIRE(registry.register_plugin(m, "").has_value());
 
     CHECK(registry.loaded_count() == 1u);
-    CHECK(registry.is_registered(eastl::string_view{"glibre.test.accessor"}));
-    CHECK_FALSE(registry.is_registered(eastl::string_view{"glibre.absent"}));
+    CHECK(registry.is_registered("glibre.test.accessor"));
+    CHECK_FALSE(registry.is_registered("glibre.absent"));
 }
 
 // ===========================================================================
@@ -447,23 +446,20 @@ TEST_CASE("registry_is_registered_and_loaded_count", "[core][plugin_loader_regis
 // ===========================================================================
 
 TEST_CASE("plugin_loader_accepts_multi_dependency_plugin", "[core][plugin_loader_registry]") {
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
-
-    const eastl::string_view expected{kExpectedHash};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     // Register dep-a and dep-b first.
     auto dep_a = make_manifest("glibre.dep.a");
-    REQUIRE(registry.register_plugin(dep_a, eastl::string_view{"/fake/dep_a.dylib"}).has_value());
+    REQUIRE(registry.register_plugin(dep_a, "/fake/dep_a.dylib").has_value());
 
     auto dep_b = make_manifest("glibre.dep.b");
-    REQUIRE(registry.register_plugin(dep_b, eastl::string_view{"/fake/dep_b.dylib"}).has_value());
+    REQUIRE(registry.register_plugin(dep_b, "/fake/dep_b.dylib").has_value());
 
-    // Plugin that depends on both — use make_manifest_with_deps helper.
+    // Plugin that depends on both -- use make_manifest_with_deps helper.
     auto manifest = make_manifest_with_deps("glibre.consumer", "glibre.dep.a", "glibre.dep.b");
 
-    auto result = registry.validate_all(
-        manifest, expected, expected, eastl::string_view{"/fake/consumer.dylib"}
-    );
+    auto result =
+        registry.validate_all(manifest, kExpectedHash, kExpectedHash, "/fake/consumer.dylib");
     CHECK(result.has_value());
 }
 
@@ -479,7 +475,7 @@ TEST_CASE("plugin_loader_accepts_multi_dependency_plugin", "[core][plugin_loader
 // the hot-reload barrier.
 //
 // SRP validation: PluginLoaderRegistry::validate_drain_phase is a static
-// method — it accepts the phase by value so the registry does NOT own or
+// method -- it accepts the phase by value so the registry does NOT own or
 // query phase state (plans #247/#248 will supply the real FramePhaseTracker).
 // ===========================================================================
 
@@ -520,7 +516,7 @@ TEST_CASE("validate_drain_phase_at_phase_8_succeeds", "[core][plugin_loader_regi
         glibre::core::PluginLoaderRegistry::validate_drain_phase(glibre::core::Phase::HotReload);
     // REQUIRE hard-fails so the operator-bool check below does not UB on an error payload.
     REQUIRE(result.has_value());
-    // Exercise operator bool — confirms no spurious glibre::Error was constructed.
+    // Exercise operator bool -- confirms no spurious glibre::Error was constructed.
     // Result<void> success returns {} (empty expected); there is no value to dereference
     // further, but operator bool must be true iff has_value() is true.
     CHECK(result);
@@ -534,18 +530,18 @@ TEST_CASE("validate_drain_phase_at_phase_8_succeeds", "[core][plugin_loader_regi
 // ===========================================================================
 
 TEST_CASE("plugin_loader_rejects_partial_dependency", "[core][plugin_loader_registry]") {
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     // Register only dep-a; dep-b is missing.
     auto dep_a = make_manifest("glibre.dep.a");
-    REQUIRE(registry.register_plugin(dep_a, eastl::string_view{"/fake/dep_a.dylib"}).has_value());
+    REQUIRE(registry.register_plugin(dep_a, "/fake/dep_a.dylib").has_value());
 
     // Use make_manifest_with_deps helper (dep-a registered, dep-b not).
     auto manifest = make_manifest_with_deps(
         "glibre.consumer",
         "glibre.dep.a",  // registered
-        "glibre.dep.b"
-    );  // NOT registered
+        "glibre.dep.b"   // NOT registered
+    );
 
     auto result = registry.validate_dependencies(manifest);
 
@@ -556,7 +552,7 @@ TEST_CASE("plugin_loader_rejects_partial_dependency", "[core][plugin_loader_regi
 }
 
 // ===========================================================================
-// Additional: name uniqueness — same name + same path is idempotent (HIGH-1)
+// Additional: name uniqueness -- same name + same path is idempotent (HIGH-1)
 //
 // plugin-abi.md §"Loader Sequence" step 6 qualifies the collision check with
 // "with a different file path".  Hot-reload re-registration of the same .dylib
@@ -564,13 +560,12 @@ TEST_CASE("plugin_loader_rejects_partial_dependency", "[core][plugin_loader_regi
 // ===========================================================================
 
 TEST_CASE("name_unique_allows_same_name_same_path", "[core][plugin_loader_registry]") {
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
-    const eastl::string_view path{"/fake/path/plugin.dylib"};
-    const eastl::string_view expected{kExpectedHash};
+    constexpr std::string_view path{"/fake/path/plugin.dylib"};
 
     auto manifest = make_manifest("glibre.test.hotreload");
-    REQUIRE(registry.validate_all(manifest, expected, expected, path).has_value());
+    REQUIRE(registry.validate_all(manifest, kExpectedHash, kExpectedHash, path).has_value());
     REQUIRE(registry.register_plugin(manifest, path).has_value());
 
     // Same name + same path: validate_name_unique must accept (idempotent).
@@ -584,7 +579,7 @@ TEST_CASE("name_unique_allows_same_name_same_path", "[core][plugin_loader_regist
 }
 
 // ===========================================================================
-// Additional: name uniqueness — same name + different path is a collision
+// Additional: name uniqueness -- same name + different path is a collision
 // (HIGH-1)
 //
 // The hot-reload re-load path is the same .dylib; a different .dylib with
@@ -592,14 +587,13 @@ TEST_CASE("name_unique_allows_same_name_same_path", "[core][plugin_loader_regist
 // ===========================================================================
 
 TEST_CASE("name_unique_rejects_same_name_different_path", "[core][plugin_loader_registry]") {
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
-    const eastl::string_view path_a{"/fake/path/plugin_v1.dylib"};
-    const eastl::string_view path_b{"/fake/path/plugin_v2.dylib"};  // different path
-    const eastl::string_view expected{kExpectedHash};
+    constexpr std::string_view path_a{"/fake/path/plugin_v1.dylib"};
+    constexpr std::string_view path_b{"/fake/path/plugin_v2.dylib"};  // different path
 
     auto manifest = make_manifest("glibre.test.collision");
-    REQUIRE(registry.validate_all(manifest, expected, expected, path_a).has_value());
+    REQUIRE(registry.validate_all(manifest, kExpectedHash, kExpectedHash, path_a).has_value());
     REQUIRE(registry.register_plugin(manifest, path_a).has_value());
 
     // Same name + different path: validate_name_unique must reject.
@@ -615,4 +609,193 @@ TEST_CASE("name_unique_rejects_same_name_different_path", "[core][plugin_loader_
     const auto* core_err2 = as_core_error(r3.error());
     REQUIRE(core_err2 != nullptr);
     CHECK(*core_err2 == glibre::core::Error::PluginNameCollision);
+}
+
+// ===========================================================================
+// Test: core/plugin_loader_registry: lookup_o_log_n  (plan #1044)
+//
+// Confirms the migrated container (std::pmr::unordered_map with transparent
+// hash) preserves the expected lookup characteristic: heterogeneous find()
+// with std::string_view succeeds without materialising a temporary
+// std::pmr::string key.
+//
+// This test validates that:
+//   1. is_registered(std::string_view) finds entries inserted via register_plugin.
+//   2. is_registered(std::string_view) returns false for absent keys.
+//   3. After N registrations, all N lookups succeed (container integrity).
+//
+// Authority: plan #1044 Unit Test Plan, eastl-removal.md matrix row 7 (OQ-2).
+// ===========================================================================
+
+TEST_CASE("core/plugin_loader_registry: lookup_o_log_n", "[core][plugin_loader_registry]") {
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
+
+    // Register a batch of plugins to exercise the container at non-trivial size.
+    constexpr std::size_t kPluginCount = 8;
+    const char* names[kPluginCount] = {
+        "glibre.plugin.alpha",
+        "glibre.plugin.beta",
+        "glibre.plugin.gamma",
+        "glibre.plugin.delta",
+        "glibre.plugin.epsilon",
+        "glibre.plugin.zeta",
+        "glibre.plugin.eta",
+        "glibre.plugin.theta",
+    };
+
+    for (std::size_t i = 0; i < kPluginCount; ++i) {
+        auto m = make_manifest(names[i]);
+        auto r = registry.register_plugin(m, "/fake/path.dylib");
+        REQUIRE(r.has_value());
+    }
+
+    CHECK(registry.loaded_count() == kPluginCount);
+
+    // All N registered names must be found via std::string_view heterogeneous lookup
+    // (no temporary std::pmr::string materialised per call).
+    for (std::size_t i = 0; i < kPluginCount; ++i) {
+        CHECK(registry.is_registered(std::string_view{names[i]}));
+    }
+
+    // An absent name must return false.
+    CHECK_FALSE(registry.is_registered(std::string_view{"glibre.plugin.absent"}));
+}
+
+// ===========================================================================
+// Test: core/compat/transparent_string_hash: heterogeneous_lookup_string_view
+//       (plan #1044)
+//
+// Verifies glibre::TransparentStringHash + std::equal_to<> enable
+// heterogeneous find() on a std::pmr::string-keyed unordered_map without
+// materialising a temporary std::pmr::string key.
+//
+// Authority: plan #1044 Unit Test Plan, eastl-removal.md matrix row 27
+//   (eastl::transparent_string_hash -> glibre::TransparentStringHash).
+// ===========================================================================
+
+TEST_CASE(
+    "core/compat/transparent_string_hash: heterogeneous_lookup_string_view", "[core][compat]"
+) {
+    // Confirm the is_transparent tag is present (required by C++14 unordered
+    // heterogeneous lookup machinery).
+    static_assert(
+        std::is_same_v<glibre::TransparentStringHash::is_transparent, void>,
+        "TransparentStringHash must declare is_transparent = void"
+    );
+
+    std::pmr::unordered_map<std::pmr::string, int, glibre::TransparentStringHash, std::equal_to<>>
+        map;
+
+    // Insert via std::pmr::string key.
+    map.emplace(std::pmr::string{"alpha"}, 1);
+    map.emplace(std::pmr::string{"beta"}, 2);
+    map.emplace(std::pmr::string{"gamma"}, 3);
+
+    // --- Heterogeneous lookup via std::string_view (no allocation) ---
+
+    // find() with std::string_view.
+    {
+        auto it = map.find(std::string_view{"alpha"});
+        REQUIRE(it != map.end());
+        CHECK(it->second == 1);
+    }
+
+    // find() with const char* (converts to std::string_view implicitly).
+    {
+        auto it = map.find("beta");
+        REQUIRE(it != map.end());
+        CHECK(it->second == 2);
+    }
+
+    // contains() with std::string_view (C++20 heterogeneous contains).
+    CHECK(map.contains(std::string_view{"gamma"}));
+
+    // Absent key returns end().
+    CHECK(map.find(std::string_view{"delta"}) == map.end());
+    CHECK_FALSE(map.contains(std::string_view{"absent"}));
+
+    // --- Hash consistency check ---
+    // Hashing a std::string_view and the corresponding std::pmr::string must
+    // produce the same result; otherwise the map's invariant breaks.
+    {
+        glibre::TransparentStringHash hasher;
+        const std::string_view sv{"consistency"};
+        const std::pmr::string pmrs{"consistency"};
+        CHECK(hasher(sv) == hasher(std::string_view{pmrs}));
+    }
+}
+
+// ===========================================================================
+// Test: core/plugin_loader_registry: allocator_aware_plugin_record  (plan #1044)
+//
+// Verifies that PluginRecord strings (name, path) are allocated under the
+// memory resource injected into PluginLoaderRegistry, NOT under
+// get_default_resource().
+//
+// This test guards against the HIGH-2 regression: default-constructing
+// PluginRecord and then copy-assigning pmr::string members results in the
+// stored strings living under get_default_resource() due to PMR's
+// non-propagating move-assign semantics, silently bypassing the per-context
+// heap ceiling (perf-budget.md §1).
+//
+// Mechanism: construct a PluginLoaderRegistry with a
+// PerContextAllocatorResource{ContextTag::core} as the backing resource.
+// After registering N plugins, assert bytes_used() has grown by at least
+// the sum of the raw string lengths — catching both total escape (zero
+// delta) and partial escape (only map nodes routed through mr_, strings
+// still escaping to get_default_resource()).
+//
+// String length choices: all names are >= 24 bytes (well above libc++'s
+// 15-byte SSO threshold) so that the string heap allocation is guaranteed
+// to occur regardless of future SSO tweaks.  The path is 24 bytes for the
+// same reason.  expected_min = kPluginCount * (name_len + path_len) is a
+// conservative lower bound (ignores bucket / map-node overhead).
+//
+// Authority: plan #1044 Unit Test Plan (HIGH-2 fix verification).
+// ===========================================================================
+
+TEST_CASE(
+    "core/plugin_loader_registry: allocator_aware_plugin_record", "[core][plugin_loader_registry]"
+) {
+    // Construct a PerContextAllocator for the core context and wrap it in a
+    // PerContextAllocatorResource so the registry can use it as a PMR resource.
+    glibre::PerContextAllocator alloc{glibre::ContextTag::core};
+    glibre::PerContextAllocatorResource mr{alloc};
+
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, &mr};
+
+    // Baseline: no bytes consumed before any registration.
+    const std::uint64_t bytes_before = alloc.bytes_used();
+
+    // Names are >= 24 chars each (above libc++ 15-byte SSO) so string heap
+    // allocation is guaranteed.  Path is 24 chars for the same reason.
+    constexpr std::size_t kPluginCount = 4;
+    // clang-format off
+    const char* names[kPluginCount] = {
+        "glibre.alloc.alpha.test01",   // 25 chars
+        "glibre.alloc.beta.test002",   // 25 chars
+        "glibre.alloc.gamma.test03",   // 25 chars
+        "glibre.alloc.delta.test04",   // 25 chars
+    };
+    // clang-format on
+    constexpr const char* kAllocPath = "/fake/alloc_test_path.dylib";  // 27 chars
+
+    for (std::size_t i = 0; i < kPluginCount; ++i) {
+        auto m = make_manifest(names[i]);
+        auto r = registry.register_plugin(m, kAllocPath);
+        REQUIRE(r.has_value());
+    }
+
+    CHECK(registry.loaded_count() == kPluginCount);
+
+    // Tightened assertion (LOW-2): require at least the sum of raw string
+    // bytes for name + path across all registered plugins.  A partial routing
+    // failure (e.g. only map nodes tracked, strings escaping) would produce a
+    // delta below this bound.
+    const std::uint64_t bytes_after = alloc.bytes_used();
+    constexpr std::uint64_t kNameLen = 25;  // length of each name above
+    constexpr std::uint64_t kPathLen = 27;  // length of kAllocPath above
+    const std::uint64_t expected_min =
+        kPluginCount * (kNameLen + kPathLen);  // conservative: string content only
+    CHECK(bytes_after - bytes_before >= expected_min);
 }

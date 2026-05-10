@@ -14,6 +14,9 @@ cmake_minimum_required(VERSION 4.3.0)
 #   - result_alias_default_constructs_to_void_success
 #   - result_alias_propagates_error_via_unexpected
 #   - error_context_round_trip
+#
+# Named test cases added by plan #1049 (EASTL sweep + std::visit + Overloaded):
+#   - core/error_variant: visit_with_overloaded_helper_is_exhaustive
 # ---------------------------------------------------------------------------
 
 add_executable(glibre-core-error-variant-tests

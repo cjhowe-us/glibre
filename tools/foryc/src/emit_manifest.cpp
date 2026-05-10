@@ -16,10 +16,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <string>
 #include <string_view>
-
-#include <EASTL/string.h>
-#include <EASTL/vector.h>
+#include <vector>
 
 namespace glibre::tools::foryc {
 
@@ -31,12 +30,12 @@ namespace {
 // All multi-byte values are big-endian (deterministic across platforms).
 // ---------------------------------------------------------------------------
 
-static void push_u16be(eastl::vector<std::uint8_t>& buf, std::uint16_t v) noexcept {
+static void push_u16be(std::vector<std::uint8_t>& buf, std::uint16_t v) noexcept {
     buf.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFFu));
     buf.push_back(static_cast<std::uint8_t>(v & 0xFFu));
 }
 
-static void push_str(eastl::vector<std::uint8_t>& buf, const eastl::string& s) noexcept {
+static void push_str(std::vector<std::uint8_t>& buf, const std::string& s) noexcept {
     // Length-prefixed string: uint16_t len (big-endian) followed by raw bytes.
     const auto len = static_cast<std::uint16_t>(s.size() <= 0xFFFFu ? s.size() : 0xFFFFu);
     push_u16be(buf, len);
@@ -52,9 +51,9 @@ static void push_str(eastl::vector<std::uint8_t>& buf, const eastl::string& s) n
 //   [abi_hash-str][num_deps u16be]([dep-str]...)
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] static eastl::vector<std::uint8_t>
+[[nodiscard]] static std::vector<std::uint8_t>
 serialize_spec(const PluginManifestSpec& spec) noexcept {
-    eastl::vector<std::uint8_t> buf;
+    std::vector<std::uint8_t> buf;
 
     // Tag 1: name
     push_str(buf, spec.name);
@@ -92,12 +91,12 @@ serialize_spec(const PluginManifestSpec& spec) noexcept {
 // which avoids a zero-size array that would be a VLA in older standards).
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] static eastl::string
-bytes_to_hex_initializer(const eastl::vector<std::uint8_t>& bytes) noexcept {
+[[nodiscard]] static std::string
+bytes_to_hex_initializer(const std::vector<std::uint8_t>& bytes) noexcept {
     if (bytes.empty())
-        return eastl::string{"0x00"};
+        return std::string{"0x00"};
 
-    eastl::string out;
+    std::string out;
     // Each byte: "0xNN" = 4 chars; ", " between = 2 chars.
     out.reserve(bytes.size() * 6);
 
@@ -105,8 +104,7 @@ bytes_to_hex_initializer(const eastl::vector<std::uint8_t>& bytes) noexcept {
         if (i > 0)
             out += ", ";
         // Format byte as 0xNN.
-        const eastl::string hex_byte = eastl::string(std::format("0x{:02X}", bytes[i]).c_str());
-        out += hex_byte;
+        out += std::format("0x{:02X}", bytes[i]);
     }
     return out;
 }
@@ -117,7 +115,7 @@ bytes_to_hex_initializer(const eastl::vector<std::uint8_t>& bytes) noexcept {
 // emit_manifest — public API
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] glibre::Result<eastl::string> emit_manifest(const PluginManifestSpec& spec) noexcept {
+[[nodiscard]] glibre::Result<std::string> emit_manifest(const PluginManifestSpec& spec) noexcept {
     // Reject empty name or empty abi_hash — both are required for a valid manifest.
     // plugin-abi.md §"Plugin file shape" item 3: abi_hash must be a 64-char hex string.
     if (spec.name.empty() || spec.abi_hash.empty())
@@ -125,11 +123,11 @@ bytes_to_hex_initializer(const eastl::vector<std::uint8_t>& bytes) noexcept {
 
     // Serialize the manifest spec to the MVP blob.
     const auto blob = serialize_spec(spec);
-    const eastl::string blob_init = bytes_to_hex_initializer(blob);
+    const std::string blob_init = bytes_to_hex_initializer(blob);
 
     // Sanitize the plugin name to a C string literal: escape backslashes and
     // double-quotes.
-    eastl::string safe_name;
+    std::string safe_name;
     safe_name.reserve(spec.name.size());
     for (const char c : spec.name) {
         if (c == '\\' || c == '"')
@@ -142,16 +140,14 @@ bytes_to_hex_initializer(const eastl::vector<std::uint8_t>& bytes) noexcept {
     // `extern "C" const char*`, a 64-char blake3 hex string global captured
     // at plugin compile time from the middleman headers.
     // The full hex string is safe to embed directly (lowercase hex chars only).
-    const eastl::string safe_abi_hash(spec.abi_hash.data(), spec.abi_hash.size());
+    const std::string& safe_abi_hash = spec.abi_hash;
 
     // Build the generated source text.
-    eastl::string out;
+    std::string out;
     out.reserve(512 + blob_init.size());
 
     out += "// GENERATED FILE — do not edit by hand.\n";
-    out += eastl::string(
-        std::format("// Plugin: {}\n", std::string_view(spec.name.data(), spec.name.size())).c_str()
-    );
+    out += std::format("// Plugin: {}\n", spec.name);
     out += "// Generator: glibre-foryc (plan #225)\n";
     out += "//\n";
     out += "// Exports the four C-ABI symbols required by the glibre plugin loader\n";
@@ -170,13 +166,7 @@ bytes_to_hex_initializer(const eastl::vector<std::uint8_t>& bytes) noexcept {
     out += "\n";
     out += "namespace {\n";
     out += "// NOLINTNEXTLINE(cppcoreguidelines-avoid-c-arrays)\n";
-    out += eastl::string(
-        std::format(
-            "constexpr uint8_t kManifestBytes[] = {{ {} }};\n",
-            std::string_view(blob_init.data(), blob_init.size())
-        )
-            .c_str()
-    );
+    out += std::format("constexpr uint8_t kManifestBytes[] = {{ {} }};\n", blob_init);
     out += "}  // namespace\n";
     out += "\n";
     out += "extern \"C\" {\n";
@@ -196,22 +186,10 @@ bytes_to_hex_initializer(const eastl::vector<std::uint8_t>& bytes) noexcept {
     out += "// plugin-abi.md §\"Plugin file shape\" item 3: extern \"C\" const char*.\n";
     out += "// The loader performs byte-string equality against the host's\n";
     out += "// glibre_types_abi_hash() value (no numeric parsing required).\n";
-    out += eastl::string(
-        std::format(
-            "const char* glibre_plugin_abi_hash = \"{}\";\n",
-            std::string_view(safe_abi_hash.data(), safe_abi_hash.size())
-        )
-            .c_str()
-    );
+    out += std::format("const char* glibre_plugin_abi_hash = \"{}\";\n", safe_abi_hash);
     out += "\n";
     out += "// Fully-qualified plugin name as a C-string literal.\n";
-    out += eastl::string(
-        std::format(
-            "const char* glibre_plugin_name = \"{}\";\n",
-            std::string_view(safe_name.data(), safe_name.size())
-        )
-            .c_str()
-    );
+    out += std::format("const char* glibre_plugin_name = \"{}\";\n", safe_name);
     out += "\n";
     out += "}  // extern \"C\"\n";
 
