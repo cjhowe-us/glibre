@@ -45,13 +45,12 @@
 // PHILOSOPHY §11: EASTL replaces std containers/strings in the IR.
 //   std:: retained for: std::expected (glibre::Result), std::string_view,
 //   std::filesystem, std::system (subprocess invocation), dlfcn.h,
-//   std::format (no EASTL equivalent), std::memcmp.
+//   std::format (no EASTL equivalent), std::string (detail_scratch buffers).
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <dlfcn.h>
 #include <expected>
 #include <filesystem>
@@ -82,11 +81,23 @@ static Schema parse_ok(std::string_view src, std::string_view vpath = "<test>") 
     return std::move(*r);
 }
 
-// MigrationEntry — local mirror of the struct emitted into the generated TU.
-// Layout MUST match the struct definition in emit_migration.cpp and
-// glibre/types/migration_entry.hpp (if it exists).  Plan #977 tests drive
-// the table through dlsym, so this struct is only used to interpret the
-// size/pointer symbols; the actual function-pointer entries live in the dylib.
+// LocalMigrationEntry — local mirror of the MigrationEntry struct emitted by
+// emit_migration.cpp into the generated TU.
+//
+// LOCKSTEP REQUIREMENT (LOW-4): This struct MUST stay in lockstep with the
+// canonical MigrationEntry definition in glibre/types/migration_entry.hpp
+// (future; the file does not yet exist as of plan #977 — emit_migration.cpp
+// line 344-352 references it as the authoritative definition).
+//
+// When glibre/types/migration_entry.hpp is created (tracked in emit_migration.cpp
+// emit_migration.cpp:344-352), this local duplicate must be removed and replaced
+// with an #include of that header.  Until then, any field addition or reorder in
+// emit_migration.cpp's struct definition must be manually mirrored here; CI will
+// catch the mismatch at link/dlsym time (mismatched pointer offset → wrong value).
+//
+// Plan #977 tests drive the table through dlsym, so this struct is only used to
+// interpret the size/pointer symbols; the actual function-pointer entries live in
+// the dylib.
 struct LocalMigrationEntry {
     std::uint32_t from_version;
     std::uint32_t to_version;
@@ -126,6 +137,14 @@ static std::string unique_test_suffix(std::string_view test_name) {
 // chain_walk() also enriches the SchemaMigrationFailed error with
 // ErrorContext::detail naming the missing pair (plan #977 Scope §3).
 //
+// `detail_scratch` — caller-provided buffer that owns the detail string for
+// the lifetime of the returned error.  The ErrorContext::detail string_view
+// points into this buffer; the caller must keep it alive until the error is
+// consumed (i.e. until the end of the test body that inspects the detail).
+// Using a per-call caller-owned buffer instead of a static thread_local
+// prevents the view from dangling if chain_walk is called twice before the
+// prior error is inspected (MED-1 fix).
+//
 // Returns:
 //   std::expected<void, glibre::Error> — success if every step executes OK;
 //   SchemaMigrationFailed (with detail) otherwise.
@@ -135,6 +154,7 @@ static std::expected<void, glibre::Error> chain_walk(
     std::size_t table_size,
     std::uint32_t from_ver,
     std::uint32_t to_ver,
+    std::string& detail_scratch,
     InvokeStep&& invoke_step
 ) noexcept {
     std::uint32_t cur = from_ver;
@@ -153,19 +173,16 @@ static std::expected<void, glibre::Error> chain_walk(
             }
         }
         if (!found) {
-            // Build detail string naming the missing pair.
-            const std::string detail_std = std::format("missing v{}->v{} provider", cur, cur + 1);
+            // Build detail string into the caller-provided scratch buffer.
             // PHILOSOPHY §11: ErrorContext::detail is eastl::string_view (non-owning).
-            // The static storage below ensures the string_view remains valid for
-            // the lifetime of the error (the caller inspects it synchronously).
-            static thread_local std::string tl_detail;
-            tl_detail = detail_std;
+            // Caller must keep detail_scratch alive until the error is consumed.
+            detail_scratch = std::format("missing v{}->v{} provider", cur, cur + 1);
             return std::unexpected{glibre::Error{
                 glibre::core::Error::SchemaMigrationFailed,
                 glibre::ErrorContext{
                     .file = __FILE__,
                     .line = __LINE__,
-                    .detail = eastl::string_view(tl_detail.data(), tl_detail.size()),
+                    .detail = eastl::string_view(detail_scratch.data(), detail_scratch.size()),
                 }
             }};
         }
@@ -177,11 +194,15 @@ static std::expected<void, glibre::Error> chain_walk(
 // entries are present (does not invoke providers).  Used when the test has no
 // access to the concrete payload types (e.g. a subset-walk in Test 3 for the
 // partial chain that IS present).
+//
+// Accepts a caller-provided detail_scratch buffer for chain_walk's error path
+// (see chain_walk() parameter documentation).
 static std::expected<void, glibre::Error> chain_walk_presence_only(
     const LocalMigrationEntry* table,
     std::size_t table_size,
     std::uint32_t from_ver,
-    std::uint32_t to_ver
+    std::uint32_t to_ver,
+    std::string& detail_scratch
 ) noexcept {
     // Trivial invoke_step: just return success — we only care about table presence.
     return chain_walk(
@@ -189,6 +210,7 @@ static std::expected<void, glibre::Error> chain_walk_presence_only(
         table_size,
         from_ver,
         to_ver,
+        detail_scratch,
         [](const LocalMigrationEntry& /*entry*/,
            std::uint32_t /*cur*/,
            std::uint32_t /*next*/) noexcept -> std::expected<void, glibre::Error> { return {}; }
@@ -421,14 +443,21 @@ migrate_Sample_v2_to_v3(const SampleV2& in, SampleV3& out) {
     SampleV3 v3_payload{};
 
     // Function pointer types matching the providers in the preamble.
-    using Fn_v1_v2 = std::expected<void, glibre::Error> (*)(const SampleV1&, SampleV2&) noexcept;
-    using Fn_v2_v3 = std::expected<void, glibre::Error> (*)(const SampleV2&, SampleV3&) noexcept;
+    // noexcept is omitted to match the actual non-noexcept definitions in the
+    // preamble (LOW-3 fix: noexcept mismatch between typedef and definition is
+    // conditionally UB per [expr.reinterpret.cast]/8).
+    using Fn_v1_v2 = std::expected<void, glibre::Error> (*)(const SampleV1&, SampleV2&);
+    using Fn_v2_v3 = std::expected<void, glibre::Error> (*)(const SampleV2&, SampleV3&);
 
+    // Scratch buffer that owns the detail string if chain_walk returns an error
+    // (success path: this test asserts walk_result.has_value(), so it's unused).
+    std::string walk_detail_scratch;
     const auto walk_result = chain_walk(
         table,
         table_size,
         1,
         3,
+        walk_detail_scratch,
         [&](const LocalMigrationEntry& entry,
             std::uint32_t cur,
             std::uint32_t /*next*/) noexcept -> std::expected<void, glibre::Error> {
@@ -606,27 +635,17 @@ migrate_Stable_v2_to_v3(const StableV2& in, StableV3& out) {
     REQUIRE(guard.handle != nullptr);
 
     // Verify the current_version symbol equals the schema's declared version (3).
+    // This is the meaningful runtime assertion: layout stability is already fully
+    // guaranteed at compile time by the static_asserts above (sizeof, offsetof,
+    // is_standard_layout, is_trivially_copyable). Redundant runtime memcmp checks
+    // on default-constructed same-type PODs are tautological once static_asserts
+    // pin the layout, so they are omitted (MED-2 fix).
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     const auto* cur_ver = reinterpret_cast<const std::uint32_t*>(
         dlsym(guard.handle, "glibre_plugin_current_version_glibre__test__Stable")
     );
     REQUIRE(cur_ver != nullptr);
     CHECK(*cur_ver == 3u);
-
-    // Byte-stability check: two independently-constructed StableV3 instances
-    // with the same field values must be byte-equal.  The static_asserts above
-    // pin the layout; this runtime check confirms default-construction produces
-    // a canonical zero-filled representation (PHILOSOPHY §7).
-    //
-    // Layout is also pinned by the static_asserts at namespace scope above —
-    // see glibre_test_stable_fixture::StableV3 static_asserts.
-    const StableV3 inst_a{};
-    const StableV3 inst_b{};
-    CHECK(std::memcmp(&inst_a, &inst_b, sizeof(StableV3)) == 0);
-
-    const StableV3 inst_c{42u, 7u};
-    const StableV3 inst_d{42u, 7u};
-    CHECK(std::memcmp(&inst_c, &inst_d, sizeof(StableV3)) == 0);
 
     fs::remove_all(tmp_dir, ec);
 }
@@ -759,7 +778,10 @@ migrate_Broken_v2_to_v3(const BrokenV2& in, BrokenV3& out) {
     CHECK(!has_v1_v2);
 
     // Attempting to walk from v1 to v3 must fail because v1→v2 is absent.
-    const auto walk_result = chain_walk_presence_only(table, table_size, 1, 3);
+    // The detail_scratch outlives both the walk_result and the detail inspection
+    // below, ensuring the ErrorContext::detail string_view remains valid.
+    std::string detail_scratch;
+    const auto walk_result = chain_walk_presence_only(table, table_size, 1, 3, detail_scratch);
     REQUIRE_FALSE(walk_result.has_value());
 
     // The error must be core::Error::SchemaMigrationFailed.
@@ -778,7 +800,8 @@ migrate_Broken_v2_to_v3(const BrokenV2& in, BrokenV3& out) {
     CHECK(detail_std.find("v2") != std::string::npos);
 
     // Walking v2→v3 (a chain that IS complete) must succeed via presence-only check.
-    const auto partial_walk = chain_walk_presence_only(table, table_size, 2, 3);
+    std::string partial_scratch;
+    const auto partial_walk = chain_walk_presence_only(table, table_size, 2, 3, partial_scratch);
     CHECK(partial_walk.has_value());
 
     fs::remove_all(tmp_dir, ec);
