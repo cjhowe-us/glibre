@@ -9,6 +9,11 @@
 // Named test cases added by plan #1042 (EASTL → std::pmr migration):
 //   - core/plugin_manifest: pmr_string_fields_thread_allocator
 //
+// Extended by plan #1066 (sub-struct PMR threading):
+//   - core/plugin_manifest: pmr_string_fields_thread_allocator (extended:
+//     emplace_back ComponentDecl into manifest.components and verify the
+//     sub-struct's fqn is charged to the per-context allocator)
+//
 // Scope: schema correctness, open() error paths, PMR allocator threading.
 // Out of scope: Fory serialisation (plan #225), loader sequence (#229..#231).
 
@@ -76,12 +81,15 @@ static PluginManifest make_test_manifest() {
 //
 // Construct a PluginManifest in-memory, copy it, and assert all fields are
 // preserved.  Validates that:
-//  - The struct is an aggregate (static_assert in header guarantees this at
-//    compile time; this test exercises the runtime value path).
 //  - Copy construction and equality comparison are correct (operator==
 //    delegates to per-field std::pmr::string / scalar equality).
 //  - All sub-struct types (SemVer, ComponentDecl, SystemDecl, PassDecl,
 //    PanelDecl) round-trip correctly through copy.
+//
+// Note: PluginManifest and the four Decl sub-structs are not aggregates (each
+// carries an explicit allocator-aware constructor per plans #1042 / #1066);
+// SemVer remains an aggregate.  The static_assert in plugin_manifest.hpp
+// covers SemVer only.
 // ---------------------------------------------------------------------------
 
 TEST_CASE("plugin_manifest_round_trip", "[core][plugin_manifest]") {
@@ -181,7 +189,16 @@ TEST_CASE("plugin_manifest_open_returns_not_found_on_missing_path", "[core][plug
 // per-context allocator rather than the global heap (perf-budget.md
 // §Allocator Rules #1).
 //
+// Extended by plan #1066 (sub-struct PMR threading): emplace_back a
+// ComponentDecl whose fqn exceeds SSO (>22 chars) into manifest.components
+// and assert bytes_used() increases beyond what the top-level fields alone
+// charged.  This proves std::uses_allocator_construction_args forwards the
+// parent vector's allocator into the ComponentDecl constructor and from there
+// into the sub-struct's std::pmr::string fields — i.e. the per-context
+// allocator flows end-to-end into nested sub-struct PMR fields.
+//
 // Plan #1042 — reviews/decisions/eastl-removal.md §3 PMR lifetime contract.
+// Plan #1066 — sub-struct allocator_type + ctor threading.
 // ---------------------------------------------------------------------------
 
 TEST_CASE("core/plugin_manifest: pmr_string_fields_thread_allocator", "[core][plugin_manifest]") {
@@ -211,17 +228,54 @@ TEST_CASE("core/plugin_manifest: pmr_string_fields_thread_allocator", "[core][pl
 
         // Bytes charged to the per-context allocator must have increased: the
         // manifest's field storage is routed through mr, not get_default_resource().
-        const std::uint64_t bytes_after = alloc.bytes_used();
-        REQUIRE(bytes_after > bytes_before);
+        const std::uint64_t bytes_after_top_level = alloc.bytes_used();
+        REQUIRE(bytes_after_top_level > bytes_before);
 
         // Field values are preserved through the PMR allocation.
         REQUIRE(manifest.name == "glibre.render.example.plugin.module");
         REQUIRE(manifest.abi_hash.size() == 64u);
         REQUIRE(manifest.depends_on.size() == 2u);
         REQUIRE(manifest.depends_on[0] == "glibre.core");
+
+        // -----------------------------------------------------------------------
+        // Sub-struct PMR threading (plan #1066)
+        //
+        // emplace_back a ComponentDecl into manifest.components.  Because
+        // ComponentDecl now carries `using allocator_type = polymorphic_allocator<byte>`
+        // and the corresponding explicit ctor, std::uses_allocator_v<ComponentDecl, ...>
+        // is true and std::pmr::vector<ComponentDecl>::emplace_back() invokes
+        // std::uses_allocator_construction_args to forward the vector's resource
+        // (mr) into the ComponentDecl constructor, which in turn initialises
+        // fqn with that resource.  The fqn value below is 38 chars — well above
+        // the libc++ SSO threshold of 22 bytes — so the string allocation is
+        // routed through mr and charged to the per-context allocator.
+        //
+        // If ComponentDecl were still an aggregate (no allocator_type / ctor),
+        // emplace_back would construct it without the allocator and fqn would
+        // silently bind to std::pmr::get_default_resource() — bytes_used() would
+        // not increase.
+        // -----------------------------------------------------------------------
+        const std::uint64_t bytes_before_substruct = alloc.bytes_used();
+        manifest.components.emplace_back();  // default-constructed ComponentDecl via mr
+        ComponentDecl& comp = manifest.components.back();
+        comp.fqn = "glibre.render.example.component.Camera";  // 38 chars — above SSO
+        comp.schema_hash =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";  // 64 chars
+        comp.storage_hint = 0;
+
+        // The sub-struct's PMR string fields must be charged to mr.
+        const std::uint64_t bytes_after_substruct = alloc.bytes_used();
+        REQUIRE(bytes_after_substruct > bytes_before_substruct);
+
+        // Verify the sub-struct data integrity.
+        REQUIRE(manifest.components.size() == 1u);
+        REQUIRE(manifest.components[0].fqn == "glibre.render.example.component.Camera");
+        REQUIRE(manifest.components[0].schema_hash.size() == 64u);
+        REQUIRE(manifest.components[0].storage_hint == 0u);
     }
 
-    // After manifest goes out of scope, its PMR fields are deallocated back
-    // through mr → alloc.  bytes_used() should return to (or below) bytes_before.
+    // After manifest goes out of scope, its PMR fields (including nested
+    // ComponentDecl fields) are deallocated back through mr → alloc.
+    // bytes_used() should return to (or below) bytes_before.
     REQUIRE(alloc.bytes_used() <= bytes_before);
 }
