@@ -20,6 +20,7 @@
 #include <optional>
 
 #include "glibre/core/frame_phase.hpp"
+#include "glibre/core/world_tick.hpp"
 #include "glibre/error.hpp"
 #include "glibre/perf_budget.hpp"
 #include "glibre/transient_arena.hpp"
@@ -185,30 +186,73 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
     case Phase::RenderSubmit: /* render — MVP empty */
         break;
     case Phase::HotReload: /* core (barrier) — MVP empty */
+                           // Phase 8: hot-reload drain barrier.
+                           //
+                           // In a live engine, plugin loader mutations (call_register,
+                           // rebuild_schedule, migrate_components) run here, guarded by
+                           // PluginLoaderRegistry::validate_drain_phase (plan #981 / PR #1012).
+                           //
+                           // FOLLOWUP(plan-981-wiring): replace the GLIBRE_TESTING stub below
+                           // with a real validate_drain_phase call once FramePhaseTracker is
+                           // wired through here (plan #981). The GLIBRE_TESTING branch simulates
+                           // the same FramePhaseMisordered path that validate_drain_phase emits.
+                           //
+                           // GLIBRE_TESTING injection: when inject_phase8_failure_ is armed,
+                           // simulate a drain-phase refusal so tests can verify that
+                           // frame_counter_ and world_tick_ do not advance when Phase 8 fails.
+                           // This exercises the "tick halts on phase failure" path from
+                           // plan #247 Unit Test Plan without requiring a live plugin loader.
+#ifdef GLIBRE_TESTING
+        if (inject_phase8_failure_) {
+            return std::unexpected(glibre::Error{core::Error::FramePhaseMisordered});
+        }
+#endif
         break;
     case Phase::Present: /* platform — drains transient arenas at frame end */
-        // Phase 9 bookkeeping order (perf-budget.md §CI Gate Spec, plan #241):
-        //   (1) Reset per-frame perf-budget counters UNCONDITIONALLY so that
-        //       counters do not carry over into the next frame regardless of
-        //       whether a transient-arena leak is detected below.  Resetting
-        //       first keeps the leak-detection path diagnostic: the caller
-        //       sees the error but the budget is already clean for frame N+1.
-        //   (2) & (3) Drain all registered transient arenas; in
-        //       GLIBRE_ALLOC_STRICT builds assert each was empty before drain
-        //       and return the first leak error (perf-budget.md §Allocator
-        //       Rules #4).  The strict gate compiles to zero cost in non-strict
-        //       builds; CI diagnostic builds define -DGLIBRE_ALLOC_STRICT=1.
+        // Phase 9 bookkeeping order (perf-budget.md §CI Gate Spec, plan #241;
+        //                            plan #247 §Scope):
         //
-        // NOTE: this is core-owned bookkeeping running inside the
+        // (0a) Acquire next drawable — STUB (render plugin owns real impl).
+        //      Interface only: the render plugin will register a callback here
+        //      once the render-plugin plan lands.  MVP: no-op.
+        // (0b) Present prior submit fence — STUB (render plugin owns real impl).
+        //      Phase 7 (RenderSubmit) enqueued the command buffer and signals
+        //      the submit fence; Phase 9 presents that prior work and waits on
+        //      the fence for one-frame pipeline semantics.  MVP: no-op stub.
+        //
+        // (1) Reset per-frame perf-budget counters UNCONDITIONALLY so that
+        //     counters do not carry over into the next frame regardless of
+        //     whether a transient-arena leak is detected below.  Resetting
+        //     first keeps the leak-detection path diagnostic: the caller
+        //     sees the error but the budget is already clean for frame N+1.
+        // (2) & (3) Drain all registered transient arenas; in
+        //     GLIBRE_ALLOC_STRICT builds assert each was empty before drain
+        //     and return the first leak error (perf-budget.md §Allocator
+        //     Rules #4).  The strict gate compiles to zero cost in non-strict
+        //     builds; CI diagnostic builds define -DGLIBRE_ALLOC_STRICT=1.
+        // (4) Advance world tick (plan #247, frame-phases.md §Phase 9).
+        //     Both WorldTick::value and WorldTick::change_tick increment once.
+        //     Simulation of frame N+1 may begin after this returns.
+        // (5) Increment frame_counter_ (plan #247 §Scope).
+        //
+        // NOTE: steps (1)–(3) are core-owned bookkeeping running inside the
         //   platform-owned Phase::Present slot.  This is a deliberate
-        //   "core barrier carve-out" that must be documented and eventually
-        //   formalised as a post_phase() hook or a frame-phases.md §Phase 9
-        //   amendment.  See [SPIKE] iterate-frame-phases-core-barrier-carveout.
+        //   "core barrier carve-out" documented in the existing comment and
+        //   tracked under [SPIKE] iterate-frame-phases-core-barrier-carveout.
+
+        // (0a) Stub: acquire next drawable.
+        // TODO(plan:render-swapchain): render plugin registers acquire callback.
+
+        // (0b) Stub: present prior submit fence.
+        // TODO(plan:render-swapchain): render plugin registers present callback.
+
         present_reset_perf_budget();          // (1) zero counters before leak detect
         if (auto r = present_drain_arenas();  // (2)+(3) drain + optional leak error
             !r) {
             return r;
         }
+        advance_world_tick(world_tick_);  // (4) tick N complete; N+1 may begin
+        ++frame_counter_;                 // (5) present-phase frame counter
         break;
     }
 

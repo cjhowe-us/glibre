@@ -26,6 +26,7 @@
 #include <span>
 
 #include "glibre/core/frame_phase.hpp"
+#include "glibre/core/world_tick.hpp"
 #include "glibre/error.hpp"
 #include "glibre/perf_budget.hpp"
 #include "glibre/transient_arena.hpp"
@@ -123,6 +124,27 @@ public:
     // Incremented only after all nine phases succeed.
     [[nodiscard]] std::uint64_t frame_index() const noexcept { return frame_index_; }
 
+    // frame_counter() — count of frames whose Phase::Present body completed.
+    //
+    // Incremented inside Phase::Present (9) after advance_world_tick().
+    // If any phase before Present fails, this counter does not advance
+    // (the early-return from tick() prevents Phase::Present from executing).
+    // Equivalent to frame_index() in the current MVP skeleton because there
+    // is no other failure path; kept as a separate accessor so callers can
+    // depend on the "incremented in Present" semantics explicitly.
+    //
+    // Authority: plan #247 §Scope — "Increment FrameLoop::frame_counter_."
+    [[nodiscard]] std::uint64_t frame_counter() const noexcept { return frame_counter_; }
+
+    // world_tick() — current WorldTick (value + change_tick) after the most
+    // recent Phase::Present execution.
+    //
+    // Before the first successful tick: WorldTick{0, 0}.
+    // After N successful ticks: WorldTick{N, N}.
+    //
+    // Authority: plan #247 §Scope; reviews/decisions/frame-phases.md §Phase 9.
+    [[nodiscard]] WorldTick world_tick() const noexcept { return world_tick_; }
+
     // transient_arena_count() — number of registered transient arenas.
     [[nodiscard]] std::size_t transient_arena_count() const noexcept { return arena_count_; }
 
@@ -147,6 +169,19 @@ private:
 
     std::uint64_t frame_index_{0};
 
+    // frame_counter_ — incremented by Phase::Present (plan #247).
+    // Advances only when Phase::Present executes successfully.
+    //
+    // FOLLOWUP(ecs-world): move world_tick_ + frame_counter_ ownership into
+    // World; FrameLoop holds World& and calls world.advance_tick() at Phase::Present
+    // once the ECS plan lands. See world_tick.hpp for the companion FOLLOWUP marker.
+    std::uint64_t frame_counter_{0};
+
+    // world_tick_ — ECS world tick descriptor; advanced by Phase::Present.
+    // Both fields (value, change_tick) increment together once per successful
+    // Phase::Present execution (advance_world_tick, plan #247).
+    WorldTick world_tick_{};
+
     // Registered transient arenas — drained at the end of Phase::Present (9).
     // Non-owning pointers; lifetimes are caller-managed.
     std::array<glibre::TransientArena*, kMaxTransientArenas> arenas_{};
@@ -163,6 +198,19 @@ private:
     std::array<std::uint8_t, kPhaseCount> last_tick_phase_ordinals_{};
     std::uint8_t last_tick_phase_count_{0};
 
+    // inject_phase8_failure_ — when true, Phase::HotReload body returns
+    // FramePhaseMisordered to simulate a drain-phase refusal.
+    //
+    // Used by test: "core/frame_loop: tick_does_not_advance_when_phase_8_refuses"
+    // to verify that frame_counter_ and world_tick_ do not advance when Phase 8
+    // refuses (Phase::Present is never reached).
+    //
+    // This mirrors the drain-phase guard semantics from plan #981 / PR #1012:
+    // validate_drain_phase returns FramePhaseMisordered when the current phase
+    // is not HotReload; here we flip the sense (HotReload body itself refuses)
+    // to exercise the same halt-on-phase-failure path without a live plugin loader.
+    bool inject_phase8_failure_{false};
+
 public:
     // Returns the sequence of Phase ordinals visited during the most recent
     // successful tick (kPhaseCount entries, in execution order).
@@ -170,6 +218,15 @@ public:
     [[nodiscard]] std::span<const std::uint8_t> last_tick_phase_ordinals() const noexcept {
         return {last_tick_phase_ordinals_.data(), last_tick_phase_count_};
     }
+
+    // set_inject_phase8_failure() — arm/disarm the phase-8 failure injection.
+    //
+    // When armed (true), the next tick() will fail at Phase::HotReload and
+    // return core::Error::FramePhaseMisordered without executing Phase::Present.
+    // frame_counter_ and world_tick_ are NOT advanced.
+    //
+    // Only available when compiled with -DGLIBRE_TESTING.
+    void set_inject_phase8_failure(bool inject) noexcept { inject_phase8_failure_ = inject; }
 #endif
 };
 
