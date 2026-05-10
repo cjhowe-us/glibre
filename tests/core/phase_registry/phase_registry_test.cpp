@@ -35,7 +35,6 @@
 //   (b) A different fqn in the same phase creates a distinct entry.
 //   (c) The idempotency check is by fqn string equality, not pointer identity.
 //   (d) The idempotent duplicate registration does not change the system count.
-//   (e) FrameLoop::tick() succeeds with a registry attached (integration smoke).
 // ===========================================================================
 TEST_CASE("core/phase_registry: register_system_idempotent", "[core][phase_registry]") {
     using namespace glibre::core;
@@ -49,23 +48,25 @@ TEST_CASE("core/phase_registry: register_system_idempotent", "[core][phase_regis
     int call_count = 0;
 
     // Register a system for Phase::Transform.
-    reg.register_system(Phase::Transform, "core.transform.propagate", [&call_count]() {
+    reg.register_system(Phase::Transform, "core.transform.propagate", [&call_count]() noexcept {
         ++call_count;
     });
     CHECK(reg.system_count(Phase::Transform) == 1U);
     CHECK(reg.total_system_count() == 1U);
 
     // (a) Register the same fqn again — must be a no-op.
-    reg.register_system(Phase::Transform, "core.transform.propagate", [&call_count]() {
+    reg.register_system(Phase::Transform, "core.transform.propagate", [&call_count]() noexcept {
         ++call_count;
     });
     CHECK(reg.system_count(Phase::Transform) == 1U);  // still 1, not 2
     CHECK(reg.total_system_count() == 1U);
 
     // (b) Register a different fqn in the same phase — must create a new entry.
-    reg.register_system(Phase::Transform, "core.transform.shadow_update", [&call_count]() {
-        ++call_count;
-    });
+    reg.register_system(
+        Phase::Transform, "core.transform.shadow_update", [&call_count]() noexcept {
+            ++call_count;
+        }
+    );
     CHECK(reg.system_count(Phase::Transform) == 2U);
     CHECK(reg.total_system_count() == 2U);
 
@@ -74,22 +75,58 @@ TEST_CASE("core/phase_registry: register_system_idempotent", "[core][phase_regis
     // pointer-equality short-circuits (the literal address differs from the
     // one used in the first registration above, but the content is equal).
     const eastl::string_view fqn_again{"core.transform.propagate"};
-    reg.register_system(Phase::Transform, fqn_again, []() {});
+    reg.register_system(Phase::Transform, fqn_again, []() noexcept {});
     CHECK(reg.system_count(Phase::Transform) == 2U);  // unchanged
 
     // (d) After idempotent re-registrations, invoke once: only the two distinct
     //     systems should fire.
     call_count = 0;
-    reg.for_each_system(Phase::Transform, [](SystemFn& fn) { fn(); });
+    reg.for_each_system(Phase::Transform, [](const PhaseSystemFn& fn) noexcept { fn(); });
     CHECK(call_count == 2);  // only 2 distinct systems
+}
+
+// ===========================================================================
+// Test: register_system_idempotent — FrameLoop integration smoke
+//
+// Separated from the idempotency assertions above per SRP: verifying that
+// FrameLoop::tick() dispatches registered systems is a distinct concern
+// from verifying the idempotency invariant itself.
+//
+// Verifies that:
+//   (e) FrameLoop::tick() succeeds with a PhaseRegistry attached and
+//       invokes registered systems the expected number of times.
+// ===========================================================================
+TEST_CASE(
+    "core/phase_registry: register_system_idempotent frameloop smoke",
+    "[core][phase_registry]"
+) {
+    using namespace glibre::core;
+
+    PhaseRegistry reg;
+    int call_count = 0;
+
+    // Register two distinct systems so there is work for the FrameLoop to do.
+    reg.register_system(Phase::Transform, "core.transform.propagate", [&call_count]() noexcept {
+        ++call_count;
+    });
+    reg.register_system(
+        Phase::Transform, "core.transform.shadow_update", [&call_count]() noexcept {
+            ++call_count;
+        }
+    );
+    REQUIRE(reg.system_count(Phase::Transform) == 2U);
+
+    // Direct invocation baseline: 2 systems fire once each.
+    reg.for_each_system(Phase::Transform, [](const PhaseSystemFn& fn) noexcept { fn(); });
+    REQUIRE(call_count == 2);
 
     // (e) Smoke: attach registry to FrameLoop and tick — must succeed.
     FrameLoop loop;
     loop.set_phase_registry(&reg);
     auto r = loop.tick();
     REQUIRE(r.has_value());
-    // After one tick the systems ran once more in Phase::Transform.
-    CHECK(call_count == 4);  // 2 (for_each call above) + 2 (tick)
+    // After one tick the two Transform systems ran once more.
+    CHECK(call_count == 4);  // 2 (direct for_each above) + 2 (tick)
 }
 
 // ===========================================================================
@@ -113,10 +150,14 @@ TEST_CASE(
 
     // Register kCount systems in order.  Each appends its index to `sequence`.
     constexpr int kCount = 5;
+    // Guard: the FQN construction below uses '0' + i which is only valid when
+    // i < 10.  Enforce this at compile time so the guard never bitrotingly
+    // silences UB as kCount grows.
+    static_assert(kCount < 10, "kCount must be < 10; FQN uses '0'+i single-digit encoding");
     std::array<int, kCount> sequence{};
     int seq_len = 0;
 
-    // Register five distinct systems in order.
+    // Register kCount distinct systems in order.
     for (int i = 0; i < kCount; ++i) {
         // Build a unique FQN.  eastl::string_view over a literal is safe for
         // the duration of the loop body; the PhaseRegistry copies it into an
@@ -134,7 +175,9 @@ TEST_CASE(
         // Capture the current value of i by value so each closure is distinct.
         const int idx = i;
         reg.register_system(
-            Phase::PhysicsFixed, eastl::string_view{fqn.data(), 4U}, [idx, &sequence, &seq_len]() {
+            Phase::PhysicsFixed,
+            eastl::string_view{fqn.data(), 4U},
+            [idx, &sequence, &seq_len]() noexcept {
                 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
                 sequence[static_cast<std::size_t>(seq_len++)] = idx;
                 // NOLINTEND(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
@@ -145,7 +188,7 @@ TEST_CASE(
     REQUIRE(reg.system_count(Phase::PhysicsFixed) == static_cast<std::size_t>(kCount));
 
     // Invoke via for_each_system.
-    reg.for_each_system(Phase::PhysicsFixed, [](SystemFn& fn) { fn(); });
+    reg.for_each_system(Phase::PhysicsFixed, [](const PhaseSystemFn& fn) noexcept { fn(); });
 
     // Verify the collected sequence equals [0, 1, 2, 3, 4] in that order.
     REQUIRE(seq_len == kCount);
@@ -182,8 +225,8 @@ TEST_CASE(
 // Verifies that:
 //   (a) Systems registered in phase A do not appear when iterating phase B.
 //   (b) Systems registered in phase B do not appear when iterating phase A.
-//   (c) After drain(), all phases have zero systems.
-//   (d) New systems can be registered in any phase after drain().
+//   (c) After drain_all(), all phases have zero systems.
+//   (d) New systems can be registered in any phase after drain_all().
 //
 // Uses three distinct phases to cover cross-phase isolation: Input, Transform,
 // and Present.
@@ -198,11 +241,13 @@ TEST_CASE("core/phase_registry: per_phase_isolation", "[core][phase_registry]") 
     bool present_ran = false;
 
     // (a/b) Register one system in each of three distinct phases.
-    reg.register_system(Phase::Input, "platform.input.poll", [&input_ran]() { input_ran = true; });
-    reg.register_system(Phase::Transform, "core.transform.propagate", [&transform_ran]() {
+    reg.register_system(Phase::Input, "platform.input.poll", [&input_ran]() noexcept {
+        input_ran = true;
+    });
+    reg.register_system(Phase::Transform, "core.transform.propagate", [&transform_ran]() noexcept {
         transform_ran = true;
     });
-    reg.register_system(Phase::Present, "platform.present.flip", [&present_ran]() {
+    reg.register_system(Phase::Present, "platform.present.flip", [&present_ran]() noexcept {
         present_ran = true;
     });
 
@@ -212,18 +257,18 @@ TEST_CASE("core/phase_registry: per_phase_isolation", "[core][phase_registry]") 
     REQUIRE(reg.total_system_count() == 3U);
 
     // Iterating Phase::Input only triggers the Input system.
-    reg.for_each_system(Phase::Input, [](SystemFn& fn) { fn(); });
+    reg.for_each_system(Phase::Input, [](const PhaseSystemFn& fn) noexcept { fn(); });
     CHECK(input_ran == true);
     CHECK(transform_ran == false);
     CHECK(present_ran == false);
 
     // Iterating Phase::Transform only triggers the Transform system.
-    reg.for_each_system(Phase::Transform, [](SystemFn& fn) { fn(); });
+    reg.for_each_system(Phase::Transform, [](const PhaseSystemFn& fn) noexcept { fn(); });
     CHECK(transform_ran == true);
     CHECK(present_ran == false);
 
     // Iterating Phase::Present only triggers the Present system.
-    reg.for_each_system(Phase::Present, [](SystemFn& fn) { fn(); });
+    reg.for_each_system(Phase::Present, [](const PhaseSystemFn& fn) noexcept { fn(); });
     CHECK(present_ran == true);
 
     // No cross-contamination: other phases still have their expected counts.
@@ -234,21 +279,26 @@ TEST_CASE("core/phase_registry: per_phase_isolation", "[core][phase_registry]") 
     CHECK(reg.system_count(Phase::RenderSubmit) == 0U);
     CHECK(reg.system_count(Phase::HotReload) == 0U);
 
-    // (c) After drain(), all phases have zero systems.
-    reg.drain();
+    // (c) After drain_all(), all phases have zero systems.
+    //     drain_all() is the coarse MVP-shutdown / test-fixture clear;
+    //     the per-plugin hot-reload drain is a separate future primitive
+    //     (hot-reload-protocol.md §Step 1, plan #251).
+    reg.drain_all();
     CHECK(reg.total_system_count() == 0U);
     for (const auto& desc : glibre::core::kPhaseTable) {
-        INFO("Phase " << static_cast<int>(desc.id) << " should be empty after drain");
+        INFO("Phase " << static_cast<int>(desc.id) << " should be empty after drain_all");
         CHECK(reg.system_count(desc.id) == 0U);
     }
 
-    // (d) New registrations work cleanly after drain().
+    // (d) New registrations work cleanly after drain_all().
     bool after_drain_ran = false;
-    reg.register_system(Phase::Transform, "core.transform.propagate", [&after_drain_ran]() {
-        after_drain_ran = true;
-    });
+    reg.register_system(
+        Phase::Transform, "core.transform.propagate", [&after_drain_ran]() noexcept {
+            after_drain_ran = true;
+        }
+    );
     CHECK(reg.system_count(Phase::Transform) == 1U);
 
-    reg.for_each_system(Phase::Transform, [](SystemFn& fn) { fn(); });
+    reg.for_each_system(Phase::Transform, [](const PhaseSystemFn& fn) noexcept { fn(); });
     CHECK(after_drain_ran == true);
 }

@@ -111,7 +111,7 @@ public:
     // dispatch.  (plan #245 — phase ownership + system register API)
     //
     // When non-null, each phase's run_phase() body calls
-    //   registry->for_each_system(phase, [](SystemFn& fn){ fn(); })
+    //   registry->for_each_system(phase, [](const PhaseSystemFn& fn) noexcept { fn(); })
     // after the built-in MVP phase body.  This dispatches all systems
     // registered into that phase in registration order (deterministic,
     // per frame-phases.md §Consequence #2).

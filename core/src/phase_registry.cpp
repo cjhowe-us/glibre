@@ -30,7 +30,7 @@ namespace glibre::core {
 // register_system — add a system to a phase slot.
 // ---------------------------------------------------------------------------
 
-void PhaseRegistry::register_system(Phase phase, eastl::string_view fqn, SystemFn fn) noexcept {
+void PhaseRegistry::register_system(Phase phase, eastl::string_view fqn, PhaseSystemFn fn) noexcept {
     // NOLINT: pro-bounds-*-array-index — phase_index() returns [0, kPhaseCount-1]
     // by construction from the closed-enum Phase (see phase_registry.hpp rationale).
     // NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
@@ -51,10 +51,14 @@ void PhaseRegistry::register_system(Phase phase, eastl::string_view fqn, SystemF
 }
 
 // ---------------------------------------------------------------------------
-// drain — remove all registered systems from every phase.
+// drain_all — remove all registered systems from every phase (coarse clear).
+//
+// SCOPE: MVP shutdown and unit-test fixtures only; NOT the per-plugin hot-
+// reload drain (hot-reload-protocol.md §Step 1 is per-plugin, not global).
+// See header doc-comment for the full rationale.
 // ---------------------------------------------------------------------------
 
-void PhaseRegistry::drain() noexcept {
+void PhaseRegistry::drain_all() noexcept {
     for (auto& list : systems_) {
         list.clear();
     }

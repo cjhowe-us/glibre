@@ -278,7 +278,7 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
     //
     // Null phase_registry_ means no systems registered (the default state).
     if (phase_registry_ != nullptr) {
-        phase_registry_->for_each_system(phase, [](SystemFn& fn) { fn(); });
+        phase_registry_->for_each_system(phase, [](const PhaseSystemFn& fn) noexcept { fn(); });
     }
 
     return {};  // success — no allocation

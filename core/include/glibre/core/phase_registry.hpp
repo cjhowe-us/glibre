@@ -20,11 +20,11 @@
 //   (a) Registry is mutated ONLY at plugin register/drain time (hot-reload
 //       protocol §4.1), never from within tick().  for_each_system is not
 //       thread-safe with concurrent register_system calls.
-//   (b) SystemFn is an eastl::fixed_function<kSystemFnStorageBytes, void()>.
+//   (b) PhaseSystemFn is an eastl::fixed_function<kSystemFnStorageBytes, void()>.
 //       The fixed-storage callable avoids heap allocation on construction and
 //       makes the stored callable self-contained without a heap pointer.
 //       Callers must ensure any state captured by the callable outlives the
-//       PhaseRegistry or the subsequent drain() call.
+//       PhaseRegistry or the subsequent drain_all() call.
 //   (c) No heap allocation occurs inside for_each_system() — iteration is
 //       a simple range walk over a pre-built eastl::vector.
 //   (d) Storage: a std::array<eastl::vector<SystemEntry>, kPhaseCount>
@@ -54,17 +54,36 @@
 namespace glibre::core {
 
 // ---------------------------------------------------------------------------
-// SystemFn — callable type for one registered system.
+// PhaseSystemFn — callable type for one registered phase-system callback.
 //
 // void() signature: the system callback takes no arguments and returns void.
 // The fixed-function storage is 64 bytes — large enough for a lambda
 // capturing a pair of pointers (context + data), which covers all known
 // MVP system call patterns.
 //
+// Named `PhaseSystemFn` (not `SystemFn`) to avoid collision with the spec
+// §5.6 `SystemFn = void (*)(SystemContext&) noexcept` type that will be
+// introduced when plan #246 lands access-set validation.  That type is a
+// free-standing function pointer; this type is an EASTL fixed-function
+// capturing closure — they are distinct, and sharing a name would create
+// two `glibre::core::SystemFn` types in the same namespace.
+//
 // PHILOSOPHY §11: eastl::fixed_function, not std::function.
+//
+// Storage-envelope invariant: the type must fit within kSystemFnStorageBytes.
+// The static_assert below is the compile-time guard.
 // ---------------------------------------------------------------------------
 inline constexpr std::size_t kSystemFnStorageBytes = 64;
-using SystemFn = eastl::fixed_function<kSystemFnStorageBytes, void()>;
+using PhaseSystemFn = eastl::fixed_function<kSystemFnStorageBytes, void()>;
+
+// Envelope assertion: ensure the instantiation does not silently expand
+// beyond the storage budget.  kSystemFnStorageBytes is the inline-storage
+// promise; exceeding it would trigger heap allocation, violating invariant (b).
+static_assert(
+    sizeof(PhaseSystemFn) <= kSystemFnStorageBytes + sizeof(void*) * 4,
+    "PhaseSystemFn storage footprint exceeds expected envelope; "
+    "increase kSystemFnStorageBytes or reduce captured state"
+);
 
 // ---------------------------------------------------------------------------
 // PhaseRegistry
@@ -72,10 +91,10 @@ using SystemFn = eastl::fixed_function<kSystemFnStorageBytes, void()>;
 // Stores per-phase system lists.  Each system is identified by a fully-
 // qualified name (FQN) string and holds a SystemFn callable.
 //
-// Thread safety: register_system() and drain() are NOT safe to call
+// Thread safety: register_system() and drain_all() are NOT safe to call
 // concurrently with for_each_system() or with each other.  The intended
 // call pattern is:
-//   - Phase::HotReload body: drain() → register_system(…) for each system.
+//   - Phase::HotReload body: drain_all() → register_system(…) for each system.
 //   - run_phase() body: for_each_system(…) — read-only iteration.
 // No lock is required because drain/register occurs only in Phase 8 while
 // Phase 1..=7 and 9 use for_each_system (which does not write the lists).
@@ -99,10 +118,10 @@ public:
     // with the same fqn is already registered in the given phase, this call
     // is a no-op (idempotency guarantee, hot-reload-protocol.md §4.1).
     //
-    // fn must be a callable convertible to SystemFn (eastl::fixed_function
+    // fn must be a callable convertible to PhaseSystemFn (eastl::fixed_function
     // with kSystemFnStorageBytes internal storage).  The callable is copied
     // or moved into the stored entry.  Any state captured by fn must remain
-    // valid for the lifetime of this PhaseRegistry or the next drain() call.
+    // valid for the lifetime of this PhaseRegistry or the next drain_all() call.
     //
     // phase: must be a valid named Phase enumerator (Input..Present, 1..=9).
     //        Passing a raw-cast invalid ordinal is undefined behaviour (the
@@ -119,32 +138,47 @@ public:
     // may throw in theory (EASTL uses EASTL_EXCEPTIONS_ENABLED), but glibre
     // builds with -fno-exceptions so EASTL never throws; the function is
     // declared noexcept to match the project's exception-free contract.
-    void register_system(Phase phase, eastl::string_view fqn, SystemFn fn) noexcept;
+    void register_system(Phase phase, eastl::string_view fqn, PhaseSystemFn fn) noexcept;
 
-    // drain() — remove all registered systems from all phases.
+    // drain_all() — remove all registered systems from every phase at once.
     //
-    // Called by the hot-reload protocol (Phase::HotReload) before re-
-    // registering the new set of systems.  Equivalent to clearing every
-    // per-phase vector.  After drain() returns, every phase has zero systems.
+    // SCOPE: this is a coarse, phase-global clear, appropriate for two
+    // situations only:
+    //   1. MVP shutdown / process exit (clearing the registry before the
+    //      PhaseRegistry destructor runs).
+    //   2. Unit-test fixtures that need a blank-slate registry between test
+    //      cases (e.g. per_phase_isolation drain-and-re-register step).
     //
-    // Complexity: O(total registered systems).
+    // It is NOT the correct primitive for the hot-reload-protocol.md §Step 1
+    // drain sequence.  That protocol drains per-plugin (each outgoing plugin
+    // calls `glibre_plugin_drain`), whereas drain_all() blindly clears every
+    // phase regardless of which plugin owns the systems.  Plan #251 will add
+    // a scoped `drain_plugin(eastl::string_view plugin_fqn)` once the
+    // per-plugin system-ownership map exists.
+    //
+    // Complexity: O(total registered systems across all phases).
     // noexcept: clearing eastl::vector does not throw (no-exceptions build).
-    void drain() noexcept;
+    void drain_all() noexcept;
 
     // for_each_system() — invoke F once per system in registration order.
     //
     // The systems for `phase` are iterated in registration order (first
-    // registered = first visited).  F is called with a reference to the
-    // SystemFn for each entry:
+    // registered = first visited).  F is called with a const reference to the
+    // PhaseSystemFn for each entry:
     //
-    //     registry.for_each_system(Phase::Transform, [](SystemFn& fn) {
-    //         fn();  // invoke the system
+    //     registry.for_each_system(Phase::Transform, [](const PhaseSystemFn& fn) {
+    //         fn();  // invoke the system (operator() is const on fixed_function)
     //     });
     //
     // Invariant: no allocation occurs inside this function.  The iteration
     // is a simple range loop over the pre-built eastl::vector.
     //
-    // F must be callable as F(SystemFn&) -> void.
+    // F must be callable as F(const PhaseSystemFn&) -> void and must be
+    // nothrow-invocable; the static_assert below enforces this at compile time
+    // so that the noexcept on for_each_system() is well-founded and the
+    // engine never silently terminates from a callback that slips in an
+    // exception-throwing path.
+    //
     // F is taken by value to avoid the cppcoreguidelines-missing-std-forward
     // lint; the callable is not stored and does not escape this call, so a
     // value copy (which the compiler elides for lambdas in practice) is
@@ -160,12 +194,18 @@ public:
     //   maintained by the closed-enum precondition, not by constexpr indexing.
     template<typename F>
     void for_each_system(Phase phase, F f) const noexcept {
+        static_assert(
+            std::is_nothrow_invocable_v<F&, const PhaseSystemFn&>,
+            "for_each_system callback F must be nothrow-invocable as "
+            "F(const PhaseSystemFn&); add noexcept to the lambda or use a "
+            "nothrow wrapper so the noexcept guarantee on this function holds."
+        );
         const auto idx = phase_index(phase);
         // NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
         const auto& list = systems_[idx];
         // NOLINTEND(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
         for (const SystemEntry& entry : list) {
-            f(const_cast<SystemFn&>(entry.fn));
+            f(entry.fn);
         }
     }
 
@@ -192,10 +232,10 @@ private:
     // fn:  the callable.  Fixed storage, no heap pointer.
     // -----------------------------------------------------------------------
     struct SystemEntry {
-        eastl::string fqn;
-        SystemFn fn;
+        eastl::string  fqn;
+        PhaseSystemFn  fn;
 
-        SystemEntry(eastl::string_view f, SystemFn cb) noexcept
+        SystemEntry(eastl::string_view f, PhaseSystemFn cb) noexcept
             : fqn(f.data(), f.size()),
               fn(eastl::move(cb)) {}
     };
@@ -213,7 +253,7 @@ private:
     // Per-phase system lists, 0-indexed (systems_[0] = Phase::Input, etc.).
     // eastl::vector per PHILOSOPHY §11.  Allocated lazily when first system
     // is registered; drained (not destroyed) on hot-reload.
-    std::array<eastl::vector<SystemEntry>, kPhaseCount> systems_;
+    std::array<eastl::vector<SystemEntry>, kPhaseCount> systems_{};
 };
 
 }  // namespace glibre::core
