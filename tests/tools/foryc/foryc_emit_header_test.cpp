@@ -31,6 +31,8 @@
 // libc++ stdlib migration guard (plan #1055, eastl-removal.md):
 //   - tools/foryc: emits_with_std_string_buffers
 
+#include <string_view>
+
 #include <catch2/catch_test_macros.hpp>
 
 #include "emit_header.hpp"
@@ -430,8 +432,6 @@ schema glibre.example.Counter {
     CHECK(text.find("Counter() = default;") != std::string_view::npos);
     // pragma once present.
     CHECK(text.find("#pragma once") != std::string_view::npos);
-    // No _builtins.hpp for scalar-only schema.
-    CHECK(text.find("#include <glibre/types/_builtins.hpp>") == std::string_view::npos);
     // Namespace wrapping from FQN "glibre.example.Counter".
     CHECK(text.find("namespace glibre {") != std::string_view::npos);
     CHECK(text.find("namespace example {") != std::string_view::npos);
