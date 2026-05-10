@@ -76,12 +76,9 @@ public:
     /// Read and integrity-check the blob stored under hash.
     ///
     /// Returns nullopt when the key is absent (cache miss).
-    /// Returns Error::CacheCorrupt when the file exists but the BLAKE3
-    ///   of its content does not match hash (tampered or truncated blob).
-    /// Returns Error::CacheIntegrity when a hash collision is detected:
-    ///   the file content's hash differs from the key hash but the file
-    ///   path matches (extremely unlikely with BLAKE3, but spec-required
-    ///   to reject rather than silently accept).
+    /// Returns Error::CacheCorrupt when the file exists but BLAKE3(content)
+    ///   does not match hash — the stored bytes are tampered or truncated
+    ///   (SPEC §10.2: CacheCorrupt = CAS file fails its BLAKE3 self-check).
     [[nodiscard]] glibre::Result<std::optional<std::vector<std::byte>>>
     get(const ShaderHash& hash) const;
 
@@ -92,7 +89,11 @@ public:
     /// Idempotent insert.  If hash already exists, returns success without
     /// writing.  On success the blob is immutable and durable (sync'd).
     ///
-    /// Error::CacheCorrupt: data is empty — not inserted.
+    /// Error arms (SPEC §10.2):
+    ///   CacheIntegrity — BLAKE3(data) != hash; caller-supplied hash is wrong.
+    ///   CacheCorrupt   — an existing on-disk entry's bytes don't hash to its
+    ///                    filename key (detected during the existence check).
+    /// Empty data is not a distinct error: the span is accepted and stored.
     [[nodiscard]] glibre::Result<void>
     insert_if_absent(const ShaderHash& hash, std::span<const std::byte> data);
 

@@ -93,9 +93,10 @@ std::vector<std::byte> make_payload(const std::string& s) {
 /// Overwrite a file's first byte to corrupt it, leaving length unchanged.
 void corrupt_file_first_byte(const std::filesystem::path& p) {
     std::fstream f{p, std::ios::in | std::ios::out | std::ios::binary};
-    std::byte b{0xFFu};
+    std::byte b{0x00u};
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     f.read(reinterpret_cast<char*>(&b), 1);
+    REQUIRE(f.good());  // assert read succeeded before flipping the byte
     f.seekp(0);
     const std::byte corrupted{static_cast<std::byte>(~static_cast<unsigned char>(b))};
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
