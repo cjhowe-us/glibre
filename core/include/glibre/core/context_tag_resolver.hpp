@@ -13,7 +13,8 @@
 // Authority: perf-budget.md §Allocator Rules #1, plan #989.
 // Caller:    plugin_loader_actions.cpp::call_register_stamped (HIGH-1, round-2).
 
-#include <EASTL/string_view.h>
+#include <string_view>
+
 #include <glibre/alloc.hpp>  // ContextTag
 #include <glibre/error.hpp>
 
@@ -50,6 +51,6 @@ namespace glibre::core {
 // ---------------------------------------------------------------------------
 
 [[nodiscard]] glibre::Result<glibre::ContextTag>
-derive_context_tag(eastl::string_view plugin_name) noexcept;
+derive_context_tag(std::string_view plugin_name) noexcept;
 
 }  // namespace glibre::core

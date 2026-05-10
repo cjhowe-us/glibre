@@ -63,7 +63,7 @@ Result<void> call_register_stamped(
     // to the corresponding ContextTag enumerator.  An unknown or malformed name
     // returns PluginManifestInvalid; the gates in plan #230 should have caught
     // this earlier, but we propagate cleanly here rather than asserting.
-    auto tag_result = derive_context_tag(eastl::string_view{manifest.name.c_str()});
+    auto tag_result = derive_context_tag(manifest.name);
     if (!tag_result) {
         return std::unexpected(tag_result.error());
     }

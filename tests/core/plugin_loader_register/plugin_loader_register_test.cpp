@@ -408,7 +408,7 @@ TEST_CASE("plugin_loader_stamps_allocator_handle_with_plugin_tag", "[core][regis
 
     for (const auto& s : samples) {
         // Step 1: derive the ContextTag from the manifest plugin name.
-        auto tag_result = glibre::core::derive_context_tag(eastl::string_view{s.plugin_name});
+        auto tag_result = glibre::core::derive_context_tag(s.plugin_name);
         REQUIRE(tag_result.has_value());
         CHECK(tag_result.value() == s.expected_tag);
 
@@ -423,13 +423,13 @@ TEST_CASE("plugin_loader_stamps_allocator_handle_with_plugin_tag", "[core][regis
 
     // Edge: single-component name (no dot) must fail.
     {
-        auto r = glibre::core::derive_context_tag(eastl::string_view{"myplugin"});
+        auto r = glibre::core::derive_context_tag("myplugin");
         REQUIRE_FALSE(r.has_value());
     }
 
     // Edge: name with recognised prefix but unknown context must fail.
     {
-        auto r = glibre::core::derive_context_tag(eastl::string_view{"glibre.unknown.foo"});
+        auto r = glibre::core::derive_context_tag("glibre.unknown.foo");
         REQUIRE_FALSE(r.has_value());
     }
 }
