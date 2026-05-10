@@ -3,7 +3,9 @@
 // Catch2 unit tests for glibre::core::PhaseRegistry.
 //
 // Authority: plan #245 (phase ownership + system register API).
+//            plan #1045 (migrate core/phase-registry EASTL -> libc++ stdlib).
 //            reviews/decisions/frame-phases.md §Decision.
+//            reviews/decisions/eastl-removal.md §1 (matrix rows 1-3, 9).
 //
 // Named test cases (plan #245 Unit Test Plan / DoD):
 //   - core/phase_registry: register_system_idempotent
@@ -11,20 +13,119 @@
 //   - core/phase_registry: iteration_order_matches_registration_order frameloop smoke
 //   - core/phase_registry: per_phase_isolation
 //
+// Named test cases (plan #1045 Unit Test Plan / DoD):
+//   - core/phase_registry: system_fn_uses_std_move_only_function
+//
 // Design constraints:
 //   - -fno-exceptions (error-model.md §Decision 3).
 //   - No REQUIRE_THROWS usage.
-//   - EASTL is the container substrate (PHILOSOPHY §11).
+//   - libc++ is the container substrate per reviews/decisions/eastl-removal.md.
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <memory_resource>
+#include <string_view>
+#include <type_traits>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "glibre/compat/move_only_function.hpp"
 #include "glibre/core/frame_loop.hpp"
 #include "glibre/core/frame_phase.hpp"
 #include "glibre/core/phase_registry.hpp"
+
+// ===========================================================================
+// Test: system_fn_uses_std_move_only_function
+//
+// Verifies (plan #1045 §Unit Test Plan):
+//   (a) PhaseSystemFn is exactly std::move_only_function<void() const>
+//       (compile-time type-identity pin).
+//   (b) PhaseSystemFn is invocable via a const PhaseSystemFn reference,
+//       which is the exact invocation path used inside for_each_system().
+//       Under the polyfill (std::function backing), only copy-constructible
+//       callables can be stored; the const-invocability assertion is the
+//       strongest portable check available without the real C++23 type.
+//   (c) When the real std::move_only_function is present, a move-only callable
+//       (unique_ptr-capturing lambda) is used to exercise actual move-only
+//       semantics.  This guard is conditioned on __cpp_lib_move_only_function
+//       because std::function (the polyfill backing) requires the callable to
+//       be CopyConstructible and cannot hold a non-copyable lambda.
+// ===========================================================================
+TEST_CASE("core/phase_registry: system_fn_uses_std_move_only_function", "[core][phase_registry]") {
+    using namespace glibre::core;
+
+    // (a) Compile-time type-identity pin.
+    // PhaseSystemFn MUST be std::move_only_function<void() const> per
+    // reviews/decisions/eastl-removal.md matrix row 9.
+    static_assert(
+        std::is_same_v<PhaseSystemFn, std::move_only_function<void() const>>,
+        "PhaseSystemFn must be std::move_only_function<void() const> per "
+        "reviews/decisions/eastl-removal.md matrix row 9"
+    );
+
+#ifdef __cpp_lib_move_only_function
+    // (c) Real C++23 std::move_only_function — exercise move-only callable.
+    // unique_ptr-capturing lambdas are NOT CopyConstructible.  Constructing
+    // PhaseSystemFn from one proves the callable type genuinely accepts
+    // move-only closures (the polyfill cannot make this guarantee).
+    {
+        int called = 0;
+        auto sentinel = std::make_unique<int>(42);
+
+        PhaseSystemFn fn = [&called, s = std::move(sentinel)]() noexcept {
+            if (s && *s == 42) {
+                ++called;
+            }
+        };
+
+        // (b) Const-ref invocation path (mirrors for_each_system).
+        const PhaseSystemFn& const_ref = fn;
+        const_ref();
+        REQUIRE(called == 1);
+
+        // Verify PhaseSystemFn is NOT copy-constructible under the real type.
+        static_assert(
+            !std::is_copy_constructible_v<PhaseSystemFn>,
+            "PhaseSystemFn must be move-only when real std::move_only_function is in use"
+        );
+    }
+#else
+    // (b) Polyfill path: std::function backing requires CopyConstructible callables.
+    // Use a plain lambda to exercise the const-ref invocation path — the
+    // strongest assertion portable across the polyfill.
+    {
+        int called = 0;
+
+        PhaseSystemFn fn = [&called]() noexcept { ++called; };
+
+        // const-ref invocation — mirrors for_each_system()'s call site.
+        const PhaseSystemFn& const_ref = fn;
+        const_ref();
+        REQUIRE(called == 1);
+    }
+
+    // Round-trip: register_system → for_each_system, mirroring the real-type
+    // branch above.  Couples the polyfill-path type-identity assertion to the
+    // actual seam (register_system accepts PhaseSystemFn; for_each_system invokes
+    // it via const ref) so that both compile paths exercise the full
+    // register → invoke contract and not just isolated type properties.
+    {
+        auto* mr = std::pmr::get_default_resource();
+        PhaseRegistry reg{mr};
+
+        int called = 0;
+        reg.register_system(Phase::Transform, "test.polyfill.round_trip", [&called]() noexcept {
+            ++called;
+        });
+        REQUIRE(reg.system_count(Phase::Transform) == 1U);
+
+        reg.for_each_system(Phase::Transform, [](const PhaseSystemFn& fn) noexcept { fn(); });
+        REQUIRE(called == 1);
+    }
+#endif  // __cpp_lib_move_only_function
+}
 
 // ===========================================================================
 // Test: register_system_idempotent
@@ -40,7 +141,12 @@
 TEST_CASE("core/phase_registry: register_system_idempotent", "[core][phase_registry]") {
     using namespace glibre::core;
 
-    PhaseRegistry reg;
+    // Use the default PMR heap resource for test fixtures.
+    // Engine code passes a PerContextAllocatorResource{ContextTag::core} here
+    // for ceiling enforcement; tests use the default heap resource to keep
+    // test fixtures simple and free of allocator-lifetime ordering concerns.
+    auto* mr = std::pmr::get_default_resource();
+    PhaseRegistry reg{mr};
 
     // Initially: no systems in any phase.
     REQUIRE(reg.system_count(Phase::Transform) == 0U);
@@ -70,10 +176,9 @@ TEST_CASE("core/phase_registry: register_system_idempotent", "[core][phase_regis
     CHECK(reg.total_system_count() == 2U);
 
     // (c) Idempotency is by string value, not pointer identity.
-    // Construct fqn from a separate string literal pointer to rule out any
-    // pointer-equality short-circuits (the literal address differs from the
-    // one used in the first registration above, but the content is equal).
-    const eastl::string_view fqn_again{"core.transform.propagate"};
+    // Construct fqn from a separate string_view to rule out any pointer-equality
+    // short-circuits (the literal address may differ but the content is equal).
+    const std::string_view fqn_again{"core.transform.propagate"};
     reg.register_system(Phase::Transform, fqn_again, []() noexcept {});
     CHECK(reg.system_count(Phase::Transform) == 2U);  // unchanged
 
@@ -100,7 +205,8 @@ TEST_CASE(
 ) {
     using namespace glibre::core;
 
-    PhaseRegistry reg;
+    auto* mr = std::pmr::get_default_resource();
+    PhaseRegistry reg{mr};
     int call_count = 0;
 
     // Register two distinct systems so there is work for the FrameLoop to do.
@@ -147,7 +253,8 @@ TEST_CASE(
 ) {
     using namespace glibre::core;
 
-    PhaseRegistry reg;
+    auto* mr = std::pmr::get_default_resource();
+    PhaseRegistry reg{mr};
 
     // Register kCount systems in order.  Each appends its index to `sequence`.
     constexpr int kCount = 5;
@@ -160,9 +267,9 @@ TEST_CASE(
 
     // Register kCount distinct systems in order.
     for (int i = 0; i < kCount; ++i) {
-        // Build a unique FQN.  eastl::string_view over a literal is safe for
-        // the duration of the loop body; the PhaseRegistry copies it into an
-        // eastl::string on registration.
+        // Build a unique FQN.  std::string_view over the char array is safe for
+        // the duration of the loop body; the PhaseRegistry copies it into a
+        // std::pmr::string on registration.
         std::array<char, 32> fqn{};
         // Manual integer-to-string to avoid std::sprintf in a -fno-exceptions TU.
         // NOLINTBEGIN(cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
@@ -177,7 +284,7 @@ TEST_CASE(
         const int idx = i;
         reg.register_system(
             Phase::PhysicsFixed,
-            eastl::string_view{fqn.data(), 4U},
+            std::string_view{fqn.data(), 4U},
             [idx, &sequence, &seq_len]() noexcept {
                 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
                 sequence[static_cast<std::size_t>(seq_len++)] = idx;
@@ -223,7 +330,8 @@ TEST_CASE(
 ) {
     using namespace glibre::core;
 
-    PhaseRegistry reg;
+    auto* mr = std::pmr::get_default_resource();
+    PhaseRegistry reg{mr};
 
     constexpr int kCount = 5;
     static_assert(kCount < 10, "kCount must be < 10; FQN uses '0'+i single-digit encoding");
@@ -243,7 +351,7 @@ TEST_CASE(
         const int idx = i;
         reg.register_system(
             Phase::PhysicsFixed,
-            eastl::string_view{fqn.data(), 4U},
+            std::string_view{fqn.data(), 4U},
             [idx, &sequence, &seq_len]() noexcept {
                 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
                 sequence[static_cast<std::size_t>(seq_len++)] = idx;
@@ -287,7 +395,8 @@ TEST_CASE(
 TEST_CASE("core/phase_registry: per_phase_isolation", "[core][phase_registry]") {
     using namespace glibre::core;
 
-    PhaseRegistry reg;
+    auto* mr = std::pmr::get_default_resource();
+    PhaseRegistry reg{mr};
 
     bool input_ran = false;
     bool transform_ran = false;
