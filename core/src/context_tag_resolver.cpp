@@ -11,8 +11,6 @@
 
 #include "glibre/core/context_tag_resolver.hpp"
 
-#include <EASTL/string_view.h>
-
 #include "glibre/error.hpp"
 
 namespace glibre::core {
@@ -32,10 +30,10 @@ namespace glibre::core {
 // ---------------------------------------------------------------------------
 
 [[nodiscard]] glibre::Result<glibre::ContextTag>
-derive_context_tag(eastl::string_view plugin_name) noexcept {
+derive_context_tag(std::string_view plugin_name) noexcept {
     // Find the first dot — skips the leading namespace component (e.g. "glibre").
     const auto first_dot = plugin_name.find('.');
-    if (first_dot == eastl::string_view::npos) {
+    if (first_dot == std::string_view::npos) {
         return std::unexpected(
             glibre::Error{
                 core::Error::PluginManifestInvalid,
@@ -54,9 +52,8 @@ derive_context_tag(eastl::string_view plugin_name) noexcept {
 
     // Extract the context component (up to the next dot, or the whole remainder).
     const auto second_dot = after_prefix.find('.');
-    const auto context = (second_dot == eastl::string_view::npos)
-                             ? after_prefix
-                             : after_prefix.substr(0, second_dot);
+    const auto context =
+        (second_dot == std::string_view::npos) ? after_prefix : after_prefix.substr(0, second_dot);
 
     if (context.empty()) {
         return std::unexpected(
@@ -72,7 +69,7 @@ derive_context_tag(eastl::string_view plugin_name) noexcept {
     }
 
     // Map context string to ContextTag (perf-budget.md §Per-Context Budget Table).
-    using eastl::string_view;
+    using std::string_view;
     if (context == string_view{"core"})
         return glibre::ContextTag::core;
     if (context == string_view{"platform"})
