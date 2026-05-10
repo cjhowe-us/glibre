@@ -14,3 +14,4 @@ endif()
 
 add_subdirectory(source)     # plan #508  — ShaderSource unit tests
 add_subdirectory(descriptor) # plan #1087 — DescriptorLayout::derive unit tests
+add_subdirectory(cache)      # plan #516  — BLAKE3 ShaderHash + CAS store unit tests
