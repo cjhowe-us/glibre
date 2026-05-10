@@ -311,7 +311,7 @@ TEST_CASE("core/plugin_manifest: pmr_string_fields_thread_allocator", "[core][pl
         // Sub-struct PMR threading (plan #1066) — PanelDecl
         // -----------------------------------------------------------------------
         PanelDecl& panel = manifest.panels.emplace_back();
-        panel.id = "glibre.render.example.panel.render-stats";  // 41 chars — above SSO
+        panel.id = "glibre.render.example.panel.render-stats";    // 41 chars — above SSO
         panel.title = "Render Statistics Panel (glibre.render)";  // 39 chars — above SSO
         panel.area = 2;
 
