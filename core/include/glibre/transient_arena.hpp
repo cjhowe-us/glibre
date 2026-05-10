@@ -51,12 +51,20 @@ namespace glibre {
 
 class TransientArena {
 public:
+    // storage_pointer — canonical type of TransientArena's backing store.
+    //
+    // Exposed as a public type alias so migration-guard tests can assert the
+    // full smart-pointer type without access to the private `storage_` member.
+    // Any accidental reversion to eastl::unique_ptr<std::byte[]> will break
+    // the static_assert in `core/transient_arena: storage_held_by_std_unique_ptr`.
+    using storage_pointer = std::unique_ptr<std::byte[]>;
+
     // Construct an arena with `capacity_bytes` of backing storage.
     //
     // The backing store is allocated once on construction via
-    // `std::make_unique_for_overwrite<std::byte[]>`.  No further allocation
-    // occurs for the lifetime of this object.  capacity_bytes == 0 is valid:
-    // every allocate() call will return TransientArenaExhausted.
+    // `std::make_unique_for_overwrite<std::byte[]>` (C++23).  No further
+    // allocation occurs for the lifetime of this object.  capacity_bytes == 0
+    // is valid: every allocate() call will return TransientArenaExhausted.
     explicit TransientArena(std::size_t capacity_bytes);
 
     // Non-copyable, non-movable.  Arenas are long-lived, context-scoped

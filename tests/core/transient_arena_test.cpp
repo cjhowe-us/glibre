@@ -583,10 +583,18 @@ TEST_CASE(
 // Test: core/transient_arena: storage_held_by_std_unique_ptr
 //
 // Plan #1041: verify at compile time that TransientArena's backing storage is
-// a std::unique_ptr<std::byte[]>, NOT eastl::unique_ptr<std::byte[]>.
+// std::unique_ptr<std::byte[]> (TransientArena::storage_pointer), NOT
+// eastl::unique_ptr<std::byte[]>.
 //
-// This is a migration-guard test.  The static_assert fires if the private
-// `storage_` member is ever accidentally reverted to an EASTL smart pointer.
+// This is a migration-guard test.  The static_assert is keyed on the public
+// `TransientArena::storage_pointer` type alias, which is defined to be exactly
+// the type of the private `storage_` member.  Any reversion of that member
+// back to eastl::unique_ptr<std::byte[]> must also change storage_pointer,
+// which breaks the static_assert below and fails compilation.
+//
+// Asserting against `TransientArena::storage_pointer` (rather than against the
+// return type of `std::make_unique_for_overwrite`) means the guard catches
+// regressions in the class declaration itself, not just in the allocator API.
 //
 // The compile-time assertion is paired with a trivial runtime CHECK so the
 // test case produces an output line in the Catch2 report (a test file with
@@ -596,30 +604,25 @@ TEST_CASE(
 TEST_CASE(
     "core/transient_arena: storage_held_by_std_unique_ptr", "[core][transient_arena][alloc]"
 ) {
-    // Validate via type inspection: construct a small arena and obtain a
-    // pointer to its backing buffer.  The arena's backing store is managed by
-    // std::unique_ptr<std::byte[]>; storage_.get() returns std::byte*.
-    // If the underlying smart-pointer type is correct, std::byte* can be
-    // implicitly converted to void* — the allocate() API already returns
-    // void*, so this round-trip confirms the byte-array type is intact.
-    glibre::TransientArena arena{64};
-
-    // static_assert: std::make_unique_for_overwrite<std::byte[]> returns
-    // std::unique_ptr<std::byte[]>.  The arena's storage_ member has the same
-    // type; verify the associated element type is std::byte (not eastl::byte,
-    // not char, not unsigned char through EASTL's internal alias).
+    // static_assert: TransientArena::storage_pointer must be exactly
+    // std::unique_ptr<std::byte[]>.
     //
-    // We test this indirectly: allocate one byte and cast the returned pointer
-    // to std::byte*.  This is valid ONLY when storage_.get() is std::byte* —
-    // the static_cast would be ill-formed if the backing type were different.
+    // This directly guards the declared type of the private `storage_` member
+    // via the public alias.  If `storage_` is ever accidentally changed back to
+    // eastl::unique_ptr<std::byte[]>, the eastl_alloc.cpp operator new[]
+    // overloads would silently re-enter the allocation path, defeating the
+    // migration.  This assertion makes that regression a compile error.
     static_assert(
-        std::is_same_v<
-            std::unique_ptr<std::byte[]>,
-            decltype(std::make_unique_for_overwrite<std::byte[]>(1))>,
-        "std::make_unique_for_overwrite<std::byte[]> must return "
-        "std::unique_ptr<std::byte[]> — libc++ stdlib migration invariant"
+        std::is_same_v<glibre::TransientArena::storage_pointer, std::unique_ptr<std::byte[]>>,
+        "TransientArena::storage_pointer must be std::unique_ptr<std::byte[]> "
+        "— eastl::unique_ptr reversion guard (refs #1041)"
     );
 
+    // Runtime portion: construct a small arena and confirm allocate() returns
+    // a non-null pointer, proving the backing store initialisation path is
+    // intact after the std::make_unique_for_overwrite<std::byte[]> (C++23)
+    // constructor change.
+    glibre::TransientArena arena{64};
     auto result = arena.allocate(1, 1);
     REQUIRE(result.has_value());
     auto* byte_ptr = static_cast<std::byte*>(*result);
