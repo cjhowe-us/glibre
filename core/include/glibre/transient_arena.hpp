@@ -49,6 +49,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <type_traits>
 
 #include "glibre/error.hpp"
 
