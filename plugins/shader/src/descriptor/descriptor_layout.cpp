@@ -27,8 +27,10 @@
 //             == len(reflection.bindings); DescriptorFrequencyAmbiguous on mismatch.
 //
 // Passes 3, 5 are MVP stubs (documented inline).  Full semantics are deferred to
-// the sub-epic #69 amendment plan that adds BindingOverflow / SamplerLimitExceeded
-// / IncompatibleVertexLayout / PushConstantTooLarge error arms.
+// the sub-epic #69 amendment plan that adds SamplerLimitExceeded /
+// IncompatibleVertexLayout / PushConstantTooLarge error arms.
+// BindingOverflow is now a live arm (plan #1087 R1 MED-1); sub-epic #69 will
+// extend it with per-sampler-table granularity.
 
 #include <algorithm>
 #include <memory_resource>
@@ -51,16 +53,23 @@ namespace {
 // (the blob's resource), not the vector's resource.  To ensure the name bytes
 // land under the target mr, construct the string explicitly from the source
 // data using the target mr.
+//
+// LOW-2 fix (plan #1087 R1): designated aggregate init binds the name string
+// directly to mr at construction.  The previous default-construct + assign
+// approach left dst.name's POAA fields wired to std::pmr::get_default_resource()
+// because move-assign-from-temporary does NOT propagate the source allocator
+// per [container.alloc.req] — any post-derive grow on dst.name would have
+// silently fallen back to the default resource.
 BindingSlot copy_slot_with_mr(const BindingSlot& src, std::pmr::memory_resource* mr) {
-    BindingSlot dst;
-    dst.kind = src.kind;
-    dst.register_space = src.register_space;
-    dst.register_index = src.register_index;
-    dst.array_size = src.array_size;
-    dst.stages = src.stages;
-    dst.frequency = src.frequency;
-    dst.name = std::pmr::string{src.name.data(), src.name.size(), mr};
-    return dst;
+    return BindingSlot{
+        .kind = src.kind,
+        .register_space = src.register_space,
+        .register_index = src.register_index,
+        .array_size = src.array_size,
+        .stages = src.stages,
+        .frequency = src.frequency,
+        .name = std::pmr::string{src.name.data(), src.name.size(), mr},
+    };
 }
 
 // slot_less — ordering key for Pass 6 sort: (register_space, register_index, stage_mask bits).
@@ -165,15 +174,18 @@ glibre::Result<DescriptorLayout> DescriptorLayout::derive(
 
     // ------------------------------------------------------------------
     // Pass 7 — per-table cap check: Metal 4 baseline ≤ 31 slots per group.
-    // Full BindingOverflow error arm deferred to sub-epic #69 amendment.
-    // At MVP return DescriptorFrequencyAmbiguous as the closest existing arm.
+    // Returns BindingOverflow (plan #1087 R1 MED-1) to distinguish layout-cap
+    // violations from tagger conflicts (DescriptorFrequencyAmbiguous is
+    // reserved for multi-tag annotation bugs per SPEC §10.2).
+    // Full sub-epic #69 amendment will add SamplerLimitExceeded and extend
+    // this check with per-sampler-table limits.
     // ------------------------------------------------------------------
     constexpr std::size_t kMaxSlotsPerGroup = 31;
     if (schema.per_frame.slots.size() > kMaxSlotsPerGroup ||
         schema.per_pass.slots.size() > kMaxSlotsPerGroup ||
         schema.per_material.slots.size() > kMaxSlotsPerGroup ||
         schema.per_draw.slots.size() > kMaxSlotsPerGroup) {
-        return std::unexpected(glibre::Error{Error::DescriptorFrequencyAmbiguous});
+        return std::unexpected(glibre::Error{Error::BindingOverflow});
     }
 
     // ------------------------------------------------------------------

@@ -213,6 +213,9 @@ namespace glibre::shader {
         return "CapabilityNotSupported";
     case Error::ShippingCompilationAttempted:
         return "ShippingCompilationAttempted";
+    // plan #1087 R1 MED-1: BindingOverflow — per-table slot count exceeds Metal 4 cap.
+    case Error::BindingOverflow:
+        return "BindingOverflow";
     }
     return "Unknown";
 }

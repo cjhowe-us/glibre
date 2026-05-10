@@ -109,6 +109,11 @@ TEST_CASE("descriptor_derive_uses_pmr_resource", "[shader][descriptor_layout]") 
 
     // Add one ConstantBuffer binding in each frequency group.  Each has a
     // non-empty name so that the name allocation is observable in bytes_used().
+    //
+    // LOW-1 fix (plan #1087 R1): one slot carries a name strictly longer than
+    // libc++ SSO threshold (~22 bytes) to ensure copy_slot_with_mr exercises
+    // the heap-allocation path and the assertion witnesses a genuine string-PMR
+    // routing, not just vector-capacity grows.
     blob.bindings.push_back(make_binding_slot(
         &blob_ta.mr,
         glibre::shader::BindingKind::ConstantBuffer,
@@ -123,7 +128,10 @@ TEST_CASE("descriptor_derive_uses_pmr_resource", "[shader][descriptor_layout]") 
         0,
         1,
         glibre::shader::DescriptorFrequencyGroup::PerPass,
-        "pass_uniforms"
+        // 48 chars — well above the libc++ SSO threshold of ~22 bytes.
+        // Ensures the copy_slot_with_mr heap path is exercised and the
+        // bytes_after > bytes_before assertion witnesses string PMR routing.
+        "pass_uniforms_with_a_long_name_exceeding_sso_cap"
     ));
     blob.bindings.push_back(make_binding_slot(
         &blob_ta.mr,
@@ -168,7 +176,7 @@ TEST_CASE("descriptor_derive_uses_pmr_resource", "[shader][descriptor_layout]") 
 
     // Verify slot names were copied correctly (content, not just pointer).
     CHECK(schema.per_frame.slots[0].name == "frame_uniforms");
-    CHECK(schema.per_pass.slots[0].name == "pass_uniforms");
+    CHECK(schema.per_pass.slots[0].name == "pass_uniforms_with_a_long_name_exceeding_sso_cap");
     CHECK(schema.per_material.slots[0].name == "albedo_texture");
     CHECK(schema.per_draw.slots[0].name == "draw_data");
 
@@ -291,4 +299,67 @@ TEST_CASE(
     // An empty blob produces no allocations under derive_mr.
     const std::uint64_t bytes_after = derive_ta.alloc.bytes_used();
     CHECK(bytes_after == bytes_before);
+}
+
+// ===========================================================================
+// Test: descriptor_derive_returns_binding_overflow_when_table_exceeds_cap
+//
+// Confirms that Pass 7 of DescriptorLayout::derive() returns BindingOverflow
+// (not DescriptorFrequencyAmbiguous) when a single DescriptorFrequencyGroup
+// contains more than 31 slots — the Metal 4 baseline cap.
+//
+// Authority: specs/shader/SPEC.md §10.2 (BindingOverflow semantics),
+//            plan #1087 R1 MED-1 fix.
+// ===========================================================================
+
+TEST_CASE(
+    "descriptor_derive_returns_binding_overflow_when_table_exceeds_cap",
+    "[shader][descriptor_layout]"
+) {
+    ShaderTestAlloc blob_ta;
+    ShaderTestAlloc derive_ta;
+
+    glibre::shader::ReflectionBlob blob{
+        .entry_points = std::pmr::vector<glibre::shader::EntryPoint>{&blob_ta.mr},
+        .bindings = std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr},
+        .vertex_io =
+            glibre::shader::VertexIOLayout{
+                std::pmr::vector<glibre::shader::VertexInputElement>{&blob_ta.mr}
+            },
+        .push_constants = std::pmr::vector<glibre::shader::PushConstantRange>{&blob_ta.mr},
+        .material_parameters =
+            glibre::shader::MaterialParameterBlock{
+                std::pmr::string{&blob_ta.mr},
+                0,
+                std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr}
+            },
+        .spec_constants = std::pmr::vector<glibre::shader::SpecializationConstantSlot>{&blob_ta.mr},
+        .rt_payload_bytes = 0,
+    };
+
+    // Push 32 PerFrame ConstantBuffer slots — one over the Metal 4 cap of 31.
+    for (std::uint32_t i = 0; i < 32; ++i) {
+        blob.bindings.push_back(make_binding_slot(
+            &blob_ta.mr,
+            glibre::shader::BindingKind::ConstantBuffer,
+            0,
+            i,
+            glibre::shader::DescriptorFrequencyGroup::PerFrame,
+            "overflow_slot"
+        ));
+    }
+
+    auto result = glibre::shader::DescriptorLayout::derive(
+        blob, glibre::shader::CompileTarget::MetalLib, &derive_ta.mr
+    );
+
+    REQUIRE_FALSE(result.has_value());
+
+    // Must return BindingOverflow, NOT DescriptorFrequencyAmbiguous.
+    // DescriptorFrequencyAmbiguous is reserved for tagger conflicts (SPEC §10.2).
+    const auto& err = result.error();
+    const bool is_overflow = std::holds_alternative<glibre::shader::Error>(err.code()) &&
+                             std::get<glibre::shader::Error>(err.code()) ==
+                                 glibre::shader::Error::BindingOverflow;
+    CHECK(is_overflow);
 }
