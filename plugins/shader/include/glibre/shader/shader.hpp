@@ -357,6 +357,11 @@ struct RootSignatureSchema {
 
 class DescriptorLayout {
 public:
+    // TODO(#1087): add `std::pmr::memory_resource* mr` parameter so that
+    // reflection-blob assembly (future slangc harvest plan) does not silently
+    // bind to std::pmr::get_default_resource() — same per-tag ceiling escape
+    // that PR #1085 fixed for ShaderSource::open().  Track in
+    // [PLAN] iterate-shader-descriptor-allocator-threading (#1087).
     static glibre::Result<DescriptorLayout> derive(const ReflectionBlob&, CompileTarget) noexcept;
 
     [[nodiscard]] const DescriptorTable& table(DescriptorFrequencyGroup g) const noexcept;

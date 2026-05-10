@@ -21,11 +21,22 @@
 #include <expected>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <glibre/shader/shader.hpp>
 
 namespace glibre::shader::detail {
+
+/// Entry on the cycle-detection visit stack.
+/// Both `path` and `path_lower` are allocated under `PreprocessContext::mr`.
+/// Storing the lowercased form alongside the original avoids re-allocating a
+/// fresh lowercase copy for every element of the stack on every include
+/// directive encountered (LOW-1 R2: cache once at push time).
+struct VisitEntry {
+    std::pmr::string path;        // project-relative path, original case
+    std::pmr::string path_lower;  // ASCII-lowercased for case-insensitive comparison
+};
 
 /// State passed through the recursive include resolution.
 ///
@@ -42,13 +53,18 @@ namespace glibre::shader::detail {
 ///                     Must be the same resource passed to ShaderSource::open()
 ///                     so that every allocation is tagged under ContextTag::shader
 ///                     (perf-budget.md §Allocator Rules #1).
+
 struct PreprocessContext {
     // caller owns; do not extend lifetime beyond the enclosing expand_includes call.
     const std::filesystem::path& project_root;
     std::pmr::vector<IncludeNode>& include_closure;  // accumulates as we expand
     std::pmr::memory_resource* mr;                   // allocation resource (never null)
-    std::pmr::vector<std::pmr::string> visit_stack;  // for cycle detection
+    std::pmr::vector<VisitEntry> visit_stack;        // for cycle detection
 };
+
+/// ASCII-lowercase `sv` into a new `std::pmr::string` allocated under `mr`.
+/// Used to compare include paths in a case-insensitive manner (macOS HFS+/APFS).
+[[nodiscard]] std::pmr::string ascii_lower(std::string_view sv, std::pmr::memory_resource* mr);
 
 /// Expand the contents of `source_bytes` by resolving all #include "..."
 /// directives recursively into `ctx`.

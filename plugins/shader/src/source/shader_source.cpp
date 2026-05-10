@@ -66,19 +66,27 @@ glibre::Result<ShaderSource> ShaderSource::open(
     // include_closure is built with mr so the vector's storage and each IncludeNode
     // string allocate under ContextTag::shader.
     std::pmr::vector<IncludeNode> include_closure{mr};
+    // Designated initializers (LOW-2 R2): name-checked at compile time; safe against
+    // field-reorder in PreprocessContext.
     detail::PreprocessContext ctx{
-        project_root,
-        include_closure,
-        mr,
-        std::pmr::vector<std::pmr::string>{mr}  // visit_stack: allocated under mr
+        .project_root = project_root,
+        .include_closure = include_closure,
+        .mr = mr,
+        .visit_stack = std::pmr::vector<detail::VisitEntry>{mr},
     };
 
     // Push the root file onto the visit stack so it participates in cycle detection.
+    // Cache the lowercased form at push time (LOW-1 R2: cached VisitEntry).
     auto proj_rel_norm = project_relative.lexically_normal();
     std::pmr::string root_rel_str{
         proj_rel_norm.native().c_str(), proj_rel_norm.native().size(), mr
     };
-    ctx.visit_stack.push_back(root_rel_str);
+    ctx.visit_stack.push_back(
+        detail::VisitEntry{
+            std::pmr::string{root_rel_str.c_str(), mr},
+            detail::ascii_lower(root_rel_str, mr),
+        }
+    );
 
     auto expanded_result = detail::expand_includes(root_bytes, abs_path, ctx);
     if (!expanded_result) {

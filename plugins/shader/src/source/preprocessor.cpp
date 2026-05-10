@@ -167,23 +167,6 @@ read_file(const std::filesystem::path& path, std::pmr::memory_resource* mr) {
 }
 
 // ---------------------------------------------------------------------------
-// Case-fold helper for cycle detection (MED-2).
-//
-// macOS HFS+/APFS is case-preserving but case-insensitive by default.
-// `#include "Foo.slang"` and `#include "foo.slang"` resolve to the same
-// file; we lowercase path strings before comparison to catch such cases.
-// ---------------------------------------------------------------------------
-
-[[nodiscard]] std::pmr::string ascii_lower(std::string_view sv, std::pmr::memory_resource* mr) {
-    std::pmr::string out{mr};
-    out.resize(sv.size());
-    for (std::size_t i = 0; i < sv.size(); ++i) {
-        out[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(sv[i])));
-    }
-    return out;
-}
-
-// ---------------------------------------------------------------------------
 // Hand-rolled #include scanner (replaces <regex> — HIGH-2 / LOW-2).
 //
 // Pattern matched per line:
@@ -245,6 +228,26 @@ scan_include_line(const char* line, std::size_t len, std::pmr::memory_resource* 
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// Case-fold helper for cycle detection (MED-2).
+//
+// macOS HFS+/APFS is case-preserving but case-insensitive by default.
+// `#include "Foo.slang"` and `#include "foo.slang"` resolve to the same
+// file; we lowercase path strings before comparison to catch such cases.
+//
+// Declared in preprocessor.hpp so shader_source.cpp can pre-lowercase the
+// root file path at VisitEntry push time (LOW-1 R2: cache once on push).
+// ---------------------------------------------------------------------------
+
+[[nodiscard]] std::pmr::string ascii_lower(std::string_view sv, std::pmr::memory_resource* mr) {
+    std::pmr::string out{mr};
+    out.resize(sv.size());
+    for (std::size_t i = 0; i < sv.size(); ++i) {
+        out[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(sv[i])));
+    }
+    return out;
+}
+
 std::expected<std::pmr::string, Error> expand_includes(
     const std::pmr::string& source_bytes,
     const std::filesystem::path& current_file,
@@ -294,10 +297,11 @@ std::expected<std::pmr::string, Error> expand_includes(
             std::pmr::string proj_rel_str{proj_rel.native().c_str(), ctx.mr};
 
             // Step 3: cycle detection — case-insensitive comparison (MED-2).
+            // Lowercase proj_rel once; compare against pre-computed path_lower cached
+            // in each VisitEntry (LOW-1 R2: avoid O(N*M) ascii_lower allocations).
             std::pmr::string proj_rel_lower = ascii_lower(proj_rel_str, ctx.mr);
-            for (const auto& visited : ctx.visit_stack) {
-                std::pmr::string visited_lower = ascii_lower(visited, ctx.mr);
-                if (visited_lower == proj_rel_lower) {
+            for (const auto& entry : ctx.visit_stack) {
+                if (entry.path_lower == proj_rel_lower) {
                     return std::unexpected(Error::IncludeCycle);
                 }
             }
@@ -328,7 +332,14 @@ std::expected<std::pmr::string, Error> expand_includes(
             );
 
             // Step 6: push onto visit stack and recurse.
-            ctx.visit_stack.push_back(proj_rel_str);
+            // Cache the lowercased form at push time so cycle detection does not
+            // need to re-allocate per-iteration (LOW-1 R2: O(N) allocs total).
+            ctx.visit_stack.push_back(
+                VisitEntry{
+                    std::pmr::string{proj_rel_str.c_str(), ctx.mr},
+                    std::pmr::string{proj_rel_lower.c_str(), ctx.mr},
+                }
+            );
             auto sub_result = expand_includes(included_bytes, abs_path, ctx);
             ctx.visit_stack.pop_back();
             if (!sub_result) {
