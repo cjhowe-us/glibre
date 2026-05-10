@@ -53,9 +53,7 @@ target_include_directories(glibre-plugin-stub-wrong-abi
 
 target_compile_features(glibre-plugin-stub-wrong-abi PRIVATE cxx_std_23)
 
-# Link EASTL for EASTL headers included transitively via glibre/core/plugin_context.hpp.
-find_package(EASTL CONFIG REQUIRED)
-target_link_libraries(glibre-plugin-stub-wrong-abi PRIVATE EASTL glibre::compile_contract)
+target_link_libraries(glibre-plugin-stub-wrong-abi PRIVATE glibre::compile_contract)
 
 set_target_properties(glibre-plugin-stub-wrong-abi PROPERTIES
     SUFFIX ".dylib"
@@ -99,8 +97,7 @@ target_include_directories(glibre-plugin-stub-invalid-manifest
 
 target_compile_features(glibre-plugin-stub-invalid-manifest PRIVATE cxx_std_23)
 
-find_package(EASTL CONFIG REQUIRED)
-target_link_libraries(glibre-plugin-stub-invalid-manifest PRIVATE EASTL glibre::compile_contract)
+target_link_libraries(glibre-plugin-stub-invalid-manifest PRIVATE glibre::compile_contract)
 
 set_target_properties(glibre-plugin-stub-invalid-manifest PROPERTIES
     SUFFIX ".dylib"
