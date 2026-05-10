@@ -68,6 +68,9 @@ target_compile_options(glibre-core-world-entity-foreign-world-refusal-tests
         -Wno-unused-parameter
         # Catch2 3.x macros use __COUNTER__ which triggers -Wpedantic C2y
         # extension warning with clang >= 22; suppress from third-party macro.
+        # This flag is set per-target (not in glibre::compile_contract) because
+        # centralising it requires touching shared CMake infra that is out of
+        # scope for plan #940.  Centralisation is tracked in issue #1101.
         -Wno-c2y-extensions
 )
 

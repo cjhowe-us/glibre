@@ -125,13 +125,14 @@ TEST_CASE("world: entity_foreign_world_arm_present", "[world][entity][error]") {
 //            plan #940 §Scope (MVP routing: foreign-world entity → EntityStale).
 //
 // Multi-world is refused for MVP (SPEC §3.3, R-1.1.35).  An entity whose
-// slot index exceeds the allocator's current slot count — i.e. it was never
-// issued by this allocator, which is the MVP proxy for "foreign-world entity"
-// — must be resolved as EntityStale.
+// slot index is >= slot_count() (i.e. was never issued by this allocator,
+// which is the MVP proxy for "foreign-world entity") must be resolved as
+// EntityStale.
 //
 // Verifies (at the EntityAllocator level, which is the MVP refusal surface):
 //   A. EntityAllocator::is_alive() returns false for an Entity whose index
-//      exceeds slot_count().
+//      equals slot_count() (the smallest out-of-range index, per the
+//      idx >= slots_.size() bounds check in entity_allocator.cpp:88,101).
 //   B. EntityAllocator::resolve() returns core::Error::EntityStale for the
 //      same entity (not EntityForeignWorld — the ForeignWorld arm is
 //      unreachable in MVP; stale is the existing catchall).
@@ -167,9 +168,10 @@ TEST_CASE("world: entity_outside_slot_range_yields_EntityStale_in_mvp", "[world]
     const std::uint32_t slot_count_after_one_spawn = allocator.slot_count();
     REQUIRE(slot_count_after_one_spawn == 1u);
 
-    // Build an Entity whose index is strictly beyond the allocator's range.
-    // The slot_count() is the number of allocated slots (0-based indexing);
-    // slot_count_after_one_spawn is the first out-of-range index.
+    // Build an Entity whose index equals slot_count() — the smallest
+    // out-of-range index per the idx >= slots_.size() bounds check in
+    // entity_allocator.cpp:88,101.  Slots are 0-based, so after one spawn
+    // slot_count() == 1 and index 1 is the first index that is never valid.
     const glibre::core::Entity foreign_entity =
         glibre::core::detail::pack(slot_count_after_one_spawn, /*generation=*/1u);
 
