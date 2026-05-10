@@ -57,7 +57,7 @@ TEST_CASE("shader_source_open_validates_entry_points", "[shader][shader_source]"
     REQUIRE(result.has_value());
 
     const auto& src = *result;
-    CHECK(src.id().project_relative_path == eastl::string{"two_stage_shader.slang"});
+    CHECK(src.id().project_relative_path == "two_stage_shader.slang");
 
     auto eps = src.entry_points();
     REQUIRE(eps.size() == 2u);
@@ -65,9 +65,9 @@ TEST_CASE("shader_source_open_validates_entry_points", "[shader][shader_source]"
     // HIGH-1 regression: entry_points() must be in source-encounter order.
     // two_stage_shader.slang declares [shader("vertex")] vs_main first,
     // then [shader("pixel")] ps_main.  The scanner preserves source order.
-    CHECK(eps[0].name == eastl::string{"vs_main"});
+    CHECK(eps[0].name == "vs_main");
     CHECK(eps[0].stage == glibre::shader::Stage::Vertex);
-    CHECK(eps[1].name == eastl::string{"ps_main"});
+    CHECK(eps[1].name == "ps_main");
     CHECK(eps[1].stage == glibre::shader::Stage::Pixel);
 }
 
@@ -371,7 +371,7 @@ TEST_CASE("shader_source_same_stage_dup_is_collapsed_not_ambiguous", "[shader][s
 
     // Must collapse to exactly one entry point, not error.
     REQUIRE(eps.size() == 1u);
-    CHECK(eps[0].name == eastl::string{"vs_main"});
+    CHECK(eps[0].name == "vs_main");
     CHECK(eps[0].stage == glibre::shader::Stage::Vertex);
 }
 
