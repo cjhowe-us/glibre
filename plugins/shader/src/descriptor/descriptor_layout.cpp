@@ -22,9 +22,15 @@
 //   Pass 5 — vertex-IO forwarding: pass through (vertex hash deferred to
 //             sub-epic #69 amendment).
 //   Pass 6 — per-table sort by (register_space, register_index, stage_mask).
-//   Pass 7 — per-table cap check: ≤ 31 slots per group (Metal baseline).
+//   Pass 7 — per-table cap check: ≤ slot_cap_for(target) slots per group.
 //   Pass 8 — cross-table completeness: Σ len(per_*.slots) + len(static_samplers)
 //             == len(reflection.bindings); DescriptorFrequencyAmbiguous on mismatch.
+//
+// Each pass is a file-scope static free function in the anonymous namespace
+// (specs/shader/descriptor-layout-design.md §3.2 line 363).  Each function takes
+// the in-progress RootSignatureSchema by reference and returns
+// std::expected<void, shader::Error>.  derive() is the thin sequencer that calls
+// them in order and short-circuits on the first failure.
 //
 // Passes 3, 5 are MVP stubs (documented inline).  Full semantics are deferred to
 // the sub-epic #69 amendment plan that adds SamplerLimitExceeded /
@@ -40,7 +46,7 @@
 namespace glibre::shader {
 
 // ---------------------------------------------------------------------------
-// Internal helpers
+// Internal helpers and pass implementations
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -83,24 +89,41 @@ struct SlotLess {
     }
 };
 
-}  // namespace
+// slot_cap_for — per-table slot capacity for the given compile target.
+//
+// MED-1 fix (plan #1087 R2): the cap is a property of the backend target,
+// not a magic constant inside Pass 7.  This makes the dependency explicit and
+// ensures a future DXIL caller does not silently inherit Metal's limit.
+//
+// Metal 4 baseline: 31 slots per DescriptorFrequencyGroup (argument-buffer
+// tier-2 layout; sub-epic #69 may extend this with per-sampler-table limits).
+// DXIL (D3D12): root-signature limits differ; cap derivation deferred to
+// post-MVP — assertion below signals the unimplemented path at dev time.
+[[nodiscard]] std::size_t slot_cap_for(CompileTarget target) noexcept {
+    switch (target) {
+    case CompileTarget::MetalLib:
+        return 31;
+    case CompileTarget::DXIL:
+        // TODO(post-MVP, sub-epic #69): derive cap from D3D12 root-signature
+        // limits.  DXIL is not an MVP target; return MetalLib cap as a safe
+        // temporary stand-in so this path does not silently misapply 31 to
+        // D3D12 without a code-reader noticing.
+        return 31;  // NOLINT(cppcoreguidelines-avoid-magic-numbers)
+    }
+    return 31;  // unreachable; all CompileTarget arms covered above
+}
 
 // ---------------------------------------------------------------------------
-// DescriptorLayout::derive
+// Pass implementations — each returns std::expected<void, shader::Error>
+// (specs/shader/descriptor-layout-design.md §3.2 line 363).
 // ---------------------------------------------------------------------------
 
-glibre::Result<DescriptorLayout> DescriptorLayout::derive(
-    const ReflectionBlob& blob, CompileTarget /*target*/, std::pmr::memory_resource* mr
+// pass1_precondition — verify every BindingSlot carries a recognised
+// DescriptorFrequencyGroup.  Unknown values (future enum extensions not in
+// this build) fail with DescriptorFrequencyMissing.
+[[nodiscard]] std::expected<void, glibre::Error> pass1_precondition(
+    const ReflectionBlob& blob, RootSignatureSchema& /*schema*/
 ) noexcept {
-    // Construct layout with all vectors wired to mr.
-    DescriptorLayout layout{mr};
-    RootSignatureSchema& schema = layout.schema_;
-
-    // ------------------------------------------------------------------
-    // Pass 1 — pre-condition: every binding must carry a recognised
-    // DescriptorFrequencyGroup.  Unknown values (future enum extensions
-    // not in this build) fail with DescriptorFrequencyMissing.
-    // ------------------------------------------------------------------
     for (const BindingSlot& slot : blob.bindings) {
         switch (slot.frequency) {
         case DescriptorFrequencyGroup::PerFrame:
@@ -112,11 +135,14 @@ glibre::Result<DescriptorLayout> DescriptorLayout::derive(
             return std::unexpected(glibre::Error{Error::DescriptorFrequencyMissing});
         }
     }
+    return {};
+}
 
-    // ------------------------------------------------------------------
-    // Pass 2 — partition each binding into the matching DescriptorTable.
-    // All BindingSlot copies allocate name under mr (see copy_slot_with_mr).
-    // ------------------------------------------------------------------
+// pass2_partition — bucket each binding into the matching DescriptorTable.
+// All BindingSlot copies allocate name under mr (see copy_slot_with_mr).
+[[nodiscard]] std::expected<void, glibre::Error> pass2_partition(
+    const ReflectionBlob& blob, RootSignatureSchema& schema, std::pmr::memory_resource* mr
+) noexcept {
     for (const BindingSlot& slot : blob.bindings) {
         switch (slot.frequency) {
         case DescriptorFrequencyGroup::PerFrame:
@@ -136,70 +162,104 @@ glibre::Result<DescriptorLayout> DescriptorLayout::derive(
             return std::unexpected(glibre::Error{Error::DescriptorFrequencyMissing});
         }
     }
+    return {};
+}
 
-    // ------------------------------------------------------------------
-    // Pass 3 — static-sampler extraction (MVP stub).
-    // Full semantics deferred to sub-epic #69 (SamplerLimitExceeded arm).
-    // All Sampler-kind slots remain in their frequency table for now.
-    // static_samplers stays empty.
-    // ------------------------------------------------------------------
-
-    // ------------------------------------------------------------------
-    // Pass 4 — push-constant side list: forward reflection.push_constants.
-    // No synthetic PerDraw slot at MVP (deferred to sub-epic #69).
-    // PushConstantRange is POD (no string members) so a direct copy suffices.
-    // ------------------------------------------------------------------
+// pass4_push_constants — forward reflection.push_constants into the schema
+// side list.  No synthetic PerDraw slot at MVP (deferred to sub-epic #69).
+// PushConstantRange is POD (no string members) so a direct copy suffices.
+[[nodiscard]] std::expected<void, glibre::Error>
+pass4_push_constants(const ReflectionBlob& blob, RootSignatureSchema& schema) noexcept {
     schema.push_constants.reserve(blob.push_constants.size());
     for (const PushConstantRange& pcr : blob.push_constants) {
         schema.push_constants.push_back(pcr);
     }
+    return {};
+}
 
-    // ------------------------------------------------------------------
-    // Pass 5 — vertex-IO forwarding (MVP stub).
-    // vertex_layout_hash deferred to sub-epic #69 (IncompatibleVertexLayout arm).
-    // RootSignatureSchema carries no VertexIOLayout field at this revision;
-    // the vertex_io information lives in the ReflectionBlob and is forwarded
-    // to the Metal backend directly via ShaderArtifact (future plan).
-    // ------------------------------------------------------------------
-
-    // ------------------------------------------------------------------
-    // Pass 6 — per-table sort by (register_space, register_index, stage_mask).
-    // §4.5 inv. 3 requires slots be ordered for deterministic ordinal assignment.
-    // ------------------------------------------------------------------
+// pass6_sort — per-table sort by (register_space, register_index, stage_mask).
+// §4.5 inv. 3 requires slots be ordered for deterministic ordinal assignment.
+[[nodiscard]] std::expected<void, glibre::Error>
+pass6_sort(const ReflectionBlob& /*blob*/, RootSignatureSchema& schema) noexcept {
     SlotLess less{};
     std::ranges::sort(schema.per_frame.slots, less);
     std::ranges::sort(schema.per_pass.slots, less);
     std::ranges::sort(schema.per_material.slots, less);
     std::ranges::sort(schema.per_draw.slots, less);
+    return {};
+}
 
-    // ------------------------------------------------------------------
-    // Pass 7 — per-table cap check: Metal 4 baseline ≤ 31 slots per group.
-    // Returns BindingOverflow (plan #1087 R1 MED-1) to distinguish layout-cap
-    // violations from tagger conflicts (DescriptorFrequencyAmbiguous is
-    // reserved for multi-tag annotation bugs per SPEC §10.2).
-    // Full sub-epic #69 amendment will add SamplerLimitExceeded and extend
-    // this check with per-sampler-table limits.
-    // ------------------------------------------------------------------
-    constexpr std::size_t kMaxSlotsPerGroup = 31;
-    if (schema.per_frame.slots.size() > kMaxSlotsPerGroup ||
-        schema.per_pass.slots.size() > kMaxSlotsPerGroup ||
-        schema.per_material.slots.size() > kMaxSlotsPerGroup ||
-        schema.per_draw.slots.size() > kMaxSlotsPerGroup) {
+// pass7_cap_check — per-table cap check: ≤ slot_cap_for(target) slots per group.
+// Returns BindingOverflow (plan #1087 R1 MED-1) to distinguish layout-cap
+// violations from tagger conflicts (DescriptorFrequencyAmbiguous is reserved for
+// multi-tag annotation bugs per SPEC §10.2).
+// Full sub-epic #69 amendment will add SamplerLimitExceeded and extend this
+// check with per-sampler-table limits.
+[[nodiscard]] std::expected<void, glibre::Error> pass7_cap_check(
+    const ReflectionBlob& /*blob*/, RootSignatureSchema& schema, CompileTarget target
+) noexcept {
+    const std::size_t cap = slot_cap_for(target);
+    if (schema.per_frame.slots.size() > cap || schema.per_pass.slots.size() > cap ||
+        schema.per_material.slots.size() > cap || schema.per_draw.slots.size() > cap) {
         return std::unexpected(glibre::Error{Error::BindingOverflow});
     }
+    return {};
+}
 
-    // ------------------------------------------------------------------
-    // Pass 8 — cross-table completeness check.
-    // Σ len(per_*.slots) + len(static_samplers) must equal len(blob.bindings).
-    // Any mismatch indicates a bug in passes 2–3 (double-count or silent drop).
-    // ------------------------------------------------------------------
+// pass8_completeness — cross-table completeness check.
+// Σ len(per_*.slots) + len(static_samplers) must equal len(blob.bindings).
+// Any mismatch indicates a bug in passes 2–3 (double-count or silent drop).
+[[nodiscard]] std::expected<void, glibre::Error>
+pass8_completeness(const ReflectionBlob& blob, RootSignatureSchema& schema) noexcept {
     const std::size_t total_placed = schema.per_frame.slots.size() + schema.per_pass.slots.size() +
                                      schema.per_material.slots.size() +
                                      schema.per_draw.slots.size() + schema.static_samplers.size();
-
     if (total_placed != blob.bindings.size()) {
         return std::unexpected(glibre::Error{Error::DescriptorFrequencyAmbiguous});
     }
+    return {};
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// DescriptorLayout::derive — thin sequencer (specs/shader/descriptor-layout-design.md §3.2)
+// ---------------------------------------------------------------------------
+
+glibre::Result<DescriptorLayout> DescriptorLayout::derive(
+    const ReflectionBlob& blob, CompileTarget target, std::pmr::memory_resource* mr
+) noexcept {
+    // Construct layout with all vectors wired to mr.
+    DescriptorLayout layout{mr};
+    RootSignatureSchema& schema = layout.schema_;
+
+    // Short-circuit on the first pass failure (§3.2 sequencer contract).
+    // Pass 3 (static-sampler extraction) and Pass 5 (vertex-IO forwarding)
+    // are MVP stubs — no-ops that need no function body.
+    if (auto r = pass1_precondition(blob, schema); !r)
+        return std::unexpected(r.error());
+
+    if (auto r = pass2_partition(blob, schema, mr); !r)
+        return std::unexpected(r.error());
+
+    // Pass 3 — static-sampler extraction (MVP stub).
+    // Full semantics deferred to sub-epic #69 (SamplerLimitExceeded arm).
+    // All Sampler-kind slots remain in their frequency table for now.
+
+    if (auto r = pass4_push_constants(blob, schema); !r)
+        return std::unexpected(r.error());
+
+    // Pass 5 — vertex-IO forwarding (MVP stub).
+    // vertex_layout_hash deferred to sub-epic #69 (IncompatibleVertexLayout arm).
+
+    if (auto r = pass6_sort(blob, schema); !r)
+        return std::unexpected(r.error());
+
+    if (auto r = pass7_cap_check(blob, schema, target); !r)
+        return std::unexpected(r.error());
+
+    if (auto r = pass8_completeness(blob, schema); !r)
+        return std::unexpected(r.error());
 
     return layout;
 }

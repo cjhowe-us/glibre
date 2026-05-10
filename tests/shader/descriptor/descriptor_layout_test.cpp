@@ -308,58 +308,84 @@ TEST_CASE(
 // (not DescriptorFrequencyAmbiguous) when a single DescriptorFrequencyGroup
 // contains more than 31 slots — the Metal 4 baseline cap.
 //
+// LOW-1 fix (plan #1087 R2): converted to SECTION-per-group so all four
+// DescriptorFrequencyGroup cap branches of Pass 7 are witnessed independently.
+// A future refactor dropping any single per_* check would produce a test
+// failure rather than silently passing.
+//
 // Authority: specs/shader/SPEC.md §10.2 (BindingOverflow semantics),
-//            plan #1087 R1 MED-1 fix.
+//            plan #1087 R1 MED-1 fix, plan #1087 R2 LOW-1 fix.
 // ===========================================================================
 
 TEST_CASE(
     "descriptor_derive_returns_binding_overflow_when_table_exceeds_cap",
     "[shader][descriptor_layout]"
 ) {
-    ShaderTestAlloc blob_ta;
-    ShaderTestAlloc derive_ta;
+    // Helper lambda: build a blob with 32 slots in the given frequency group
+    // and verify that derive() returns BindingOverflow.
+    auto check_overflow_for_group = [](glibre::shader::DescriptorFrequencyGroup group) {
+        ShaderTestAlloc blob_ta;
+        ShaderTestAlloc derive_ta;
 
-    glibre::shader::ReflectionBlob blob{
-        .entry_points = std::pmr::vector<glibre::shader::EntryPoint>{&blob_ta.mr},
-        .bindings = std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr},
-        .vertex_io =
-            glibre::shader::VertexIOLayout{
-                std::pmr::vector<glibre::shader::VertexInputElement>{&blob_ta.mr}
-            },
-        .push_constants = std::pmr::vector<glibre::shader::PushConstantRange>{&blob_ta.mr},
-        .material_parameters =
-            glibre::shader::MaterialParameterBlock{
-                std::pmr::string{&blob_ta.mr},
+        glibre::shader::ReflectionBlob blob{
+            .entry_points = std::pmr::vector<glibre::shader::EntryPoint>{&blob_ta.mr},
+            .bindings = std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr},
+            .vertex_io =
+                glibre::shader::VertexIOLayout{
+                    std::pmr::vector<glibre::shader::VertexInputElement>{&blob_ta.mr}
+                },
+            .push_constants = std::pmr::vector<glibre::shader::PushConstantRange>{&blob_ta.mr},
+            .material_parameters =
+                glibre::shader::MaterialParameterBlock{
+                    std::pmr::string{&blob_ta.mr},
+                    0,
+                    std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr}
+                },
+            .spec_constants =
+                std::pmr::vector<glibre::shader::SpecializationConstantSlot>{&blob_ta.mr},
+            .rt_payload_bytes = 0,
+        };
+
+        // Push 32 slots in the target group — one over the Metal 4 cap of 31.
+        for (std::uint32_t i = 0; i < 32; ++i) {
+            blob.bindings.push_back(make_binding_slot(
+                &blob_ta.mr,
+                glibre::shader::BindingKind::ConstantBuffer,
                 0,
-                std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr}
-            },
-        .spec_constants = std::pmr::vector<glibre::shader::SpecializationConstantSlot>{&blob_ta.mr},
-        .rt_payload_bytes = 0,
+                i,
+                group,
+                "overflow_slot"
+            ));
+        }
+
+        auto result = glibre::shader::DescriptorLayout::derive(
+            blob, glibre::shader::CompileTarget::MetalLib, &derive_ta.mr
+        );
+
+        REQUIRE_FALSE(result.has_value());
+
+        // Must return BindingOverflow, NOT DescriptorFrequencyAmbiguous.
+        // DescriptorFrequencyAmbiguous is reserved for tagger conflicts (SPEC §10.2).
+        const auto& err = result.error();
+        const bool is_overflow =
+            std::holds_alternative<glibre::shader::Error>(err.code()) &&
+            std::get<glibre::shader::Error>(err.code()) == glibre::shader::Error::BindingOverflow;
+        CHECK(is_overflow);
     };
 
-    // Push 32 PerFrame ConstantBuffer slots — one over the Metal 4 cap of 31.
-    for (std::uint32_t i = 0; i < 32; ++i) {
-        blob.bindings.push_back(make_binding_slot(
-            &blob_ta.mr,
-            glibre::shader::BindingKind::ConstantBuffer,
-            0,
-            i,
-            glibre::shader::DescriptorFrequencyGroup::PerFrame,
-            "overflow_slot"
-        ));
+    SECTION("PerFrame table overflow triggers BindingOverflow") {
+        check_overflow_for_group(glibre::shader::DescriptorFrequencyGroup::PerFrame);
     }
 
-    auto result = glibre::shader::DescriptorLayout::derive(
-        blob, glibre::shader::CompileTarget::MetalLib, &derive_ta.mr
-    );
+    SECTION("PerPass table overflow triggers BindingOverflow") {
+        check_overflow_for_group(glibre::shader::DescriptorFrequencyGroup::PerPass);
+    }
 
-    REQUIRE_FALSE(result.has_value());
+    SECTION("PerMaterial table overflow triggers BindingOverflow") {
+        check_overflow_for_group(glibre::shader::DescriptorFrequencyGroup::PerMaterial);
+    }
 
-    // Must return BindingOverflow, NOT DescriptorFrequencyAmbiguous.
-    // DescriptorFrequencyAmbiguous is reserved for tagger conflicts (SPEC §10.2).
-    const auto& err = result.error();
-    const bool is_overflow =
-        std::holds_alternative<glibre::shader::Error>(err.code()) &&
-        std::get<glibre::shader::Error>(err.code()) == glibre::shader::Error::BindingOverflow;
-    CHECK(is_overflow);
+    SECTION("PerDraw table overflow triggers BindingOverflow") {
+        check_overflow_for_group(glibre::shader::DescriptorFrequencyGroup::PerDraw);
+    }
 }
