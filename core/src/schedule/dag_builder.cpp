@@ -295,9 +295,9 @@ kahn_sort(std::span<const SystemNode> nodes, std::vector<NodeState>& states) noe
 //     (The cycle is purely a logical ordering contradiction declared by the
 //     plugin author via after/before; no access-set conflict exists.)
 //
-// Rationale: add_or_upgrade_edge no longer upgrades AccessSet→Explicit when
-// an explicit declaration coincides with an access-set edge.  Therefore an
-// AccessSet edge in the cycle reliably signals the access-set root cause.
+// Rationale: add_explicit_edge_if_absent does not upgrade AccessSet→Explicit
+// when an explicit declaration coincides with an access-set edge.  Therefore
+// an AccessSet edge in the cycle reliably signals the access-set root cause.
 // The previous early-return on the first Explicit edge was correct only with
 // the upgrade semantics; without upgrade, we must scan all cycle edges.
 // ---------------------------------------------------------------------------

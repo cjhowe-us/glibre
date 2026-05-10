@@ -17,10 +17,14 @@
 //      A cycle can arise from explicit after/before edges OR from mutual
 //      access-set intersection edges (e.g. A writes X, B writes X →
 //      A→B; B writes X, A writes X → B→A, cycle).
-//   2. A pure access-set cycle (no explicit after/before) where the two
-//      systems mutually write the same component yields
-//      core::Error::ScheduleAccessConflict rather than SystemScheduleCycle,
-//      per plan #584 Scope.
+//   2. Cycle classification:
+//      - A cycle where ANY edge is an access-set intersection edge
+//        (writes∩reads or writes∩writes) → core::Error::ScheduleAccessConflict.
+//      - A cycle where ALL edges are explicit after/before edges
+//        → core::Error::SystemScheduleCycle.
+//      When an explicit declaration coincides with an access-set edge, the
+//      EdgeKind is preserved as AccessSet (not upgraded), so the access-set
+//      root cause dominates classification.
 //   3. Deterministic tiebreaker: lexicographic order of system FQN (§4.4 #5).
 //   4. CompiledPhase is a std::pmr::vector<SystemId> in resolved topological
 //      order, walked per frame by FrameLoop.
