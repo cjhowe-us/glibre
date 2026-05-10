@@ -69,7 +69,7 @@ constexpr bool all_distinct(const std::array<T, N>& arr) noexcept {
 
 /// All core::Error enumerator values, listed in declaration order.
 /// When a new enumerator is added to core::Error, add it here too.
-constexpr std::array<std::underlying_type_t<glibre::core::Error>, 21> kCoreErrorValues{{
+constexpr std::array<std::underlying_type_t<glibre::core::Error>, 23> kCoreErrorValues{{
     static_cast<std::uint16_t>(glibre::core::Error::PluginAbiHashMismatch),
     static_cast<std::uint16_t>(glibre::core::Error::PluginInitFailed),
     static_cast<std::uint16_t>(glibre::core::Error::SchemaMigrationFailed),
@@ -97,6 +97,10 @@ constexpr std::array<std::underlying_type_t<glibre::core::Error>, 21> kCoreError
     static_cast<std::uint16_t>(glibre::core::Error::TypeRegistryClosed),
     // plan #597: TypeRegistryGap — codegen contract violation (gap in TypeId sequence).
     static_cast<std::uint16_t>(glibre::core::Error::TypeRegistryGap),
+    // plan #557: EntityStale — stale generational entity handle.
+    static_cast<std::uint16_t>(glibre::core::Error::EntityStale),
+    // plan #557: EntityForeignWorld — entity from a different World (reserved, unreachable MVP).
+    static_cast<std::uint16_t>(glibre::core::Error::EntityForeignWorld),
     // When a new enumerator is added to core::Error, add it here and
     // increment the array size template argument above.
 }};
@@ -180,7 +184,8 @@ TEST_CASE("error_register_per_context_arms_unique", "[core][error_register]") {
     // Making them visible in the Catch2 report means they appear in CI output
     // and are tracked as named test cases in the DoD.
 
-    // core::Error: 21 enumerators with sequential values 0..20 (plan #597 added
+    // core::Error: 23 enumerators with sequential values 0..22 (plan #557 added
+    // EntityStale+EntityForeignWorld; plan #597 added
     // TypeUnregistered+TypeRegistryClosed+TypeRegistryGap)
     CHECK(all_distinct(kCoreErrorValues));
 

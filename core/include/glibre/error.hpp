@@ -102,6 +102,16 @@ enum class Error : std::uint16_t {
     // registration-time gap check so callers can distinguish the two cases.
     // (plan #597 review round 1, MED-3 fix)
     TypeRegistryGap,
+    // Entity handle whose slot generation does not match the allocator's
+    // current generation for that slot.  Returned by EntityAllocator::resolve()
+    // and all World APIs that accept an Entity argument (SPEC §4.3 invariant 1).
+    // (plan #557 — Entity ID encoding + generational allocator)
+    EntityStale,
+    // Entity handle from a different World passed to this World's API.
+    // Reserved now for honest MVP code paths; unreachable until multi-world
+    // lands post-MVP (SPEC §4.3 invariant 3, §3.3 deferral).
+    // (plan #557 — Entity ID encoding + generational allocator)
+    EntityForeignWorld,
 };
 }  // namespace core
 

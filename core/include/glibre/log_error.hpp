@@ -95,6 +95,11 @@ namespace glibre::core {
         return "TypeRegistryClosed";
     case Error::TypeRegistryGap:
         return "TypeRegistryGap";
+    // plan #557: Entity generational handle error arms.
+    case Error::EntityStale:
+        return "EntityStale";
+    case Error::EntityForeignWorld:
+        return "EntityForeignWorld";
     }
     return "Unknown";
 }
