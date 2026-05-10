@@ -13,8 +13,16 @@
 //   - missing_symbol_returns_plugin_missing_entry_point
 //     (alias / equivalent to plugin_loader_open_returns_error_on_missing_symbols)
 //
+// Named test cases (plan #1050 Unit Test Plan, DoD):
+//   - core/plugin_loader: load_returns_pmr_handle
+//
 // Design constraints:
 //   • -fno-exceptions (error-model.md §Decision 3).
+//   • libc++ std::string_view / std::pmr per PHILOSOPHY §11
+//     (reviews/decisions/eastl-removal.md, plan #1050).
+//     PluginLoader::open() takes eastl::string_view on this branch
+//     (migrated in plan #1043 / PR #1073); pass const char* literals directly
+//     so no EASTL include is required in test scope.
 //   • GLIBRE_NOOP_DYLIB_PATH — compile-time path to glibre-plugin-noop.dylib,
 //     injected by CMakeLists.txt.
 //   • GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH — path to the stub dylib that exports
@@ -24,6 +32,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 #include <type_traits>
 #include <variant>
 
@@ -89,8 +98,9 @@ TEST_CASE("plugin_loader_open_loads_noop_plugin", "[core][plugin_loader]") {
 #ifndef GLIBRE_NOOP_DYLIB_PATH
     SKIP("GLIBRE_NOOP_DYLIB_PATH not defined; build with GLIBRE_BUILD_EXAMPLES=ON");
 #else
-    const eastl::string_view path{GLIBRE_NOOP_DYLIB_PATH};
-    REQUIRE_FALSE(path.empty());
+    constexpr const char* path = GLIBRE_NOOP_DYLIB_PATH;
+    REQUIRE(path != nullptr);
+    REQUIRE(*path != '\0');
 
     auto result = glibre::core::PluginLoader::open(path);
 
@@ -109,8 +119,8 @@ TEST_CASE("plugin_loader_open_loads_noop_plugin", "[core][plugin_loader]") {
     // glibre_plugin_manifest_size = 0.
     CHECK(loader.manifest_blob_size() == 0u);
 
-    // dylib_path accessor must round-trip the input path.
-    CHECK(loader.dylib_path() == eastl::string{path.data(), path.size()});
+    // dylib_path accessor must round-trip the input path (compare via std::string_view).
+    CHECK(std::string_view{loader.dylib_path().c_str()} == std::string_view{path});
 #endif
 }
 
@@ -126,9 +136,7 @@ TEST_CASE("plugin_loader_open_loads_noop_plugin", "[core][plugin_loader]") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("plugin_loader_open_returns_error_on_missing_path", "[core][plugin_loader]") {
-    const eastl::string_view nonexistent{"/tmp/glibre-nonexistent-plugin-229.dylib"};
-
-    auto result = glibre::core::PluginLoader::open(nonexistent);
+    auto result = glibre::core::PluginLoader::open("/tmp/glibre-nonexistent-plugin-229.dylib");
 
     REQUIRE_FALSE(result.has_value());
     CHECK(holds_core_error(result.error(), glibre::core::Error::PluginDlopenFailed));
@@ -165,8 +173,9 @@ TEST_CASE("plugin_loader_open_returns_error_on_missing_symbols", "[core][plugin_
 #ifndef GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH
     SKIP("GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH not defined");
 #else
-    const eastl::string_view stub_path{GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH};
-    REQUIRE_FALSE(stub_path.empty());
+    constexpr const char* stub_path = GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH;
+    REQUIRE(stub_path != nullptr);
+    REQUIRE(*stub_path != '\0');
 
     auto result = glibre::core::PluginLoader::open(stub_path);
 
@@ -189,7 +198,7 @@ TEST_CASE("missing_symbol_returns_plugin_missing_entry_point", "[core][plugin_lo
 #ifndef GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH
     SKIP("GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH not defined");
 #else
-    const eastl::string_view stub_path{GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH};
+    constexpr const char* stub_path = GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH;
 
     auto result = glibre::core::PluginLoader::open(stub_path);
 
@@ -222,7 +231,7 @@ TEST_CASE("success_manifest_result_is_populated_after_open", "[core][plugin_load
 #ifndef GLIBRE_NOOP_DYLIB_PATH
     SKIP("GLIBRE_NOOP_DYLIB_PATH not defined; build with GLIBRE_BUILD_EXAMPLES=ON");
 #else
-    const eastl::string_view path{GLIBRE_NOOP_DYLIB_PATH};
+    constexpr const char* path = GLIBRE_NOOP_DYLIB_PATH;
 
     auto result = glibre::core::PluginLoader::open(path);
     REQUIRE(result.has_value());
@@ -304,7 +313,7 @@ TEST_CASE("invalid_manifest_returns_plugin_manifest_invalid", "[core][plugin_loa
     }
 
     const std::string noop_dst_str = noop_dst.string();
-    const eastl::string_view loader_path{noop_dst_str.data(), noop_dst_str.size()};
+    const char* loader_path = noop_dst_str.c_str();
 
     auto result = glibre::core::PluginLoader::open(loader_path);
 
@@ -317,5 +326,44 @@ TEST_CASE("invalid_manifest_returns_plugin_manifest_invalid", "[core][plugin_loa
     const auto& manifest_res = loader.manifest_result();
     REQUIRE_FALSE(manifest_res.has_value());
     CHECK(holds_core_error(manifest_res.error(), glibre::core::Error::PluginManifestInvalid));
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Test: core/plugin_loader: load_returns_pmr_handle
+//
+// (Satisfies plan #1050 DoD assertion:
+//   unit_test_named: "core/plugin_loader: load_returns_pmr_handle")
+//
+// Confirms that PluginLoader::open() succeeds on the noop plugin and that the
+// dylib_path() accessor is non-empty after a successful load.  This validates
+// the path-threading invariant through the loader.
+//
+// Design note: once PR #1073 lands (migrating PluginLoader to std::pmr),
+// a compile-time static_assert confirming the return type of dylib_path() is
+// const std::pmr::string& will be added here as an additional invariant check.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("core/plugin_loader: load_returns_pmr_handle", "[core][plugin_loader]") {
+#ifndef GLIBRE_NOOP_DYLIB_PATH
+    SKIP("GLIBRE_NOOP_DYLIB_PATH not defined; build with GLIBRE_BUILD_EXAMPLES=ON");
+#else
+    auto result = glibre::core::PluginLoader::open(GLIBRE_NOOP_DYLIB_PATH);
+
+    // Load must succeed on a well-formed plugin dylib.
+    REQUIRE(result.has_value());
+
+    const glibre::core::PluginLoader& loader = *result;
+
+    // The ABI hash symbol must have resolved.
+    REQUIRE(loader.abi_hash() != nullptr);
+
+    // dylib_path must be non-empty (the path was threaded into the loader).
+    REQUIRE_FALSE(loader.dylib_path().empty());
+
+    // The path stored in the loader must match the path we opened.
+    CHECK(
+        std::string_view{loader.dylib_path().c_str()} == std::string_view{GLIBRE_NOOP_DYLIB_PATH}
+    );
 #endif
 }
