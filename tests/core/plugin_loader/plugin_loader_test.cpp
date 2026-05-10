@@ -14,7 +14,7 @@
 //     (alias / equivalent to plugin_loader_open_returns_error_on_missing_symbols)
 //
 // Named test cases (plan #1050 Unit Test Plan, DoD):
-//   - core/plugin_loader: load_returns_pmr_handle
+//   - core/plugin_loader: load_returns_eastl_string_handle_pre_pmr_migration
 //
 // Design constraints:
 //   • -fno-exceptions (error-model.md §Decision 3).
@@ -330,22 +330,24 @@ TEST_CASE("invalid_manifest_returns_plugin_manifest_invalid", "[core][plugin_loa
 }
 
 // ---------------------------------------------------------------------------
-// Test: core/plugin_loader: load_returns_pmr_handle
+// Test: core/plugin_loader: load_returns_eastl_string_handle_pre_pmr_migration
 //
 // (Satisfies plan #1050 DoD assertion:
-//   unit_test_named: "core/plugin_loader: load_returns_pmr_handle")
+//   unit_test_named:
+//     "core/plugin_loader: load_returns_eastl_string_handle_pre_pmr_migration")
 //
-// Confirms that PluginLoader::open() succeeds on the noop plugin and that the
-// dylib_path() accessor is non-empty after a successful load.  This validates
-// the path-threading invariant through the loader.
+// Pre-#1073 contract witness: PluginLoader::open() succeeds on the noop plugin
+// and dylib_path() returns a non-empty const eastl::string& (EASTL storage,
+// not std::pmr::string yet).  The static_assert below pins this contract at
+// compile time so any inadvertent type change fails loudly.
 //
-// The static_assert below pins the return-type contract of dylib_path() at
-// compile time.  Currently the PluginLoader fields use eastl::string (pre-#1073
-// migration); the assert documents the current contract and will be updated to
-// const std::pmr::string& when PR #1073 migrates PluginLoader storage to PMR.
+// After PR #1073 migrates PluginLoader storage to std::pmr, the follow-up plan
+// ([PLAN] iterate-rename-load-returns-handle-test-after-1073-migration) will
+// rename this test to "core/plugin_loader: load_returns_pmr_handle" and update
+// the assert to const std::pmr::string&.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("core/plugin_loader: load_returns_pmr_handle", "[core][plugin_loader]") {
+TEST_CASE("core/plugin_loader: load_returns_eastl_string_handle_pre_pmr_migration", "[core][plugin_loader]") {
 #ifndef GLIBRE_NOOP_DYLIB_PATH
     SKIP("GLIBRE_NOOP_DYLIB_PATH not defined; build with GLIBRE_BUILD_EXAMPLES=ON");
 #else
@@ -356,12 +358,13 @@ TEST_CASE("core/plugin_loader: load_returns_pmr_handle", "[core][plugin_loader]"
 
     const glibre::core::PluginLoader& loader = *result;
 
-    // Pin the return-type contract at compile time.
-    // Update to const std::pmr::string& when PR #1073 lands.
+    // Pin the pre-#1073 return-type contract at compile time.
+    // When PR #1073 lands: update assert to const std::pmr::string& and rename
+    // this TEST_CASE to "core/plugin_loader: load_returns_pmr_handle".
     static_assert(
         std::is_same_v<decltype(loader.dylib_path()), const eastl::string&>,
-        "dylib_path() return type changed; update this assert (and the test name) "
-        "once PluginLoader migrates to std::pmr (PR #1073)"
+        "dylib_path() return type changed; update this assert and rename the test "
+        "per [PLAN] iterate-rename-load-returns-handle-test-after-1073-migration"
     );
 
     // The ABI hash symbol must have resolved.
