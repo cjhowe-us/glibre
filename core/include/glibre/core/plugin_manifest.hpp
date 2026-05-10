@@ -117,12 +117,18 @@ struct ComponentDecl {
           storage_hint{other.storage_hint} {}
 
     // Extended move (allocator-extended move constructor for PMR containers).
-    // noexcept: std::pmr::string move-with-alloc is noexcept when the resource
-    // pointers match (same allocator); unconditional noexcept here is correct for
-    // this type because the move constructor cannot throw — scalar copy is trivially
-    // noexcept and pmr::string move-with-alloc is noexcept per the standard.
-    // This allows std::pmr::vector<ComponentDecl> to use move (not copy) on grow,
-    // avoiding redundant heap allocation during reallocation.
+    // noexcept: safe under glibre's -fno-exceptions posture (cmake/Compile.cmake
+    // glibre::compile_contract, eastl-removal.md §2) + PerContextAllocatorResource::
+    // do_allocate abort-on-ceiling-breach (eastl-removal.md §3.do_allocate).
+    // NOT unconditionally noexcept under the standard: std::pmr::polymorphic_allocator::
+    // is_always_equal is false (pointer-identity per eastl-removal.md §3.2), so
+    // std::pmr::string/std::pmr::vector's allocator-extended move ctor may allocate
+    // (and therefore throw under exceptions) when source and destination allocators
+    // compare unequal. Vector growth within a single std::pmr::vector<ComponentDecl>
+    // always uses the same resource, so this throwing branch is statically unreachable
+    // in this engine.
+    // This noexcept allows std::pmr::vector<ComponentDecl> to use move (not copy) on
+    // grow, avoiding redundant heap allocation during reallocation.
     ComponentDecl(ComponentDecl&& other, allocator_type alloc) noexcept
         : fqn{std::move(other.fqn), alloc},
           schema_hash{std::move(other.schema_hash), alloc},
@@ -169,6 +175,15 @@ struct SystemDecl {
           after{other.after, alloc},
           before{other.before, alloc} {}
 
+    // noexcept: safe under glibre's -fno-exceptions posture (cmake/Compile.cmake
+    // glibre::compile_contract, eastl-removal.md §2) + PerContextAllocatorResource::
+    // do_allocate abort-on-ceiling-breach (eastl-removal.md §3.do_allocate).
+    // NOT unconditionally noexcept under the standard: std::pmr::polymorphic_allocator::
+    // is_always_equal is false (pointer-identity per eastl-removal.md §3.2), so
+    // std::pmr::string/std::pmr::vector's allocator-extended move ctor may allocate
+    // (and therefore throw under exceptions) when source and destination allocators
+    // compare unequal. The throwing branch is statically unreachable in this engine.
+    // See ComponentDecl move+alloc ctor comment for full rationale.
     SystemDecl(SystemDecl&& other, allocator_type alloc) noexcept
         : name{std::move(other.name), alloc},
           phase{other.phase},
@@ -218,6 +233,15 @@ struct PassDecl {
           inputs{other.inputs, alloc},
           outputs{other.outputs, alloc} {}
 
+    // noexcept: safe under glibre's -fno-exceptions posture (cmake/Compile.cmake
+    // glibre::compile_contract, eastl-removal.md §2) + PerContextAllocatorResource::
+    // do_allocate abort-on-ceiling-breach (eastl-removal.md §3.do_allocate).
+    // NOT unconditionally noexcept under the standard: std::pmr::polymorphic_allocator::
+    // is_always_equal is false (pointer-identity per eastl-removal.md §3.2), so
+    // std::pmr::string/std::pmr::vector's allocator-extended move ctor may allocate
+    // (and therefore throw under exceptions) when source and destination allocators
+    // compare unequal. The throwing branch is statically unreachable in this engine.
+    // See ComponentDecl move+alloc ctor comment for full rationale.
     PassDecl(PassDecl&& other, allocator_type alloc) noexcept
         : name{std::move(other.name), alloc},
           render_phase{other.render_phase},
@@ -259,6 +283,15 @@ struct PanelDecl {
           title{other.title, alloc},
           area{other.area} {}
 
+    // noexcept: safe under glibre's -fno-exceptions posture (cmake/Compile.cmake
+    // glibre::compile_contract, eastl-removal.md §2) + PerContextAllocatorResource::
+    // do_allocate abort-on-ceiling-breach (eastl-removal.md §3.do_allocate).
+    // NOT unconditionally noexcept under the standard: std::pmr::polymorphic_allocator::
+    // is_always_equal is false (pointer-identity per eastl-removal.md §3.2), so
+    // std::pmr::string's allocator-extended move ctor may allocate (and therefore throw
+    // under exceptions) when source and destination allocators compare unequal.
+    // The throwing branch is statically unreachable in this engine.
+    // See ComponentDecl move+alloc ctor comment for full rationale.
     PanelDecl(PanelDecl&& other, allocator_type alloc) noexcept
         : id{std::move(other.id), alloc},
           title{std::move(other.title), alloc},
