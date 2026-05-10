@@ -43,7 +43,12 @@
 //   CI artifact-upload step (plan #944) picks up this path.
 //
 // Build flags:
-//   - No -fno-exceptions: Catch2 TEST_CASE requires exception support.
+//   - Exception handling: inherits CMake defaults (exception-neutral).
+//     The glibre-core-world-perf-tests target does NOT link
+//     glibre::compile_contract and does NOT call glibre_target_exceptions(),
+//     so no -fno-exceptions flag is injected.  This is the standard pattern
+//     for Catch2 test targets — Catch2 TEST_CASE requires exception support
+//     and the CMake exception-neutral default provides it.
 //   - Compiled as part of the glibre-core-world-perf-tests target
 //     (tests/core/world/perf/CMakeLists.txt).
 //   - GLIBRE_ENABLE_PMC compile definition forwarded from CMakeLists.txt.
