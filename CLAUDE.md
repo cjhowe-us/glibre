@@ -45,9 +45,10 @@ Slang. macOS 26 / Apple Silicon baseline.
 ## Tech Stack (locked)
 
 C++23, CMake ≥ 4.3.0 + Ninja, vcpkg manifest mode, clang ≥ 21, SDL3, Metal 4 via metal-cpp, Slang,
-Jolt, meshoptimizer, Draco, Apache Fory, FreeImage, HarfBuzz, FBX SDK, Catch2, spdlog, **EASTL**
-(game-focused container + allocator library replacing `std::` containers / strings / smart pointers
-/ optional / variant / tuple / function — see PHILOSOPHY.md §11).
+Jolt, meshoptimizer, Draco, Apache Fory, FreeImage, HarfBuzz, FBX SDK, Catch2, spdlog. Containers /
+strings / smart pointers / `optional` / `variant` / `tuple` / `function` use libc++ (`std::*` /
+`std::pmr::*`); per-context allocation via `std::pmr::polymorphic_allocator<T>` over
+`glibre::PerContextAllocatorResource` (see `reviews/decisions/eastl-removal.md` and PHILOSOPHY.md §11).
 
 ## Repo Layout
 
