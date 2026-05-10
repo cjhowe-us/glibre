@@ -47,6 +47,14 @@ struct Entity {
     // Equality compares the raw bits (SPEC §5.2): two Entity values are equal
     // iff they encode the same (index, generation) pair.
     friend constexpr bool operator==(Entity, Entity) noexcept = default;
+
+    /// Test-only factory: constructs Entity from raw (index, generation) bits.
+    [[nodiscard]] static constexpr Entity from_bits_for_testing(
+        std::uint32_t index,
+        std::uint32_t generation
+    ) noexcept {
+        return detail::pack(index, generation);
+    }
 };
 
 // ---------------------------------------------------------------------------
