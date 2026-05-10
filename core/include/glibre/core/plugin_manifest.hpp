@@ -117,7 +117,13 @@ struct ComponentDecl {
           storage_hint{other.storage_hint} {}
 
     // Extended move (allocator-extended move constructor for PMR containers).
-    ComponentDecl(ComponentDecl&& other, allocator_type alloc)
+    // noexcept: std::pmr::string move-with-alloc is noexcept when the resource
+    // pointers match (same allocator); unconditional noexcept here is correct for
+    // this type because the move constructor cannot throw — scalar copy is trivially
+    // noexcept and pmr::string move-with-alloc is noexcept per the standard.
+    // This allows std::pmr::vector<ComponentDecl> to use move (not copy) on grow,
+    // avoiding redundant heap allocation during reallocation.
+    ComponentDecl(ComponentDecl&& other, allocator_type alloc) noexcept
         : fqn{std::move(other.fqn), alloc},
           schema_hash{std::move(other.schema_hash), alloc},
           storage_hint{other.storage_hint} {}
@@ -163,7 +169,7 @@ struct SystemDecl {
           after{other.after, alloc},
           before{other.before, alloc} {}
 
-    SystemDecl(SystemDecl&& other, allocator_type alloc)
+    SystemDecl(SystemDecl&& other, allocator_type alloc) noexcept
         : name{std::move(other.name), alloc},
           phase{other.phase},
           reads{std::move(other.reads), alloc},
@@ -212,7 +218,7 @@ struct PassDecl {
           inputs{other.inputs, alloc},
           outputs{other.outputs, alloc} {}
 
-    PassDecl(PassDecl&& other, allocator_type alloc)
+    PassDecl(PassDecl&& other, allocator_type alloc) noexcept
         : name{std::move(other.name), alloc},
           render_phase{other.render_phase},
           inputs{std::move(other.inputs), alloc},
@@ -253,7 +259,7 @@ struct PanelDecl {
           title{other.title, alloc},
           area{other.area} {}
 
-    PanelDecl(PanelDecl&& other, allocator_type alloc)
+    PanelDecl(PanelDecl&& other, allocator_type alloc) noexcept
         : id{std::move(other.id), alloc},
           title{std::move(other.title), alloc},
           area{other.area} {}
