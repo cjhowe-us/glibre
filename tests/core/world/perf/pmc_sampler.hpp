@@ -46,6 +46,7 @@
 
 #include <cstdint>
 #include <type_traits>
+#include <utility>
 
 // Guard: only compile active PMC sampling when explicitly requested.
 #ifndef GLIBRE_ENABLE_PMC
@@ -116,16 +117,31 @@ private:
 // Inline template definition — must appear after the class definition.
 // ---------------------------------------------------------------------------
 
-#include <utility>
-
 namespace glibre::testing {
 
 template<typename F>
     requires std::is_invocable_v<F>
-[[nodiscard]] PmcCounters PmcSampler::measure(F&& fn) {
+PmcCounters PmcSampler::measure(F&& fn) {
+    // StopSamplingOnExit: RAII scope guard ensuring stop_sampling() is called
+    // even if fn() exits early.  The repo builds with -fno-exceptions so fn()
+    // cannot throw (std::terminate would fire first), but the guard is cheap
+    // forward-proofing for future code paths that add early returns inside
+    // measure() once the KPC integration spike lands.
+    struct StopSamplingOnExit {
+        PmcCounters result{};
+        bool stopped{false};
+        ~StopSamplingOnExit() noexcept {
+            if (!stopped) {
+                result = PmcSampler::stop_sampling();
+            }
+        }
+    } guard;
+
     PmcSampler::start_sampling();
     std::forward<F>(fn)();
-    return PmcSampler::stop_sampling();
+    guard.result  = PmcSampler::stop_sampling();
+    guard.stopped = true;
+    return guard.result;
 }
 
 }  // namespace glibre::testing
