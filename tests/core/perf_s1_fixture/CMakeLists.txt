@@ -53,6 +53,10 @@ target_compile_options(
         -Wextra
         -Wpedantic
         -Wno-unused-parameter
+        # This target intentionally enables exceptions (std::ifstream / std::runtime_error
+        # in the fixture header) so it cannot link glibre::test_contract (which inherits
+        # -fno-exceptions from glibre::compile_contract).  The Catch2 __COUNTER__ warning
+        # is suppressed here directly instead.
         -Wno-c2y-extensions
 )
 

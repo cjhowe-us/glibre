@@ -57,7 +57,7 @@ target_link_libraries(foryc-golden-tests
     PRIVATE
         Catch2::Catch2WithMain
         glibre::core   # glibre::Error (std::variant-based; eastl-removal.md §4)
-        glibre::compile_contract
+        glibre::test_contract
 )
 
 target_compile_features(foryc-golden-tests PRIVATE cxx_std_23)
@@ -69,7 +69,7 @@ target_compile_options(foryc-golden-tests PRIVATE
     -Wextra
     -Wpedantic
     -Wno-unused-parameter
-    -Wno-c2y-extensions
+    # -Wno-c2y-extensions is inherited from glibre::test_contract (cmake/Compile.cmake).
 )
 
 # Inject the absolute path to this golden/ directory so the test binary can
@@ -131,20 +131,20 @@ if(EXISTS "${_EMIT_MIGRATION_HPP}" AND EXISTS "${_EMIT_MIGRATION_CPP}")
         PRIVATE
             Catch2::Catch2WithMain
             glibre::core   # glibre::Error (std::variant-based; eastl-removal.md §4)
-            glibre::compile_contract
+            glibre::test_contract
     )
 
     target_compile_features(foryc-migration-golden-tests PRIVATE cxx_std_23)
 
     set_target_properties(foryc-migration-golden-tests PROPERTIES CXX_MODULE_STD OFF)
 
-    # -fno-exceptions and -fno-rtti are provided via glibre::compile_contract.
+    # -fno-exceptions and -fno-rtti are provided via glibre::test_contract.
     target_compile_options(foryc-migration-golden-tests PRIVATE
         -Wall
         -Wextra
         -Wpedantic
         -Wno-unused-parameter
-        -Wno-c2y-extensions
+        # -Wno-c2y-extensions is inherited from glibre::test_contract (cmake/Compile.cmake).
     )
 
     # Inject the absolute path to this golden/ directory so the binary can

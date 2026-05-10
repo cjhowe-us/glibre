@@ -40,7 +40,9 @@ target_compile_options(glibre-types-dylib-tests PRIVATE
     -Wextra
     -Wpedantic
     -Wno-unused-parameter
-    -Wno-c2y-extensions   # Catch2 uses __COUNTER__; suppress clang pedantic warning
+    # This target intentionally enables exceptions (Catch2 REQUIRE uses throws) so
+    # it cannot link glibre::test_contract.  -Wno-c2y-extensions suppressed directly.
+    -Wno-c2y-extensions
 )
 
 # Inject the path to libglibre-types.dylib so the nm/otool regression test

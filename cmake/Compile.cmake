@@ -47,6 +47,40 @@ if(NOT TARGET glibre::compile_contract)
 endif()
 
 # ---------------------------------------------------------------------------
+# 1b. Interface target for Catch2 test executables: glibre::test_contract
+#
+#     Inherits the full compile_contract (no-exceptions, no-rtti, visibility)
+#     and adds -Wno-c2y-extensions.  All Catch2 test executable targets link
+#     this instead of glibre::compile_contract so the per-target duplication
+#     is eliminated.  Centralisation is tracked in issue #1101.
+#
+#     Rationale for -Wno-c2y-extensions:
+#       Catch2 3.x TEST_CASE / SECTION macros expand __COUNTER__ which clang
+#       >= 22 diagnoses as a C2y extension under -Wpedantic.  Suppressing it
+#       per-target in every test CMakeLists is fragile; a single authoritative
+#       source here means a future toolchain bump only requires one edit.
+#
+#     Non-test targets (production code, plugin stubs) MUST NOT link this
+#     target — they use glibre::compile_contract directly.
+# ---------------------------------------------------------------------------
+if(NOT TARGET glibre::test_contract)
+    add_library(glibre_test_contract INTERFACE)
+    add_library(glibre::test_contract ALIAS glibre_test_contract)
+
+    target_link_libraries(glibre_test_contract INTERFACE
+        glibre::compile_contract
+    )
+
+    target_compile_options(glibre_test_contract INTERFACE
+        # Catch2 3.x macros use __COUNTER__ which triggers -Wpedantic C2y
+        # extension warning with clang >= 22; suppress from third-party macro.
+        # This flag lives here so every Catch2 test target inherits it without
+        # per-target boilerplate.  See issue #1101.
+        -Wno-c2y-extensions
+    )
+endif()
+
+# ---------------------------------------------------------------------------
 # 2. Helper: glibre_register_engine_root(target)
 #
 #    Self-registration macro: each engine CMakeLists.txt calls this after

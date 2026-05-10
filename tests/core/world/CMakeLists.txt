@@ -41,7 +41,7 @@ target_link_libraries(glibre-core-world-entity-foreign-world-refusal-tests
     PRIVATE
         glibre::core
         Catch2::Catch2WithMain
-        glibre::compile_contract
+        glibre::test_contract
 )
 
 # Add the internal source directory so the test can include entity_allocator.hpp.
@@ -66,12 +66,7 @@ target_compile_options(glibre-core-world-entity-foreign-world-refusal-tests
         -Wextra
         -Wpedantic
         -Wno-unused-parameter
-        # Catch2 3.x macros use __COUNTER__ which triggers -Wpedantic C2y
-        # extension warning with clang >= 22; suppress from third-party macro.
-        # This flag is set per-target (not in glibre::compile_contract) because
-        # centralising it requires touching shared CMake infra that is out of
-        # scope for plan #940.  Centralisation is tracked in issue #1101.
-        -Wno-c2y-extensions
+        # -Wno-c2y-extensions is inherited from glibre::test_contract (cmake/Compile.cmake).
 )
 
 # GLIBRE_TESTING is propagated PUBLIC from glibre-core when GLIBRE_BUILD_TESTS=ON,

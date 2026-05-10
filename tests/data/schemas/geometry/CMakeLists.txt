@@ -47,7 +47,7 @@ target_link_libraries(geometry-schema-parse-tests
     PRIVATE
         Catch2::Catch2WithMain
         glibre::core   # glibre::Error
-        glibre::compile_contract
+        glibre::test_contract
 )
 
 target_compile_features(geometry-schema-parse-tests PRIVATE cxx_std_23)
@@ -61,7 +61,7 @@ target_compile_options(geometry-schema-parse-tests PRIVATE
     -Wextra
     -Wpedantic
     -Wno-unused-parameter
-    -Wno-c2y-extensions   # Catch2 uses __COUNTER__; suppress clang pedantic warning
+    # -Wno-c2y-extensions is inherited from glibre::test_contract (cmake/Compile.cmake).
 )
 
 include(CTest)

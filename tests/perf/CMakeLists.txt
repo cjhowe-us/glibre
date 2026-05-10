@@ -57,8 +57,11 @@ target_include_directories(
 )
 
 # -O2 per-target for realistic benchmark measurements.
-# -Wno-c2y-extensions: Catch2 3.x macros use __COUNTER__ which triggers the
-# C2Y extension warning with clang >= 22; suppress from third-party macros.
+# -Wno-c2y-extensions: This target intentionally enables exceptions (Catch2
+# BENCHMARK requires CATCH_TRY/CATCH_CATCH_ALL) so it cannot link
+# glibre::test_contract (which inherits -fno-exceptions from
+# glibre::compile_contract).  The Catch2 __COUNTER__ warning is suppressed
+# here directly instead.  See cmake/Compile.cmake for the centralised variant.
 target_compile_options(
     glibre-perf-budget-gate-tests
     PRIVATE -O2

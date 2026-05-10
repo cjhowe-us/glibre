@@ -27,7 +27,7 @@ target_link_libraries(glibre-core-error-variant-tests
     PRIVATE
         glibre::core
         Catch2::Catch2WithMain
-        glibre::compile_contract
+        glibre::test_contract
 )
 
 target_compile_features(glibre-core-error-variant-tests PRIVATE cxx_std_23)
@@ -42,15 +42,8 @@ target_compile_options(glibre-core-error-variant-tests PRIVATE
     -Wextra
     -Wpedantic
     -Wno-unused-parameter
-    # Catch2 3.x macros use __COUNTER__ which triggers -Wpedantic C2y
-    # extension warning with clang >= 22; suppress from third-party macro.
-    # TODO: remove once Catch2 upstream lands a fix (tracked at
-    # https://github.com/catchorg/Catch2/issues/2892).  Until then, narrowing
-    # via SYSTEM includes does not help because __COUNTER__ is expanded in our
-    # TU by macros that originate in Catch2 headers — the diagnostic fires in
-    # our code, not in the system include.  The same flag is applied to sibling
-    # targets error_register and error_propagation for consistency.
-    -Wno-c2y-extensions
+    # -Wno-c2y-extensions is inherited from glibre::test_contract (cmake/Compile.cmake).
+    # See https://github.com/catchorg/Catch2/issues/2892 for upstream tracking.
 )
 
 include(CTest)
