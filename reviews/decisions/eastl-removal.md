@@ -117,6 +117,8 @@ ships it). The `core/include/glibre/compat/` directory is created by
 the first migration PLAN that needs it; it does not exist on `main`
 today.
 
+The matrix is grouped by EASTL category — strings → containers (sequence, fixed, associative) → callables → sum-types (optional/variant/expected) → smart-pointers → utilities — and within each group ordered by per-tree usage frequency descending.
+
 | EASTL type                         | libc++ replacement                                                              | C++ standard           | Locked toolchain ships? | Fallback / polyfill                                                                                                |
 |------------------------------------|---------------------------------------------------------------------------------|------------------------|-------------------------|--------------------------------------------------------------------------------------------------------------------|
 | `eastl::string`                    | `std::pmr::string` (engine code) / `std::string` (tools, ImGui, FBX wrappers)   | C++17                  | yes                     | n/a                                                                                                                |
@@ -124,30 +126,30 @@ today.
 | `eastl::vector`                    | `std::pmr::vector<T>` (engine) / `std::vector<T>` (tools, tests fixture data)   | C++17                  | yes                     | n/a                                                                                                                |
 | `eastl::fixed_vector<T, N>`        | `std::inplace_vector<T, N>` (P0843R14)                                          | C++26                  | **no** (libc++ tracking)| `core/include/glibre/compat/inplace_vector.hpp` — `std::array<T,N>` + `size_t size_` member, push_back returns Result on overflow |
 | `eastl::array`                     | `std::array<T, N>`                                                              | C++11                  | yes                     | n/a                                                                                                                |
-| `eastl::fixed_function<N, Sig>`    | `std::move_only_function<Sig>` (heap; engine default) — see Open Question 1     | C++23                  | yes                     | inline-storage variant deferred until measured hot path; if needed, polyfill `core/include/glibre/compat/inline_function.hpp` |
-| `eastl::function`                  | `std::move_only_function<Sig>`                                                  | C++23                  | yes                     | `std::function` only at editor / scripting boundaries that genuinely require copyability                           |
-| `eastl::optional`                  | `std::optional`                                                                 | C++17                  | yes                     | n/a                                                                                                                |
-| `eastl::variant`                   | `std::variant`                                                                  | C++17                  | yes                     | n/a (see §4 below for `glibre::Error`-specific migration)                                                          |
-| `eastl::tuple`                     | `std::tuple`                                                                    | C++17                  | yes                     | n/a                                                                                                                |
-| `eastl::pair`                      | `std::pair`                                                                     | C++11                  | yes                     | n/a                                                                                                                |
-| `eastl::unique_ptr`                | `std::unique_ptr`                                                               | C++14                  | yes                     | n/a; prefer `std::make_unique` / `std::make_unique_for_overwrite` (C++20)                                          |
-| `eastl::shared_ptr`                | `std::shared_ptr`                                                               | C++11                  | yes                     | discouraged in engine code; engine prefers handles (see plugin-abi.md)                                             |
-| `eastl::weak_ptr`                  | `std::weak_ptr`                                                                 | C++11                  | yes                     | discouraged for the same reason                                                                                    |
-| `eastl::span`                      | `std::span`                                                                     | C++20                  | yes                     | n/a                                                                                                                |
+| `eastl::deque`                     | `std::pmr::deque<T>`                                                            | C++17                  | yes                     | n/a; replace with ring buffer in measured hot paths                                                                |
+| `eastl::list`                      | `std::pmr::list<T>`                                                             | C++17                  | yes                     | n/a; near-zero use today; intrusive lists in hot paths                                                             |
 | `eastl::hash_map<K,V>`             | `std::pmr::flat_map<K,V>` (default) / `std::pmr::unordered_map<K,V>` (hot mutate) | C++23 (flat) / C++17  | flat_map: **partial** in libc++ 19 — verify per migration PLAN | if `std::flat_map` not yet shipped at the migration PLAN's commit, use `std::pmr::unordered_map` and TODO-link to a follow-up PLAN |
 | `eastl::hash_set<K>`               | `std::pmr::flat_set<K>` (default) / `std::pmr::unordered_set<K>` (hot mutate)   | C++23 (flat) / C++17  | flat_set: same as flat_map | same                                                                                                            |
 | `eastl::map<K,V>` / `eastl::set<K>`| `std::pmr::flat_map<K,V>` / `std::pmr::flat_set<K>`                             | C++23                  | partial                 | same; node-based `std::pmr::map` / `std::pmr::set` is the C++17 fallback if `flat_*` unavailable                   |
-| `eastl::deque`                     | `std::pmr::deque<T>`                                                            | C++17                  | yes                     | n/a; replace with ring buffer in measured hot paths                                                                |
-| `eastl::list`                      | `std::pmr::list<T>`                                                             | C++17                  | yes                     | n/a; near-zero use today; intrusive lists in hot paths                                                             |
-| `eastl::expected`                  | `std::expected<T, E>`                                                           | C++23                  | yes                     | n/a — error-model.md already mandates `std::expected`; the lone EASTL use is a defect to be removed                |
-| `eastl::transparent_string_hash`   | `glibre::TransparentStringHash` (4-line struct: `using is_transparent = void;` + `operator()(std::string_view)`) | n/a — local utility | yes (header-only)  | `core/include/glibre/compat/transparent_string_hash.hpp` — keeps the polyfill cluster co-located even though no future stdlib version owns it |
+| `eastl::fixed_function<N, Sig>`    | `std::move_only_function<Sig>` (heap; engine default) — see Open Question 1     | C++23                  | yes                     | inline-storage variant deferred until measured hot path; if needed, polyfill `core/include/glibre/compat/inline_function.hpp` |
+| `eastl::function`                  | `std::move_only_function<Sig>`                                                  | C++23                  | yes                     | `std::function` only at editor / scripting boundaries that genuinely require copyability                           |
+| `eastl::optional`                  | `std::optional`                                                                 | C++17                  | yes                     | n/a                                                                                                                |
 | `eastl::nullopt`                   | `std::nullopt`                                                                  | C++17                  | yes                     | n/a                                                                                                                |
+| `eastl::variant`                   | `std::variant`                                                                  | C++17                  | yes                     | n/a (see §4 below for `glibre::Error`-specific migration)                                                          |
+| `eastl::expected`                  | `std::expected<T, E>`                                                           | C++23                  | yes                     | n/a — error-model.md already mandates `std::expected`; the lone EASTL use is a defect to be removed                |
 | `eastl::holds_alternative`         | `std::holds_alternative`                                                        | C++17                  | yes                     | n/a                                                                                                                |
 | `eastl::get_if<T>`                 | `std::get_if<T>`                                                                | C++17                  | yes                     | n/a                                                                                                                |
 | `eastl::get<T>` (throwing)         | **forbidden** in engine code (throws `std::bad_variant_access`)                 | C++17                  | yes                     | use `std::get_if<T>` + null-check, or `std::visit`; lint catches misuse                                            |
 | `eastl::visit`                     | `std::visit`                                                                    | C++17                  | yes                     | n/a; pair with `Overloaded { lambdas... }` helper for ad-hoc visitors                                              |
 | `eastl::variant_size_v<V>`         | `std::variant_size_v<V>`                                                        | C++17                  | yes                     | n/a — used in §4 for the arm-count `static_assert`                                                                 |
 | `eastl::variant_npos`              | `std::variant_npos`                                                             | C++17                  | yes                     | n/a                                                                                                                |
+| `eastl::unique_ptr`                | `std::unique_ptr`                                                               | C++14                  | yes                     | n/a; prefer `std::make_unique` / `std::make_unique_for_overwrite` (C++20)                                          |
+| `eastl::shared_ptr`                | `std::shared_ptr`                                                               | C++11                  | yes                     | discouraged in engine code; engine prefers handles (see plugin-abi.md)                                             |
+| `eastl::weak_ptr`                  | `std::weak_ptr`                                                                 | C++11                  | yes                     | discouraged for the same reason                                                                                    |
+| `eastl::tuple`                     | `std::tuple`                                                                    | C++17                  | yes                     | n/a                                                                                                                |
+| `eastl::pair`                      | `std::pair`                                                                     | C++11                  | yes                     | n/a                                                                                                                |
+| `eastl::span`                      | `std::span`                                                                     | C++20                  | yes                     | n/a                                                                                                                |
+| `eastl::transparent_string_hash`   | `glibre::TransparentStringHash` (4-line struct: `using is_transparent = void;` + `operator()(std::string_view)`) | n/a — local utility | yes (header-only)  | `core/include/glibre/compat/transparent_string_hash.hpp` — keeps the polyfill cluster co-located even though no future stdlib version owns it |
 | `eastl::move`                      | `std::move`                                                                     | C++11                  | yes                     | n/a                                                                                                                |
 | `eastl::equal_to`                  | `std::equal_to<>`                                                               | C++14                  | yes                     | n/a; transparent (`<>` form) preferred for heterogeneous lookup                                                    |
 | `eastl::allocator`                 | `std::pmr::polymorphic_allocator<T>`                                            | C++17                  | yes                     | substrate is `glibre::PerContextAllocatorResource` (see §3)                                                        |
@@ -341,7 +343,9 @@ budget at the price of a logged warning (perf-budget.md
 §Allocator Rules #3). Engine code MUST NOT catch the abort — there is
 no recovery contract here, by design.
 
-**Recoverability concession.** Adopting `std::pmr::*` containers via
+#### 3.1 Recoverability concession
+
+Adopting `std::pmr::*` containers via
 `PerContextMemoryResource` collapses the recoverable-error surface from
 `OutOfBudget` (typed via `std::expected<T, glibre::Error>`) down to
 `std::abort()` — since `std::pmr::memory_resource::do_allocate` cannot
@@ -370,8 +374,9 @@ void PerContextAllocatorResource::do_deallocate(void* p, std::size_t bytes, std:
 }
 ```
 
-**`do_is_equal` — pointer-identity. This is the load-bearing
-constraint.**
+#### 3.2 `do_is_equal` — pointer-identity
+
+This is the load-bearing constraint.
 
 ```cpp
 bool PerContextAllocatorResource::do_is_equal(const std::pmr::memory_resource& other) const noexcept {
@@ -404,8 +409,9 @@ within that context simply reuses the same `PerContextAllocatorResource`
 instance (hold it as a class member and pass `&mr_` to every PMR
 container in the class — see PR #1028 TypeRegistry pattern).
 
-**`ContextTag` threading.** The tag is reachable two ways from the
-PMR adapter:
+#### 3.3 `ContextTag` threading
+
+The tag is reachable two ways from the PMR adapter:
 
 1. `PerContextAllocatorResource::tag()` — explicit accessor for
    diagnostics / structured logging. Forwards to `alloc_.tag()`.
