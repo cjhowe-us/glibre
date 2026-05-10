@@ -198,6 +198,107 @@ TEST_CASE("core/asset_table: free_index_reused_lowest_first", "[core][asset_tabl
 }
 
 // ===========================================================================
+// Test: core/asset_table: foreign_type_tag_resolves_to_AssetStale
+//
+// HIGH-1 (r1): resolve() and release() must reject a handle whose type_tag
+// does not match the table's type_tag_ (SPEC §4.7 inv.1, §6.8).
+//
+// A handle built with a mismatching type_tag must resolve to AssetStale even
+// if the slot index and generation are valid within the table.
+// ===========================================================================
+
+TEST_CASE("core/asset_table: foreign_type_tag_resolves_to_AssetStale", "[core][asset_table]") {
+    using namespace glibre::core;
+    using namespace glibre::core::detail;
+
+    glibre::PerContextAllocator alloc{glibre::ContextTag::core, 1024 * 1024};
+
+    // Table constructed with type_tag == 0.
+    AssetTable<int> table{alloc, detail::AssetTypeTag{0}};
+
+    // Insert a valid payload — handle carries type_tag 0.
+    auto valid_handle = table.insert(42);
+    auto [idx, gen, tag] = asset_unpack(valid_handle);
+    CHECK(tag == 0u);  // sanity: tag matches table
+
+    // Forge a handle with type_tag == 1 (different from the table's tag 0),
+    // but the same slot index and generation so only the tag differs.
+    auto foreign_handle = asset_pack<int>(idx, gen, AssetTypeTag{1});
+
+    // resolve() must return AssetStale for the foreign-tagged handle.
+    auto r = table.resolve(foreign_handle);
+    REQUIRE(!r.has_value());
+    CHECK(std::holds_alternative<glibre::core::Error>(r.error().code()));
+    CHECK(std::get<glibre::core::Error>(r.error().code()) == glibre::core::Error::AssetStale);
+
+    // The genuine handle must still resolve correctly (no side-effect).
+    auto r2 = table.resolve(valid_handle);
+    REQUIRE(r2.has_value());
+    CHECK(*r2.value() == 42);
+
+    // release() with the foreign-tagged handle must be a no-op:
+    // the valid handle must still resolve after the spurious release attempt.
+    table.release(foreign_handle);
+    auto r3 = table.resolve(valid_handle);
+    REQUIRE(r3.has_value());
+    CHECK(*r3.value() == 42);
+}
+
+// ===========================================================================
+// Test: core/asset_registry: reset_for_testing_clears_type_map
+//
+// MED-4 (r1): after reset_for_testing(), re-registering types in a different
+// order must not produce a UB cast (the old per-T-static s_tag_index bug).
+//
+// Sequence: insert A, insert B, reset, insert B first (should get tag 0),
+// insert A second (should get tag 1). Both must resolve to their own payloads.
+// ===========================================================================
+
+#ifdef GLIBRE_TESTING
+TEST_CASE("core/asset_registry: reset_for_testing_clears_type_map", "[core][asset_registry]") {
+    using namespace glibre::core;
+
+    AssetRegistry& reg = AssetRegistry::instance();
+
+    // -- Phase 1: register int (tag 0) and float (tag 1). ----------------
+    reg.reset_for_testing();
+    CHECK(reg.registered_type_count() == 0u);
+
+    auto hi = reg.insert<int>(10);
+    auto hf = reg.insert<float>(3.14f);
+    CHECK(reg.registered_type_count() == 2u);
+
+    // Sanity: both resolve.
+    REQUIRE(reg.resolve(hi).has_value());
+    CHECK(*reg.resolve(hi).value() == 10);
+    REQUIRE(reg.resolve(hf).has_value());
+    CHECK(*reg.resolve(hf).value() == 3.14f);
+
+    // -- Phase 2: reset, then register in reverse order. -----------------
+    reg.reset_for_testing();
+    CHECK(reg.registered_type_count() == 0u);
+
+    // float inserted first — should now receive tag 0 (previously int's tag).
+    auto hf2 = reg.insert<float>(2.71f);
+    CHECK(reg.registered_type_count() == 1u);
+
+    // int inserted second — should receive tag 1.
+    auto hi2 = reg.insert<int>(99);
+    CHECK(reg.registered_type_count() == 2u);
+
+    // Both must resolve to their own payloads (not each other's).
+    REQUIRE(reg.resolve(hf2).has_value());
+    CHECK(*reg.resolve(hf2).value() == 2.71f);
+
+    REQUIRE(reg.resolve(hi2).has_value());
+    CHECK(*reg.resolve(hi2).value() == 99);
+
+    // Cleanup.
+    reg.reset_for_testing();
+}
+#endif  // GLIBRE_TESTING
+
+// ===========================================================================
 // Test: core/asset_registry: per_T_table_instantiated_on_first_insert
 //
 // Verifies that AssetRegistry instantiates a new per-T table on the first

@@ -45,7 +45,10 @@
 
 #include <array>
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <new>
 
 #include <glibre/alloc.hpp>
 #include <glibre/core/asset_handle.hpp>
@@ -100,7 +103,7 @@ public:
     // -------------------------------------------------------------------------
     template<class T>
     [[nodiscard]] AssetHandle<T> insert(T payload) noexcept {
-        return table_for<T>().insert(std::move(payload));
+        return table_for<T>().insert(std::move(payload));  // forward as rvalue
     }
 
     // -------------------------------------------------------------------------
@@ -143,6 +146,15 @@ public:
             entry.reset();
         }
         next_type_tag_ = 0;
+        // Reset type-token map so re-registration after reset assigns fresh
+        // indices (MED-4 fix: previously s_tag_index was process-lifetime and
+        // could produce UB casts if types were registered in a different order
+        // post-reset).  Nulling the map entries invalidates all prior tag
+        // assignments; the per-T kTypeToken statics remain live (they are
+        // process-lifetime) and will be looked up fresh on next table_for<T>().
+        for (auto& token : type_token_map_) {
+            token = nullptr;
+        }
     }
 #endif
 
@@ -153,49 +165,59 @@ private:
     // -------------------------------------------------------------------------
     // table_for<T>() — return (creating if necessary) the AssetTable<T>.
     //
-    // Uses a function-template-local static index to locate the entry in the
-    // tables_ array.  The index is assigned the first time table_for<T>() is
-    // called for a given T; subsequent calls return the cached entry.
+    // Type assignment is table-driven (type_index_map_ + next_type_tag_) so
+    // that reset_for_testing() can clear all state and re-assign correctly.
     //
-    // Implementation note: We use a per-T function-local atomic_bool + index
-    // to perform type registration.  In MVP single-threaded bootstrap this is
-    // simple and correct.
+    // Previously, a per-T function-local static held the tag index.  That
+    // design was un-resetable: after reset_for_testing(), a type registered
+    // before the reset would still hold its old index, while post-reset
+    // registrations would start from 0 — if different types landed at the
+    // same index a UB cast would result.  The type_index_map_ array fixes
+    // this: reset_for_testing() clears the map and next_type_tag_ together.
     // -------------------------------------------------------------------------
     template<class T>
     [[nodiscard]] AssetTable<T>& table_for() noexcept {
-        // Static per-T slot index — assigned on first call for a given T.
-        // kUnassigned sentinel: tables_.size() is at most kMaxAssetPayloadTypes
-        // (4), so using ~0u as "unassigned" is safe.
-        //
-        // After reset_for_testing() the slot ptr is nulled but s_tag_index
-        // retains its value.  We detect this case by checking ptr and
-        // re-allocating the table at the same index.
-        static std::size_t s_tag_index = kUnassigned;
+        // Per-T unique token: address of a function-local static char is stable
+        // for the process lifetime and unique per template instantiation.
+        // No RTTI required (project compiles with -fno-rtti).
+        static const char kTypeToken = '\0';
+        const void* const key = &kTypeToken;
 
-        if (s_tag_index == kUnassigned) {
-            // First call ever for this T — assign a new type_tag index.
+        // Look up existing tag assignment.
+        std::size_t tag_index = kUnassigned;
+        for (std::size_t i = 0; i < next_type_tag_; ++i) {
+            if (type_token_map_[i] == key) {
+                tag_index = i;
+                break;
+            }
+        }
+
+        if (tag_index == kUnassigned) {
+            // First call for this T — assign a new type_tag index.
+            // Runtime guard (not assert-only): in release builds assert is a
+            // no-op; std::abort() ensures we never silently proceed with an
+            // out-of-bounds index (LOW-1 fix: release path must not fall
+            // through to OOB table access).
             assert(
                 next_type_tag_ < kMaxAssetPayloadTypes &&
                 "AssetRegistry: more than 4 payload types registered (2-bit type_tag limit)"
             );
-            s_tag_index = next_type_tag_++;
-        }
-
-        if (!tables_[s_tag_index].has_value()) {
-            // Either first call or re-initialization after reset_for_testing().
-            // In the reset case, s_tag_index is already assigned; we simply
-            // re-create the table at the same index without incrementing
-            // next_type_tag_ again.
-            if (s_tag_index >= next_type_tag_) {
-                // Re-registration after reset: bump counter back.
-                next_type_tag_ = s_tag_index + 1;
+            if (next_type_tag_ >= kMaxAssetPayloadTypes) {
+                // Release-build safety: abort rather than writing OOB.
+                std::abort();
             }
-            tables_[s_tag_index] =
-                make_erased_table<T>(alloc_, static_cast<detail::AssetTypeTag>(s_tag_index));
+            tag_index = next_type_tag_++;
+            type_token_map_[tag_index] = key;
         }
 
-        // SAFETY: s_tag_index is valid and the slot is initialized.
-        return *static_cast<AssetTable<T>*>(tables_[s_tag_index].ptr);
+        if (!tables_[tag_index].has_value()) {
+            // First call or re-initialization after reset_for_testing().
+            tables_[tag_index] =
+                make_erased_table<T>(alloc_, static_cast<detail::AssetTypeTag>(tag_index));
+        }
+
+        // SAFETY: tag_index is valid and the slot is initialized.
+        return *static_cast<AssetTable<T>*>(tables_[tag_index].ptr);
     }
 
     static constexpr std::size_t kUnassigned = ~std::size_t{0};
@@ -203,15 +225,19 @@ private:
     // Backing allocator for all AssetTable storage.
     PerContextAllocator& alloc_;
 
-    // Per-T table entries (type-erased via void-deleter unique_ptr wrapper).
-    // We store them as unique_ptr<void, void(*)(void*)> so that each table's
-    // destructor is called correctly despite type erasure.
+    // Per-T table entries.
     //
-    // Implementation: We use a custom deleter that casts back to the concrete
-    // type.  The concrete type is baked into the deleter at construction time.
+    // Each AssetTable<T> header is allocated through alloc_ (MED-3 fix: the
+    // AssetTable<T> object itself must be budget-counted, not just the inner
+    // PMR vectors).  ErasedTable stores alloc_ + size so reset() can call
+    // alloc_.deallocate() after destroying the table object.
     struct ErasedTable {
+        using DestroyFn = void (*)(void*) noexcept;
+
         void* ptr{nullptr};
-        void (*deleter)(void*){nullptr};
+        DestroyFn destroy{nullptr};  // calls ~AssetTable<T>
+        PerContextAllocator* alloc{nullptr};
+        std::size_t alloc_size{0};
 
         ErasedTable() noexcept = default;
 
@@ -220,18 +246,26 @@ private:
 
         ErasedTable(ErasedTable&& other) noexcept
             : ptr{other.ptr},
-              deleter{other.deleter} {
+              destroy{other.destroy},
+              alloc{other.alloc},
+              alloc_size{other.alloc_size} {
             other.ptr = nullptr;
-            other.deleter = nullptr;
+            other.destroy = nullptr;
+            other.alloc = nullptr;
+            other.alloc_size = 0;
         }
 
         ErasedTable& operator=(ErasedTable&& other) noexcept {
             if (this != &other) {
                 reset();
                 ptr = other.ptr;
-                deleter = other.deleter;
+                destroy = other.destroy;
+                alloc = other.alloc;
+                alloc_size = other.alloc_size;
                 other.ptr = nullptr;
-                other.deleter = nullptr;
+                other.destroy = nullptr;
+                other.alloc = nullptr;
+                other.alloc_size = 0;
             }
             return *this;
         }
@@ -239,11 +273,18 @@ private:
         ~ErasedTable() noexcept { reset(); }
 
         void reset() noexcept {
-            if (ptr && deleter) {
-                deleter(ptr);
+            if (ptr) {
+                if (destroy) {
+                    destroy(ptr);
+                }
+                if (alloc) {
+                    alloc->deallocate(ptr, alloc_size);
+                }
             }
             ptr = nullptr;
-            deleter = nullptr;
+            destroy = nullptr;
+            alloc = nullptr;
+            alloc_size = 0;
         }
 
         [[nodiscard]] bool has_value() const noexcept { return ptr != nullptr; }
@@ -255,18 +296,46 @@ private:
     // Next type_tag to assign on first insert for a new type T.
     std::size_t next_type_tag_{0};
 
+    // Type-token map: type_token_map_[i] is the address of the per-T static
+    // `kTypeToken` char in table_for<T>().  Each template instantiation gets a
+    // unique address (guaranteed by the standard for distinct statics), giving
+    // us a stable RTTI-free per-type identity.  Populated alongside tables_ and
+    // cleared by reset_for_testing() so the per-T static s_tag_index UB
+    // (MED-4) cannot occur — the map is the authoritative tag assignment; the
+    // per-T static `kTypeToken` address is merely the key, not the assignment.
+    std::array<const void*, kMaxAssetPayloadTypes> type_token_map_{};
+
     // -------------------------------------------------------------------------
-    // make_unique helper — constructs AssetTable<T> and wraps in ErasedTable.
+    // make_erased_table<T> — allocate AssetTable<T> through alloc_ and wrap.
+    //
+    // The AssetTable<T> object is placement-new'd into a raw buffer obtained
+    // from alloc_ so the header bytes are budget-counted alongside the inner
+    // PMR vectors (MED-3 fix: previously used bare `new`, escaping the ceiling).
     // -------------------------------------------------------------------------
     template<class T>
     static ErasedTable
     make_erased_table(PerContextAllocator& alloc, detail::AssetTypeTag tag) noexcept {
-        auto* p = new AssetTable<T>(alloc, tag);  // NOLINT(cppcoreguidelines-owning-memory)
+        constexpr std::size_t kSize = sizeof(AssetTable<T>);
+        constexpr std::size_t kAlign = alignof(AssetTable<T>);
+
+        auto result = alloc.allocate(kSize, kAlign);
+        // allocate() aborts on OOM (PerContextAllocator contract); the Result
+        // can only be unexpected on ceiling breach in GLIBRE_ALLOC_STRICT mode.
+        // In that case we abort as well — no recovery for asset-table OOM.
+        if (!result.has_value()) {
+            std::abort();
+        }
+        void* raw = result.value();
+        // Placement-new: construct AssetTable<T> in the allocated buffer.
+        auto* p = ::new (raw) AssetTable<T>(alloc, tag);
+
         ErasedTable entry;
         entry.ptr = p;
-        entry.deleter = [](void* raw) noexcept {
-            delete static_cast<AssetTable<T>*>(raw);  // NOLINT
+        entry.destroy = [](void* raw_ptr) noexcept {
+            static_cast<AssetTable<T>*>(raw_ptr)->~AssetTable<T>();
         };
+        entry.alloc = &alloc;
+        entry.alloc_size = kSize;
         return entry;
     }
 };

@@ -15,6 +15,7 @@
 //     only; internal slot vectors are not accessed directly.
 
 #include <cstdint>
+#include <limits>
 #include <tuple>
 #include <type_traits>
 
@@ -47,41 +48,103 @@ TEST_CASE("core/asset_handle: bit_layout_index_generation_typetag", "[core][asse
         "Bit fields must sum to exactly 64 bits."
     );
 
-    // Known values that fit within their respective fields.
-    constexpr AssetIndex test_index = (AssetIndex{1} << 39u) - 1u;          // 2^39 - 1
-    constexpr AssetGeneration test_gen = (AssetGeneration{1} << 21u) - 1u;  // 2^21 - 1
-    constexpr AssetTypeTag test_tag = 3u;                                   // max 2-bit value
-
     struct MockPayload {};
 
-    auto handle = asset_pack<MockPayload>(test_index, test_gen, test_tag);
+    // -----------------------------------------------------------------------
+    // Round-trip with sub-maximum values (verify packing logic).
+    // -----------------------------------------------------------------------
+    {
+        constexpr AssetIndex test_index = (AssetIndex{1} << 39u) - 1u;          // 2^39 - 1
+        constexpr AssetGeneration test_gen = (AssetGeneration{1} << 21u) - 1u;  // 2^21 - 1
+        constexpr AssetTypeTag test_tag = 3u;                                   // max 2-bit value
 
-    // Round-trip via asset_unpack.
-    auto [idx, gen, tag] = asset_unpack(handle);
-    CHECK(idx == test_index);
-    CHECK(gen == test_gen);
-    CHECK(tag == test_tag);
+        auto handle = asset_pack<MockPayload>(test_index, test_gen, test_tag);
 
-    // Verify raw bit isolation:
-    // Index occupies bits [39:0].
-    CHECK((handle.bits & kAssetIndexMask) == test_index);
-    // Generation occupies bits [61:40].
-    CHECK(
-        ((handle.bits >> kAssetIndexBits) & kAssetGenerationMask) ==
-        static_cast<std::uint64_t>(test_gen)
-    );
-    // type_tag occupies bits [63:62].
-    CHECK(
-        ((handle.bits >> (kAssetIndexBits + kAssetGenerationBits)) & kAssetTypeTagMask) ==
-        static_cast<std::uint64_t>(test_tag)
-    );
+        auto [idx, gen, tag] = asset_unpack(handle);
+        CHECK(idx == test_index);
+        CHECK(gen == test_gen);
+        CHECK(tag == test_tag);
 
+        // Verify raw bit isolation:
+        CHECK((handle.bits & kAssetIndexMask) == test_index);
+        CHECK(
+            ((handle.bits >> kAssetIndexBits) & kAssetGenerationMask) ==
+            static_cast<std::uint64_t>(test_gen)
+        );
+        CHECK(
+            ((handle.bits >> (kAssetIndexBits + kAssetGenerationBits)) & kAssetTypeTagMask) ==
+            static_cast<std::uint64_t>(test_tag)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Round-trip with TRUE field maxima — exercises every bit of every field.
+    // Previously the test used 2^39-1 / 2^21-1 (one bit short of the maximum),
+    // so a shift-by-39 instead of shift-by-40 bug would not be caught.
+    // -----------------------------------------------------------------------
+    {
+        constexpr AssetIndex max_index = kAssetIndexMax;          // all 40 low bits set
+        constexpr AssetGeneration max_gen = kAssetGenerationMax;  // all 22 gen bits set
+        constexpr AssetTypeTag max_tag = kAssetTypeTagMax;        // both tag bits set
+
+        auto handle = asset_pack<MockPayload>(max_index, max_gen, max_tag);
+
+        auto [idx, gen, tag] = asset_unpack(handle);
+        CHECK(idx == max_index);
+        CHECK(gen == max_gen);
+        CHECK(tag == max_tag);
+
+        // Raw isolation at true maxima.
+        CHECK((handle.bits & kAssetIndexMask) == max_index);
+        CHECK(
+            ((handle.bits >> kAssetIndexBits) & kAssetGenerationMask) ==
+            static_cast<std::uint64_t>(max_gen)
+        );
+        CHECK(
+            ((handle.bits >> (kAssetIndexBits + kAssetGenerationBits)) & kAssetTypeTagMask) ==
+            static_cast<std::uint64_t>(max_tag)
+        );
+
+        // The all-bits-set pattern (with all three maxima packed) must equal
+        // std::numeric_limits<uint64_t>::max() to confirm no bit is left unused.
+        CHECK(handle.bits == std::numeric_limits<std::uint64_t>::max());
+    }
+
+    // -----------------------------------------------------------------------
+    // Overflow truncation: packing values one above each maximum.
+    // asset_pack masks each field — values that exceed the field width must
+    // truncate to 0 (wraparound via mask).
+    // -----------------------------------------------------------------------
+    {
+        // kAssetIndexMax + 1 = 2^40, which truncates to 0 after masking.
+        constexpr AssetIndex overflow_index = kAssetIndexMax + AssetIndex{1};
+        auto h_idx = asset_pack<MockPayload>(overflow_index, 1u, 0u);
+        auto [i, g, t] = asset_unpack(h_idx);
+        CHECK(i == 0u);  // truncated
+
+        // kAssetGenerationMax + 1 = 2^22, truncates to 0.
+        constexpr AssetGeneration overflow_gen = kAssetGenerationMax + AssetGeneration{1};
+        auto h_gen = asset_pack<MockPayload>(1u, overflow_gen, 0u);
+        auto [i2, g2, t2] = asset_unpack(h_gen);
+        CHECK(g2 == 0u);  // truncated
+
+        // kAssetTypeTagMax + 1 = 4, truncates to 0.
+        constexpr AssetTypeTag overflow_tag = kAssetTypeTagMax + AssetTypeTag{1};
+        auto h_tag = asset_pack<MockPayload>(1u, 1u, overflow_tag);
+        auto [i3, g3, t3] = asset_unpack(h_tag);
+        CHECK(t3 == 0u);  // truncated
+    }
+
+    // -----------------------------------------------------------------------
     // Zero-value handle: all fields zero (the "null / never-issued" state).
-    AssetHandle<MockPayload> zero_handle{};
-    auto [zi, zg, zt] = asset_unpack(zero_handle);
-    CHECK(zi == 0u);
-    CHECK(zg == 0u);
-    CHECK(zt == 0u);
+    // -----------------------------------------------------------------------
+    {
+        AssetHandle<MockPayload> zero_handle{};
+        auto [zi, zg, zt] = asset_unpack(zero_handle);
+        CHECK(zi == 0u);
+        CHECK(zg == 0u);
+        CHECK(zt == 0u);
+    }
 }
 
 // ===========================================================================

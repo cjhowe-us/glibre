@@ -108,11 +108,15 @@ public:
     //                (which already incremented it); it is NOT incremented here.
     //
     // Returns the new AssetHandle<T>.
+    //
+    // Signature: T&& (SPEC §6.8 stub contract — rvalue ref for move-only payloads).
     // -------------------------------------------------------------------------
-    [[nodiscard]] AssetHandle<T> insert(T payload) noexcept {
+    [[nodiscard]] AssetHandle<T> insert(T&& payload) noexcept {
         if (!free_list_.empty()) {
             // Reuse the lowest-indexed free slot.
             const auto idx = static_cast<detail::AssetIndex>(free_list_.front());
+            // O(n) erase from front — shifts the tail. Acceptable for MVP:
+            // SPEC §6.12.3 ceiling ~2^20 and single-threaded bootstrap (§6.10).
             free_list_.erase(free_list_.begin());
 
             auto& slot = slots_[static_cast<std::size_t>(idx)];
@@ -132,13 +136,23 @@ public:
     // resolve(handle) — validate and return a pointer to the stored payload.
     //
     // Returns core::Error::AssetStale when:
+    //   - The handle's type_tag does not match this table's type_tag_ (SPEC
+    //     §4.7 inv.1, §6.8 — a foreign-typed handle is treated as stale).
     //   - The handle's index is out of range.
     //   - The slot is not live (was released and not yet reused).
     //   - The handle's generation does not match the slot's current generation.
     // -------------------------------------------------------------------------
     [[nodiscard]] Result<T*> resolve(AssetHandle<T> handle) noexcept {
-        auto [idx, gen, tag_unused] = detail::asset_unpack(handle);
-        (void)tag_unused;
+        auto [idx, gen, tag] = detail::asset_unpack(handle);
+        if (static_cast<detail::AssetTypeTag>(tag) != type_tag_) {
+            // Handle belongs to a different typed table — treat as stale.
+            // SPEC §4.7 inv.1, §6.8: type_tag is part of handle identity.
+            return std::unexpected(
+                glibre::Error{
+                    core::Error::AssetStale, ErrorContext{__FILE__, __LINE__, "type_tag mismatch"}
+                }
+            );
+        }
         if (idx >= slots_.size()) {
             return std::unexpected(
                 glibre::Error{
@@ -173,8 +187,10 @@ public:
     //      order (lowest-index-first reuse — PHILOSOPHY §7 determinism).
     // -------------------------------------------------------------------------
     void release(AssetHandle<T> handle) noexcept {
-        auto [idx, gen, tag_unused] = detail::asset_unpack(handle);
-        (void)tag_unused;
+        auto [idx, gen, tag] = detail::asset_unpack(handle);
+        if (static_cast<detail::AssetTypeTag>(tag) != type_tag_) {
+            return;  // foreign-typed handle: no-op (SPEC §4.7 inv.1)
+        }
         if (idx >= slots_.size()) {
             return;  // out-of-range: no-op
         }
@@ -183,8 +199,18 @@ public:
             return;  // stale: no-op
         }
         slot.live = false;
+        // Guard against 22-bit generation overflow (SPEC §6.8, §6.12.3).
+        // After 2^22 release/reinsert cycles the slot is permanently retired —
+        // leaked rather than silently reissued with a colliding generation.
+        // MVP asset ceiling ~2^20 means saturation is pathological; compaction
+        // is deferred to a post-MVP spike (SPEC §6.12.3).
+        if (slot.generation >= detail::kAssetGenerationMax) {
+            // Permanently retire this slot; do not return it to the free list.
+            return;
+        }
         ++slot.generation;  // invalidate outstanding handles immediately
         // Insert into free list in sorted ascending order.
+        // O(n) per insert — acceptable for MVP (SPEC §6.12.3 ceiling ~2^20).
         const auto pos =
             std::lower_bound(free_list_.begin(), free_list_.end(), static_cast<std::uint32_t>(idx));
         free_list_.insert(pos, static_cast<std::uint32_t>(idx));
