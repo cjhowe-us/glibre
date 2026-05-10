@@ -85,6 +85,19 @@ jobs:
         run: cmake --build --preset macos-debug
       - name: Test
         run: ctest --preset macos-debug
+      - name: Upload perf artifacts
+        # Upload any l1d_miss.json files produced by the perf alarm plan (#938)
+        # that consumes the PmcSampler helper from plan #944.  The directory
+        # tests/core/world/perf/_artifacts/ is created by the alarm test TU
+        # when it completes a measurement pass; if no file was produced (e.g.
+        # on a CI run that did not invoke the alarm) the step is a no-op via
+        # if-no-files-found: ignore.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-artifacts
+          path: tests/core/world/perf/_artifacts/l1d_miss.json
+          if-no-files-found: ignore
 
   spec-check:
     runs-on: macos-14
