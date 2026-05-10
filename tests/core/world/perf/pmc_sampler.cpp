@@ -71,7 +71,8 @@ namespace {
 // Reserved storage for KPC spike integration — currently inert (zero-stub).
 // start_sampling() will populate this; stop_sampling() will compute the delta.
 // See §Integration Notes above for the kperf/KPC API plan.
-thread_local glibre::testing::PmcCounters g_snapshot{};  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+thread_local glibre::testing::PmcCounters
+    g_snapshot{};  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 }  // namespace
 

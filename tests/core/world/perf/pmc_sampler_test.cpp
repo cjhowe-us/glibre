@@ -49,8 +49,10 @@
 // struct.  When KPC integration lands, the disabled CHECK line at the bottom
 // can be re-enabled to assert non-zero loads on entitled hardware runners.
 // ---------------------------------------------------------------------------
-TEST_CASE("world/perf: pmc_sampler_smoke_returns_struct_with_zero_stub_counters",
-          "[world][perf][pmc][smoke]") {
+TEST_CASE(
+    "world/perf: pmc_sampler_smoke_returns_struct_with_zero_stub_counters",
+    "[world][perf][pmc][smoke]"
+) {
     bool called = false;
 
     const auto counters = glibre::testing::PmcSampler::measure([&] {
