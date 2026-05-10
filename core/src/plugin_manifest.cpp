@@ -44,9 +44,12 @@ Result<PluginManifest> PluginManifest::open(std::string_view path, std::pmr::mem
     // Return Invalid so callers that reach here with a real file get a
     // predictable, diagnosable error rather than UB.
     //
-    // mr is passed through so plan #225's full implementation can supply it
-    // to the PluginManifest constructor (PluginManifest{pa}) and charge all
-    // field allocations to the caller's per-context ceiling.
+    // The mr parameter is typically a glibre::PerContextAllocatorResource (per
+    // reviews/decisions/perf-budget.md §Allocator Rules #1) but accepts any
+    // std::pmr::memory_resource.  Plan #225's full implementation will pass it
+    // to the PluginManifest constructor (PluginManifest{pa}) so that all field
+    // allocations are charged to the caller's per-context ceiling rather than
+    // std::pmr::get_default_resource().
     //
     // Suppress "unused parameter" in the stub (plan #225 will use it).
     (void)mr;

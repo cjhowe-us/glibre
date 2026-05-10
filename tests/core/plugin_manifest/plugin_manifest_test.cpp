@@ -402,6 +402,14 @@ TEST_CASE("core/plugin_manifest: open_uses_per_context_allocator", "[core][plugi
     // Assert no bytes were charged through the per-context allocator.
     // On the not-found path, open() returns before constructing any
     // PluginManifest fields — the byte count must be unchanged.
+    //
+    // TODO(#225): upgrade to a success-path witness once Fory decode lands.
+    // On the success path the assertion should be REQUIRE(bytes_after >
+    // bytes_before) — confirming that manifest field storage is charged to
+    // the per-context allocator rather than std::pmr::get_default_resource().
+    // Note: bytes_after == bytes_before also passes if open() silently routes
+    // to get_default_resource() on the not-found path, so the success-path
+    // probe is the definitive allocator-routing witness.
     const std::uint64_t bytes_after = alloc.bytes_used();
     REQUIRE(bytes_after == bytes_before);
 }
