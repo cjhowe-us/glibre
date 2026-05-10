@@ -7,7 +7,8 @@
 #   "sample scene = 1 character + 200 props + 8 dynamic lights at 1920x1080"
 #
 # This manifest is data-only. Entity transforms expand from seed + index
-# arithmetic so cross-host determinism holds (PHILOSOPHY §7 — determinism by default).
+# arithmetic — a derived determinism strategy (no RNG state, no platform-dependent
+# intrinsics, fixed iteration order) aligned with PHILOSOPHY §7 (byte-equal snapshots).
 # A fixture change requires a perf-budget amendment spike (perf-budget.md §Consequences).
 #
 # Version: 1

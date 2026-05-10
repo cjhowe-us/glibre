@@ -29,8 +29,10 @@
 //     environment variable if set, otherwise by traversing from __FILE__
 //     upward until e2e/perf/s1/scene.yaml is found.
 //
-// PHILOSOPHY §7 (determinism): placement_seed is read and stored so callers
-// can expand deterministic transforms from seed + entity_index arithmetic.
+// Determinism design: placement_seed is read and stored so callers can expand
+// transforms via seed + entity_index arithmetic — a derived determinism strategy
+// aligned with PHILOSOPHY §7 (byte-equal snapshots, fixed iteration order,
+// no platform-dependent intrinsics).
 
 #include <cstdint>
 #include <filesystem>
@@ -288,6 +290,19 @@ inline ParsedLine parse_line(std::string line) {
 
         // ---------------------------------------------------------------------------
         // Indented lines: dispatch to current section.
+        //
+        // Schema-evolution policy (v1, intentional):
+        //   Archetypes — unknown fields throw.  Archetype identity (count per type)
+        //   is load-bearing; silently ignoring a renamed field would produce zero
+        //   entities with no diagnostic.  Strict enforcement catches schema drift
+        //   immediately.
+        //   Viewport and Budgets — unknown keys are silently skipped.  These
+        //   sections are outer-block metadata; additive keys (e.g. a new budget
+        //   context) must not break loaders that do not know them yet.  Strict
+        //   checking here would require every caller to be updated when a new
+        //   context is added, which is the wrong direction for forward compatibility.
+        //   If a future v2 archetype field is needed, the version check (above)
+        //   ensures old loaders fail rather than silently misparse.
         // ---------------------------------------------------------------------------
 
         switch (section) {
