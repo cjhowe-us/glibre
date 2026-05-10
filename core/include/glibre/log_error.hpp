@@ -106,6 +106,9 @@ namespace glibre::core {
     // plan #584 R1 MED-3: Phase::HotReload footgun guard.
     case Error::SystemForbiddenInHotReloadPhase:
         return "SystemForbiddenInHotReloadPhase";
+    // plan #584 R2 MED-1: (phase, fqn) idempotency conflict.
+    case Error::SystemDescriptorConflict:
+        return "SystemDescriptorConflict";
     }
     return "Unknown";
 }

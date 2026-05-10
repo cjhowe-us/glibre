@@ -128,6 +128,15 @@ enum class Error : std::uint16_t {
     // dropping the system at compile() time.
     // (plan #584 — Schedule DAG builder, R1 review MED-3 fix)
     SystemForbiddenInHotReloadPhase,
+    // register_system() was called with an FQN that is already registered
+    // under a DIFFERENT (phase, fqn) pair — i.e. the name matches an existing
+    // entry but the new descriptor's phase or access-set diverges from the
+    // stored entry.  SPEC §8.6 specifies idempotency only for identical
+    // (phase, system_fqn) pairs; a differing phase is a configuration error
+    // (e.g. a hot-reload rollback accidentally changed the target phase).
+    // Callers should treat this as a plugin-author error and refuse the swap.
+    // (plan #584 — Schedule DAG builder, R2 review MED-1 fix)
+    SystemDescriptorConflict,
 };
 }  // namespace core
 

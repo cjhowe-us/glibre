@@ -8,14 +8,24 @@
 // Memory note:
 //   Schedule::Impl is allocated via std::pmr::polymorphic_allocator<Impl>
 //   backed by the PerContextAllocatorResource that Schedule holds as mr_.
-//   This routes the Impl object's memory through PerContextAllocator so that
-//   its allocation is counted against the context ceiling — satisfying §9
-//   budget accounting.  mr_ is a direct member of Schedule (not inside Impl)
+//   This routes the Impl object's bytes through PerContextAllocator so that
+//   the Impl object itself is counted against the context ceiling — satisfying
+//   §9 budget accounting.  mr_ is a direct member of Schedule (not inside Impl)
 //   so it is constructed before the polymorphic_allocator that uses it.
 //
-//   Internal PMR containers inside Impl (by_id, by_name, compiled_phases) also
-//   use &mr_ (reachable after Impl construction via impl_->mr_ptr), counting
-//   their storage under the same ceiling.
+//   §9 budget carve-out (R2 review MED-2, reconciled):
+//     - compiled_phases — a std::array of CompiledPhase, where each CompiledPhase
+//       is a pmr::vector<SystemId> routed through &mr_.  These are the bulk of
+//       per-system allocation and ARE counted under the context ceiling.
+//     - by_id / by_name — std::unordered_map (NOT pmr) with std::string / std::vector
+//       mapped values; their node storage is global-heap (not counted under §9).
+//     - RegistryEntry sub-fields (name, reads, writes, after, before) — std::string /
+//       std::vector, also global-heap.
+//   Net: the per-system registry bookkeeping is NOT PMR-counted; only the compiled
+//   topological order is.  For MVP scale (~200 systems) this gap is sub-MB and
+//   accepted.  A future plan should adopt pmr::unordered_map + pmr::string when
+//   budget auditing needs tighter §9 accounting.
+//   NOLINTNEXTLINE — deliberate §9 carve-out; tracked for future PMR migration.
 //
 //   Under -fno-exceptions + std::pmr: do_allocate() in PerContextAllocatorResource
 //   calls std::abort() on OOM (the engine does not recover from heap exhaustion).
@@ -171,13 +181,25 @@ Result<SystemId> Schedule::register_system(const SystemDesc& desc) noexcept {
         return std::unexpected(glibre::Error{core::Error::SystemForbiddenInHotReloadPhase});
     }
 
-    // Idempotency: return existing id if name already registered.
+    // Idempotency: return existing id if the (phase, name) pair is already registered.
+    // SPEC §8.6: "Re-registration of an already-known (phase, system_fqn) is idempotent."
+    // If the name exists but with a DIFFERENT phase, the plugin descriptor drifted —
+    // this is a configuration error, not a benign re-registration.  Surface it as
+    // SystemDescriptorConflict so callers (the hot-reload barrier) can refuse the swap.
+    //
     // Heterogeneous lookup: find() accepts string_view directly without
     // constructing a temporary std::string (TransparentStringHash + equal_to<>).
     {
         const auto it = impl_->by_name.find(desc.name);
         if (it != impl_->by_name.end()) {
-            return SystemId{it->second};
+            // FQN match — verify the phase is identical.
+            const auto id_val = it->second;
+            const auto entry_it = impl_->by_id.find(id_val);
+            if (entry_it != impl_->by_id.end() && entry_it->second.phase != desc.phase) {
+                // Same FQN, different phase: reject as descriptor conflict.
+                return std::unexpected(glibre::Error{core::Error::SystemDescriptorConflict});
+            }
+            return SystemId{id_val};
         }
     }
 
@@ -217,6 +239,11 @@ Result<SystemId> Schedule::register_system(const SystemDesc& desc) noexcept {
         entry.before.emplace_back(sv);
     }
 
+    // ORDER IS LOAD-BEARING: by_name must be emplaced before by_id.
+    // by_id takes entry by move (stealing entry.name); by_name copies entry.name
+    // into the map key.  Swapping these lines would emplace a moved-from std::string
+    // as the by_name key.  If a refactor changes this order, both emplace calls
+    // must be audited together.  (R2 review LOW-1)
     impl_->by_name.emplace(entry.name, id.value);
     impl_->by_id.emplace(id.value, std::move(entry));
 

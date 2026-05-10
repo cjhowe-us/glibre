@@ -14,6 +14,8 @@
 //   - core/schedule: access_conflict_no_valid_order_yields_ScheduleAccessConflict
 //   - core/schedule: tiebreaker_lex_order_of_fqn
 //   - core/schedule: compile_idempotent_when_set_unchanged
+//   - core/schedule: register_system_rejects_HotReload_phase        (R1 MED-3)
+//   - core/schedule: register_system_rejects_phase_drift_on_same_fqn (R2 MED-1)
 //
 // Design constraints:
 //   - -fno-exceptions (error-model.md §Decision 3); no REQUIRE_THROWS.
@@ -513,4 +515,54 @@ TEST_CASE("core/schedule: register_system_rejects_HotReload_phase") {
     const auto* code = std::get_if<glibre::core::Error>(&r.error().code());
     REQUIRE(code != nullptr);
     CHECK(*code == glibre::core::Error::SystemForbiddenInHotReloadPhase);
+}
+
+// ===========================================================================
+// Test: register_system_rejects_phase_drift_on_same_fqn
+//
+// Verifies (plan #584 R2 review MED-1 / SPEC §8.6):
+//   SPEC §8.6 specifies that idempotency applies only to the (phase, system_fqn)
+//   pair.  If a system is re-registered with the same FQN but a different phase,
+//   register_system() must return SystemDescriptorConflict rather than silently
+//   returning the existing id with the wrong phase.  This guards against hot-reload
+//   rollback errors where a plugin re-registers an FQN to a changed phase, which
+//   would produce a stale schedule without a visible error.
+//
+//   Scenario: SysA registered to Phase::Transform; second call with Phase::Physics
+//   must be rejected with SystemDescriptorConflict.
+//   A third call with Phase::Transform (the original) must remain idempotent.
+// ===========================================================================
+
+TEST_CASE("core/schedule: register_system_rejects_phase_drift_on_same_fqn") {
+    glibre::PerContextAllocator alloc{glibre::ContextTag::core};
+    glibre::core::Schedule sched{alloc};
+
+    std::vector<glibre::core::TypeId> empty_reads;
+    std::vector<glibre::core::TypeId> empty_writes;
+
+    glibre::core::SystemDesc desc_a;
+    desc_a.name = "test::phase_drift::SysA";
+    desc_a.phase = glibre::core::Phase::Transform;
+    desc_a.access = make_access(empty_reads, empty_writes);
+    desc_a.body = &null_system;
+
+    // First registration — must succeed and assign an id.
+    auto r1 = sched.register_system(desc_a);
+    REQUIRE(r1.has_value());
+    const auto original_id = (*r1).value;
+
+    // Second registration — identical (phase, name): must be idempotent.
+    auto r2 = sched.register_system(desc_a);
+    REQUIRE(r2.has_value());
+    CHECK((*r2).value == original_id);
+
+    // Third registration — same name, different phase: must be rejected.
+    glibre::core::SystemDesc desc_a_drifted = desc_a;
+    desc_a_drifted.phase = glibre::core::Phase::PhysicsFixed;
+    auto r3 = sched.register_system(desc_a_drifted);
+    REQUIRE_FALSE(r3.has_value());
+
+    const auto* code = std::get_if<glibre::core::Error>(&r3.error().code());
+    REQUIRE(code != nullptr);
+    CHECK(*code == glibre::core::Error::SystemDescriptorConflict);
 }

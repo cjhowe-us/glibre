@@ -107,7 +107,13 @@ void build_access_set_edges(
             if (intersects(nodes[i].writes, nodes[j].reads)) {
                 states.at(i).adj.push_back({.to = j, .kind = EdgeKind::AccessSet});
                 ++states.at(j).in_degree;
-                continue;  // Already added i→j; skip writes∩writes for same pair.
+                // Dominance: writes∩reads takes priority over writes∩writes for the
+                // same (i, j) pair.  Both would produce EdgeKind::AccessSet, so cycle
+                // classification is unchanged — but skipping the writes∩writes check
+                // avoids a duplicate edge.  This is intentional: a single AccessSet
+                // edge per (i,j) direction is sufficient for §4.4 invariant 2
+                // enforcement.  (R2 review LOW-2)
+                continue;
             }
 
             // writes∩writes: serialize the pair with i→j only when i < j.
@@ -134,18 +140,23 @@ edge_exists(const std::vector<NodeState>& states, std::size_t from, std::size_t 
 }
 
 // ---------------------------------------------------------------------------
-// add_or_upgrade_edge — add an explicit edge i→j, or leave an existing
-// access-set edge unchanged so cycle detection sees the right kind.
+// add_explicit_edge_if_absent — add an Explicit edge i→j only when no prior
+// edge exists for that pair; leave an existing AccessSet edge unchanged.
+//
+// SRP: one responsibility — adding an explicit ordering edge, but only when
+// the pair does not already carry an edge of any kind.
 //
 // Cycle classification rule: a cycle is SystemScheduleCycle only when ALL
 // edges in the cycle are Explicit.  If any edge is AccessSet (even when an
 // explicit declaration also coincides on that pair), the cycle is a
-// ScheduleAccessConflict.  Therefore we must NOT upgrade an AccessSet edge
-// to Explicit — upgrading would misclassify a pure-access-set cycle whose
-// pairs also happen to have after/before declarations.
+// ScheduleAccessConflict.  Therefore we must NOT add a second Explicit edge
+// when an AccessSet edge already exists — the AccessSet edge must be the one
+// classify_cycle inspects, preserving the correct root-cause attribution.
+// (Renamed from add_or_upgrade_edge in R2 review MED-3: the post-R1 body
+// no longer upgrades; the old name was actively misleading.)
 // ---------------------------------------------------------------------------
 
-void add_or_upgrade_edge(
+void add_explicit_edge_if_absent(
     std::vector<NodeState>& states, std::size_t from, std::size_t to
 ) noexcept {
     if (!edge_exists(states, from, to)) {
@@ -153,11 +164,11 @@ void add_or_upgrade_edge(
         ++states.at(to).in_degree;
         return;
     }
-    // Edge already exists from the access-set pass.  Do NOT upgrade its kind:
+    // Edge already exists from the access-set pass.  Do NOT add a second edge:
     // the cycle classifier checks whether ALL cycle edges are Explicit; an
     // edge that arose from access-set intersection must remain AccessSet even
-    // when an explicit declaration also targets the same pair.  Leaving the
-    // kind unchanged correctly preserves ScheduleAccessConflict classification.
+    // when an explicit declaration also targets the same pair.  The existing
+    // edge's kind correctly preserves ScheduleAccessConflict classification.
 }
 
 // ---------------------------------------------------------------------------
@@ -184,7 +195,7 @@ void build_explicit_edges(
             if (j == i) {
                 continue;
             }
-            add_or_upgrade_edge(states, j, i);
+            add_explicit_edge_if_absent(states, j, i);
         }
 
         // before: system i runs before each named system j.
@@ -199,7 +210,7 @@ void build_explicit_edges(
             if (j == i) {
                 continue;
             }
-            add_or_upgrade_edge(states, i, j);
+            add_explicit_edge_if_absent(states, i, j);
         }
     }
 }
@@ -314,6 +325,17 @@ kahn_sort(std::span<const SystemNode> nodes, std::vector<NodeState>& states) noe
 
 // ---------------------------------------------------------------------------
 // build_phase — public entry point
+//
+// Peak-memory carve-out (R2 review LOW-3, §9/§11.6):
+//   build_phase() returns a std::vector<SystemId> via global-new.  Schedule::
+//   compile() assigns its contents into the PMR compiled_phases slots and then
+//   the transient vector is destroyed.  During the compile() call the in-flight
+//   peak is doubled: one transient std::vector<SystemId> (global-new) plus the
+//   final pmr::vector<SystemId> (PMR-counted).  The same applies to the
+//   phase_nodes std::array<std::vector<SystemNode>> scratch in compile().
+//   For MVP scale (~200 systems) this is sub-MB and accepted.
+//   Track as a follow-up when a TransientArena lands for compile-time scratch
+//   (per perf-budget.md §"Schedule Build").
 // ---------------------------------------------------------------------------
 
 [[nodiscard]] Result<std::vector<SystemId>>

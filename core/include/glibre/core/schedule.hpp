@@ -158,14 +158,17 @@ public:
 
     // register_system — add a system to the registry.
     //
-    // If a system with the same `desc.name` is already registered,
-    // the call is idempotent and returns the existing SystemId.
-    // Otherwise assigns a new SystemId (value > 0, monotonically increasing).
+    // Idempotency rule (SPEC §8.6): if a system with the same (phase, name) pair
+    // is already registered, the call is idempotent and returns the existing
+    // SystemId — no mutation occurs.
     //
-    // Invalidates the compiled state if the set changes.
+    // Conflict rule: if a system with the same name is registered under a DIFFERENT
+    // phase, the call returns std::unexpected(core::Error::SystemDescriptorConflict).
+    // This detects hot-reload rollback errors where a plugin re-registers an FQN
+    // with a changed target phase, which would silently produce a stale schedule.
     //
-    // Returns std::unexpected on internal allocation failure (abort is
-    // not used here; OOM is surfaced as an error so tests can observe it).
+    // On success with a new name: assigns a new SystemId (value > 0, monotonically
+    // increasing) and invalidates the compiled state.
     [[nodiscard]] Result<SystemId> register_system(const SystemDesc& desc) noexcept;
 
     // unregister_system — remove the system identified by `id`.
