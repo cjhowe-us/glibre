@@ -25,15 +25,18 @@
 //   Storage grows via push_back into the PMR vector; the capacity is bounded
 //   by the 64 MiB core heap ceiling (perf-budget.md Allocator Rules).
 //
-// ## PMR allocator (HIGH-1 round-1 review fix)
+// ## PMR allocator (HIGH-1 round-1 review fix; SRP lift MED-2 round-2 review)
 //
 //   The constructor requires a PerContextAllocator& stamped with ContextTag::core.
 //   All TypeRegistry storage is tracked under the 64 MiB core heap ceiling
 //   (perf-budget.md Allocator Rule #1).  Bypassing PerContextAllocator by
 //   passing a raw std::pmr::memory_resource* directly is not supported and would
-//   escape the ceiling enforcement.  The nested PerContextAllocatorResource class
-//   adapts the PerContextAllocator to the std::pmr::memory_resource interface
-//   required by std::pmr::vector.
+//   escape the ceiling enforcement.  glibre::PerContextAllocatorResource (from
+//   glibre/alloc.hpp) adapts the PerContextAllocator to the
+//   std::pmr::memory_resource interface required by std::pmr::vector.  The
+//   adaptor now lives in alloc.hpp (SRP: it is a PerContextAllocator concern,
+//   not a TypeRegistry concern) so other PMR consumers do not need to pull in
+//   type_registry.hpp for a generic memory-resource adaptor.
 //
 // ## TypeId duplication note (MED-5 round-1 review)
 //
@@ -67,8 +70,11 @@ namespace core {
 // ---------------------------------------------------------------------------
 // Forward declarations
 // ---------------------------------------------------------------------------
-class PluginLoader;          // friend — may call extend_during_load() + set_loading_().
-class TypeRegistryTestHook;  // friend test-hook for set_loading_() access in tests.
+class PluginLoader;  // friend — may call extend_during_load() + set_loading_().
+#if defined(GLIBRE_TESTING)
+class TypeRegistryTestHook;  // friend test-hook for set_loading_() access in tests (test builds
+                             // only).
+#endif
 
 // ---------------------------------------------------------------------------
 // ColumnDescriptor — type descriptor stored in the registry for each TypeId.
@@ -208,14 +214,17 @@ private:
     // so that plugins loaded after World creation may still register types
     // (SPEC §6.9 append-only hot-reload rule; §4.9 invariant 1 carve-out).
     //
-    // GATED by is_loading_: this method asserts(is_loading_) so that any
-    // caller outside PluginLoader's load critical section is caught early
-    // (round-1 review MED-4 fix).
+    // GATED by is_loading_: this method returns TypeRegistryClosed (not just
+    // asserts) when is_loading_ is false, so that any caller outside
+    // PluginLoader's load critical section receives a typed error in both debug
+    // and release builds (round-1 review MED-4 fix, hardened in round-2 MED-3).
     //
     // Returns:
-    //   Ok(void)                          — registration succeeded.
-    //   Err(core::Error::TypeRegistryGap) — id.value is not the next slot
-    //                                       (codegen contract violation).
+    //   Ok(void)                              — registration succeeded.
+    //   Err(core::Error::TypeRegistryClosed)  — is_loading_ is false (called
+    //                                           outside the load window).
+    //   Err(core::Error::TypeRegistryGap)     — id.value is not the next slot
+    //                                           (codegen contract violation).
     [[nodiscard]] Result<void> extend_during_load(TypeId id, ColumnDescriptor desc) noexcept;
 
     // set_loading_(flag) — set/clear the is_loading_ latch.
@@ -226,39 +235,16 @@ private:
     void set_loading_(bool flag) noexcept { is_loading_ = flag; }
 
     friend class PluginLoader;
+#if defined(GLIBRE_TESTING)
     friend class TypeRegistryTestHook;
-
-    // PerContextAllocatorResource — thin std::pmr::memory_resource adaptor.
-    //
-    // Forwards do_allocate / do_deallocate to a PerContextAllocator so that
-    // all TypeRegistry storage is tracked under the 64 MiB core ceiling.
-    // Defined as a nested class here so TypeRegistry can store it by value
-    // and declare it before entries_ (construction order matters).
-    //
-    // Virtual dispatch through std::pmr::memory_resource is acceptable here
-    // because construction is one-time (not per-frame).
-    // PerContextAllocatorResource — adapts PerContextAllocator to
-    // std::pmr::memory_resource so std::pmr::vector uses the ceiling-tracked
-    // allocator.  do_is_equal uses pointer identity (this == &other) because
-    // -fno-rtti disables dynamic_cast; each TypeRegistry owns exactly one
-    // alloc_resource_ so self-equality is the only meaningful case.
-    class PerContextAllocatorResource final : public std::pmr::memory_resource {
-    public:
-        explicit PerContextAllocatorResource(PerContextAllocator& alloc) noexcept
-            : alloc_{alloc} {}
-
-    protected:
-        void* do_allocate(std::size_t bytes, std::size_t alignment) override;
-        void do_deallocate(void* p, std::size_t bytes, std::size_t alignment) noexcept override;
-        bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override;
-
-    private:
-        PerContextAllocator& alloc_;
-    };
+#endif
 
     // alloc_resource_ must be declared before entries_ so the resource is
     // constructed before the vector that references it.
-    PerContextAllocatorResource alloc_resource_;
+    // glibre::PerContextAllocatorResource is defined in glibre/alloc.hpp
+    // (lifted from nested class in round-2 review MED-2 — SRP: the PMR
+    // adaptor is an allocator concern, not a TypeRegistry concern).
+    glibre::PerContextAllocatorResource alloc_resource_;
 
     // Flat descriptor table: slot i holds the descriptor for TypeId{i}.
     // The vector is only ever grown by appending; no sparse gaps are permitted.

@@ -292,6 +292,20 @@ TEST_CASE("core/type_registry: register_during_plugin_register_admitted", "[core
         REQUIRE_FALSE(result.has_value());
         CHECK(is_type_registry_closed(result.error()));
     }
+
+    SECTION("extend_during_load outside load window returns TypeRegistryClosed (MED-3 fix)") {
+        // is_loading_ is false (begin_load was never called).  In release builds
+        // the old assert-only check was elided and the call would silently mutate
+        // a sealed registry.  The MED-3 fix returns TypeRegistryClosed always.
+        auto result = glibre::core::TypeRegistryTestHook::extend(
+            reg, glibre::core::TypeId{1}, make_desc(4, 4)
+        );
+        REQUIRE_FALSE(result.has_value());
+        CHECK(is_type_registry_closed(result.error()));
+
+        // Registry must be unmodified — count still 1.
+        CHECK(reg.count() == 1u);
+    }
 }
 
 // ===========================================================================

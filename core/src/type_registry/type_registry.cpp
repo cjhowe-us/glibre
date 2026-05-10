@@ -13,14 +13,17 @@
 //   ordering by emitting type registrations in TypeId-ascending order from
 //   glibre-types.dylib's _registry.cpp.
 //
-// ## Allocator wiring (HIGH-1 round-1 review fix)
+// ## Allocator wiring (HIGH-1 round-1 review fix; SRP lift MED-2 round-2 review)
 //
 //   The constructor requires a PerContextAllocator& stamped with
-//   ContextTag::core.  TypeRegistry::PerContextAllocatorResource adapts
-//   the allocator to the std::pmr::memory_resource interface required by
-//   std::pmr::vector so all TypeRegistry storage is tracked under the 64 MiB
-//   core heap ceiling (perf-budget.md Allocator Rule #1).
-//   std::pmr::get_default_resource() is no longer used here.
+//   ContextTag::core.  glibre::PerContextAllocatorResource (from
+//   glibre/alloc.hpp) adapts the allocator to the std::pmr::memory_resource
+//   interface required by std::pmr::vector so all TypeRegistry storage is
+//   tracked under the 64 MiB core heap ceiling (perf-budget.md Allocator
+//   Rule #1).  The adaptor class was lifted from a TypeRegistry nested class
+//   (round-2 review MED-2 fix) so that other per-context PMR consumers
+//   (PhaseRegistry, plugin-owned-type tables) can share it without pulling in
+//   type_registry.hpp.  std::pmr::get_default_resource() is no longer used.
 //
 // ## Seal semantics
 //
@@ -33,58 +36,18 @@
 //
 // ## is_loading_ latch (MED-4 round-1 review fix)
 //
-//   extend_during_load() asserts is_loading_ == true.  The latch is set
+//   extend_during_load() returns core::Error::TypeRegistryClosed when
+//   is_loading_ is false (release-safe always-on check).  The latch is set
 //   by PluginLoader (friend) via set_loading_(true) at entry to the loading
-//   critical section and cleared at exit.  This ensures that
-//   extend_during_load() cannot be called outside that window.
+//   critical section and cleared at exit.
 //
 // ## -fno-exceptions clean
 //   No exceptions thrown or propagated.
 
 #include "glibre/core/type_registry.hpp"
 
-#include <cassert>
-#include <memory_resource>
-
 namespace glibre {
 namespace core {
-
-// ---------------------------------------------------------------------------
-// TypeRegistry::PerContextAllocatorResource — virtual method bodies
-// ---------------------------------------------------------------------------
-
-void* TypeRegistry::PerContextAllocatorResource::do_allocate(
-    std::size_t bytes, std::size_t alignment
-) {
-    auto result = alloc_.allocate(bytes, alignment);
-    if (!result) {
-        // Ceiling breach in GLIBRE_ALLOC_STRICT builds.  std::pmr::vector
-        // expects a valid pointer or a thrown exception.  Since the engine
-        // compiles with -fno-exceptions, abort — the caller in a diagnostic
-        // build should have budgeted enough memory.  This matches the
-        // PerContextAllocator OOM contract (alloc.hpp: OOM → std::abort()).
-        std::abort();
-    }
-    return *result;
-}
-
-void TypeRegistry::PerContextAllocatorResource::do_deallocate(
-    void* p, std::size_t bytes, std::size_t /*alignment*/
-) noexcept {
-    alloc_.deallocate(p, bytes);
-}
-
-bool TypeRegistry::PerContextAllocatorResource::do_is_equal(
-    const std::pmr::memory_resource& other
-) const noexcept {
-    // dynamic_cast is unavailable under -fno-rtti.  Identity equality: two
-    // PerContextAllocatorResource instances wrapping the same PerContextAllocator
-    // are equal if they are the same object (pointer equality on *this).
-    // For TypeRegistry, there is exactly one alloc_resource_ per instance and
-    // the vector never transfers resources across allocators, so self-equality
-    // is the only meaningful case.
-    return this == &other;
-}
 
 // ---------------------------------------------------------------------------
 // TypeRegistry implementation
@@ -135,8 +98,25 @@ void TypeRegistry::seal() noexcept { sealed_ = true; }
 
 Result<void> TypeRegistry::extend_during_load(TypeId id, ColumnDescriptor desc) noexcept {
     // is_loading_ latch: extend_during_load() is only valid inside
-    // PluginLoader's loading critical section (round-1 review MED-4 fix).
-    assert(is_loading_ && "extend_during_load() called outside loader critical section");
+    // PluginLoader's loading critical section (round-1 review MED-4 fix,
+    // strengthened to always-on typed error in round-2 review MED-3 fix).
+    //
+    // Returns TypeRegistryClosed when is_loading_ is false, in both debug and
+    // release builds.  A debug-assert-only approach (the prior state) silently
+    // mutated a sealed registry in release when a late caller arrived outside
+    // the load window (SPEC §4.9 invariant 1 violation).
+    if (!is_loading_) {
+        return std::unexpected(
+            glibre::Error{
+                core::Error::TypeRegistryClosed,
+                ErrorContext{
+                    __FILE__,
+                    __LINE__,
+                    "extend_during_load() called outside PluginLoader critical section"
+                }
+            }
+        );
+    }
 
     // Bypasses sealed_ check — loader privilege (friend class PluginLoader).
     // Enforce contiguous assignment same as register_type.
