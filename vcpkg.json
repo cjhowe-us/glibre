@@ -14,7 +14,6 @@
     "freeimage",
     "freetype",
     "fory",
-    "imgui",
     "spdlog",
     "fmt",
     "xxhash",
@@ -23,8 +22,19 @@
     "eastl"
   ],
   "features": {
-    "tests":  { "description": "Build Catch2 test suite",  "dependencies": ["catch2"] },
-    "editor": { "description": "Build editor",             "dependencies": [] }
+    "tests": {
+      "description": "Build Catch2 test suite",
+      "dependencies": [
+        "catch2"
+      ]
+    },
+    "editor": {
+      "description": "Build editor",
+      "dependencies": []
+    }
   },
-  "default-features": ["tests", "editor"]
+  "default-features": [
+    "tests",
+    "editor"
+  ]
 }
