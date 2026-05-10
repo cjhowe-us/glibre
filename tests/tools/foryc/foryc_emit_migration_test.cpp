@@ -111,9 +111,7 @@ schema glibre.core.Transform {
     // Per-type exported symbols must use the mangled FQN suffix (plan #1010).
     // "glibre.core.Transform" → symbol suffix "glibre__core__Transform".
     CHECK(text.find("glibre_plugin_migrations_glibre__core__Transform") != std::string::npos);
-    CHECK(
-        text.find("glibre_plugin_migrations_glibre__core__Transform_size") != std::string::npos
-    );
+    CHECK(text.find("glibre_plugin_migrations_glibre__core__Transform_size") != std::string::npos);
 }
 
 TEST_CASE("foryc_emit_migration_handles_no_migrations", "[foryc][emit_migration]") {
@@ -609,12 +607,8 @@ schema glibre.test.Valve {
     // Mangled FQN suffix (plan #1010):
     //   "glibre.test.Turbo" → "glibre__test__Turbo"
     //   "glibre.test.Valve" → "glibre__test__Valve"
-    CHECK(
-        gen_text.find("glibre_plugin_current_version_glibre__test__Turbo") != std::string::npos
-    );
-    CHECK(
-        gen_text.find("glibre_plugin_current_version_glibre__test__Valve") != std::string::npos
-    );
+    CHECK(gen_text.find("glibre_plugin_current_version_glibre__test__Turbo") != std::string::npos);
+    CHECK(gen_text.find("glibre_plugin_current_version_glibre__test__Valve") != std::string::npos);
 
     // --- Set up temp dir. ---
     const fs::path tmp_base = fs::temp_directory_path() / "glibre_foryc_ver_test";
@@ -808,9 +802,7 @@ schema glibre.core.Transform {
         text_multi.find("glibre_plugin_current_version_glibre__core__Transform") !=
         std::string::npos
     );
-    CHECK(
-        text_multi.find("glibre_plugin_migrations_glibre__core__Transform") != std::string::npos
-    );
+    CHECK(text_multi.find("glibre_plugin_migrations_glibre__core__Transform") != std::string::npos);
 
     // Single-underscore separator must NOT appear between the FQN components.
     // (i.e. "glibre_core_Transform" is the wrong scheme.)
@@ -867,13 +859,9 @@ schema glibre.core.Transform {
     CHECK(text.find("glibre__core__Transform") != std::string::npos);
 
     // All three symbol families use the mangled suffix.
-    CHECK(
-        text.find("glibre_plugin_current_version_glibre__core__Transform") != std::string::npos
-    );
+    CHECK(text.find("glibre_plugin_current_version_glibre__core__Transform") != std::string::npos);
     CHECK(text.find("glibre_plugin_migrations_glibre__core__Transform") != std::string::npos);
-    CHECK(
-        text.find("glibre_plugin_migrations_glibre__core__Transform_size") != std::string::npos
-    );
+    CHECK(text.find("glibre_plugin_migrations_glibre__core__Transform_size") != std::string::npos);
 }
 
 // -----------------------------------------------------------------------

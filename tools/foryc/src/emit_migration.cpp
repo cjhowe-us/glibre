@@ -198,9 +198,8 @@ struct FqnParts {
         const auto last_sep = fn_name.rfind("::");
         if (last_sep != std::string::npos) {
             provider_ns = std::string(mig.provider.data(), last_sep);
-            fn_name = std::string(
-                mig.provider.data() + last_sep + 2, mig.provider.size() - last_sep - 2
-            );
+            fn_name =
+                std::string(mig.provider.data() + last_sep + 2, mig.provider.size() - last_sep - 2);
         }
 
         if (!provider_ns.empty()) {

@@ -262,8 +262,7 @@ emit_type_decl_body(const TypeDecl& td, bool& needs_builtins) noexcept {
 // Public API — map_builtin_to_cpp
 // -----------------------------------------------------------------------
 
-[[nodiscard]] glibre::Result<std::string>
-map_builtin_to_cpp(std::string_view fory_type) noexcept {
+[[nodiscard]] glibre::Result<std::string> map_builtin_to_cpp(std::string_view fory_type) noexcept {
     bool ignored = false;
     return map_builtin_to_cpp_impl(fory_type, ignored);
 }

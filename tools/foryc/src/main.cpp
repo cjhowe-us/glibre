@@ -61,10 +61,11 @@
 #include <string_view>
 #include <vector>
 
+#include "glibre/log_error.hpp"
+
 #include "emit_header.hpp"
 #include "emit_manifest.hpp"
 #include "emit_migration.hpp"
-#include "glibre/log_error.hpp"
 #include "parser.hpp"
 
 namespace fs = std::filesystem;
@@ -395,8 +396,7 @@ static bool emit_migration_for_schema(
 // ".PluginManifest" (including the case of a single-component FQN with no dot,
 // which would otherwise silently return the FQN as-is and produce a non-namespaced
 // plugin name).
-static std::string
-plugin_name_from_fqn(const std::string& fqn, std::string* error_msg) noexcept {
+static std::string plugin_name_from_fqn(const std::string& fqn, std::string* error_msg) noexcept {
     static constexpr std::string_view kSuffix = ".PluginManifest";
     const std::string_view fqn_sv{fqn.data(), fqn.size()};
 

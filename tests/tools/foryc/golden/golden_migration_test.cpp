@@ -30,7 +30,6 @@
 #include <string>
 #include <string_view>
 
-
 #include <catch2/catch_test_macros.hpp>
 
 #include "emit_migration.hpp"

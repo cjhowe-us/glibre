@@ -84,11 +84,11 @@ struct ManifestSemVer {
 // ---------------------------------------------------------------------------
 
 struct PluginManifestSpec {
-    std::string name;                       // tag 1 — e.g. "glibre.render"
-    ManifestSemVer version{};               // tag 2
-    std::string abi_hash;                   // tag 3 — 64-char blake3 hex
-    ManifestSemVer min_engine_version{};    // tag 4
-    std::vector<std::string> depends_on;    // tag 9
+    std::string name;                     // tag 1 — e.g. "glibre.render"
+    ManifestSemVer version{};             // tag 2
+    std::string abi_hash;                 // tag 3 — 64-char blake3 hex
+    ManifestSemVer min_engine_version{};  // tag 4
+    std::vector<std::string> depends_on;  // tag 9
 };
 
 // ---------------------------------------------------------------------------
