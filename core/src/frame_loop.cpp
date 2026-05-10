@@ -283,8 +283,14 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
             return result;  // propagate error; frame_index_ not incremented
         }
 #ifdef GLIBRE_TESTING
-        // Record the ordinal of each phase visited, in execution order.
-        last_tick_phase_ordinals_[last_tick_phase_count_++] = static_cast<std::uint8_t>(desc.id);
+        // Record the ordinal and post-phase world_tick for each phase visited,
+        // in execution order.  The world_tick snapshot is taken after run_phase
+        // returns so that Phase::Present's advance_world_tick() is captured at
+        // index 8 (kPhaseCount - 1), while indices 0..=7 retain the pre-advance
+        // value — this proves mid-frame stability (world_tick invariant).
+        last_tick_phase_ordinals_[last_tick_phase_count_] = static_cast<std::uint8_t>(desc.id);
+        last_tick_per_phase_world_ticks_[last_tick_phase_count_] = world_tick_;
+        ++last_tick_phase_count_;
 #endif
         ++expected_ordinal;
     }

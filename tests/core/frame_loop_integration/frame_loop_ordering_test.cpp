@@ -21,7 +21,6 @@
 // All three tests are deterministic, allocation-free (no heap inside tick()),
 // and run under `ctest -L unit`.
 
-#include <array>
 #include <cstdint>
 
 #include <catch2/catch_test_macros.hpp>
@@ -101,8 +100,14 @@ TEST_CASE(
             const std::uint8_t expected_ordinal = static_cast<std::uint8_t>(pos + 1u);
             const std::uint8_t actual_ordinal = ordinals[pos];
 
+            // global_seq = (tick_idx * kPhaseCount) + pos, where pos is
+            // the 0-indexed position of this phase in the execution sequence.
+            // Plan #248 §Scope uses "phase_id" to mean the Phase ordinal
+            // value (1-indexed); the relationship is: phase_id == pos + 1.
+            // So global_seq == (tick_idx * kPhaseCount) + (phase_id - 1).
             INFO(
                 "global_seq=" << global_seq << " pos=" << static_cast<int>(pos)
+                              << " phase_id(ordinal)=" << static_cast<int>(expected_ordinal)
                               << " expected_ordinal=" << static_cast<int>(expected_ordinal)
                               << " actual_ordinal=" << static_cast<int>(actual_ordinal)
             );
@@ -144,13 +149,16 @@ TEST_CASE(
 // equals (N - 1).  After tick N's Phase::Present, it equals N.
 //
 // Interpretation:
-//   - The "same world_tick() throughout a frame" property is verified by
-//     confirming that world_tick() does NOT advance until Phase::Present runs.
-//     In the MVP skeleton there is no mid-frame mutation: world_tick() stays
-//     constant from the start of tick T until Phase::Present of tick T fires.
+//   - The "same world_tick() throughout a frame" property (mid-frame stability)
+//     is verified via the GLIBRE_TESTING per-phase world_tick snapshot seam
+//     (last_tick_per_phase_world_ticks()).  For phases 0..=7 (Input through
+//     HotReload) the captured value must match world_tick() BEFORE the tick —
+//     world_tick does not advance until Phase::Present fires.  Only the
+//     Phase::Present snapshot (index 8) carries the advanced value.
 //   - After Phase::Present: world_tick().value == frame_counter() == tick T.
 //
-// We verify this by sampling world_tick() before and after each tick.
+// We verify this by sampling world_tick() before and after each tick, AND by
+// inspecting the per-phase snapshots for mid-frame stability.
 // ---------------------------------------------------------------------------
 
 TEST_CASE(
@@ -176,6 +184,8 @@ TEST_CASE(
     // executed — the same count as the world tick value.
     static constexpr int kNumTicks = 12;
     for (int t = 0; t < kNumTicks; ++t) {
+        INFO("tick t=" << t);
+
         // Capture world_tick BEFORE the tick.
         const WorldTick before = loop.world_tick();
         const std::uint64_t before_frame_counter = loop.frame_counter();
@@ -204,6 +214,33 @@ TEST_CASE(
         // Verify the delta is exactly 1.
         CHECK(after.value - before.value == 1u);
         CHECK(after.change_tick - before.change_tick == 1u);
+
+        // Mid-frame stability: assert per-phase world_tick snapshots.
+        //
+        // The GLIBRE_TESTING seam (last_tick_per_phase_world_ticks()) captures
+        // world_tick_ immediately after each phase's run_phase() returns, in
+        // execution order.  Phases 0..=7 (Input through HotReload) must all
+        // observe the same world_tick as `before` — world_tick does not mutate
+        // until advance_world_tick() fires inside Phase::Present (index 8).
+        // Phase::Present's snapshot (index 8) must equal `after`.
+        //
+        // This directly verifies plan #248 §Scope assertion 2: per-phase systems
+        // see an identical world_tick throughout the frame, advancing only once
+        // at the Present barrier.
+        auto phase_wt_snapshots = loop.last_tick_per_phase_world_ticks();
+        REQUIRE(phase_wt_snapshots.size() == kPhaseCount);
+
+        // Phases 0..=7: world_tick must equal `before` (pre-advance).
+        static constexpr std::uint8_t kPresentIdx = kPhaseCount - 1u;  // index 8
+        for (std::uint8_t p = 0; p < kPresentIdx; ++p) {
+            INFO("  phase_idx=" << static_cast<int>(p));
+            CHECK(phase_wt_snapshots[p].value == before.value);
+            CHECK(phase_wt_snapshots[p].change_tick == before.change_tick);
+        }
+
+        // Phase 8 (Present): world_tick must equal `after` (post-advance).
+        CHECK(phase_wt_snapshots[kPresentIdx].value == after.value);
+        CHECK(phase_wt_snapshots[kPresentIdx].change_tick == after.change_tick);
     }
 
     // Final state: world_tick equals kNumTicks.
@@ -228,11 +265,17 @@ TEST_CASE(
 //   (d) No error propagates from these empty slots: tick() succeeds.
 //   (e) frame_index() advances normally even when the reserved phases run.
 //   (f) The other 7 phases are NOT marked mvp_reserved.
+//   (g) "No work" proof: frame_counter_ advances by exactly 1 per full tick
+//       (incremented only inside Phase::Present), not by any extra amount from
+//       the reserved phases.  Likewise, world_tick per-phase snapshots at the
+//       reserved positions (indices 1 and 3) carry the pre-advance value,
+//       proving the reserved bodies executed as true no-ops with no side effects
+//       beyond ordinal trace appearance.
 //
-// The "no-op" guarantee is exactly that these phases have no observable
-// side effect beyond appearing in the ordinal trace; the test verifies that
-// the ordinal trace at positions 1 and 3 carries the expected Phase ordinals
-// (2 and 4) and that the tick completes without error.
+// The "no-op" guarantee is that reserved phases produce no observable side
+// effect other than appearing in the ordinal trace.  (g) directly falsifies
+// any implementation that might accidentally trigger frame_counter or
+// world_tick mutations inside a reserved phase body.
 // ---------------------------------------------------------------------------
 
 TEST_CASE(
@@ -263,13 +306,17 @@ TEST_CASE(
     CHECK(kPhaseTable[7].mvp_reserved == false);  // HotReload
     CHECK(kPhaseTable[8].mvp_reserved == false);  // Present
 
-    // --- (c) + (d) + (e): runtime — reserved phases run without error ---
+    // --- (c) + (d) + (e) + (g): runtime — reserved phases run without error ---
     FrameLoop loop;
 
     // Run several ticks to confirm reserved phases execute as no-ops
     // in every tick, not just the first.
     for (int t = 0; t < 5; ++t) {
         INFO("tick t=" << t);
+
+        // Capture counters BEFORE the tick (g): prove reserved phases add nothing.
+        const std::uint64_t fc_before = loop.frame_counter();
+        const WorldTick wt_before = loop.world_tick();
 
         auto result = loop.tick();
 
@@ -278,6 +325,12 @@ TEST_CASE(
 
         // (e) frame_index advances: reserved phases do not abort the frame.
         REQUIRE(loop.frame_index() == static_cast<std::uint64_t>(t + 1));
+
+        // (g) frame_counter advances by exactly 1 — only Phase::Present fires it.
+        // If either reserved phase body accidentally incremented frame_counter,
+        // this would equal 3 instead of 1 (one increment per reserved + Present).
+        const std::uint64_t fc_after = loop.frame_counter();
+        CHECK(fc_after - fc_before == 1u);
 
         // (c) Both reserved phases appear in the ordinal trace at their
         // expected positions (1-indexed positions 2 and 4, 0-indexed 1 and 3).
@@ -291,6 +344,20 @@ TEST_CASE(
         // Animation is at 0-indexed position 3, ordinal 4.
         const std::uint8_t anim_ordinal = ordinals[3];
         CHECK(anim_ordinal == static_cast<std::uint8_t>(Phase::Animation));
+
+        // (g) Per-phase world_tick snapshots at the reserved positions must
+        // carry wt_before — proving the reserved bodies did not mutate world_tick.
+        // Only Phase::Present (index 8) is allowed to advance it.
+        auto phase_wt = loop.last_tick_per_phase_world_ticks();
+        REQUIRE(phase_wt.size() == kPhaseCount);
+
+        // Index 1 = Logic (reserved): world_tick must not have advanced.
+        CHECK(phase_wt[1].value == wt_before.value);
+        CHECK(phase_wt[1].change_tick == wt_before.change_tick);
+
+        // Index 3 = Animation (reserved): world_tick must not have advanced.
+        CHECK(phase_wt[3].value == wt_before.value);
+        CHECK(phase_wt[3].change_tick == wt_before.change_tick);
 
         // Verify these two phases are the only mvp_reserved ones in the trace.
         for (std::uint8_t pos = 0; pos < kPhaseCount; ++pos) {

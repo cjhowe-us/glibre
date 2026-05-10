@@ -198,6 +198,12 @@ private:
     std::array<std::uint8_t, kPhaseCount> last_tick_phase_ordinals_{};
     std::uint8_t last_tick_phase_count_{0};
 
+    // Per-phase world_tick snapshot: world_tick_ value captured after each
+    // phase completes, in execution order.  Allows tests to verify that
+    // world_tick does not advance until Phase::Present (mid-frame stability).
+    // Populated in tick() immediately after each run_phase() succeeds.
+    std::array<WorldTick, kPhaseCount> last_tick_per_phase_world_ticks_{};
+
     // inject_phase8_failure_ — when true, Phase::HotReload body returns
     // FramePhaseMisordered to simulate a drain-phase refusal.
     //
@@ -217,6 +223,17 @@ public:
     // Only available when compiled with -DGLIBRE_TESTING.
     [[nodiscard]] std::span<const std::uint8_t> last_tick_phase_ordinals() const noexcept {
         return {last_tick_phase_ordinals_.data(), last_tick_phase_count_};
+    }
+
+    // Returns the world_tick snapshot captured after each phase completed
+    // during the most recent successful tick (kPhaseCount entries, in
+    // execution order).  Phase indices 0..=7 (Input through HotReload) will
+    // carry the same WorldTick value (world_tick does not advance until
+    // Phase::Present); index 8 (Present) carries the advanced value.
+    // Use this accessor to assert per-phase mid-frame stability.
+    // Only available when compiled with -DGLIBRE_TESTING.
+    [[nodiscard]] std::span<const WorldTick> last_tick_per_phase_world_ticks() const noexcept {
+        return {last_tick_per_phase_world_ticks_.data(), last_tick_phase_count_};
     }
 
     // set_inject_phase8_failure() — arm/disarm the phase-8 failure injection.
