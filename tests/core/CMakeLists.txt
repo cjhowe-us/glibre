@@ -29,6 +29,8 @@ add_subdirectory(phase_registry)                # plan #245 — phase ownership 
 add_subdirectory(type_registry)                 # plan #597 — TypeRegistry immutable-after-init
 add_subdirectory(entity)                        # plan #557 — Entity value object encoding
 add_subdirectory(entity_allocator)              # plan #557 — generational entity allocator
+add_subdirectory(asset_handle)                  # plan #598 — AssetHandle<T> bit layout + equality
+add_subdirectory(asset_table)                   # plan #598 — AssetTable<T> generational slots + AssetRegistry
 
 add_executable(glibre-core-tests
     frame_loop_test.cpp

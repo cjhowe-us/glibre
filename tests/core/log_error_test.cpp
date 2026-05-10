@@ -229,6 +229,8 @@ TEST_CASE("core/log_error: tostring_complete_for_core_error", "[core][log_error]
     check(E::EntityStale, "EntityStale");
     // plan #557: EntityForeignWorld — entity from a different World (reserved, unreachable MVP)
     check(E::EntityForeignWorld, "EntityForeignWorld");
+    // plan #598: AssetStale — stale generational asset handle
+    check(E::AssetStale, "AssetStale");
 }
 
 // ---------------------------------------------------------------------------
