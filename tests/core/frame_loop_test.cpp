@@ -13,7 +13,6 @@
 
 #include <array>
 #include <cstdint>
-
 #include <variant>
 
 #include <catch2/catch_test_macros.hpp>
@@ -258,8 +257,7 @@ TEST_CASE("core/frame_loop: tick_does_not_advance_when_phase_8_refuses", "[core]
     const auto& err = result.error();
     const auto* core_err_ptr = std::get_if<glibre::core::Error>(&err.code());
     const bool is_misordered =
-        core_err_ptr != nullptr &&
-        *core_err_ptr == glibre::core::Error::FramePhaseMisordered;
+        core_err_ptr != nullptr && *core_err_ptr == glibre::core::Error::FramePhaseMisordered;
     CHECK(is_misordered);
 
     // frame_counter must NOT have advanced.

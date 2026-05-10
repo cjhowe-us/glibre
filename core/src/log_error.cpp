@@ -41,8 +41,8 @@ void log_error(
     // ErrorContext::file and ::detail are std::string_view (post-migration per
     // reviews/decisions/eastl-removal.md §4), so fmtlib can format them directly
     // without any conversion.
-    const std::string_view file_sv    = ctx.file;
-    const std::string_view detail_sv  = ctx.detail;
+    const std::string_view file_sv = ctx.file;
+    const std::string_view detail_sv = ctx.detail;
 
     // Pass format string and arguments directly to spdlog's logger::log().
     // spdlog forwards them into its internal fmtlib pipeline — zero heap

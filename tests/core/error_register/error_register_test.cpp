@@ -295,9 +295,7 @@ static_assert(
             glibre::core::Error,
             glibre::render::Error,
             glibre::tools::Error,
-            glibre::shader::Error
-        >
-    >,
+            glibre::shader::Error>>,
     "glibre::Error::Variant must be std::variant<core::Error, render::Error, "
     "tools::Error, shader::Error> per eastl-removal.md §4."
 );
@@ -311,9 +309,7 @@ TEST_CASE("core/error: variant_alias_uses_std_variant", "[core][error][variant]"
             glibre::core::Error,
             glibre::render::Error,
             glibre::tools::Error,
-            glibre::shader::Error
-        >
-    >;
+            glibre::shader::Error>>;
     CHECK(is_std_variant);
 
     // Arm count is preserved: four contexts remain registered.

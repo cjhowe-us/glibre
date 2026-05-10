@@ -31,14 +31,14 @@ namespace glibre {
 ///
 /// Inherits operator() from each lambda and exposes all overloads for
 /// ADL-based overload resolution inside std::visit.
-template <class... Ts>
+template<class... Ts>
 struct Overloaded : Ts... {
     using Ts::operator()...;
 };
 
 /// Deduction guide — allows `Overloaded{lambda1, lambda2, ...}` without
 /// explicit template arguments.
-template <class... Ts>
+template<class... Ts>
 Overloaded(Ts...) -> Overloaded<Ts...>;
 
 }  // namespace glibre

@@ -149,10 +149,10 @@ bool glibre_test_context_write(char* buf, std::size_t buf_size) noexcept {
     GlibreTestContextTransfer transfer{};
     transfer.line = r.error().where().line;
 
-    const std::string_view file_view   = r.error().where().file;
+    const std::string_view file_view = r.error().where().file;
     const std::string_view detail_view = r.error().where().detail;
 
-    const std::size_t file_copy   = std::min(file_view.size(), kFileMax - 1u);
+    const std::size_t file_copy = std::min(file_view.size(), kFileMax - 1u);
     const std::size_t detail_copy = std::min(detail_view.size(), kDetailMax - 1u);
 
     std::memcpy(transfer.file, file_view.data(), file_copy);

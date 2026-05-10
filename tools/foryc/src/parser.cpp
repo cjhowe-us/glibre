@@ -181,9 +181,7 @@ private:
     std::unexpected<glibre::Error> {                                                               \
         glibre::Error {                                                                            \
             (code), glibre::ErrorContext {                                                         \
-                __FILE__, __LINE__, std::string_view {                                             \
-                    detail_literal                                                                  \
-                }                                                                                  \
+                __FILE__, __LINE__, std::string_view { detail_literal }                            \
             }                                                                                      \
         }                                                                                          \
     }

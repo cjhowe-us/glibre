@@ -92,8 +92,7 @@ TEST_CASE("per_context_allocator_rejects_alloc_over_ceiling", "[core][alloc]") {
     const glibre::Error& err = r2.error();
     const auto* core_err_ptr = std::get_if<glibre::core::Error>(&err.code());
     const bool is_out_of_budget =
-        core_err_ptr != nullptr &&
-        *core_err_ptr == glibre::core::Error::OutOfBudget;
+        core_err_ptr != nullptr && *core_err_ptr == glibre::core::Error::OutOfBudget;
     CHECK(is_out_of_budget);
 
     // Counter must NOT have advanced on the rejected allocation.
