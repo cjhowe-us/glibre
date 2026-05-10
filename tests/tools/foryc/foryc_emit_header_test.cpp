@@ -27,6 +27,9 @@
 // Builtin include tests:
 //   - foryc_emit_header_includes_builtins_for_math_type
 //   - foryc_emit_header_no_builtins_include_for_scalar_only_schema
+//
+// libc++ stdlib migration guard (plan #1055, eastl-removal.md):
+//   - tools/foryc: emits_with_std_string_buffers
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -373,4 +376,63 @@ schema glibre.example.Widget {
 
     const eastl::string& text = *result;
     CHECK(text.find("#include <glibre/types/_builtins.hpp>") == eastl::string::npos);
+}
+
+// -----------------------------------------------------------------------
+// libc++ stdlib migration guard — plan #1055 / eastl-removal.md
+//
+// Verifies that emit_header() produces a string buffer whose content is
+// accessible through std::string_view — the universal read-only view that
+// is constructible from both eastl::string (current production type) and
+// std::string (post-migrate(tools/foryc) #1048 type).
+//
+// All assertions use std::string_view so this test requires no changes
+// when #1048 migrates the production API return type from eastl::string
+// to std::string.  Only the binding annotation (`const auto&`) or an
+// explicit type annotation in that future PR will need updating.
+//
+// Policy: eastl-removal.md §Consequences/Test-fixtures — Catch2 built-in
+// matchers work equally well on std::string_view slices; no custom
+// EASTL matchers are used here.
+// -----------------------------------------------------------------------
+
+TEST_CASE("tools/foryc: emits_with_std_string_buffers", "[foryc][emit_header][stdlib]") {
+    // Parse a schema with scalar fields only (no math/entity builtins).
+    // The emitted header must be accessible as a std::string_view buffer
+    // with no EASTL-specific accessor calls on the assertion side.
+    constexpr std::string_view src = R"(
+schema glibre.example.Counter {
+  version 1
+  field count  : u32  tag 1
+  field active : bool tag 2
+}
+)";
+
+    const auto schema = parse_ok(src, "Counter.fory");
+    auto result = emit_header(schema);
+    REQUIRE(result.has_value());
+
+    // Bind via std::string_view — constructible from both eastl::string
+    // (data() + size()) and std::string (after #1048 lands).
+    // NOTE: When migrate(tools/foryc) #1048 migrates the production API,
+    // the line below may be simplified to `const std::string& text = *result;`
+    // or kept as-is since std::string_view is constructible from std::string.
+    const std::string_view text{result->data(), result->size()};
+
+    // --- Content assertions via std::string_view::find ---
+    // Struct present.
+    CHECK(text.find("struct Counter") != std::string_view::npos);
+    // Fields present (tag-sorted ascending: count tag 1, active tag 2).
+    CHECK(text.find("uint32_t count") != std::string_view::npos);
+    CHECK(text.find("bool active") != std::string_view::npos);
+    // ABI rule 2: struct is final, default ctor only.
+    CHECK(text.find("struct Counter final {") != std::string_view::npos);
+    CHECK(text.find("Counter() = default;") != std::string_view::npos);
+    // pragma once present.
+    CHECK(text.find("#pragma once") != std::string_view::npos);
+    // No _builtins.hpp for scalar-only schema.
+    CHECK(text.find("#include <glibre/types/_builtins.hpp>") == std::string_view::npos);
+    // Namespace wrapping from FQN "glibre.example.Counter".
+    CHECK(text.find("namespace glibre {") != std::string_view::npos);
+    CHECK(text.find("namespace example {") != std::string_view::npos);
 }
