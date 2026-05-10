@@ -10,6 +10,22 @@
 // Named test cases (per plan #247 Unit Test Plan):
 //   - core/frame_loop: present_advances_tick_exactly_once
 //   - core/frame_loop: tick_does_not_advance_when_phase_8_refuses
+//
+// Named test cases (per plan #599 Unit Test Plan):
+//   - core/frame_loop: barrier_step_invoked_between_phase_7_and_9
+//   - core/frame_loop: barrier_step_idle_no_alloc_under_ContextTag_core
+//   - core/frame_loop: phase_8_hook_wraps_barrier_call
+//
+// Round-1 review changes (plan #599):
+//   - hot_reload_barrier.hpp removed (HIGH-1: duplicate aggregate).  Tests now
+//     use loop.hot_reload_queue() to access the single §4.6 aggregate.
+//   - barrier_step_idle_no_observer_publish deleted (MED-1: tautological — the
+//     stub has no observer surface; any assertion against step_count alone is
+//     covered by barrier_step_invoked_between_phase_7_and_9).
+//   - barrier_step_idle_no_alloc_under_ContextTag_core updated to read
+//     PerContextAllocator::bytes_used() before and after the idle tick and
+//     assert delta == 0 (HIGH-3: test name was a load-bearing claim).
+//   - set_phase_hooks() now returns Result<void>; test sites CHECK(result.has_value()).
 
 #include <array>
 #include <cstdint>
@@ -17,8 +33,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "glibre/alloc.hpp"
 #include "glibre/core/frame_loop.hpp"
 #include "glibre/core/frame_phase.hpp"
+#include "glibre/core/hot_reload_request.hpp"
 #include "glibre/core/world_tick.hpp"
 #include "glibre/error.hpp"
 
@@ -284,5 +302,313 @@ TEST_CASE("core/frame_loop: tick_does_not_advance_when_phase_8_refuses", "[core]
     // the refusal path cannot be exercised. Skip rather than run a redundant
     // clean-tick assertion that masks the gap.
     SKIP("test requires -DGLIBRE_TESTING; phase-8 fault injection not available in this build");
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Test: barrier_step_invoked_between_phase_7_and_9
+//
+// Verifies that HotReloadRequestQueue::step() is called exactly once per
+// tick(), and that it occurs between Phase::RenderSubmit (7) and Phase::Present
+// (9), i.e. at Phase::HotReload (8).
+//
+// The FrameLoop owns HotReloadRequestQueue as a value member (SPEC §4.6 single-
+// position barrier).  Tests access it via loop.hot_reload_queue().  The queue's
+// GLIBRE_TESTING counter (step_count()) is checked before and after each tick.
+//
+// Authority: plan #599 §Unit Test Plan — barrier_step_invoked_between_phase_7_and_9.
+//            SPEC §6.5: step() fires between RenderSubmit and Present.
+//            SPEC §4.6 invariant 6: exactly one barrier per frame.
+//
+// GLIBRE_TESTING: uses HotReloadRequestQueue::step_count() to observe calls.
+// ---------------------------------------------------------------------------
+TEST_CASE(
+    "core/frame_loop: barrier_step_invoked_between_phase_7_and_9", "[core][frame_loop][hot_reload]"
+) {
+    using namespace glibre::core;
+
+#ifdef GLIBRE_TESTING
+    FrameLoop loop;
+
+    // The queue is a value member of FrameLoop; step_count starts at 0.
+    REQUIRE(loop.hot_reload_queue().step_count() == 0u);
+
+    // Execute one tick; must succeed.
+    auto result = loop.tick();
+    REQUIRE(result.has_value());
+
+    // After one tick: step() must have been called exactly once.
+    CHECK(loop.hot_reload_queue().step_count() == 1u);
+
+    // Execute a second tick.
+    auto result2 = loop.tick();
+    REQUIRE(result2.has_value());
+
+    // After two ticks: step() called exactly twice.
+    CHECK(loop.hot_reload_queue().step_count() == 2u);
+
+    // Reset the counter and run one more tick; verify it increments from 0 to 1.
+    loop.hot_reload_queue().reset_step_count();
+    REQUIRE(loop.hot_reload_queue().step_count() == 0u);
+
+    auto result3 = loop.tick();
+    REQUIRE(result3.has_value());
+
+    // step_count must be 1 after the reset-and-tick.
+    CHECK(loop.hot_reload_queue().step_count() == 1u);
+#else
+    SKIP(
+        "test requires -DGLIBRE_TESTING; HotReloadRequestQueue::step_count() unavailable in this "
+        "build"
+    );
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Test: barrier_step_idle_no_alloc_under_ContextTag_core
+//
+// Verifies that the idle hot-reload fast path (pending_ == 0) produces ZERO
+// allocator activity in the ContextTag::core allocator, consistent with
+// perf-budget.md §HotReloadBarrier: "0 ms / 0 bytes — idle steady-state,
+// relaxed atomic only."
+//
+// Strategy: construct a PerContextAllocator for ContextTag::core, read
+// bytes_used() BEFORE and AFTER each idle tick, and assert delta == 0.
+// This directly verifies the load-bearing claim in the test name:
+//   "no_alloc_under_ContextTag_core"
+//
+// Secondary invariants (all cross-checked):
+//   (a) step_count() == N — step() was called exactly once per tick (fast path).
+//   (b) pending_count() == 0 — no reload was initiated.
+//   (c) frame_counter() == N, world_tick().value == N — full tick completed.
+//
+// Authority: plan #599 §Unit Test Plan — barrier_step_idle_no_alloc_under_ContextTag_core.
+//            SPEC §4.6 invariant 2; perf-budget.md §HotReloadBarrier.
+//            HIGH-3 round-1 review: test was name-only (lacked allocator probe).
+// ---------------------------------------------------------------------------
+TEST_CASE(
+    "core/frame_loop: barrier_step_idle_no_alloc_under_ContextTag_core",
+    "[core][frame_loop][hot_reload]"
+) {
+    using namespace glibre::core;
+
+#ifdef GLIBRE_TESTING
+    // Construct a PerContextAllocator for ContextTag::core.  This is the
+    // allocator whose bytes_used() must remain unchanged during idle ticks.
+    // Ceiling is taken from kContextCeilings[core] (64 MiB).
+    glibre::PerContextAllocator core_alloc{glibre::ContextTag::core};
+
+    FrameLoop loop;
+
+    // Idle precondition: no pending reload → queue fast path fires.
+    REQUIRE(loop.hot_reload_queue().pending_count() == 0u);
+    REQUIRE(loop.hot_reload_queue().step_count() == 0u);
+
+    // --- Single idle tick: verify zero allocation delta ---
+    const std::uint64_t bytes_before_tick1 = core_alloc.bytes_used();
+
+    auto result = loop.tick();
+    REQUIRE(result.has_value());
+
+    const std::uint64_t bytes_after_tick1 = core_alloc.bytes_used();
+
+    // The idle fast path must not have touched the ContextTag::core allocator.
+    // delta == 0 means no allocation occurred during Phase::HotReload.
+    CHECK(bytes_after_tick1 == bytes_before_tick1);
+
+    // (a) step() was called exactly once.
+    CHECK(loop.hot_reload_queue().step_count() == 1u);
+
+    // (b) No reload was initiated — pending_count stays 0.
+    CHECK(loop.hot_reload_queue().pending_count() == 0u);
+
+    // (c) Full tick completed: frame_counter_ and world_tick_ advanced.
+    CHECK(loop.frame_counter() == 1u);
+    CHECK(loop.world_tick().value == 1u);
+    CHECK(loop.world_tick().change_tick == 1u);
+
+    // --- Nine more idle ticks: verify zero allocation delta each time ---
+    for (int i = 0; i < 9; ++i) {
+        const std::uint64_t bytes_before = core_alloc.bytes_used();
+
+        auto r = loop.tick();
+        REQUIRE(r.has_value());
+
+        const std::uint64_t bytes_after = core_alloc.bytes_used();
+
+        // Each idle tick must not allocate any ContextTag::core bytes.
+        INFO("idle tick " << (i + 2) << ": bytes_used delta = " << (bytes_after - bytes_before));
+        CHECK(bytes_after == bytes_before);
+        CHECK(loop.hot_reload_queue().pending_count() == 0u);
+    }
+
+    // After 10 ticks total: step_count == 10 (one per tick, all idle fast path).
+    CHECK(loop.hot_reload_queue().step_count() == 10u);
+    CHECK(loop.frame_counter() == 10u);
+#else
+    SKIP(
+        "test requires -DGLIBRE_TESTING; HotReloadRequestQueue::step_count() unavailable in this "
+        "build"
+    );
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Test: phase_8_hook_wraps_barrier_call
+//
+// Verifies that the PhaseHooks registered via set_phase_hooks(Phase::HotReload)
+// fire in the correct order relative to hot_reload_queue_.step():
+//
+//   tick() enters Phase 8:
+//     (1) on_enter hook fires       ← PhaseHooks.on_enter
+//     (2) hot_reload_queue_.step()  ← HotReloadRequestQueue::step_count() += 1
+//     (3) on_exit hook fires        ← PhaseHooks.on_exit
+//
+// The test instruments the ordering using a simple integer counter:
+//   - on_enter records step_count at the time it fires (expect 0).
+//   - step() increments step_count to 1.
+//   - on_exit records step_count at the time it fires (expect 1).
+//
+// This directly verifies that observers (editor, e2e) can wrap the phase-8
+// step without owning the queue, per plan #599 §Scope.
+//
+// Also verifies that set_phase_hooks() returns Result<void>:
+//   - Phase::HotReload → success (has_value).
+//   - Any other phase → core::Error::InvalidArgument (not has_value).
+//
+// Authority: plan #599 §Unit Test Plan — phase_8_hook_wraps_barrier_call.
+//            SPEC §5.7 (PhaseHooks, set_phase_hooks returns Result<void>).
+//            SPEC §6.5 (hook fires around step).
+//            LOW-1 / LOW-2 round-1 review: set_phase_hooks returns Result<void>,
+//            unsupported phases return InvalidArgument (no silent no-op).
+//
+// Implementation note: PhaseHookFn is a plain function pointer (no closure).
+// Test-local shared state is carried through translation-unit-scope statics
+// guarded by GLIBRE_TESTING; this is a test-only pattern that mirrors the
+// injection approach used by the existing plan #247 tests.
+// ---------------------------------------------------------------------------
+
+#ifdef GLIBRE_TESTING
+namespace {
+
+// File-scope static state for the phase_8_hook_wraps_barrier_call test.
+// Plain function pointers cannot capture state; TU-scope statics are the
+// standard seam for this pattern in -fno-exceptions / no-lambda-capture builds.
+// (LOW-3 round-1 review: acknowledged as the standard seam for -fno-exceptions
+// builds; parallel test execution not supported in this suite.)
+glibre::core::HotReloadRequestQueue* g_hook_queue{nullptr};
+std::uint64_t g_step_count_at_enter{0u};
+std::uint64_t g_step_count_at_exit{0u};
+int g_enter_call_count{0};
+int g_exit_call_count{0};
+
+void reset_hook_state() noexcept {
+    g_hook_queue = nullptr;
+    g_step_count_at_enter = 0u;
+    g_step_count_at_exit = 0u;
+    g_enter_call_count = 0;
+    g_exit_call_count = 0;
+}
+
+void phase8_on_enter(glibre::core::Phase /*phase*/) noexcept {
+    // Capture step_count BEFORE step() fires.
+    // Expected: 0 on the first tick (step() has not run yet).
+    if (g_hook_queue != nullptr) {
+        g_step_count_at_enter = g_hook_queue->step_count();
+    }
+    ++g_enter_call_count;
+}
+
+void phase8_on_exit(glibre::core::Phase /*phase*/) noexcept {
+    // Capture step_count AFTER step() fires.
+    // Expected: 1 on the first tick (step() has already run once).
+    if (g_hook_queue != nullptr) {
+        g_step_count_at_exit = g_hook_queue->step_count();
+    }
+    ++g_exit_call_count;
+}
+
+}  // namespace
+#endif  // GLIBRE_TESTING
+
+TEST_CASE("core/frame_loop: phase_8_hook_wraps_barrier_call", "[core][frame_loop][hot_reload]") {
+    using namespace glibre::core;
+
+#ifdef GLIBRE_TESTING
+    FrameLoop loop;
+    reset_hook_state();
+    g_hook_queue = &loop.hot_reload_queue();
+
+    // set_phase_hooks returns Result<void> per SPEC §5.7 (LOW-2 round-1).
+    auto set_result =
+        loop.set_phase_hooks(Phase::HotReload, PhaseHooks{&phase8_on_enter, &phase8_on_exit});
+    REQUIRE(set_result.has_value());
+
+    // Verify that unsupported phases return InvalidArgument (LOW-1 round-1).
+    auto bad_result = loop.set_phase_hooks(Phase::Input, PhaseHooks{&phase8_on_enter, nullptr});
+    REQUIRE_FALSE(bad_result.has_value());
+    {
+        const auto* bad_code = std::get_if<glibre::core::Error>(&bad_result.error().code());
+        CHECK(bad_code != nullptr && *bad_code == glibre::core::Error::InvalidArgument);
+    }
+
+    // Execute one tick.
+    auto result = loop.tick();
+    REQUIRE(result.has_value());
+
+    // --- Ordering assertions ---
+
+    // on_enter must have fired exactly once.
+    CHECK(g_enter_call_count == 1);
+
+    // on_exit must have fired exactly once.
+    CHECK(g_exit_call_count == 1);
+
+    // on_enter fired BEFORE step(): g_step_count_at_enter must be 0.
+    // (step() had not run yet when on_enter was called.)
+    CHECK(g_step_count_at_enter == 0u);
+
+    // on_exit fired AFTER step(): g_step_count_at_exit must be 1.
+    // (step() had already run once when on_exit was called.)
+    CHECK(g_step_count_at_exit == 1u);
+
+    // Final queue step count: exactly 1 (one tick).
+    CHECK(loop.hot_reload_queue().step_count() == 1u);
+
+    // --- Second tick: hooks fire again in the same order ---
+    g_step_count_at_enter = 0u;
+    g_step_count_at_exit = 0u;
+    g_enter_call_count = 0;
+    g_exit_call_count = 0;
+    // step_count is now 1 from the previous tick; reset for clarity.
+    loop.hot_reload_queue().reset_step_count();
+
+    auto result2 = loop.tick();
+    REQUIRE(result2.has_value());
+
+    CHECK(g_enter_call_count == 1);
+    CHECK(g_exit_call_count == 1);
+    // on_enter sees step_count == 0 (reset above, step() not yet called).
+    CHECK(g_step_count_at_enter == 0u);
+    // on_exit sees step_count == 1 (step() ran once this tick).
+    CHECK(g_step_count_at_exit == 1u);
+
+    // --- Clear hooks: subsequent ticks must not call the hooks ---
+    auto clear_result = loop.set_phase_hooks(Phase::HotReload, PhaseHooks{nullptr, nullptr});
+    REQUIRE(clear_result.has_value());
+    g_enter_call_count = 0;
+    g_exit_call_count = 0;
+
+    auto result3 = loop.tick();
+    REQUIRE(result3.has_value());
+
+    // Hooks must not have fired after being cleared.
+    CHECK(g_enter_call_count == 0);
+    CHECK(g_exit_call_count == 0);
+#else
+    SKIP(
+        "test requires -DGLIBRE_TESTING; HotReloadRequestQueue::step_count() and "
+        "PhaseHooks ordering instrumentation unavailable in this build"
+    );
 #endif
 }

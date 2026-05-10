@@ -18,6 +18,12 @@
 // (phase ownership + system register API).  Registered systems are
 // invoked inside run_phase() after the built-in MVP phase body,
 // in registration order.
+//
+// PhaseHooks / set_phase_hooks() / Phase 8 hot_reload_queue_.step() call site
+// are per plan #599 (HotReloadBarrier call-site wiring).  Phase 8 fires
+// on_enter before step() and on_exit after, per SPEC §5.7 / §6.5.
+// execute_pending_reloads removed: HotReloadRequestQueue::step() (SPEC §5.8)
+// now encapsulates both the fast-path check and the slow-path stub.
 
 #include "glibre/core/frame_loop.hpp"
 
@@ -90,6 +96,39 @@ void FrameLoop::set_perf_budget(glibre::PerfBudget* budget) noexcept { perf_budg
 void FrameLoop::set_phase_registry(PhaseRegistry* registry) noexcept { phase_registry_ = registry; }
 
 // ---------------------------------------------------------------------------
+// set_phase_hooks — register observer hooks for a specific phase.  (plan #599)
+//
+// Currently stores hooks for Phase::HotReload (8) only.  Future plans extend
+// storage to all nine phases; for now a single PhaseHooks slot is sufficient
+// for the editor/e2e observer pattern described in the plan.
+//
+// Returns core::Error::InvalidArgument for any phase other than Phase::HotReload
+// so that callers wiring an observer for an unsupported phase receive an explicit
+// diagnostic rather than a silent no-op (LOW-1 round-1 review).  Future plans
+// extend the slot table and widen the accepted phase set.
+// ---------------------------------------------------------------------------
+
+[[nodiscard]] glibre::Result<void>
+FrameLoop::set_phase_hooks(Phase phase, PhaseHooks hooks) noexcept {
+    if (phase == Phase::HotReload) {
+        phase_8_hooks_ = hooks;
+        return {};
+    }
+    // Other phases: not yet supported — return InvalidArgument so callers get
+    // an explicit diagnostic instead of a silent no-op (LOW-1, round-1 review).
+    return std::unexpected(
+        glibre::Error{
+            core::Error::InvalidArgument,
+            glibre::ErrorContext{
+                .file = "core/src/frame_loop.cpp",
+                .line = __LINE__,
+                .detail = "set_phase_hooks: only Phase::HotReload is supported in this plan",
+            },
+        }
+    );
+}
+
+// ---------------------------------------------------------------------------
 // present_reset_perf_budget — Phase::Present step (1).
 //
 // Resets all perf-budget counters unconditionally when a budget is registered.
@@ -141,34 +180,6 @@ void FrameLoop::present_reset_perf_budget() noexcept {
 #endif
 
     return {};
-}
-
-// ---------------------------------------------------------------------------
-// execute_pending_reloads — stub for the Phase 8 drain/swap/migrate/resume
-// state machine.
-//
-// Authority: reviews/decisions/hot-reload-protocol.md §"Protocol Sequence"
-// (four-step drain → swap → migrate → resume state machine).
-//
-// This stub stands in for the full implementation that will land in
-// plans #251+ when at least one reload request is pending.  It returns
-// core::Error::HotReloadRefused so that the Phase 8 fast-path exercises
-// its non-trivial branch in tests without coupling to the real state machine.
-//
-// The real body will: (1) drain all plugins in the queue, (2) swap vtables,
-// (3) migrate component storages, (4) resume (call register on new plugin).
-// Each step is guarded by atomicity and rollback as specified in the protocol.
-//
-// plan #249 §Scope: "Stub execute_pending_reloads returns
-// core::Error::HotReloadRefused — the real body lands in subsequent plans."
-// ---------------------------------------------------------------------------
-
-[[nodiscard]] static glibre::Result<void>
-execute_pending_reloads(glibre::core::HotReloadRequestQueue& queue) noexcept {
-    // TODO(plan-251): consume queue.pending_count() to iterate pending requests
-    // and implement the full drain → swap → migrate → resume state machine.
-    (void)queue;
-    return std::unexpected(glibre::Error{glibre::core::Error::HotReloadRefused});
 }
 
 // ---------------------------------------------------------------------------
@@ -229,40 +240,53 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
     case Phase::RenderSubmit: /* render — MVP empty */
         break;
     case Phase::HotReload: {
-        // Phase 8: hot-reload drain barrier. (core (barrier) — pending-reload fast-path)
+        // Phase 8: hot-reload drain barrier (SPEC §4.6, plan #599, plan #249).
         //
-        // Fast-path (plan #249): read the pending_reloads counter once with
-        // memory_order_relaxed.  If zero, return immediately — true no-op:
-        // no fence, no cache flush (hot-reload-protocol.md §Consequences,
-        // frame-phases.md open question 1 resolution).
+        // Execution order (plan #599):
+        //   (A) on_enter hook fires (if set via set_phase_hooks(Phase::HotReload))
+        //   (B) hot_reload_queue_.step() — single relaxed-atomic load on fast path
+        //       (pending_ == 0); drain→swap→migrate→resume on slow path
+        //       (SPEC §6.7; slow-path bodies in plans #249-#258).
+        //   (C) on_exit hook fires (if set)
         //
-        // Non-zero path: delegate to execute_pending_reloads (stub for now;
-        // full drain → swap → migrate → resume body lands in plans #251+).
+        // hot_reload_queue_.step() returns Result<std::size_t>:
+        //   0 — fast path (idle, no reloads pending).
+        //   N — N requests processed.
+        //   unexpected — slow-path refusal (propagated to tick() caller).
+        //
+        // Per hot-reload-protocol.md §Decision: "Plugin code does not execute
+        // during phase 8.  No system bodies run."  Both fast and slow paths
+        // return directly from this case, bypassing system dispatch.
         //
         // FOLLOWUP(plan-981-wiring): wire FramePhaseTracker / validate_drain_phase
         // once that plan lands.  The GLIBRE_TESTING injection below exercises
         // the "tick halts on phase failure" path from plan #247 Unit Test Plan.
         //
         // GLIBRE_TESTING injection: when inject_phase8_failure_ is armed,
-        // bypass the counter check and simulate a drain-phase refusal so tests
-        // can verify that frame_counter_ and world_tick_ do not advance.
+        // simulate a drain-phase refusal so tests can verify that frame_counter_
+        // and world_tick_ do not advance when Phase 8 fails.
 #ifdef GLIBRE_TESTING
         if (inject_phase8_failure_) {
             return std::unexpected(glibre::Error{core::Error::FramePhaseMisordered});
         }
 #endif
-        // Fast-path: single relaxed load — sub-microsecond when no reloads pending.
-        // Per hot-reload-protocol.md §Decision: "Plugin code does not execute
-        // during phase 8.  No system bodies run."  Both branches must bypass
-        // the system dispatch below, so we return directly rather than break.
-        if (hot_reload_queue_.pending_count() == 0) {
-            return {};  // true no-op — no system bodies per protocol §Decision
+        // (A) on_enter hook — fires before step().
+        if (phase_8_hooks_.on_enter != nullptr) {
+            phase_8_hooks_.on_enter(Phase::HotReload);
         }
-        // Non-zero: run the drain/swap/migrate/resume state machine (stub).
-        // Returns (propagates the error from execute_pending_reloads); either
-        // way system dispatch at the end of run_phase is never reached for
-        // Phase 8 (protocol §Decision: no system bodies run in phase 8).
-        return execute_pending_reloads(hot_reload_queue_);
+        // (B) step() — single relaxed-atomic load on fast path (SPEC §6.7).
+        //     Returns 0 when idle (fast path, no allocation, no observer event).
+        //     Propagate slow-path refusal errors back to tick() if they occur.
+        auto step_result = hot_reload_queue_.step();
+        // (C) on_exit hook — fires after step() regardless of result.
+        if (phase_8_hooks_.on_exit != nullptr) {
+            phase_8_hooks_.on_exit(Phase::HotReload);
+        }
+        if (!step_result) {
+            return std::unexpected(std::move(step_result.error()));
+        }
+        // Phase 8 never reaches system dispatch (no system bodies per protocol).
+        return {};
     }
     case Phase::Present: /* platform — drains transient arenas at frame end */
         // Phase 9 bookkeeping order (perf-budget.md §CI Gate Spec, plan #241;

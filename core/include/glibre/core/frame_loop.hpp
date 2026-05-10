@@ -21,6 +21,17 @@
 //
 // See reviews/decisions/frame-phases.md for the authoritative ordering.
 // See reviews/decisions/error-model.md for std::expected usage rules.
+//
+// Plan #599 additions:
+//   - PhaseHooks / PhaseHookFn: per-phase observer hook pair (on_enter / on_exit).
+//   - set_phase_hooks(): register observer hooks for Phase::HotReload.
+//   - Phase 8 body calls hot_reload_queue_.step() wrapped by phase_8_hooks_.
+//
+// Round-1 review reconciliation (HIGH-1, plan #599):
+//   hot_reload_barrier.hpp is removed; HotReloadRequestQueue is the single
+//   SPEC §4.6 aggregate.  set_barrier() / HotReloadBarrier* are not added.
+//   Phase 8 calls hot_reload_queue_.step() directly (single aggregate, no
+//   non-owning pointer indirection).
 
 #include <array>
 #include <cstddef>
@@ -36,6 +47,41 @@
 #include "glibre/transient_arena.hpp"
 
 namespace glibre::core {
+
+// ---------------------------------------------------------------------------
+// PhaseHooks — observer hooks fired at entry and exit of a named phase.
+//
+// Hooks run on the game-loop thread inside tick(), between phase N exit and
+// phase N+1 entry (for on_enter) and after the phase body (for on_exit).
+// They MUST NOT mutate world state — observation only (SPEC §5.7).
+//
+// Used by plan #599 to allow observers (editor, e2e) to wrap the
+// Phase::HotReload barrier call without owning the queue.
+//
+// SPEC §5.7 mandates:
+//   using PhaseHookFn = void (*)(World& world, Phase phase) noexcept;
+//
+// World& is intentionally deferred: World is not yet wired into FrameLoop
+// (it requires the ECS World plan to land first, tracked under
+// FOLLOWUP(ecs-world)).  Adding World& now would require fabricating a stub
+// World* or a null reference — both introduce worse bugs than the current
+// shape.  When World is wired into tick(), this signature gains World& and
+// all call sites update in a single ECS-wiring pass.
+//
+// MED-2 PUSHBACK (round-1 review): PhaseHookFn does NOT carry World& in
+// this PR because World is not yet wired into FrameLoop::tick().  The SPEC
+// §5.7 shape is the target; the FOLLOWUP comment below is the gate.
+//
+// FOLLOWUP(ecs-world): once World& is threaded into tick(), change to:
+//   using PhaseHookFn = void (*)(World& world, Phase phase) noexcept;
+// and add world to every on_enter / on_exit call site below.
+// ---------------------------------------------------------------------------
+using PhaseHookFn = void (*)(Phase phase) noexcept;
+
+struct PhaseHooks {
+    PhaseHookFn on_enter{nullptr};  // fires before the phase body
+    PhaseHookFn on_exit{nullptr};   // fires after the phase body
+};
 
 // -----------------------------------------------------------------------
 // FrameLoop
@@ -107,6 +153,35 @@ public:
     //
     // Thread safety: must not be called concurrently with tick().
     void set_perf_budget(glibre::PerfBudget* budget) noexcept;
+
+    // set_phase_hooks() — register observer hooks for a specific phase.
+    //
+    // Hooks fire on the game-loop thread inside tick():
+    //   on_enter: immediately before the phase body executes.
+    //   on_exit:  immediately after the phase body executes.
+    //
+    // Currently only Phase::HotReload hooks are used (plan #599).  Support
+    // for other phases may be added by future plans; the implementation
+    // currently stores only the phase-8 hook pair.
+    //
+    // Returns:
+    //   glibre::Result<void> — success when the phase is supported
+    //     (currently Phase::HotReload only).
+    //   core::Error::InvalidArgument — when a phase other than Phase::HotReload
+    //     is supplied.  This is a present-tense diagnostic: the SPEC §5.7 surface
+    //     supports all phases, but the implementation only stores phase-8 hooks;
+    //     returning an error prevents silent no-ops for wired observers (LOW-1
+    //     round-1 review: "caller wiring an observer for Phase::Input gets nothing
+    //     back, and no diagnostic").  Future plans extend storage to all phases
+    //     and this error path widens accordingly.
+    //
+    // Passing PhaseHooks{nullptr, nullptr} clears the hooks for that phase.
+    //
+    // Thread safety: must not be called concurrently with tick().
+    //
+    // Plan #599 — PhaseHooks wiring for phase-8 barrier observers.
+    [[nodiscard]] glibre::Result<void>
+    set_phase_hooks(Phase phase, PhaseHooks hooks) noexcept;
 
     // set_phase_registry() — attach (or detach) a PhaseRegistry for system
     // dispatch.  (plan #245 — phase ownership + system register API)
@@ -237,14 +312,20 @@ private:
     // Non-owning pointer; lifetime is caller-managed.  Null = no system dispatch.
     PhaseRegistry* phase_registry_{nullptr};
 
-    // hot_reload_queue_ — pending-reload counter for the Phase 8 fast-path.
-    //
-    // Phase 8 reads pending_count() once on entry; if zero, it returns {}
-    // immediately (true no-op: single relaxed atomic load, no fence, no cache
-    // flush per hot-reload-protocol.md §Consequences and frame-phases.md open
-    // question 1 resolution).  Callers enqueue requests via hot_reload_queue()
-    // before Phase 8 executes.  plan #249.
+    // hot_reload_queue_ — the SPEC §4.6 aggregate: pending-reload counter and
+    // step gate for Phase 8.  FrameLoop owns this as a value member (single
+    // instance per FrameLoop, satisfying §4.6 invariant 6 "single-position
+    // barrier").  Phase 8 calls hot_reload_queue_.step() once per tick, wrapped
+    // by phase_8_hooks_.  Callers enqueue requests via hot_reload_queue().
+    // Authority: plan #249; SPEC §5.8.
     HotReloadRequestQueue hot_reload_queue_;
+
+    // phase_8_hooks_ — observer hooks for Phase::HotReload (plan #599).
+    //
+    // on_enter fires before hot_reload_queue_.step(); on_exit fires after.
+    // Null function pointers are skipped silently.  Registered via
+    // set_phase_hooks(Phase::HotReload, ...).
+    PhaseHooks phase_8_hooks_{};
 
 #ifdef GLIBRE_TESTING
     // Under GLIBRE_TESTING builds the last tick's phase execution order is
