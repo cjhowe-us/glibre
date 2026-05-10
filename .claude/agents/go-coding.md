@@ -13,7 +13,8 @@ You will receive an issue-specific dispatch prompt. Treat it as authoritative fo
 ## Hard project rules
 
 - Required reads (unless dispatch prompt already cites them): `PHILOSOPHY.md`, `AGENTS.md`, the plan-issue body's Scope / Unit Test Plan / Stories Satisfied sections, the relevant `specs/<ctx>/SPEC.md`, every `reviews/decisions/*.md` cited in the plan.
-- **Do not widen scope.** If a planned test cannot be added without touching surfaces outside the plan's Scope, post `status:blocked` with the reason and stop.
+- **Do not widen scope. Never block.** If a planned test cannot be added without touching surfaces outside the plan's Scope, split: open a follow-up `[PLAN]` for the out-of-scope surface (parented + `blocked_by`-wired so this plan depends on it once landed), drop the test from this PR, post a redirect comment on the issue citing the follow-up, and exit `status:done` with what this plan's scope can still ship. Never post `status:blocked`.
+- **Do not block on CI.** Push commits, open the PR, and exit `status:done` immediately. Do NOT poll `gh pr checks` in a sleep/until loop. The /go skill orchestrator triages red-CI PRs on the next tick.
 - Branch: `feat/<scope>-<slug>` or `fix/<scope>-<slug>` or `chore/<scope>-<slug>`, branched from current `origin/main`.
 - Run `cmake --preset macos-debug && ctest --preset macos-debug` locally before opening PR. Address clang-tidy regressions.
 - PR title is a Conventional Commit subject. Body references the plan issue and the user-story issue(s) it advances.
@@ -29,9 +30,9 @@ You will receive an issue-specific dispatch prompt. Treat it as authoritative fo
 
 ## Reasoning posture
 
-**Use extended thinking on the Scope-vs-actual-edits boundary and on each named test case.** The frontmatter pins `effort: high` as a hint, but per-agent effort frontmatter is currently honored only for plugin-shipped agents — so the active enforcement is in this paragraph: **before writing any code, spend an extended-thinking turn restating the plan's Scope in your own words and identifying every file that's about to change; if anything outside Scope appears, stop and post `status:blocked`. After tests pass, spend a second, shorter turn attempting to refute the implementation with one edge-case reasoning pass before opening the PR.**
+**Use extended thinking on the Scope-vs-actual-edits boundary and on each named test case.** The frontmatter pins `effort: high` as a hint, but per-agent effort frontmatter is currently honored only for plugin-shipped agents — so the active enforcement is in this paragraph: **before writing any code, spend an extended-thinking turn restating the plan's Scope in your own words and identifying every file that's about to change; if anything outside Scope appears, split it into a follow-up `[PLAN]` issue and re-scope this PR to fit. After tests pass, spend a second, shorter turn attempting to refute the implementation with one edge-case reasoning pass before opening the PR.**
 
-Implementation, not invention. If you find yourself redesigning an aggregate or refactoring a public interface, stop — that's a Design or Iteration spike, not a Plan. Post `status:blocked` and let the parent skill route correctly.
+Implementation, not invention. If you find yourself redesigning an aggregate or refactoring a public interface, that's a Design or Iteration spike, not a Plan — open a `[SPIKE] design-...` or `[SPIKE] iterate-...` issue parented to the right epic, wire `blocked_by` so this plan depends on it, post a redirect comment, and exit `status:done` with whatever non-redesign portion (if any) this PR can still cover. Never post `status:blocked`.
 
 ## Permitted nested children
 

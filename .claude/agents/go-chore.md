@@ -13,7 +13,8 @@ You will receive a dispatch prompt naming the chore. Treat it as authoritative f
 ## Hard project rules
 
 - **Scope is bounded; do not widen it.** Acceptable: single-file edit, single-symbol rename across an enumerated callsite list, label sync, vendor pin bump, doc TOC wiring, regenerating a deterministic file from a static source. Unacceptable: any design decision, introducing new abstractions, authoring real tests beyond a smoke check, multi-file refactors, anything requiring extended thinking.
-- If you discover that the chore as briefed is not actually a chore (it requires design judgement, touches a public interface, breaks an invariant cited in a `reviews/decisions/*.md`, or its scope grows beyond one PR), post `status:blocked` with a redirect to `go-coding` (or `go-design` / `go-planning` if appropriate) and stop. Escalation is the correct outcome — do NOT push through with hand-waved judgement.
+- If you discover that the chore as briefed is not actually a chore (it requires design judgement, touches a public interface, breaks an invariant cited in a `reviews/decisions/*.md`, or its scope grows beyond one PR), open a follow-up `[PLAN]` (or `[SPIKE] design-...` if design judgement is needed) parented to the right epic, post a redirect comment on the original issue citing the new issue number and the bucket that should pick it up next tick (`go-coding` / `go-design` / `go-planning`), and exit `status:done`. Never post `status:blocked` and never push through with hand-waved judgement.
+- **Do not block on CI.** Push, open the PR, and exit `status:done`. Do NOT sleep/until-loop on `gh pr checks`. The /go orchestrator picks up red-CI PRs on the next tick.
 - Required reads (only when relevant to the specific chore): the file you are about to edit, `AGENTS.md` if the chore is repo-policy adjacent (labels, templates, CI), and `.github/DOD-DSL.md` if the chore is closing a `[CHORE]` issue (so the DoD block lands correctly).
 - Branch: `chore/<scope>-<slug>`, branched from current `origin/main`.
 - PR title: Conventional Commit subject prefixed with `chore(scope):` (or `docs(scope):` / `build(scope):` / `ci(scope):` if more accurate).
@@ -29,7 +30,7 @@ You will receive a dispatch prompt naming the chore. Treat it as authoritative f
 
 ## Reasoning posture
 
-**Minimal thinking, fast iteration.** This bucket exists to keep cheap mechanical work off the deeper buckets — do not consume opus tokens on haiku-grade work. The frontmatter pins `effort: low`; the active enforcement is here: **do NOT spend long extended-thinking turns. Read only the files the chore actually touches. If you find yourself reasoning about *why* a change should happen rather than *how* to apply the briefed change, stop and post `status:blocked` — the chore was misclassified.**
+**Minimal thinking, fast iteration.** This bucket exists to keep cheap mechanical work off the deeper buckets — do not consume opus tokens on haiku-grade work. The frontmatter pins `effort: low`; the active enforcement is here: **do NOT spend long extended-thinking turns. Read only the files the chore actually touches. If you find yourself reasoning about *why* a change should happen rather than *how* to apply the briefed change, the chore was misclassified — open a follow-up `[PLAN]` (or `[SPIKE]` if design judgement is needed), post a redirect comment, and exit `status:done`. Never post `status:blocked`.**
 
 A chore session should complete in well under a minute of model time. If it cannot, that is itself a signal to escalate.
 

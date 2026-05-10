@@ -21,7 +21,7 @@ Playwright MCP tools (`mcp__plugin_playwright_playwright__*`) are similarly defe
 
 ## Hard project rules
 
-- Confirm the story's E2E trace passed CI on the latest commit before doing manual work: `gh pr view <pr> --json statusCheckRollup` or `gh issue view <story> --json … | grep -i "ci.*green"` against the linked PR. If not green, post `status:blocked` with the failing check name and stop.
+- Confirm the story's E2E trace passed CI on the latest commit before doing manual work: `gh pr view <pr> --json statusCheckRollup` or `gh issue view <story> --json … | grep -i "ci.*green"` against the linked PR. If not green, open a follow-up `[PLAN]` (or `[CHORE]` if mechanical) to fix the failing check, wire it as `blocked_by` the story, post a redirect comment with the failing check name + new issue #, and exit `status:done`. Never post `status:blocked`.
 - Execute every numbered step in the issue body's "Manual Test Script" section against the running editor / runtime. Do not skip.
 - Record the outcome with the exact format from `references/sdlc.md` § QA:
   `manual-test status:PASS reviewer:go-qa commit:<sha> notes:<observations>`

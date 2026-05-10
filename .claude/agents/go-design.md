@@ -16,7 +16,7 @@ You will receive an issue-specific dispatch prompt. Treat it as authoritative fo
 - Re-derive every conclusion from glibre primitives. Harmonius is **input only** — never copy a conclusion without re-justifying it against SOLID/SRP and the cohesion-AND-completeness principle in `PHILOSOPHY.md`.
 - Pull the smallest reasonable boundary. Reject internal cross-domain abstractions that would have only one user.
 - `std::expected<T, glibre::Error>` at every public boundary. No runtime reflection.
-- One leaf, one session. If the spike's scope grew during work, post `status:blocked` with a split proposal and stop — do NOT widen the PR.
+- One leaf, one session. **Never block.** If the spike's scope grew during work, split it: open one or more new follow-up `[SPIKE]` / `[PLAN]` issues (parented + dependency-wired via the GitHub graph), post a redirect comment on the original issue citing the new issue numbers, ship whatever the original spike's scope can still cover in this PR, and exit `status:done`. Do NOT widen the PR. Do NOT post `status:blocked`.
 
 ## Required outputs
 
