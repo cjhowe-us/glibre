@@ -20,7 +20,8 @@
 //
 // Design constraints:
 //   • -fno-exceptions (error-model.md §Decision 3).
-//   • EASTL for containers/strings per PHILOSOPHY §11.
+//   • libc++ standard library + std::pmr containers per PHILOSOPHY §11 (rewritten
+//     in PR #1059); see reviews/decisions/eastl-removal.md.
 //   • Each TEST_CASE constructs its own objects (no singletons).
 //   • PluginContext references World, TypeRegistry, etc. which are opaque
 //     pending types.  The test defines minimal empty stubs for each
