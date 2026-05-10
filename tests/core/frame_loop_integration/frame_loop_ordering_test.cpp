@@ -73,8 +73,10 @@ static_assert(
 // the round-trip property.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("core/frame_loop_integration: nine_phase_round_trip_orders_correctly",
-          "[core][frame_loop_integration]") {
+TEST_CASE(
+    "core/frame_loop_integration: nine_phase_round_trip_orders_correctly",
+    "[core][frame_loop_integration]"
+) {
     using namespace glibre::core;
 
     FrameLoop loop;
@@ -97,13 +99,12 @@ TEST_CASE("core/frame_loop_integration: nine_phase_round_trip_orders_correctly",
             const std::uint64_t global_seq = (tick_idx * kPhaseCount) + pos;
             // The phase ordinal at this position must be (pos + 1).
             const std::uint8_t expected_ordinal = static_cast<std::uint8_t>(pos + 1u);
-            const std::uint8_t actual_ordinal   = ordinals[pos];
+            const std::uint8_t actual_ordinal = ordinals[pos];
 
             INFO(
-                "global_seq=" << global_seq
-                << " pos=" << static_cast<int>(pos)
-                << " expected_ordinal=" << static_cast<int>(expected_ordinal)
-                << " actual_ordinal=" << static_cast<int>(actual_ordinal)
+                "global_seq=" << global_seq << " pos=" << static_cast<int>(pos)
+                              << " expected_ordinal=" << static_cast<int>(expected_ordinal)
+                              << " actual_ordinal=" << static_cast<int>(actual_ordinal)
             );
 
             // Strictly increasing global sequence number: each position advances.
@@ -152,8 +153,10 @@ TEST_CASE("core/frame_loop_integration: nine_phase_round_trip_orders_correctly",
 // We verify this by sampling world_tick() before and after each tick.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("core/frame_loop_integration: world_tick_visible_to_all_phases_in_frame",
-          "[core][frame_loop_integration]") {
+TEST_CASE(
+    "core/frame_loop_integration: world_tick_visible_to_all_phases_in_frame",
+    "[core][frame_loop_integration]"
+) {
     using namespace glibre::core;
 
     FrameLoop loop;
@@ -178,7 +181,7 @@ TEST_CASE("core/frame_loop_integration: world_tick_visible_to_all_phases_in_fram
         const std::uint64_t before_frame_counter = loop.frame_counter();
 
         // world_tick before tick T must equal T (ticks completed so far).
-        CHECK(before.value       == static_cast<std::uint64_t>(t));
+        CHECK(before.value == static_cast<std::uint64_t>(t));
         CHECK(before.change_tick == static_cast<std::uint64_t>(t));
         CHECK(before_frame_counter == static_cast<std::uint64_t>(t));
 
@@ -191,7 +194,7 @@ TEST_CASE("core/frame_loop_integration: world_tick_visible_to_all_phases_in_fram
         const std::uint64_t after_frame_counter = loop.frame_counter();
 
         // world_tick must have advanced by exactly 1 (Phase::Present ran).
-        CHECK(after.value       == static_cast<std::uint64_t>(t + 1));
+        CHECK(after.value == static_cast<std::uint64_t>(t + 1));
         CHECK(after.change_tick == static_cast<std::uint64_t>(t + 1));
         CHECK(after_frame_counter == static_cast<std::uint64_t>(t + 1));
 
@@ -232,8 +235,9 @@ TEST_CASE("core/frame_loop_integration: world_tick_visible_to_all_phases_in_fram
 // (2 and 4) and that the tick completes without error.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("core/frame_loop_integration: empty_reserved_phases_no_op",
-          "[core][frame_loop_integration]") {
+TEST_CASE(
+    "core/frame_loop_integration: empty_reserved_phases_no_op", "[core][frame_loop_integration]"
+) {
     using namespace glibre::core;
 
     // --- (a) + (b): compile-time-stable mvp_reserved flags ---
