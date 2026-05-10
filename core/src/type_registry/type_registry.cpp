@@ -97,7 +97,7 @@ TypeRegistry::TypeRegistry(PerContextAllocator& alloc) noexcept
 Result<const ColumnDescriptor*> TypeRegistry::lookup(TypeId id) const noexcept {
     if (id.value >= entries_.size()) {
         return std::unexpected(
-            Error{
+            glibre::Error{
                 core::Error::TypeUnregistered, ErrorContext{__FILE__, __LINE__, "id out of range"}
             }
         );
@@ -112,7 +112,7 @@ std::size_t TypeRegistry::count() const noexcept { return entries_.size(); }
 Result<void> TypeRegistry::register_type(TypeId id, ColumnDescriptor desc) noexcept {
     if (sealed_) {
         return std::unexpected(
-            Error{
+            glibre::Error{
                 core::Error::TypeRegistryClosed,
                 ErrorContext{__FILE__, __LINE__, "register_type called after seal()"}
             }
@@ -121,7 +121,7 @@ Result<void> TypeRegistry::register_type(TypeId id, ColumnDescriptor desc) noexc
     // Enforce contiguous assignment: id.value must equal the next empty slot.
     if (id.value != entries_.size()) {
         return std::unexpected(
-            Error{
+            glibre::Error{
                 core::Error::TypeRegistryGap,
                 ErrorContext{__FILE__, __LINE__, "id.value != count() — codegen contract violation"}
             }
@@ -142,7 +142,7 @@ Result<void> TypeRegistry::extend_during_load(TypeId id, ColumnDescriptor desc) 
     // Enforce contiguous assignment same as register_type.
     if (id.value != entries_.size()) {
         return std::unexpected(
-            Error{
+            glibre::Error{
                 core::Error::TypeRegistryGap,
                 ErrorContext{__FILE__, __LINE__, "id.value != count() — codegen contract violation"}
             }
