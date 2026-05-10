@@ -1,0 +1,72 @@
+# S1 Sample-Scene Fixture Manifest
+#
+# Authority: reviews/decisions/perf-budget.md §Justification Per Cell — S1 scenario
+#            plan #1003 (canonical S1 fixture loader)
+#
+# Canonical invariants:
+#   "sample scene = 1 character + 200 props + 8 dynamic lights at 1920x1080"
+#
+# This manifest is data-only. Entity transforms expand from seed + index
+# arithmetic so cross-host determinism holds (PHILOSOPHY §7 — determinism by default).
+# A fixture change requires a perf-budget amendment spike (perf-budget.md §Consequences).
+#
+# Version: 1
+# Schema: glibre/e2e/perf/s1/scene-v1
+
+version: 1
+
+# ---------------------------------------------------------------------------
+# Scene entity composition
+# ---------------------------------------------------------------------------
+
+entity_count: 209   # 1 character + 200 props + 8 dynamic lights
+
+archetypes:
+  character:
+    count: 1
+  prop:
+    count: 200
+  dynamic_light:
+    count: 8
+
+# System count = 2 (core transform sweep + render visibility sweep).
+# Matches the system_count invariant carried over from the synthetic placeholder.
+system_count: 2
+
+# ---------------------------------------------------------------------------
+# Viewport descriptor
+# ---------------------------------------------------------------------------
+
+viewport:
+  width: 1920
+  height: 1080
+
+# ---------------------------------------------------------------------------
+# Deterministic placement seed
+#
+# Prop transforms expand from: position = f(seed, entity_index)
+# where f is a deterministic arithmetic function (no RNG state, no
+# platform-dependent floating-point).  Same seed on every host → same world.
+# ---------------------------------------------------------------------------
+
+placement_seed: 0xDEAD5EED
+
+# ---------------------------------------------------------------------------
+# Per-context CPU budget cells (nanoseconds)
+#
+# Verbatim from reviews/decisions/perf-budget.md §Per-Context Budget Table.
+# These are the cells that per-context BENCHMARK_CELL benches assert against.
+# Any amendment requires a perf-budget amendment spike (perf-budget.md §Consequences).
+#
+# Naming convention: <context>_cpu_sim_ns / <context>_cpu_submit_ns
+# ---------------------------------------------------------------------------
+
+budgets:
+  core_cpu_sim_ns:       400000   # 0.40 ms — phase 5 transform propagation
+  core_cpu_submit_ns:     50000   # 0.05 ms — world-tick advance + frame-stat writes
+  render_cpu_sim_ns:     100000   # 0.10 ms — RenderFrame extract handoff
+  render_cpu_submit_ns: 1400000   # 1.40 ms — phase 7 Metal encode
+  geometry_cpu_sim_ns:   300000   # 0.30 ms — meshlet visibility + LOD selection
+  geometry_cpu_submit_ns: 200000  # 0.20 ms — BLAS descriptor packing
+  physics_cpu_sim_ns:   2000000   # 2.00 ms — Jolt fixed-step (200 props, ~30 active)
+  physics_cpu_submit_ns:       0  # 0.00 ms — no physics submit work
