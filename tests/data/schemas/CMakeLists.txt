@@ -31,7 +31,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 endif()
 
 find_package(Catch2 3 CONFIG REQUIRED)
-find_package(EASTL CONFIG REQUIRED)
 
 # ---------------------------------------------------------------------------
 # schema-migration-tests binary
@@ -56,18 +55,19 @@ target_include_directories(schema-migration-tests
 target_link_libraries(schema-migration-tests
     PRIVATE
         Catch2::Catch2WithMain
-        glibre::core   # glibre::Error + EASTL
+        glibre::core   # glibre::Error
         glibre::compile_contract
 )
 
 # Inject include paths for the subprocess clang++ calls inside the tests.
-# The tests compile generated TUs that include "glibre/error.hpp" and EASTL
-# headers; these paths are passed via -I flags inside the test binary.
-get_target_property(_eastl_inc EASTL INTERFACE_INCLUDE_DIRECTORIES)
+# The tests compile generated TUs that include "glibre/error.hpp";
+# these paths are passed via -I flags inside the test binary.
+# GLIBRE_VCPKG_INCLUDE_DIR is no longer used (EASTL migration); left defined
+# for backward compatibility with test code that still references it.
 target_compile_definitions(schema-migration-tests
     PRIVATE
         GLIBRE_CORE_INCLUDE_DIR="${CMAKE_SOURCE_DIR}/core/include"
-        GLIBRE_VCPKG_INCLUDE_DIR="${_eastl_inc}"
+        GLIBRE_VCPKG_INCLUDE_DIR="${CMAKE_SOURCE_DIR}/core/include"
 )
 
 target_compile_features(schema-migration-tests PRIVATE cxx_std_23)

@@ -24,7 +24,7 @@ endif()
 add_library(glibre-core STATIC
     src/frame_loop.cpp
     src/phase_registry.cpp           # PhaseRegistry: per-phase system registration + dispatch (plan #245)
-    src/eastl_alloc.cpp              # EASTL operator new[] substrate (PHILOSOPHY §11)
+    src/eastl_alloc.cpp              # EASTL operator new[] substrate; removed from CMake link line (EASTL migration in progress)
     src/plugin_manifest.cpp
     src/plugin_loader.cpp            # PluginLoader: dlopen+dlsym+manifest read (plan #229)
     src/plugin_loader_registry.cpp   # PluginLoaderRegistry: ABI+version+name+deps gates (plan #230)
@@ -36,11 +36,6 @@ add_library(glibre-core STATIC
     src/perf_budget.cpp              # Per-context perf-budget counters (plan #241)
     src/type_registry/type_registry.cpp  # TypeRegistry immutable-after-init lookup (plan #597)
 )
-
-# EASTL is the substrate container/string/variant library per PHILOSOPHY §11.
-# glibre/error.hpp uses eastl::variant and eastl::string_view; linking EASTL
-# PUBLIC so every consumer of glibre::core transitively gets the include path.
-find_package(EASTL CONFIG REQUIRED)
 
 # spdlog — structured logging.  Used by log_error.cpp (plan #236).
 # Linked PUBLIC so consumers of glibre::core can call log_error() without a
@@ -55,7 +50,6 @@ target_include_directories(glibre-core
 
 target_link_libraries(glibre-core
     PUBLIC
-        EASTL
         spdlog::spdlog
     PRIVATE
         # Compile-flag contract: enforces -fno-exceptions, -fno-rtti,

@@ -44,10 +44,7 @@ target_include_directories(glibre-plugin-stub-register-fails
 
 target_compile_features(glibre-plugin-stub-register-fails PRIVATE cxx_std_23)
 
-# Link EASTL: transitively required by glibre/core/plugin_loader.hpp (eastl::string
-# in PluginLoader on this branch; migrated in plan #1043 / PR #1073).
-find_package(EASTL CONFIG REQUIRED)
-target_link_libraries(glibre-plugin-stub-register-fails PRIVATE EASTL glibre::compile_contract)
+target_link_libraries(glibre-plugin-stub-register-fails PRIVATE glibre::compile_contract)
 
 set_target_properties(glibre-plugin-stub-register-fails PROPERTIES
     SUFFIX ".dylib"
