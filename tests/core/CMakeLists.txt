@@ -27,6 +27,8 @@ add_subdirectory(perf_s1_fixture)               # plan #1003 — canonical S1 fi
 add_subdirectory(world)                         # plan #944 — macOS PMC sampler helper
 add_subdirectory(phase_registry)                # plan #245 — phase ownership + system register API
 add_subdirectory(type_registry)                 # plan #597 — TypeRegistry immutable-after-init
+add_subdirectory(entity)                        # plan #557 — Entity value object encoding
+add_subdirectory(entity_allocator)              # plan #557 — generational entity allocator
 
 add_executable(glibre-core-tests
     frame_loop_test.cpp
