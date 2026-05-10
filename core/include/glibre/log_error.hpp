@@ -103,6 +103,9 @@ namespace glibre::core {
     // plan #598: AssetStale — stale generational asset handle.
     case Error::AssetStale:
         return "AssetStale";
+    // plan #584 R1 MED-3: Phase::HotReload footgun guard.
+    case Error::SystemForbiddenInHotReloadPhase:
+        return "SystemForbiddenInHotReloadPhase";
     }
     return "Unknown";
 }

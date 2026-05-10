@@ -208,8 +208,14 @@ public:
     [[nodiscard]] bool is_compiled() const noexcept;
 
 private:
+    // mr_ MUST be declared before impl_ — it is constructed first (member
+    // initialisation order) so the polymorphic_allocator in the constructor
+    // body can use it, and destroyed last so impl_'s PMR containers remain
+    // valid while the destructor runs the polymorphic_allocator deallocation.
+    PerContextAllocatorResource mr_;  // PMR resource backed by the context allocator.
+
     struct Impl;
-    Impl* impl_;  // Heap-allocated pimpl (PerContextAllocator manages the memory).
+    Impl* impl_{nullptr};  // Allocated via std::pmr::polymorphic_allocator<Impl>{&mr_}.
 };
 
 }  // namespace glibre::core

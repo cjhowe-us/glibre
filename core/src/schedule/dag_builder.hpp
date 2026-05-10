@@ -11,11 +11,13 @@
 // and must NOT be included by headers under core/include/.
 //
 // Cycle classification:
-//   - A cycle that involves at least one access-set intersection edge
-//     (writes∩reads or writes∩writes) and no explicit after/before edge
-//     forming the cycle → core::Error::ScheduleAccessConflict.
-//   - A cycle that involves explicit after/before edges (possibly combined
-//     with access-set edges) → core::Error::SystemScheduleCycle.
+//   - A cycle where ANY edge is an access-set intersection edge
+//     (writes∩reads or writes∩writes) → core::Error::ScheduleAccessConflict.
+//   - A cycle where ALL edges are explicit after/before edges
+//     → core::Error::SystemScheduleCycle.
+//   When an explicit declaration coincides with an access-set edge, the
+//   EdgeKind is preserved as AccessSet (not upgraded), so the access-set
+//   root cause dominates classification.
 //
 // -fno-exceptions clean.
 

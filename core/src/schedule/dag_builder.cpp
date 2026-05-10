@@ -12,9 +12,13 @@
 //   after the loop are part of one or more cycles.  To distinguish error
 //   kinds the build records, for each edge, whether it arose from access-set
 //   intersection ("access") or from an explicit after/before declaration
-//   ("explicit").  If ALL edges incident to the remaining cycle nodes are
-//   access-set edges → ScheduleAccessConflict.  If any explicit edge is
-//   involved → SystemScheduleCycle.
+//   ("explicit").  If ANY edge in the cycle is access-set → ScheduleAccessConflict.
+//   Only when ALL cycle edges are explicit → SystemScheduleCycle.
+//
+//   Important: when an explicit after/before declaration coincides with an
+//   access-set edge, the EdgeKind is NOT upgraded to Explicit.  The original
+//   AccessSet kind is preserved so that the cycle classifier can correctly
+//   attribute the root cause to the access-set conflict.
 //
 // Deterministic tiebreaker (SPEC §4.4 invariant 5):
 //   The Kahn ready-queue is a sorted list of (name, SystemId) pairs.
@@ -35,6 +39,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <functional>
+#include <queue>
 #include <ranges>
 #include <string_view>
 #include <unordered_map>
@@ -128,8 +134,15 @@ edge_exists(const std::vector<NodeState>& states, std::size_t from, std::size_t 
 }
 
 // ---------------------------------------------------------------------------
-// add_or_upgrade_edge — add an explicit edge i→j, or upgrade an existing
-// access-set edge to Explicit so cycle detection sees the right kind.
+// add_or_upgrade_edge — add an explicit edge i→j, or leave an existing
+// access-set edge unchanged so cycle detection sees the right kind.
+//
+// Cycle classification rule: a cycle is SystemScheduleCycle only when ALL
+// edges in the cycle are Explicit.  If any edge is AccessSet (even when an
+// explicit declaration also coincides on that pair), the cycle is a
+// ScheduleAccessConflict.  Therefore we must NOT upgrade an AccessSet edge
+// to Explicit — upgrading would misclassify a pure-access-set cycle whose
+// pairs also happen to have after/before declarations.
 // ---------------------------------------------------------------------------
 
 void add_or_upgrade_edge(
@@ -140,14 +153,11 @@ void add_or_upgrade_edge(
         ++states.at(to).in_degree;
         return;
     }
-    // Edge already exists from access-set pass; upgrade kind to Explicit so
-    // cycle classification treats it as an explicit edge.
-    for (Edge& e : states.at(from).adj) {
-        if (e.to == to) {
-            e.kind = EdgeKind::Explicit;
-            break;
-        }
-    }
+    // Edge already exists from the access-set pass.  Do NOT upgrade its kind:
+    // the cycle classifier checks whether ALL cycle edges are Explicit; an
+    // edge that arose from access-set intersection must remain AccessSet even
+    // when an explicit declaration also targets the same pair.  Leaving the
+    // kind unchanged correctly preserves ScheduleAccessConflict classification.
 }
 
 // ---------------------------------------------------------------------------
@@ -197,14 +207,28 @@ void build_explicit_edges(
 // ---------------------------------------------------------------------------
 // kahn_sort — run Kahn's algorithm with lexicographic tiebreaker.
 //
-// ready holds indices sorted by name (ascending lexicographic).  On each
-// iteration we pop the smallest-named ready node, add it to result, and
-// reduce in-degree for its successors.  Newly ready nodes are merged into
-// the sorted ready list.
+// The ready set is a min-heap keyed by (name, idx) so that the smallest-named
+// ready node is always at the top.  Inserting a newly-ready successor is
+// O(log n); no O(n) erase+merge is required.
 //
 // Returns the sorted order.  If result.size() < n after the loop, there is
 // a cycle and the caller must detect it.
 // ---------------------------------------------------------------------------
+
+// Comparator: min-heap on name (lexicographic ascending), with idx as a
+// stable tiebreaker for equal names (each system has a unique name, so idx
+// is only needed if names were equal — kept for robustness).
+struct ReadyEntryGreater {
+    bool operator()(
+        const std::pair<std::string_view, std::size_t>& a,
+        const std::pair<std::string_view, std::size_t>& b
+    ) const noexcept {
+        if (a.first != b.first) {
+            return a.first > b.first;  // min-heap: greater name sinks down.
+        }
+        return a.second > b.second;
+    }
+};
 
 [[nodiscard]] std::vector<SystemId>
 kahn_sort(std::span<const SystemNode> nodes, std::vector<NodeState>& states) noexcept {
@@ -213,46 +237,35 @@ kahn_sort(std::span<const SystemNode> nodes, std::vector<NodeState>& states) noe
     // edge.to which was assigned from i ∈ [0, n).
     const std::size_t n = nodes.size();
 
+    using Entry = std::pair<std::string_view, std::size_t>;
+
     // Build initial ready set: all nodes with in_degree == 0.
-    std::vector<std::pair<std::string_view, std::size_t>> ready;
-    ready.reserve(n);
+    // std::priority_queue is a max-heap by default; ReadyEntryGreater inverts
+    // the comparison to produce a min-heap ordered by name ascending.
+    std::priority_queue<Entry, std::vector<Entry>, ReadyEntryGreater> ready;
     for (std::size_t i = 0; i < n; ++i) {
         if (states.at(i).in_degree == 0) {
-            ready.emplace_back(nodes[i].name, i);
+            ready.emplace(nodes[i].name, i);
         }
     }
-    std::ranges::sort(ready, [](const auto& a, const auto& b) { return a.first < b.first; });
 
     std::vector<SystemId> result;
     result.reserve(n);
 
     while (!ready.empty()) {
-        const auto [name, idx] = ready.front();
-        ready.erase(ready.begin());
+        const auto [name, idx] = ready.top();
+        ready.pop();
 
         result.push_back(nodes[idx].id);
 
-        // Collect newly-ready successors.
-        std::vector<std::pair<std::string_view, std::size_t>> newly_ready;
+        // Reduce in-degree for successors; push newly-ready ones into the heap.
+        // Each push is O(log n); total across all iterations: O(n log n).
         for (const Edge& edge : states.at(idx).adj) {
             --states.at(edge.to).in_degree;
             if (states.at(edge.to).in_degree == 0) {
-                newly_ready.emplace_back(nodes[edge.to].name, edge.to);
+                ready.emplace(nodes[edge.to].name, edge.to);
             }
         }
-
-        // Merge newly_ready into ready (both lists already sorted).
-        std::ranges::sort(newly_ready, [](const auto& a, const auto& b) {
-            return a.first < b.first;
-        });
-        std::vector<std::pair<std::string_view, std::size_t>> merged;
-        merged.reserve(ready.size() + newly_ready.size());
-        std::ranges::merge(
-            ready, newly_ready, std::back_inserter(merged), [](const auto& a, const auto& b) {
-                return a.first < b.first;
-            }
-        );
-        ready = std::move(merged);
     }
     // NOLINTEND(cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
 
@@ -260,11 +273,22 @@ kahn_sort(std::span<const SystemNode> nodes, std::vector<NodeState>& states) noe
 }
 
 // ---------------------------------------------------------------------------
-// classify_cycle — determine whether the cycle involves any explicit edges.
+// classify_cycle — classify the cycle using OriginalKind-preserving logic.
 //
 // Nodes still in the cycle have in_degree > 0 after Kahn.  We inspect all
-// edges between cycle-nodes: if any has EdgeKind::Explicit → SystemScheduleCycle;
-// otherwise → ScheduleAccessConflict.
+// edges between cycle-nodes:
+//   - If ANY edge is EdgeKind::AccessSet → ScheduleAccessConflict.
+//     (The access-set intersection is the root cause; plugin authors must
+//     resolve the conflicting write declarations, not the after/before set.)
+//   - If ALL edges are EdgeKind::Explicit → SystemScheduleCycle.
+//     (The cycle is purely a logical ordering contradiction declared by the
+//     plugin author via after/before; no access-set conflict exists.)
+//
+// Rationale: add_or_upgrade_edge no longer upgrades AccessSet→Explicit when
+// an explicit declaration coincides with an access-set edge.  Therefore an
+// AccessSet edge in the cycle reliably signals the access-set root cause.
+// The previous early-return on the first Explicit edge was correct only with
+// the upgrade semantics; without upgrade, we must scan all cycle edges.
 // ---------------------------------------------------------------------------
 
 [[nodiscard]] glibre::Error classify_cycle(const std::vector<NodeState>& states) noexcept {
@@ -276,12 +300,14 @@ kahn_sort(std::span<const SystemNode> nodes, std::vector<NodeState>& states) noe
             if (states.at(edge.to).in_degree == 0) {
                 continue;  // Successor already processed; not in the cycle.
             }
-            if (edge.kind == EdgeKind::Explicit) {
-                return glibre::Error{glibre::core::Error::SystemScheduleCycle};
+            if (edge.kind == EdgeKind::AccessSet) {
+                // Any access-set edge → access-set conflict dominates.
+                return glibre::Error{glibre::core::Error::ScheduleAccessConflict};
             }
         }
     }
-    return glibre::Error{glibre::core::Error::ScheduleAccessConflict};
+    // All cycle edges are Explicit → pure ordering cycle.
+    return glibre::Error{glibre::core::Error::SystemScheduleCycle};
 }
 
 }  // namespace

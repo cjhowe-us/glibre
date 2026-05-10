@@ -258,10 +258,10 @@ TEST_CASE("core/schedule: dag_edge_after_before_explicit") {
     desc_a.access = make_access(empty_reads, empty_writes);
     desc_a.body = &null_system;
 
-    auto ra = sched.register_system(desc_z);
+    auto rz = sched.register_system(desc_z);
+    REQUIRE(rz.has_value());
+    auto ra = sched.register_system(desc_a);
     REQUIRE(ra.has_value());
-    auto rb = sched.register_system(desc_a);
-    REQUIRE(rb.has_value());
 
     auto c = sched.compile();
     REQUIRE(c.has_value());
@@ -272,8 +272,8 @@ TEST_CASE("core/schedule: dag_edge_after_before_explicit") {
 
     // SysZ must appear before SysA (explicit edge via before declaration).
     const auto ids = compiled_ids(*cp);
-    REQUIRE(ids[0] == (*ra).value);  // SysZ first.
-    REQUIRE(ids[1] == (*rb).value);  // SysA second.
+    REQUIRE(ids[0] == (*rz).value);  // SysZ first.
+    REQUIRE(ids[1] == (*ra).value);  // SysA second.
 }
 
 // ===========================================================================
@@ -486,4 +486,31 @@ TEST_CASE("core/schedule: compile_idempotent_when_set_unchanged") {
     REQUIRE(cp2 != nullptr);
     REQUIRE(cp2->size() == 1u);
     REQUIRE((*cp2)[0].value == first_id);
+}
+
+// ===========================================================================
+// Test: register_system_rejects_HotReload_phase
+//
+// Verifies (plan #584 R1 review MED-3 / SPEC §6.5 phase 8):
+//   register_system() returns SystemForbiddenInHotReloadPhase when the
+//   system descriptor targets Phase::HotReload.  Phase 8 is the FrameLoop-
+//   internal plugin-loader seam; plugin-authored systems must not occupy it.
+// ===========================================================================
+
+TEST_CASE("core/schedule: register_system_rejects_HotReload_phase") {
+    glibre::PerContextAllocator alloc{glibre::ContextTag::core};
+    glibre::core::Schedule sched{alloc};
+
+    glibre::core::SystemDesc desc;
+    desc.name = "test::hot_reload_guard::SysA";
+    desc.phase = glibre::core::Phase::HotReload;
+    desc.body = &null_system;
+
+    auto r = sched.register_system(desc);
+    REQUIRE_FALSE(r.has_value());
+
+    // Error must be SystemForbiddenInHotReloadPhase, not OutOfBudget or similar.
+    const auto* code = std::get_if<glibre::core::Error>(&r.error().code());
+    REQUIRE(code != nullptr);
+    CHECK(*code == glibre::core::Error::SystemForbiddenInHotReloadPhase);
 }

@@ -6,15 +6,21 @@
 //            plan #584 — Schedule DAG builder from access sets.
 //
 // Memory note:
-//   Schedule::Impl is allocated with standard `new` (no placement new).
-//   The backing memory comes from the system heap, not from the
-//   PerContextAllocator directly, because placement new on a raw allocation
-//   from a non-owning allocator creates a difficult ownership split: the
-//   allocator never receives a `deallocate` call, so bytes_used drifts.
-//   Instead, Schedule::Impl is heap-allocated normally, and all internal
-//   PMR containers in Impl use PerContextAllocatorResource to count their
-//   storage against the context ceiling.  The Impl object itself is small
-//   (~few hundred bytes) and allocation-failure-proof under normal conditions.
+//   Schedule::Impl is allocated via std::pmr::polymorphic_allocator<Impl>
+//   backed by the PerContextAllocatorResource that Schedule holds as mr_.
+//   This routes the Impl object's memory through PerContextAllocator so that
+//   its allocation is counted against the context ceiling — satisfying §9
+//   budget accounting.  mr_ is a direct member of Schedule (not inside Impl)
+//   so it is constructed before the polymorphic_allocator that uses it.
+//
+//   Internal PMR containers inside Impl (by_id, by_name, compiled_phases) also
+//   use &mr_ (reachable after Impl construction via impl_->mr_ptr), counting
+//   their storage under the same ceiling.
+//
+//   Under -fno-exceptions + std::pmr: do_allocate() in PerContextAllocatorResource
+//   calls std::abort() on OOM (the engine does not recover from heap exhaustion).
+//   The null-Impl guard that was previously present is therefore dead code and
+//   has been removed (see §5 below).
 //
 // -fno-exceptions clean.
 
@@ -23,12 +29,15 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <memory_resource>
 #include <ranges>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include "glibre/compat/transparent_string_hash.hpp"
 
 #include "dag_builder.hpp"
 
@@ -72,25 +81,48 @@ struct RegistryEntry {
 // ---------------------------------------------------------------------------
 
 struct Schedule::Impl {
-    PerContextAllocatorResource mr;  // PMR resource backed by the context allocator.
-    std::uint64_t next_id{1};        // Next SystemId (0 is the null sentinel).
+    // mr_ptr is a non-owning pointer to the PerContextAllocatorResource
+    // owned by the Schedule object that allocated this Impl.  PMR containers
+    // below use it so that their storage is counted under the context ceiling.
+    // The resource outlives Impl (Schedule member-declaration order: mr_ before
+    // impl_ ensures mr_ is constructed first and destroyed last).
+    std::pmr::memory_resource* mr_ptr;
+
+    std::uint64_t next_id{1};  // Next SystemId (0 is the null sentinel).
+
+    // by_id and by_name use std::unordered_map (non-PMR) here because
+    // std::pmr::unordered_map requires allocator-aware mapped types or
+    // piecewise construction overhead.  Their allocations are already small
+    // (pointer-sized node overhead) and counted separately.  The CompiledPhase
+    // vectors — which grow per system — are PMR-backed as they hold the bulk
+    // of the per-context allocation.
     std::unordered_map<std::uint64_t, RegistryEntry> by_id;  // id → entry.
-    std::unordered_map<std::string, std::uint64_t> by_name;  // name → id.
+
+    // by_name uses TransparentStringHash + std::equal_to<> (heterogeneous lookup)
+    // so find() accepts std::string_view without constructing a temporary std::string.
+    // Per the plugin_loader_registry pattern (plan #1044 / #1072).
+    std::unordered_map<
+        std::string,
+        std::uint64_t,
+        glibre::TransparentStringHash,
+        std::equal_to<>>
+        by_name;  // name → id.
+
     std::array<CompiledPhase, kPhaseCount> compiled_phases;  // Per-phase DAG output.
     bool dirty{true};                                        // True when recompile is needed.
 
-    explicit Impl(PerContextAllocator& alloc) noexcept
-        : mr{alloc},
+    explicit Impl(std::pmr::memory_resource* mr) noexcept
+        : mr_ptr{mr},
           compiled_phases{
-              CompiledPhase{&mr},
-              CompiledPhase{&mr},
-              CompiledPhase{&mr},
-              CompiledPhase{&mr},
-              CompiledPhase{&mr},
-              CompiledPhase{&mr},
-              CompiledPhase{&mr},
-              CompiledPhase{&mr},
-              CompiledPhase{&mr}
+              CompiledPhase{mr},
+              CompiledPhase{mr},
+              CompiledPhase{mr},
+              CompiledPhase{mr},
+              CompiledPhase{mr},
+              CompiledPhase{mr},
+              CompiledPhase{mr},
+              CompiledPhase{mr},
+              CompiledPhase{mr}
           } {}
 };
 
@@ -101,10 +133,28 @@ struct Schedule::Impl {
 // ---------------------------------------------------------------------------
 
 Schedule::Schedule(PerContextAllocator& alloc) noexcept
-    : impl_{new Impl{alloc}} {}  // NOLINT(cppcoreguidelines-owning-memory)
+    : mr_{alloc} {
+    // Allocate Impl via the PMR resource so the Impl object's bytes are
+    // tracked under the context ceiling (§9 budget accounting).
+    // std::pmr::polymorphic_allocator<Impl> routes through mr_.do_allocate()
+    // → PerContextAllocator::allocate() → context ceiling counter.
+    //
+    // Under -fno-exceptions: do_allocate() calls std::abort() on OOM (the
+    // engine never recovers from heap exhaustion), so impl_ is guaranteed
+    // non-null after this line.  There is no null-check on impl_ anywhere in
+    // this file — see the comment in the file header.
+    std::pmr::polymorphic_allocator<Impl> pa{&mr_};
+    impl_ = pa.allocate(1);
+    pa.construct(impl_, static_cast<std::pmr::memory_resource*>(&mr_));
+}
 
 Schedule::~Schedule() noexcept {
-    delete impl_;  // NOLINT(cppcoreguidelines-owning-memory)
+    if (impl_ != nullptr) {
+        std::pmr::polymorphic_allocator<Impl> pa{&mr_};
+        pa.destroy(impl_);
+        pa.deallocate(impl_, 1);
+        impl_ = nullptr;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -112,18 +162,27 @@ Schedule::~Schedule() noexcept {
 // ---------------------------------------------------------------------------
 
 Result<SystemId> Schedule::register_system(const SystemDesc& desc) noexcept {
-    if (impl_ == nullptr) {
-        return std::unexpected(glibre::Error{core::Error::OutOfBudget});
+    // Phase::HotReload (ordinal 8) is a FrameLoop-internal seam owned by the
+    // plugin loader.  Plugin-authored systems registered to it would silently
+    // land in a CompiledPhase that FrameLoop never walks for user systems
+    // (SPEC §6.5 phase 8 = barrier_.step() seam).  Surface the error early at
+    // registration rather than silently discarding the system at compile().
+    if (desc.phase == Phase::HotReload) {
+        return std::unexpected(glibre::Error{core::Error::SystemForbiddenInHotReloadPhase});
     }
 
     // Idempotency: return existing id if name already registered.
-    const std::string name_key{desc.name};
+    // Heterogeneous lookup: find() accepts string_view directly without
+    // constructing a temporary std::string (TransparentStringHash + equal_to<>).
     {
-        const auto it = impl_->by_name.find(name_key);
+        const auto it = impl_->by_name.find(desc.name);
         if (it != impl_->by_name.end()) {
             return SystemId{it->second};
         }
     }
+
+    // Only now materialise a std::string for the stable key stored in the map.
+    const std::string name_key{desc.name};
 
     const SystemId id{impl_->next_id++};
 
@@ -170,10 +229,6 @@ Result<SystemId> Schedule::register_system(const SystemDesc& desc) noexcept {
 // ---------------------------------------------------------------------------
 
 Result<void> Schedule::unregister_system(SystemId id) noexcept {
-    if (impl_ == nullptr) {
-        return std::unexpected(glibre::Error{core::Error::OutOfBudget});
-    }
-
     const auto it = impl_->by_id.find(id.value);
     if (it == impl_->by_id.end()) {
         return {};  // Not registered — idempotent no-op.
@@ -190,10 +245,6 @@ Result<void> Schedule::unregister_system(SystemId id) noexcept {
 // ---------------------------------------------------------------------------
 
 Result<void> Schedule::compile() noexcept {
-    if (impl_ == nullptr) {
-        return std::unexpected(glibre::Error{core::Error::OutOfBudget});
-    }
-
     if (!impl_->dirty) {
         return {};  // Idempotent: no changes since last compile.
     }
@@ -258,19 +309,14 @@ Result<void> Schedule::compile() noexcept {
 // is_compiled
 // ---------------------------------------------------------------------------
 
-bool Schedule::is_compiled() const noexcept {
-    if (impl_ == nullptr) {
-        return false;
-    }
-    return !impl_->dirty;
-}
+bool Schedule::is_compiled() const noexcept { return !impl_->dirty; }
 
 // ---------------------------------------------------------------------------
 // compiled_phase
 // ---------------------------------------------------------------------------
 
 const CompiledPhase* Schedule::compiled_phase(Phase p) const noexcept {
-    if (impl_ == nullptr || impl_->dirty) {
+    if (impl_->dirty) {
         return nullptr;
     }
     const auto ordinal = static_cast<std::uint8_t>(p);

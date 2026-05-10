@@ -119,6 +119,15 @@ enum class Error : std::uint16_t {
     // Spec authority: specs/core/SPEC.md §4.7 invariant 1, §10 error table
     // row "AssetStale".
     AssetStale,
+    // System registered against Phase::HotReload (ordinal 8).
+    // Phase 8 is a FrameLoop-internal seam owned by the plugin loader;
+    // plugin-authored systems may not occupy it.  FrameLoop never walks
+    // HotReload-phase compiled slots for user systems (SPEC §6.5 phase 8).
+    // This error is returned by register_system() as a plugin-author footgun
+    // guard: surfacing it early at registration is cheaper than silently
+    // dropping the system at compile() time.
+    // (plan #584 — Schedule DAG builder, R1 review MED-3 fix)
+    SystemForbiddenInHotReloadPhase,
 };
 }  // namespace core
 
