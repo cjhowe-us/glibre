@@ -17,7 +17,7 @@
 //     (alias / equivalent to plugin_loader_open_returns_error_on_missing_symbols)
 //
 // Named test cases (plan #1050 Unit Test Plan, DoD):
-//   - core/plugin_loader: load_returns_eastl_string_handle_pre_pmr_migration
+//   - core/plugin_loader: load_returns_pmr_handle
 //
 // Design constraints:
 //   • -fno-exceptions (error-model.md §Decision 3).
@@ -393,27 +393,19 @@ TEST_CASE("invalid_manifest_returns_plugin_manifest_invalid", "[core][plugin_loa
 }
 
 // ---------------------------------------------------------------------------
-// Test: core/plugin_loader: load_returns_eastl_string_handle_pre_pmr_migration
+// Test: core/plugin_loader: load_returns_pmr_handle
 //
-// (Satisfies plan #1050 DoD assertion:
-//   unit_test_named:
-//     "core/plugin_loader: load_returns_eastl_string_handle_pre_pmr_migration")
+// (Satisfies plan #1050 + #1084 DoD assertion:
+//   unit_test_named: "core/plugin_loader: load_returns_pmr_handle")
 //
-// Pre-#1073 contract witness: PluginLoader::open() succeeds on the noop plugin
-// and dylib_path() returns a non-empty const eastl::string& (EASTL storage,
-// not std::pmr::string yet).  The static_assert below pins this contract at
-// compile time so any inadvertent type change fails loudly.
-//
-// After PR #1073 migrates PluginLoader storage to std::pmr, the follow-up plan
-// ([PLAN] iterate-rename-load-returns-handle-test-after-1073-migration) will
-// rename this test to "core/plugin_loader: load_returns_pmr_handle" and update
-// the assert to const std::pmr::string&.
+// Post-#1073 contract witness: PluginLoader::open() succeeds on the noop plugin
+// and dylib_path() returns a non-empty const std::pmr::string& (per
+// reviews/decisions/eastl-removal.md matrix row 1).  The static_assert below
+// pins this contract at compile time so any inadvertent type change fails
+// loudly.
 // ---------------------------------------------------------------------------
 
-TEST_CASE(
-    "core/plugin_loader: load_returns_eastl_string_handle_pre_pmr_migration",
-    "[core][plugin_loader]"
-) {
+TEST_CASE("core/plugin_loader: load_returns_pmr_handle", "[core][plugin_loader]") {
 #ifndef GLIBRE_NOOP_DYLIB_PATH
     SKIP("GLIBRE_NOOP_DYLIB_PATH not defined; build with GLIBRE_BUILD_EXAMPLES=ON");
 #else
