@@ -126,17 +126,42 @@ def check_workflow_passed(arg: object) -> tuple[bool, str]:
 
 
 def check_unit_test_named(arg: object) -> tuple[bool, str]:
+    """Return (True, label) when a Catch2 TEST_CASE or SCENARIO with the exact
+    name *arg* exists under tests/.
+
+    Implementation notes:
+    - Uses Python re with re.DOTALL so the pattern matches across newlines.
+      clang-format (ColumnLimit: 100) wraps long TEST_CASE invocations onto
+      two lines, e.g.::
+
+          TEST_CASE(
+              "core/type_registry: lookup_unregistered_yields_TypeUnregistered",
+              "[core][type_registry]"
+          ) {
+
+      grep -E does not span newlines under POSIX-extended regex, causing
+      spurious dod:failed results for tests that exist and run green.
+    - Restricts the file scan to .cpp / .hpp / .cc so pytest files that
+      contain 'TEST_CASE' in docstrings or fixture content are not scanned.
+    """
     name = str(arg)
     label = f"unit_test_named: {name}"
-    res = subprocess.run(
-        [
-            "grep", "-RE",
-            rf'(TEST_CASE|SCENARIO)\s*\(\s*"{re.escape(name)}"',
-            "tests/",
-        ],
-        check=False, capture_output=True, text=True,
+    pattern = re.compile(
+        r'(?:TEST_CASE|SCENARIO)\s*\(\s*"' + re.escape(name) + r'"',
+        flags=re.DOTALL,
     )
-    return res.returncode == 0, label
+    tests_root = Path("tests")
+    extensions = {".cpp", ".hpp", ".cc"}
+    for src_file in tests_root.rglob("*"):
+        if src_file.suffix not in extensions:
+            continue
+        try:
+            text = src_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if pattern.search(text):
+            return True, label
+    return False, label
 
 
 def check_issue_comment_matches(arg: object) -> tuple[bool, str]:

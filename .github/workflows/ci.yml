@@ -149,6 +149,26 @@ jobs:
             echo "::endgroup::"
           done <<< "${{ steps.list.outputs.traces }}"
 
+  python-tests:
+    # Runs the pytest suite under tests/infra/ — currently covers the
+    # verify_dod.py multi-line TEST_CASE fix (plan #1035).
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python dependencies
+        run: pip install pyyaml pytest
+      - name: Run infra pytest suite
+        env:
+          # Provide sentinel values so verify_dod module-level env reads
+          # do not abort import during collection.
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ISSUE_NUMBER: "0"
+          ISSUE_BODY: ""
+        run: pytest tests/infra -v
+
   dep-check:
     runs-on: ubuntu-latest
     steps:
