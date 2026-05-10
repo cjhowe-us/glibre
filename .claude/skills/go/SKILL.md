@@ -65,15 +65,30 @@ Every dispatch must respect these (also enforced by `AGENTS.md`):
 
 Run the GraphQL recipe documented in `references/github-recipes.md`.
 The query returns open issues with zero open `blockedBy` edges and
-type ∈ {`type:user-story`, `type:plan`, `type:spike`}.
+type ∈ {`type:user-story`, `type:plan`, `type:spike`}. **Include
+`dod:failed`-labelled leaves in the candidate pool** — those have
+been reopened by `dod-verify` and are first-class pickable work that
+must be re-triaged before they can close again.
 
-Pick at most 2. Prefer:
+Pick at most 2. Selection priority (apply in order):
 
-- Earliest SDLC stage that is currently open in the project (e.g. if
-  no spec spike has filled §4 of any context yet, prioritize
-  `design-*-aggregates` spikes over later stages).
-- Items whose closure unblocks the largest downstream subtree
-  (rough heuristic: spikes with many `blocking` edges).
+1. **Downstream fan-out (primary).** Sort candidates by the count
+   of open issues that depend on them (`blocking` edges, transitive
+   if cheaply computable, otherwise direct). High fan-out wins —
+   closing an issue with 10 dependents unblocks 10 parallel work
+   items, so it dominates a same-stage alternative with 1 dependent.
+   Recompute every invocation; don't cache.
+2. **Earliest open SDLC stage (tie-breaker).** Among candidates with
+   comparable fan-out, pick items in the earliest open stage
+   (ideation → maintenance — see `references/sdlc.md`). Spikes that
+   fill spec sections come before plans that consume them.
+3. **`dod:failed` routing.** When a `dod:failed` leaf is picked,
+   the bucket is **`go-planning`** regardless of the issue's
+   original SDLC stage — re-planning the DoD / scope / depends_on
+   precedes any new coding pass. Step 4b's recovery rule applies
+   verbatim. Carve-out: clearly-mechanical fixes the existing plan
+   body already covers (typo, lint, single-flag CMake) may go
+   direct to `go-chore`; everything else is `go-planning` first.
 
 Topology is intrinsic to the GitHub dependency graph. Do not store
 ordered lists in the repo — recompute every invocation.
@@ -303,12 +318,26 @@ spike closes and its parent sub-epic has no `task-breakdown-*` or
 to author one. Designs that don't break down into plans and stories
 ship nothing.
 
-Stop dispatching new leaves when one of:
+**Only stop dispatching when the user explicitly says so** —
+i.e. the user types `stop`, `/stop`, or `pause`. **Nothing else
+ends the loop.** "No unblocked leaves visible right now" is not a
+stop condition: schedule a wakeup, re-query, and try again. A
+structural anomaly (agent split a leaf, dependency graph changed)
+is not a stop condition either: triage it inline, then keep
+driving.
 
-- Total open unblocked leaves becomes 0.
-- The user asks to stop.
-- A completion run reports a structural problem (e.g. agent split a
-  leaf — the new leaves need to be triaged before continuing).
+If a single Step-1 query returns zero candidates, do NOT post a
+round-up and exit. Instead:
+
+1. Sync main (`git pull --ff-only`).
+2. Scan for `dod:failed` reopens, blocked-by edges that may have
+   cleared since last tick, and newly-opened leaves authored by
+   prior Step-4c stage transitions.
+3. If still zero candidates, schedule a wakeup (1200–1800s) and
+   re-enter the loop on fire — leaves frequently unblock when an
+   in-flight PR merges.
+4. Only after the user explicitly types `stop` / `/stop` / `pause`
+   do you stop dispatching.
 
 ## Step 6 — Continuous-drive policy
 
@@ -329,19 +358,22 @@ loop:
   6. Goto 1.
 ```
 
-**Stop conditions.** Continuous drive runs until one of: (a) total
-open unblocked leaves becomes 0, (b) the user types stop/pause, or
-(c) a structural problem requires triage. Token-budget self-throttling
-is removed because the harness already auto-compresses prior messages
-near context limits, and the watermark heuristic is unreliable. At
-end-of-loop, post a single round-up message summarising: PRs opened,
-issues closed via dod-verify, stage transitions opened, any leaves
-left blocked. Then end the turn.
+**Stop condition.** **The loop runs until the user explicitly types
+`stop`, `/stop`, or `pause` — and only then.** "Nothing pickable
+right now" is not a stop condition; schedule a wakeup and re-query.
+Token-budget self-throttling is removed because the harness already
+auto-compresses prior messages near context limits, and the
+watermark heuristic is unreliable. Do NOT post a final round-up
+unless the user has said stop — round-ups mid-loop signal exit
+prematurely. At each idle tick (zero candidates), post a one-line
+status ("queue empty; sleeping ${N}s, will re-query on wake") and
+schedule the wakeup.
 
 **User-overridable.** If the user types "stop", "pause", or a fresh
-non-/go message, exit the loop immediately — leave running agents
-in place (they will complete on their own and post status comments
-as usual) but do NOT dispatch any new work.
+non-/go message that clearly redirects, exit the loop immediately —
+leave running agents in place (they will complete on their own and
+post status comments as usual) but do NOT dispatch any new work.
+Then post the final round-up.
 
 ## Step 5 — Three-Round Sequential Review (per PR)
 
