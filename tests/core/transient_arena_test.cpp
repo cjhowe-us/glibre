@@ -17,6 +17,9 @@
 //   - transient_arena_alignment_respected
 //   - transient_arena_exhaustion_returns_error
 //
+// Named test cases (plan #1051 Unit Test Plan):
+//   - core/transient_arena: storage_held_by_std_unique_ptr
+//
 // Design constraints:
 //   - -fno-exceptions (error-model.md §Decision 3).
 //   - No REQUIRE_THROWS usage.
@@ -25,7 +28,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string_view>
+#include <type_traits>
 #include <variant>
 
 #include <catch2/catch_test_macros.hpp>
@@ -574,4 +579,46 @@ TEST_CASE(
 #else
     SUCCEED("GLIBRE_ALLOC_STRICT not defined — strict-mode path not active in this build");
 #endif
+}
+
+// ===========================================================================
+// Test: core/transient_arena: storage_held_by_std_unique_ptr
+//
+// Plan #1051: verify at compile time that TransientArena's backing storage is
+// std::unique_ptr<std::byte[]> (TransientArena::storage_pointer), NOT
+// eastl::unique_ptr<std::byte[]>.
+//
+// This is a migration-guard test per reviews/decisions/eastl-removal.md §1
+// matrix row 22 (eastl::unique_ptr → std::unique_ptr).  The static_assert is
+// keyed on the public `TransientArena::storage_pointer` type alias, which is
+// defined to be exactly the type of the private `storage_` member.  Any
+// reversion of that member back to eastl::unique_ptr<std::byte[]> must also
+// change storage_pointer, which breaks the static_assert and fails compilation.
+//
+// The compile-time assertion is paired with a trivial runtime SUCCEED so the
+// test case produces an output line in the Catch2 report (a test with only
+// static_asserts would appear as zero assertions in the Catch2 XML).
+// ===========================================================================
+
+TEST_CASE(
+    "core/transient_arena: storage_held_by_std_unique_ptr", "[core][transient_arena][alloc]"
+) {
+    // static_assert: TransientArena::storage_pointer must be exactly
+    // std::unique_ptr<std::byte[]>.
+    //
+    // This directly guards the declared type of the private `storage_` member
+    // via the public alias.  If `storage_` is ever accidentally changed back to
+    // eastl::unique_ptr<std::byte[]>, the eastl_alloc.cpp operator new[]
+    // overloads would silently re-enter the allocation path, defeating the
+    // migration.  This assertion makes that regression a compile error.
+    static_assert(
+        std::is_same_v<glibre::TransientArena::storage_pointer, std::unique_ptr<std::byte[]>>,
+        "TransientArena::storage_pointer must be std::unique_ptr<std::byte[]> "
+        "— eastl::unique_ptr reversion guard (refs #1051 / eastl-removal.md row 22)"
+    );
+
+    // The static_assert above is the load-bearing assertion.  A runtime
+    // allocate() round-trip is already covered by existing test cases; this
+    // SUCCEED anchors the test case so Catch2 reports it with one assertion.
+    SUCCEED("compile-time storage_pointer guard passes");
 }

@@ -14,7 +14,6 @@
 // Design constraints:
 //   - -fno-exceptions (error-model.md §Decision 3).
 //   - No REQUIRE_THROWS usage.
-//   - No std:: containers in test helpers (PHILOSOPHY §11).
 //   - Tests exercise the public API surface only; internals (entries_ vector)
 //     are not accessed directly.
 //
@@ -44,7 +43,6 @@
 #include <cstdint>
 #include <type_traits>
 
-#include <EASTL/variant.h>
 #include <catch2/catch_test_macros.hpp>
 #include <glibre/alloc.hpp>               // PerContextAllocator, ContextTag
 #include <glibre/core/plugin_loader.hpp>  // real PluginLoader — included to avoid ODR violation

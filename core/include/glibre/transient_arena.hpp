@@ -37,10 +37,16 @@
 //
 // -fno-exceptions clean.  No heap allocation inside this class beyond
 // the one backing-store allocation in the constructor.
+//
+// PerContextAllocator bypass (perf-budget.md §Allocator Rules #4):
+//   TransientArena allocates its backing store via
+//   `std::make_unique_for_overwrite<std::byte[]>(N)` (i.e. `::operator new[]`),
+//   bypassing PerContextAllocator's per-tag heap accounting.  This is by design —
+//   transient / per-frame arenas are exempted from the per-context ceiling because
+//   they are frame-bounded and freed at the next frame boundary (Phase::Present).
 
 #include <cstddef>
-
-#include <EASTL/unique_ptr.h>
+#include <memory>
 
 #include "glibre/error.hpp"
 
@@ -52,12 +58,20 @@ namespace glibre {
 
 class TransientArena {
 public:
+    // storage_pointer — canonical type of TransientArena's backing store.
+    //
+    // Exposed as a public type alias so migration-guard tests can assert the
+    // full smart-pointer type without access to the private `storage_` member.
+    // Any accidental reversion to eastl::unique_ptr<std::byte[]> will break
+    // the static_assert in `core/transient_arena: storage_held_by_std_unique_ptr`.
+    using storage_pointer = std::unique_ptr<std::byte[]>;
+
     // Construct an arena with `capacity_bytes` of backing storage.
     //
     // The backing store is allocated once on construction via
-    // `eastl::make_unique<std::byte[]>`.  No further allocation occurs for
-    // the lifetime of this object.  capacity_bytes == 0 is valid: every
-    // allocate() call will return TransientArenaExhausted.
+    // `std::make_unique_for_overwrite<std::byte[]>` (C++20).  No further
+    // allocation occurs for the lifetime of this object.  capacity_bytes == 0
+    // is valid: every allocate() call will return TransientArenaExhausted.
     explicit TransientArena(std::size_t capacity_bytes);
 
     // Non-copyable, non-movable.  Arenas are long-lived, context-scoped
@@ -120,7 +134,7 @@ public:
     [[nodiscard]] glibre::Result<void> assert_drained() const noexcept;
 
 private:
-    eastl::unique_ptr<std::byte[]> storage_;
+    storage_pointer storage_;
     std::size_t capacity_{0};
     std::size_t cursor_{0};
     std::size_t high_watermark_{0};
