@@ -216,7 +216,7 @@ enum class Error : std::uint16_t {
     // violations from multi-tag annotation bugs.
     // Added by plan #1087 R1 (MED-1 fix) — full sub-epic #69 plan will extend
     // this with SamplerLimitExceeded / IncompatibleVertexLayout / PushConstantTooLarge.
-    BindingOverflow,                // per-table slot count exceeds Metal 4 cap (31)
+    BindingOverflow,  // per-table slot count exceeds Metal 4 cap (31)
 };
 }  // namespace shader
 

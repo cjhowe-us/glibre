@@ -358,8 +358,8 @@ TEST_CASE(
     // Must return BindingOverflow, NOT DescriptorFrequencyAmbiguous.
     // DescriptorFrequencyAmbiguous is reserved for tagger conflicts (SPEC §10.2).
     const auto& err = result.error();
-    const bool is_overflow = std::holds_alternative<glibre::shader::Error>(err.code()) &&
-                             std::get<glibre::shader::Error>(err.code()) ==
-                                 glibre::shader::Error::BindingOverflow;
+    const bool is_overflow =
+        std::holds_alternative<glibre::shader::Error>(err.code()) &&
+        std::get<glibre::shader::Error>(err.code()) == glibre::shader::Error::BindingOverflow;
     CHECK(is_overflow);
 }
