@@ -56,7 +56,7 @@ target_include_directories(foryc-golden-tests
 target_link_libraries(foryc-golden-tests
     PRIVATE
         Catch2::Catch2WithMain
-        glibre::core   # glibre::Error + EASTL
+        glibre::core   # glibre::Error (std::variant-based; eastl-removal.md §4)
         glibre::compile_contract
 )
 
@@ -130,7 +130,7 @@ if(EXISTS "${_EMIT_MIGRATION_HPP}" AND EXISTS "${_EMIT_MIGRATION_CPP}")
     target_link_libraries(foryc-migration-golden-tests
         PRIVATE
             Catch2::Catch2WithMain
-            glibre::core   # glibre::Error + EASTL
+            glibre::core   # glibre::Error (std::variant-based; eastl-removal.md §4)
             glibre::compile_contract
     )
 
