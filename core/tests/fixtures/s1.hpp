@@ -147,9 +147,7 @@ inline std::uint64_t parse_uint64(const std::string& s) {
 inline std::uint32_t parse_uint32(const std::string& s) {
     const std::uint64_t v = std::stoull(s, nullptr, 0);
     if (v > static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())) {
-        throw std::out_of_range(
-            "glibre::testing parse_uint32: value exceeds uint32 max: " + s
-        );
+        throw std::out_of_range("glibre::testing parse_uint32: value exceeds uint32 max: " + s);
     }
     return static_cast<std::uint32_t>(v);
 }
@@ -272,8 +270,8 @@ inline ParsedLine parse_line(std::string line) {
                     manifest_version = detail::parse_uint64(p.val);
                     if (manifest_version != 1u) {
                         throw std::runtime_error(
-                            "glibre::testing::load_s1(): unsupported manifest version " +
-                            p.val + " (expected 1); schema glibre/e2e/perf/s1/scene-v1"
+                            "glibre::testing::load_s1(): unsupported manifest version " + p.val +
+                            " (expected 1); schema glibre/e2e/perf/s1/scene-v1"
                         );
                     }
                 } else if (p.key == "entity_count") {
@@ -319,9 +317,8 @@ inline ParsedLine parse_line(std::string line) {
                     // schema drift is caught immediately rather than silently
                     // yielding stale zero counts.
                     throw std::runtime_error(
-                        "glibre::testing::load_s1(): unknown archetype field '" +
-                        p.key + "' under archetype '" + arch_name +
-                        "' (expected 'count')"
+                        "glibre::testing::load_s1(): unknown archetype field '" + p.key +
+                        "' under archetype '" + arch_name + "' (expected 'count')"
                     );
                 }
             }
