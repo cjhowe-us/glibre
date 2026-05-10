@@ -231,10 +231,10 @@ TEST_CASE(
     // Using constexpr std::string_view avoids heap allocation under -fno-exceptions.
     auto make_visitor = []() {
         return glibre::Overloaded{
-            [](glibre::core::Error) -> std::string_view { return "core"; },
-            [](glibre::render::Error) -> std::string_view { return "render"; },
-            [](glibre::tools::Error) -> std::string_view { return "tools"; },
-            [](glibre::shader::Error) -> std::string_view { return "shader"; },
+            [](glibre::core::Error e) -> std::string_view { return "core"; },
+            [](glibre::render::Error e) -> std::string_view { return "render"; },
+            [](glibre::tools::Error e) -> std::string_view { return "tools"; },
+            [](glibre::shader::Error e) -> std::string_view { return "shader"; },
         };
     };
 
