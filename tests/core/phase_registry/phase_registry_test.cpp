@@ -16,8 +16,8 @@
 //   - EASTL is the container substrate (PHILOSOPHY §11).
 
 #include <array>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -105,8 +105,7 @@ TEST_CASE("core/phase_registry: register_system_idempotent", "[core][phase_regis
 //   [0, 1, 2, ..., N-1].  This is deterministic regardless of FQN ordering.
 // ===========================================================================
 TEST_CASE(
-    "core/phase_registry: iteration_order_matches_registration_order",
-    "[core][phase_registry]"
+    "core/phase_registry: iteration_order_matches_registration_order", "[core][phase_registry]"
 ) {
     using namespace glibre::core;
 
@@ -135,9 +134,7 @@ TEST_CASE(
         // Capture the current value of i by value so each closure is distinct.
         const int idx = i;
         reg.register_system(
-            Phase::PhysicsFixed,
-            eastl::string_view{fqn.data(), 4U},
-            [idx, &sequence, &seq_len]() {
+            Phase::PhysicsFixed, eastl::string_view{fqn.data(), 4U}, [idx, &sequence, &seq_len]() {
                 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
                 sequence[static_cast<std::size_t>(seq_len++)] = idx;
                 // NOLINTEND(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
@@ -154,7 +151,10 @@ TEST_CASE(
     REQUIRE(seq_len == kCount);
     for (int i = 0; i < kCount; ++i) {
         // NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
-        INFO("position " << i << ": expected " << i << " got " << sequence[static_cast<std::size_t>(i)]);
+        INFO(
+            "position " << i << ": expected " << i << " got "
+                        << sequence[static_cast<std::size_t>(i)]
+        );
         CHECK(sequence[static_cast<std::size_t>(i)] == i);
         // NOLINTEND(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
     }
@@ -198,9 +198,7 @@ TEST_CASE("core/phase_registry: per_phase_isolation", "[core][phase_registry]") 
     bool present_ran = false;
 
     // (a/b) Register one system in each of three distinct phases.
-    reg.register_system(Phase::Input, "platform.input.poll", [&input_ran]() {
-        input_ran = true;
-    });
+    reg.register_system(Phase::Input, "platform.input.poll", [&input_ran]() { input_ran = true; });
     reg.register_system(Phase::Transform, "core.transform.propagate", [&transform_ran]() {
         transform_ran = true;
     });

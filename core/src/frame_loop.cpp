@@ -86,9 +86,7 @@ void FrameLoop::set_perf_budget(glibre::PerfBudget* budget) noexcept { perf_budg
 // Out-of-line for seam consistency.  See header doc-comment for contract.
 // ---------------------------------------------------------------------------
 
-void FrameLoop::set_phase_registry(PhaseRegistry* registry) noexcept {
-    phase_registry_ = registry;
-}
+void FrameLoop::set_phase_registry(PhaseRegistry* registry) noexcept { phase_registry_ = registry; }
 
 // ---------------------------------------------------------------------------
 // present_reset_perf_budget — Phase::Present step (1).
