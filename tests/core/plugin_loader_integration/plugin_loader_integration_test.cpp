@@ -237,12 +237,12 @@ TEST_CASE("integration_abi_hash_mismatch_propagates", "[core][integration]") {
 
     // Step 4 (symbol-side gate): validate_symbol_abi_hash must reject the stub.
     // PluginLoaderRegistry API now takes std::string_view (plan #1044).
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     SECTION("validate_symbol_abi_hash rejects wrong hash") {
         auto result = registry.validate_symbol_abi_hash(
             std::string_view{loader.abi_hash()},  // symbol hash via std::string_view
-            kRealExpectedHash                      // const char* -> std::string_view
+            kRealExpectedHash                     // const char* -> std::string_view
         );
         REQUIRE_FALSE(result.has_value());
         const auto* core_err = as_core_error(result.error());
@@ -308,7 +308,7 @@ TEST_CASE("integration_name_collision_propagates", "[core][integration]") {
     const eastl::string_view noop_path{GLIBRE_NOOP_DYLIB_PATH};
     REQUIRE_FALSE(noop_path.empty());
 
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     // Step 1: load the noop plugin via PluginLoader::open().
     auto loader_result = glibre::core::PluginLoader::open(noop_path);
@@ -329,10 +329,9 @@ TEST_CASE("integration_name_collision_propagates", "[core][integration]") {
         );
         REQUIRE(vr.has_value());
     }
-    REQUIRE(
-        registry.register_plugin(manifest_a, std::string_view{noop_path.data(), noop_path.size()})
-            .has_value()
-    );
+    REQUIRE(registry
+                .register_plugin(manifest_a, std::string_view{noop_path.data(), noop_path.size()})
+                .has_value());
     CHECK(registry.loaded_count() == 1u);
 
     // Step 3: attempt to load a second plugin with the SAME manifest name but
@@ -414,7 +413,7 @@ TEST_CASE("integration_happy_path_loads_and_validates", "[core][integration]") {
     // Step 3 (registry): construct a manifest whose abi_hash matches the noop
     // plugin's exported value.  Since the noop exports all-zeros, we use
     // kNoopAbiHash for both the manifest field and the expected_abi_hash arg.
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     auto manifest = make_manifest("glibre.integration.happy");
 
@@ -425,19 +424,16 @@ TEST_CASE("integration_happy_path_loads_and_validates", "[core][integration]") {
     // Gate 4:  depends_on is empty → pass (step 7 vacuously satisfied).
     auto validate_result = registry.validate_all(
         manifest,
-        kNoopAbiHash,                                              // expected hash (const char*)
-        std::string_view{loader.abi_hash()},                      // symbol hash (std::string_view)
-        std::string_view{noop_path.data(), noop_path.size()}       // eastl → std::string_view
+        kNoopAbiHash,                                         // expected hash (const char*)
+        std::string_view{loader.abi_hash()},                  // symbol hash (std::string_view)
+        std::string_view{noop_path.data(), noop_path.size()}  // eastl → std::string_view
     );
 
     REQUIRE(validate_result.has_value());
 
     // register_plugin records the plugin in the table.
-    REQUIRE(
-        registry
-            .register_plugin(manifest, std::string_view{noop_path.data(), noop_path.size()})
-            .has_value()
-    );
+    REQUIRE(registry.register_plugin(manifest, std::string_view{noop_path.data(), noop_path.size()})
+                .has_value());
 
     CHECK(registry.loaded_count() == 1u);
     CHECK(registry.is_registered("glibre.integration.happy"));
@@ -572,7 +568,7 @@ TEST_CASE("integration_engine_too_old_propagates", "[core][integration]") {
     CHECK(eastl::string_view{loader_result->abi_hash()} == eastl::string_view{kNoopAbiHash});
 
     // Registry with host engine version {1, 0, 0}.
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     // Synthesise a manifest whose min_engine_version far exceeds the host.
     // min_engine_version {99, 0, 0} > host {1, 0, 0} → gate 2 fires.
@@ -651,7 +647,7 @@ TEST_CASE("integration_dependency_missing_propagates", "[core][integration]") {
     CHECK(eastl::string_view{loader_result->abi_hash()} == eastl::string_view{kNoopAbiHash});
 
     // Registry is empty — "glibre.integration.missing_dep" is not registered.
-    glibre::core::PluginLoaderRegistry registry{kHostVersion};
+    glibre::core::PluginLoaderRegistry registry{kHostVersion, std::pmr::get_default_resource()};
 
     // Synthesise a manifest for plugin B that lists an unmet dependency.
     glibre::core::PluginManifest manifest = make_manifest("glibre.integration.dep_consumer");

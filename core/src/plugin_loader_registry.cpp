@@ -41,12 +41,17 @@ namespace glibre::core {
 // backing allocator (PerContextAllocatorResource for production, or
 // get_default_resource() for tests).
 //
+// `mr` is now REQUIRED (no default).  Every callsite must explicitly name
+// the resource it intends to use, making per-context tracking opt-in by
+// decision rather than by omission (MED-4 fix).
+//
 // RAII note: mr_ is declared before loaded_ in the header so that the
 // resource is initialised before the map's allocator captures the pointer.
 // ---------------------------------------------------------------------------
 
-PluginLoaderRegistry::PluginLoaderRegistry(SemVer host_engine_version,
-                                           std::pmr::memory_resource* mr) noexcept
+PluginLoaderRegistry::PluginLoaderRegistry(
+    SemVer host_engine_version, std::pmr::memory_resource* mr
+) noexcept
     : host_engine_version_{host_engine_version},
       mr_{mr},
       loaded_{mr_} {}
@@ -248,32 +253,64 @@ Result<void> PluginLoaderRegistry::validate_all(
 // registered with a different path.  Same name + same path is an idempotent
 // no-op (returns success without re-inserting).
 //
-// Key storage: the std::pmr::string key is constructed under mr_ so the
-// stored key's lifetime is tied to loaded_, not to the caller's manifest.
+// Allocator correctness (HIGH-2 + HIGH-3 fixes):
+//   * PluginRecord is constructed in-place via try_emplace with a
+//     piecewise_construct + forward_as_tuple so the map's own polymorphic
+//     allocator (which wraps mr_) is propagated into PluginRecord via the
+//     uses-allocator protocol (PluginRecord::allocator_type typedef).
+//   * The map key std::pmr::string is constructed exactly ONCE from the
+//     name string_view.  The PluginRecord::name member is then populated
+//     inside PluginRecord's allocator-extended ctor from the same view --
+//     no second heap allocation for the name (HIGH-3).
+//   * Because PluginRecord carries allocator_type, std::pmr::unordered_map's
+//     try_emplace invokes PluginRecord's allocator-extended ctor with the
+//     map's own allocator, so rec.name and rec.path are initialised under
+//     mr_ from construction (not via copy-assign from a default-resource
+//     string) (HIGH-2).
 // ---------------------------------------------------------------------------
 
 Result<void> PluginLoaderRegistry::register_plugin(
     const PluginManifest& manifest, std::string_view path
 ) noexcept {
 
+    const std::string_view name_sv{manifest.name};
+
     // Unconditional precondition check -- protects release builds from
     // silent overwrites (replaces the former debug-only assert).
-    if (is_collision(std::string_view{manifest.name}, path)) {
+    if (is_collision(name_sv, path)) {
         return std::unexpected(glibre::Error{core::Error::PluginNameCollision});
     }
 
-    const auto it = loaded_.find(std::string_view{manifest.name});
-    if (it != loaded_.end()) {
+    if (loaded_.contains(name_sv)) {
         // Same name + same path: idempotent re-registration, no-op.
         return {};
     }
 
-    PluginRecord rec;
-    rec.name = std::pmr::string{manifest.name, mr_};
-    rec.version = manifest.version;
-    rec.path = std::pmr::string{path, mr_};
-
-    loaded_.emplace(std::pmr::string{manifest.name, mr_}, std::move(rec));
+    // Construct key and value in-place via uses-allocator protocol.
+    //
+    // HIGH-3 fix: name_sv is the single materialization of the plugin name;
+    // both the map key (std::pmr::string) and PluginRecord::name are
+    // constructed from the same string_view — no second heap allocation.
+    //
+    // HIGH-2 fix: emplace(piecewise_construct, ...) on a std::pmr::unordered_map
+    // detects uses_allocator<K> and uses_allocator<V> (both true: pmr::string
+    // has allocator_type; PluginRecord declares allocator_type) and injects
+    // the map's own polymorphic_allocator (which wraps mr_) into BOTH the key
+    // and value constructions via the trailing-allocator convention.
+    //
+    // Do NOT include the allocator in the forward_as_tuple arguments; the
+    // container appends it automatically.  Including it explicitly would pass
+    // two allocators (the explicit one plus the injected one), causing a
+    // "N+1 args to N-param ctor" compile error.
+    //
+    // The injected allocator wraps mr_ (the map's memory_resource), so
+    // rec.name, rec.path, and the map key all allocate under mr_ from
+    // construction — NOT under get_default_resource().
+    loaded_.emplace(
+        std::piecewise_construct,
+        std::forward_as_tuple(name_sv),
+        std::forward_as_tuple(name_sv, manifest.version, path)
+    );
     return {};
 }
 

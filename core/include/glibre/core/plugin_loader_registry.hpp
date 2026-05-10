@@ -79,9 +79,29 @@ namespace glibre::core {
 //
 // Stored in the registry after a plugin passes all gates.  The record is
 // used by subsequent loads for name-collision and dependency checks.
+//
+// Allocator-awareness: PluginRecord declares allocator_type and an
+// allocator-extended constructor so that std::pmr::unordered_map's
+// try_emplace/piecewise_construct path constructs the value directly under
+// the map's allocator.  Without this, default-constructing a PluginRecord
+// and then copy-assigning pmr::string members falls back to
+// get_default_resource() for the destination (PMR's non-propagating
+// move-assign semantics), silently bypassing the per-context ceiling
+// enforced by PluginLoaderRegistry::mr_.
 // ---------------------------------------------------------------------------
 
 struct PluginRecord {
+    using allocator_type = std::pmr::polymorphic_allocator<std::byte>;
+
+    // Allocator-extended constructor: wires name and path to the supplied
+    // allocator so both strings live under the caller's memory resource.
+    explicit PluginRecord(
+        std::string_view name_sv, SemVer ver, std::string_view path_sv, const allocator_type& alloc
+    )
+        : name{name_sv, alloc},
+          version{ver},
+          path{path_sv, alloc} {}
+
     std::pmr::string name;  // manifest.name  — must be unique
     SemVer version;         // manifest.version
     std::pmr::string path;  // filesystem path to the .dylib (may be empty in tests)
@@ -109,10 +129,12 @@ public:
     // -----------------------------------------------------------------------
     // PluginLoaderRegistry(host_engine_version, mr) — resource-injected ctor.
     //
-    // `mr` backs all PMR string and map storage in this registry.  Pass a
-    // PerContextAllocatorResource for production use; pass
-    // std::pmr::get_default_resource() in tests that do not need per-context
-    // ceiling enforcement.
+    // `mr` backs all PMR string and map storage in this registry.  The
+    // parameter is REQUIRED: callers must explicitly choose a resource.
+    // Production callers pass a PerContextAllocatorResource (perf-budget.md
+    // §1 core ceiling).  Tests pass std::pmr::get_default_resource()
+    // explicitly so per-context tracking is consciously opt-in and no
+    // callsite silently falls through to the global default.
     //
     // The host engine version is injected at construction time so that it
     // participates in gate checks without coupling the registry to a global
@@ -121,8 +143,7 @@ public:
     // -----------------------------------------------------------------------
 
     explicit PluginLoaderRegistry(
-        SemVer host_engine_version,
-        std::pmr::memory_resource* mr = std::pmr::get_default_resource()
+        SemVer host_engine_version, std::pmr::memory_resource* mr
     ) noexcept;
 
     // -----------------------------------------------------------------------
@@ -181,9 +202,8 @@ public:
     // On collision returns core::Error::PluginNameCollision.
     // -----------------------------------------------------------------------
 
-    [[nodiscard]] Result<void> validate_name_unique(
-        const PluginManifest& manifest, std::string_view file_path
-    ) const noexcept;
+    [[nodiscard]] Result<void>
+    validate_name_unique(const PluginManifest& manifest, std::string_view file_path) const noexcept;
 
     // -----------------------------------------------------------------------
     // validate_dependencies — run gate 4 (dependency resolution).
@@ -313,8 +333,11 @@ private:
     // TransparentStringHash + std::equal_to<> enable heterogeneous lookup:
     //   loaded_.find(std::string_view{...})  — no std::pmr::string allocation
     //   per lookup (MED-3: avoids per-call key materialisation).
-    std::pmr::unordered_map<std::pmr::string, PluginRecord, glibre::TransparentStringHash,
-                            std::equal_to<>>
+    std::pmr::unordered_map<
+        std::pmr::string,
+        PluginRecord,
+        glibre::TransparentStringHash,
+        std::equal_to<>>
         loaded_;
 };
 
