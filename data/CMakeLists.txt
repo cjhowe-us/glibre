@@ -144,7 +144,6 @@ target_include_directories(glibre-types
 )
 
 target_link_libraries(glibre-types
-    PUBLIC
     PRIVATE
         # Compile-flag contract: enforces -fno-exceptions, -fno-rtti,
         # -fvisibility=hidden project-wide (cmake/Compile.cmake).
