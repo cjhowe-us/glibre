@@ -25,6 +25,7 @@ add_subdirectory(hot_reload)                    # plan #250 — hot-reload manif
 add_subdirectory(frame_loop_integration)         # plan #248 — frame-loop nine-phase ordering integration test
 add_subdirectory(perf_s1_fixture)               # plan #1003 — canonical S1 fixture loader + invariant tests
 add_subdirectory(world)                         # plan #944 — macOS PMC sampler helper
+add_subdirectory(phase_registry)                # plan #245 — phase ownership + system register API
 add_subdirectory(type_registry)                 # plan #597 — TypeRegistry immutable-after-init
 
 add_executable(glibre-core-tests

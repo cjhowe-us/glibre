@@ -23,6 +23,7 @@ endif()
 
 add_library(glibre-core STATIC
     src/frame_loop.cpp
+    src/phase_registry.cpp           # PhaseRegistry: per-phase system registration + dispatch (plan #245)
     src/eastl_alloc.cpp              # EASTL operator new[] substrate (PHILOSOPHY §11)
     src/plugin_manifest.cpp
     src/plugin_loader.cpp            # PluginLoader: dlopen+dlsym+manifest read (plan #229)

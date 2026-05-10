@@ -14,6 +14,8 @@
 //     (perf-budget.md §Allocator Rules #4, plan #239).
 //   - At Phase::Present (9), reset the registered PerfBudget if one has
 //     been set via set_perf_budget() (perf-budget.md §CI Gate Spec, plan #241).
+//   - For each phase, invoke registered systems in registration order via a
+//     PhaseRegistry (plan #245 — phase ownership + system register API).
 //   - No dynamic allocation inside tick().
 //   - -fno-exceptions clean; noexcept throughout the public surface.
 //
@@ -26,6 +28,7 @@
 #include <span>
 
 #include "glibre/core/frame_phase.hpp"
+#include "glibre/core/phase_registry.hpp"
 #include "glibre/core/world_tick.hpp"
 #include "glibre/error.hpp"
 #include "glibre/perf_budget.hpp"
@@ -103,6 +106,29 @@ public:
     //
     // Thread safety: must not be called concurrently with tick().
     void set_perf_budget(glibre::PerfBudget* budget) noexcept;
+
+    // set_phase_registry() — attach (or detach) a PhaseRegistry for system
+    // dispatch.  (plan #245 — phase ownership + system register API)
+    //
+    // When non-null, each phase's run_phase() body calls
+    //   registry->for_each_system(phase, [](const PhaseSystemFn& fn) noexcept { fn(); })
+    // after the built-in MVP phase body.  This dispatches all systems
+    // registered into that phase in registration order (deterministic,
+    // per frame-phases.md §Consequence #2).
+    //
+    // Rebind contract mirrors set_perf_budget():
+    //   - May be called any number of times outside of tick().
+    //   - Passing nullptr detaches the registry: subsequent tick() calls
+    //     skip system dispatch for all phases.
+    //   - The new pointer takes effect on the next tick() call.
+    //
+    // The registry pointer must remain valid from the moment it is passed
+    // here until the next set_phase_registry() call (with null or another
+    // pointer) or until the FrameLoop is destroyed.  Callers are responsible
+    // for ensuring pointer validity.
+    //
+    // Thread safety: must not be called concurrently with tick().
+    void set_phase_registry(PhaseRegistry* registry) noexcept;
 
     // tick() — advance one engine frame.
     //
@@ -190,6 +216,10 @@ private:
     // Optional PerfBudget — reset() called at end of Phase::Present (9).
     // Non-owning pointer; lifetime is caller-managed.  Null = no-op.
     glibre::PerfBudget* perf_budget_{nullptr};
+
+    // Optional PhaseRegistry — for_each_system() called in every phase (plan #245).
+    // Non-owning pointer; lifetime is caller-managed.  Null = no system dispatch.
+    PhaseRegistry* phase_registry_{nullptr};
 
 #ifdef GLIBRE_TESTING
     // Under GLIBRE_TESTING builds the last tick's phase execution order is
