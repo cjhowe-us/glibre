@@ -32,7 +32,9 @@
    mismatch.
 10. **Occam's razor at every decision**. Two collapsing requirements
     become one primitive. Record the collapse in the spec.
-11. **EASTL replaces the C++ standard library for runtime data
+11. > **SUPERSEDED — see [reviews/decisions/eastl-removal.md](reviews/decisions/eastl-removal.md). §11 body retained until [CHORE] update-philosophy-md-eastl-removal lands.**
+
+    **EASTL replaces the C++ standard library for runtime data
     structures**. All containers, strings, smart pointers, `optional`,
     `variant`, `tuple`, `pair`, and `function` come from `eastl::`,
     not `std::`. Reasons: explicit allocator-by-value (per-system
