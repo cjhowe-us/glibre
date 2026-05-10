@@ -9,15 +9,15 @@
 // closed (SPEC §3.2 collapse #1, SPEC §5.3).
 //
 // -fno-exceptions clean; no allocation; all data is constexpr POD.
+//
+// Migrated from EASTL to libc++ per reviews/decisions/eastl-removal.md
+// (plan #1045): eastl::string_view → std::string_view (matrix row 2).
 
 #include <array>
 #include <cassert>
 #include <cstdint>
+#include <string_view>
 #include <utility>
-
-// EASTL substrate — PHILOSOPHY §11 mandates eastl::string_view for engine
-// runtime data structures; std::string_view is not permitted in engine code.
-#include <EASTL/string_view.h>
 
 namespace glibre::core {
 
@@ -46,13 +46,15 @@ inline constexpr std::uint8_t kPhaseMax = 9;
 // -----------------------------------------------------------------------
 
 struct PhaseDesc {
-    Phase id;                           // numeric ordinal (1..=9)
-    eastl::string_view name;            // canonical kebab-case name (telemetry/replay-stable
-                                        // per frame-phases.md §Consequence #2)
-                                        // PHILOSOPHY §11: eastl::string_view, not std::
-    eastl::string_view owning_context;  // bounded-context owner per frame-phases.md
-                                        // PHILOSOPHY §11: eastl::string_view, not std::
-    bool mvp_reserved;                  // true → empty body in MVP (phases 2, 4)
+    Phase id;                         // numeric ordinal (1..=9)
+    std::string_view name;            // canonical kebab-case name (telemetry/replay-stable
+                                      // per frame-phases.md §Consequence #2)
+                                      // Per reviews/decisions/eastl-removal.md matrix row 2:
+                                      // eastl::string_view → std::string_view.
+    std::string_view owning_context;  // bounded-context owner per frame-phases.md
+                                      // Per reviews/decisions/eastl-removal.md matrix row 2:
+                                      // eastl::string_view → std::string_view.
+    bool mvp_reserved;                // true → empty body in MVP (phases 2, 4)
 };
 
 // -----------------------------------------------------------------------
