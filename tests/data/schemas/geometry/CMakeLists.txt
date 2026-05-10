@@ -46,7 +46,7 @@ target_include_directories(geometry-schema-parse-tests
 target_link_libraries(geometry-schema-parse-tests
     PRIVATE
         Catch2::Catch2WithMain
-        glibre::core   # glibre::Error + EASTL
+        glibre::core   # glibre::Error
         glibre::compile_contract
 )
 

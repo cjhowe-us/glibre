@@ -24,23 +24,6 @@ add_library(glibre-plugin-noop MODULE
 # They link only glibre-types.dylib (added here once that target exists in plan
 # #223/#225).  For MVP the plugin needs only the C-ABI declarations and the
 # PluginContext POD layout — both header-only from core/include.
-#
-# EASTL headers are needed transitively via plugin_context.hpp → error.hpp.
-# Since the noop plugin does not link glibre::core (which exports EASTL PUBLIC),
-# we use find_package(EASTL) to obtain the include path and link the interface.
-#
-# TODO(#224): Switch to `target_link_libraries(glibre-plugin-noop PRIVATE
-#   glibre::types)` once plan #224 (glibre-types.dylib CMake target) lands.
-#   glibre-types.dylib will link and re-export EASTL PUBLIC, making the
-#   find_package(EASTL) + direct link below unnecessary.
-#
-# WARNING: The direct EASTL link here risks two independent EASTL runtimes
-# inside one process if any EASTL singleton/global state (allocator hooks,
-# debug counters, hash seeds) diverges between the host copy and the plugin
-# copy loaded via dlopen(RTLD_LOCAL).  Once #224 lands, both the engine and
-# all plugins will share a single EASTL runtime via glibre-types.dylib.
-# See MED finding round-1 of PR #959 for details.
-find_package(EASTL CONFIG REQUIRED)
 
 target_include_directories(glibre-plugin-noop
     PRIVATE
@@ -49,7 +32,6 @@ target_include_directories(glibre-plugin-noop
 
 target_link_libraries(glibre-plugin-noop
     PRIVATE
-        EASTL
         # Compile-flag contract: enforces -fno-exceptions, -fno-rtti,
         # -fvisibility=hidden project-wide (cmake/Compile.cmake).
         glibre::compile_contract

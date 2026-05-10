@@ -49,8 +49,6 @@ endif()
 #   ensures glibre-types.dylib can be built and linked before codegen runs.
 # ---------------------------------------------------------------------------
 
-find_package(EASTL CONFIG REQUIRED)
-
 # ---------------------------------------------------------------------------
 # Codegen custom command — invokes glibre-foryc over data/schemas/**/*.fory
 #
@@ -149,12 +147,7 @@ target_include_directories(glibre-types
         $<INSTALL_INTERFACE:include>
 )
 
-# EASTL is a PUBLIC dependency: consumers of glibre-types (plugins) inherit
-# the EASTL include path so they can use eastl:: containers in plugin code
-# that is type-compatible with types defined here.
 target_link_libraries(glibre-types
-    PUBLIC
-        EASTL
     PRIVATE
         # Compile-flag contract: enforces -fno-exceptions, -fno-rtti,
         # -fvisibility=hidden project-wide (cmake/Compile.cmake).
