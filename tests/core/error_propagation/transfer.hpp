@@ -25,10 +25,11 @@ inline constexpr std::size_t kDetailMax = 256;
 
 // GlibreTestContextTransfer — POD mirror of the stub's transfer struct.
 //
-// ErrorContext holds eastl::string_view members (non-owning pointer+size
-// references). Transferring raw bytes across the ABI boundary would produce
-// dangling string_view pointers in the host. This struct copies the string
-// data into fixed-size char arrays, making it safe to memcpy through the
+// ErrorContext holds std::string_view members (non-owning pointer+size
+// references per reviews/decisions/eastl-removal.md §4, matrix row 2).
+// Transferring raw bytes across the ABI boundary would produce dangling
+// string_view pointers in the host. This struct copies the string data into
+// fixed-size char arrays, making it safe to memcpy through the
 // caller-supplied buffer.
 struct GlibreTestContextTransfer {
     char file[kFileMax];  // null-terminated
