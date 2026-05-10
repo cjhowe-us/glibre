@@ -339,9 +339,10 @@ TEST_CASE("invalid_manifest_returns_plugin_manifest_invalid", "[core][plugin_loa
 // dylib_path() accessor is non-empty after a successful load.  This validates
 // the path-threading invariant through the loader.
 //
-// Design note: once PR #1073 lands (migrating PluginLoader to std::pmr),
-// a compile-time static_assert confirming the return type of dylib_path() is
-// const std::pmr::string& will be added here as an additional invariant check.
+// The static_assert below pins the return-type contract of dylib_path() at
+// compile time.  Currently the PluginLoader fields use eastl::string (pre-#1073
+// migration); the assert documents the current contract and will be updated to
+// const std::pmr::string& when PR #1073 migrates PluginLoader storage to PMR.
 // ---------------------------------------------------------------------------
 
 TEST_CASE("core/plugin_loader: load_returns_pmr_handle", "[core][plugin_loader]") {
@@ -355,6 +356,14 @@ TEST_CASE("core/plugin_loader: load_returns_pmr_handle", "[core][plugin_loader]"
 
     const glibre::core::PluginLoader& loader = *result;
 
+    // Pin the return-type contract at compile time.
+    // Update to const std::pmr::string& when PR #1073 lands.
+    static_assert(
+        std::is_same_v<decltype(loader.dylib_path()), const eastl::string&>,
+        "dylib_path() return type changed; update this assert (and the test name) "
+        "once PluginLoader migrates to std::pmr (PR #1073)"
+    );
+
     // The ABI hash symbol must have resolved.
     REQUIRE(loader.abi_hash() != nullptr);
 
@@ -362,8 +371,11 @@ TEST_CASE("core/plugin_loader: load_returns_pmr_handle", "[core][plugin_loader]"
     REQUIRE_FALSE(loader.dylib_path().empty());
 
     // The path stored in the loader must match the path we opened.
+    // Use data()/size() to avoid an extra strlen() call that c_str() would
+    // impose, and to correctly handle any embedded NULs (defensive).
     CHECK(
-        std::string_view{loader.dylib_path().c_str()} == std::string_view{GLIBRE_NOOP_DYLIB_PATH}
+        std::string_view{loader.dylib_path().data(), loader.dylib_path().size()} ==
+        std::string_view{GLIBRE_NOOP_DYLIB_PATH}
     );
 #endif
 }
