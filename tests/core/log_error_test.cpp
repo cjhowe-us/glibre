@@ -231,6 +231,10 @@ TEST_CASE("core/log_error: tostring_complete_for_core_error", "[core][log_error]
     check(E::EntityForeignWorld, "EntityForeignWorld");
     // plan #598: AssetStale — stale generational asset handle
     check(E::AssetStale, "AssetStale");
+    // plan #584 R1 MED-3: Phase::HotReload footgun guard
+    check(E::SystemForbiddenInHotReloadPhase, "SystemForbiddenInHotReloadPhase");
+    // plan #584 R2 MED-1: (phase, fqn) idempotency conflict
+    check(E::SystemDescriptorConflict, "SystemDescriptorConflict");
 }
 
 // ---------------------------------------------------------------------------

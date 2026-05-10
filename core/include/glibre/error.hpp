@@ -119,6 +119,24 @@ enum class Error : std::uint16_t {
     // Spec authority: specs/core/SPEC.md §4.7 invariant 1, §10 error table
     // row "AssetStale".
     AssetStale,
+    // System registered against Phase::HotReload (ordinal 8).
+    // Phase 8 is a FrameLoop-internal seam owned by the plugin loader;
+    // plugin-authored systems may not occupy it.  FrameLoop never walks
+    // HotReload-phase compiled slots for user systems (SPEC §6.5 phase 8).
+    // This error is returned by register_system() as a plugin-author footgun
+    // guard: surfacing it early at registration is cheaper than silently
+    // dropping the system at compile() time.
+    // (plan #584 — Schedule DAG builder, R1 review MED-3 fix)
+    SystemForbiddenInHotReloadPhase,
+    // register_system() was called with an FQN that is already registered
+    // under a DIFFERENT (phase, fqn) pair — i.e. the name matches an existing
+    // entry but the new descriptor's phase or access-set diverges from the
+    // stored entry.  SPEC §8.6 specifies idempotency only for identical
+    // (phase, system_fqn) pairs; a differing phase is a configuration error
+    // (e.g. a hot-reload rollback accidentally changed the target phase).
+    // Callers should treat this as a plugin-author error and refuse the swap.
+    // (plan #584 — Schedule DAG builder, R2 review MED-1 fix)
+    SystemDescriptorConflict,
 };
 }  // namespace core
 

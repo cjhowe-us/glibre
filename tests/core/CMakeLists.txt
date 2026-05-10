@@ -31,6 +31,7 @@ add_subdirectory(entity)                        # plan #557 — Entity value obj
 add_subdirectory(entity_allocator)              # plan #557 — generational entity allocator
 add_subdirectory(asset_handle)                  # plan #598 — AssetHandle<T> bit layout + equality
 add_subdirectory(asset_table)                   # plan #598 — AssetTable<T> generational slots + AssetRegistry
+add_subdirectory(schedule)                      # plan #584 — Schedule DAG builder from access sets
 
 add_executable(glibre-core-tests
     frame_loop_test.cpp
