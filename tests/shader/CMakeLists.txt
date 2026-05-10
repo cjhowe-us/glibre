@@ -12,4 +12,5 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     return()
 endif()
 
-add_subdirectory(source)  # plan #508 — ShaderSource unit tests
+add_subdirectory(source)     # plan #508  — ShaderSource unit tests
+add_subdirectory(descriptor) # plan #1087 — DescriptorLayout::derive unit tests
