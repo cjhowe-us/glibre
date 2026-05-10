@@ -16,6 +16,9 @@
 // Named test cases (plan #1045 Unit Test Plan / DoD):
 //   - core/phase_registry: system_fn_uses_std_move_only_function
 //
+// Named test cases (plan #1070 Unit Test Plan / DoD):
+//   - core/phase_registry: allocator_ceiling_enforced
+//
 // Design constraints:
 //   - -fno-exceptions (error-model.md §Decision 3).
 //   - No REQUIRE_THROWS usage.
