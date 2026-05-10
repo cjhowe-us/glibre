@@ -9,6 +9,9 @@
 //   - result_alias_propagates_error_via_unexpected
 //   - error_context_round_trip
 //
+// Named test cases added by plan #1049 (EASTL sweep + std::visit + Overloaded):
+//   - core/error_variant: visit_with_overloaded_helper_is_exhaustive
+//
 // Design constraints:
 //   - -fno-exceptions / -fno-rtti (error-model.md §Decision 3).
 //   - No REQUIRE_THROWS usage.
@@ -25,6 +28,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <glibre/error.hpp>
 #include <glibre/error_register.hpp>
+#include <glibre/overloaded.hpp>
 
 // ===========================================================================
 // TEST: error_variant_holds_alternative_per_context
@@ -192,4 +196,80 @@ TEST_CASE("error_context_round_trip", "[core][error][context]") {
         REQUIRE(bare.where().line == 0);
         REQUIRE(bare.where().detail.empty());
     }
+}
+
+// ===========================================================================
+// TEST: core/error_variant: visit_with_overloaded_helper_is_exhaustive
+//
+// Verifies the migrated std::visit + glibre::Overloaded pattern against
+// glibre::Error::code().  Reviews/decisions/eastl-removal.md §4 requires
+// that visitors use glibre::Overloaded { lambdas... } (from
+// core/include/glibre/overloaded.hpp) and that std::visit enforces
+// exhaustive coverage of every Variant arm.
+//
+// The test constructs one glibre::Error for each registered per-context arm,
+// visits each with the canonical Overloaded helper, and verifies the correct
+// arm's lambda fires.  A compile-time guard (the Overloaded deduction + the
+// exhaustive-overload rule enforced by libc++'s std::visit) catches any
+// missing arm at compile time; the runtime CHECK confirms the dispatch path
+// is exercised for each arm.
+//
+// Authority: reviews/decisions/eastl-removal.md §4
+//   ("std::visit replaces eastl::visit; pair with Overloaded { ... } helper")
+//   (matrix rows 14/16 — eastl::variant/eastl::visit → std::variant/std::visit)
+// DoD: unit_test_named: "core/error_variant: visit_with_overloaded_helper_is_exhaustive"
+// ===========================================================================
+
+TEST_CASE(
+    "core/error_variant: visit_with_overloaded_helper_is_exhaustive", "[core][error][variant]"
+) {
+    // Visitor that records which arm fired.  Overloaded must enumerate every
+    // arm of glibre::Error::Variant; omitting any arm is a compile error
+    // (libc++ std::visit requires exhaustive match across all alternatives).
+    //
+    // Each lambda returns a string_view tag identifying the fired arm.
+    // Using constexpr std::string_view avoids heap allocation under -fno-exceptions.
+    auto make_visitor = []() {
+        return glibre::Overloaded{
+            [](glibre::core::Error) -> std::string_view { return "core"; },
+            [](glibre::render::Error) -> std::string_view { return "render"; },
+            [](glibre::tools::Error) -> std::string_view { return "tools"; },
+            [](glibre::shader::Error) -> std::string_view { return "shader"; },
+        };
+    };
+
+    SECTION("core::Error arm fires the core lambda") {
+        const glibre::Error err{glibre::core::Error::OutOfBudget};
+        const std::string_view tag = std::visit(make_visitor(), err.code());
+        CHECK(tag == "core");
+    }
+
+    SECTION("render::Error arm fires the render lambda") {
+        const glibre::Error err{glibre::render::Error::DeviceLost};
+        const std::string_view tag = std::visit(make_visitor(), err.code());
+        CHECK(tag == "render");
+    }
+
+    SECTION("tools::Error arm fires the tools lambda") {
+        const glibre::Error err{glibre::tools::Error::ForycSyntaxError};
+        const std::string_view tag = std::visit(make_visitor(), err.code());
+        CHECK(tag == "tools");
+    }
+
+    SECTION("shader::Error arm fires the shader lambda") {
+        const glibre::Error err{glibre::shader::Error::SourceNotFound};
+        const std::string_view tag = std::visit(make_visitor(), err.code());
+        CHECK(tag == "shader");
+    }
+
+    // Compile-time invariant: the Overloaded helper must cover exactly
+    // kExpectedArmCount arms.  This static_assert fires if a new context is
+    // added to glibre::Error::Variant but its lambda is not added above.
+    // (The libc++ std::visit exhaustive-match rule already enforces this at
+    // compile time; this assert makes the intent explicit in the test body.)
+    static_assert(
+        std::variant_size_v<glibre::Error::Variant> == glibre::kExpectedArmCount,
+        "Variant arm count drifted — add the new arm's lambda to the Overloaded "
+        "visitor above and update kExpectedArmCount in error_register.hpp."
+    );
 }

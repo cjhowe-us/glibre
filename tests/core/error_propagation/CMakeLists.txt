@@ -25,19 +25,14 @@ cmake_minimum_required(VERSION 4.3.0)
 # ---------------------------------------------------------------------------
 # glibre-stub-error-returns — C-ABI stub for the contract tests
 #
-# Links EASTL (for eastl::string_view used in glibre::ErrorContext) but does
-# NOT link glibre-core — the stub represents a plugin dylib that only sees
-# the header-only glibre::Error type.
+# Does NOT link glibre-core — the stub represents a plugin dylib that only
+# sees the header-only glibre::Error type (std::string_view + std::variant,
+# libc++ stdlib only per reviews/decisions/eastl-removal.md §4).
 #
-# TODO(#224): replace find_package(EASTL) + direct link with
-#   target_link_libraries(... PRIVATE glibre::types)
-#   once plan #224 (glibre-types.dylib CMake target) lands.
-#
-# WARNING: Same dual-EASTL-runtime caveat as examples/plugin-noop —
-#   see that CMakeLists.txt for rationale.  Resolved when #224 lands.
+# glibre::compile_contract supplies -fno-exceptions/-fno-rtti and visibility
+# flags.  No EASTL dependency: stub_error_returns.cpp was migrated to
+# libc++ stdlib by plan #1049 (eastl-removal.md §4 migration sweep).
 # ---------------------------------------------------------------------------
-
-find_package(EASTL CONFIG REQUIRED)
 
 add_library(glibre-stub-error-returns MODULE
     stub_error_returns.cpp
@@ -48,7 +43,7 @@ target_include_directories(glibre-stub-error-returns
         ${CMAKE_SOURCE_DIR}/core/include
 )
 
-target_link_libraries(glibre-stub-error-returns PRIVATE EASTL glibre::compile_contract)
+target_link_libraries(glibre-stub-error-returns PRIVATE glibre::compile_contract)
 
 target_compile_features(glibre-stub-error-returns PRIVATE cxx_std_23)
 
