@@ -62,7 +62,7 @@ constexpr bool all_distinct(const eastl::array<T, N>& arr) noexcept {
 
 /// All core::Error enumerator values, listed in declaration order.
 /// When a new enumerator is added to core::Error, add it here too.
-constexpr eastl::array<std::underlying_type_t<glibre::core::Error>, 18> kCoreErrorValues{{
+constexpr eastl::array<std::underlying_type_t<glibre::core::Error>, 21> kCoreErrorValues{{
     static_cast<std::uint16_t>(glibre::core::Error::PluginAbiHashMismatch),
     static_cast<std::uint16_t>(glibre::core::Error::PluginInitFailed),
     static_cast<std::uint16_t>(glibre::core::Error::SchemaMigrationFailed),
@@ -84,6 +84,12 @@ constexpr eastl::array<std::underlying_type_t<glibre::core::Error>, 18> kCoreErr
     static_cast<std::uint16_t>(glibre::core::Error::NullArgument),
     // plan #250: PluginNameMismatch — hot-reload swap candidate has a different name.
     static_cast<std::uint16_t>(glibre::core::Error::PluginNameMismatch),
+    // plan #597: TypeUnregistered — lookup on a TypeId with no registered descriptor.
+    static_cast<std::uint16_t>(glibre::core::Error::TypeUnregistered),
+    // plan #597: TypeRegistryClosed — register_type() called after seal().
+    static_cast<std::uint16_t>(glibre::core::Error::TypeRegistryClosed),
+    // plan #597: TypeRegistryGap — codegen contract violation (gap in TypeId sequence).
+    static_cast<std::uint16_t>(glibre::core::Error::TypeRegistryGap),
     // When a new enumerator is added to core::Error, add it here and
     // increment the array size template argument above.
 }};
@@ -167,7 +173,8 @@ TEST_CASE("error_register_per_context_arms_unique", "[core][error_register]") {
     // Making them visible in the Catch2 report means they appear in CI output
     // and are tracked as named test cases in the DoD.
 
-    // core::Error: 18 enumerators with sequential values 0..17
+    // core::Error: 21 enumerators with sequential values 0..20 (plan #597 added
+    // TypeUnregistered+TypeRegistryClosed+TypeRegistryGap)
     CHECK(all_distinct(kCoreErrorValues));
 
     // render::Error: 5 enumerators with sequential values 0..4

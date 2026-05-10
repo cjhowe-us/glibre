@@ -88,6 +88,13 @@ namespace glibre::core {
         return "NullArgument";
     case Error::PluginNameMismatch:
         return "PluginNameMismatch";
+    // plan #597: TypeRegistry error arms.
+    case Error::TypeUnregistered:
+        return "TypeUnregistered";
+    case Error::TypeRegistryClosed:
+        return "TypeRegistryClosed";
+    case Error::TypeRegistryGap:
+        return "TypeRegistryGap";
     }
     return "Unknown";
 }

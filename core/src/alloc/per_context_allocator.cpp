@@ -1,7 +1,7 @@
 // core/src/alloc/per_context_allocator.cpp
 //
-// Implementation of glibre::PerContextAllocator.
-// Authority: reviews/decisions/perf-budget.md §Allocator Rules #1-3, plan #238.
+// Implementation of glibre::PerContextAllocator and glibre::PerContextAllocatorResource.
+// Authority: reviews/decisions/perf-budget.md §Allocator Rules #1-3, plan #238, plan #597 (MED-2).
 //
 // ## Backing allocation
 //
@@ -222,5 +222,40 @@ void testing_reset_register_allocator_call_count() noexcept {
 }
 
 #endif  // GLIBRE_TESTING
+
+// ---------------------------------------------------------------------------
+// PerContextAllocatorResource — std::pmr::memory_resource adaptor bodies
+// ---------------------------------------------------------------------------
+
+void* PerContextAllocatorResource::do_allocate(std::size_t bytes, std::size_t alignment) {
+    auto result = alloc_.allocate(bytes, alignment);
+    if (!result) {
+        // Ceiling breach in GLIBRE_ALLOC_STRICT builds.  std::pmr::vector
+        // expects a valid pointer or a thrown exception.  Since the engine
+        // compiles with -fno-exceptions, abort — the caller in a diagnostic
+        // build should have budgeted enough memory.  This matches the
+        // PerContextAllocator OOM contract (alloc.hpp: OOM → std::abort()).
+        std::abort();
+    }
+    return *result;
+}
+
+void PerContextAllocatorResource::do_deallocate(
+    void* p, std::size_t bytes, std::size_t /*alignment*/
+) noexcept {
+    alloc_.deallocate(p, bytes);
+}
+
+bool PerContextAllocatorResource::do_is_equal(
+    const std::pmr::memory_resource& other
+) const noexcept {
+    // PerContextAllocator is non-copyable (single-instance-per-context per
+    // perf-budget.md §Allocator Rules #1).  Each PerContextAllocatorResource
+    // wraps exactly one allocator instance; self-equality (pointer identity on
+    // *this) is therefore the only meaningful case.  PMR containers call
+    // is_equal before swapping resources; pointer identity prevents any
+    // cross-resource allocation-transfer.
+    return this == &other;
+}
 
 }  // namespace glibre
