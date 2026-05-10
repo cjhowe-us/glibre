@@ -383,17 +383,15 @@ TEST_CASE("core/plugin_manifest: open_uses_per_context_allocator", "[core][plugi
     // PluginManifestNotFound error path.  The error path returns before
     // constructing any PluginManifest fields, so no allocations through mr
     // should occur.
-    const std::filesystem::path absent =
-        std::filesystem::temp_directory_path() /
-        "glibre_open_uses_per_context_allocator_test.manifest";
+    const std::filesystem::path absent = std::filesystem::temp_directory_path() /
+                                         "glibre_open_uses_per_context_allocator_test.manifest";
     std::error_code ec;
     std::filesystem::remove(absent, ec);  // clean up from prior runs
 
     // Call open() with the PerContextAllocatorResource.
     // This is the API shape mandated by plan #1065:
     //   open(path, mr) — mr must be a PerContextAllocatorResource in production.
-    const auto result =
-        PluginManifest::open(std::string_view{absent.c_str()}, mr);
+    const auto result = PluginManifest::open(std::string_view{absent.c_str()}, mr);
 
     // Assert the expected error arm.
     REQUIRE(!result.has_value());

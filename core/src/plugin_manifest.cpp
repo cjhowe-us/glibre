@@ -25,8 +25,7 @@
 
 namespace glibre::core {
 
-Result<PluginManifest>
-PluginManifest::open(std::string_view path, std::pmr::memory_resource& mr) {
+Result<PluginManifest> PluginManifest::open(std::string_view path, std::pmr::memory_resource& mr) {
     // Convert std::string_view to std::filesystem::path for OS stat call.
     // std::filesystem::path accepts std::string_view directly (C++17).
     const std::filesystem::path fs_path(path);
