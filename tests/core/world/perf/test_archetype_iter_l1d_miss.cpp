@@ -29,11 +29,16 @@
 //   Emits tests/core/world/perf/_artifacts/l1d_miss.json after each run.
 //   Format:
 //     {
-//       "l1d_misses":    <uint64>,
-//       "loads_retired": <uint64>,
-//       "threshold_pct": 5,
-//       "miss_pct":      <float or null>,   // null when loads_retired == 0
-//       "verdict":       "pass" | "skip_zero_stub"
+//       "commit_sha":     "<GLIBRE_COMMIT_SHA env, or empty>",
+//       "entity_count":   <uint32>,
+//       "archetype_count":<uint32>,
+//       "row_bytes":      <uint32>,
+//       "chunk_rows":     <uint32>,
+//       "l1d_misses":     <uint64>,
+//       "loads_retired":  <uint64>,
+//       "threshold_pct":  5,
+//       "miss_pct":       <float or null>,   // null when loads_retired == 0
+//       "verdict":        "pass" | "skip_zero_stub"
 //     }
 //   CI artifact-upload step (plan #944) picks up this path.
 //
@@ -45,6 +50,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -187,6 +193,29 @@ struct ArchetypeStorage {
 // Returns an accumulated float to prevent dead-code elimination.
 // [[gnu::noinline]] forces the call to not be inlined at the PMC call site,
 // ensuring the measured region is the inner hot loop only.
+//
+// SYNTHETIC WALK — FUTURE SWAP-IN (#562 / #572):
+//   This function walks SyntheticChunk / ArchetypeStorage arrays rather than
+//   the real glibre Archetype, Chunk, and Query::iter() pipeline.  The
+//   synthetic walk is intentionally accepted by plan #938 because the real
+//   archetype storage (#562) and query iteration (#572) are still open issues.
+//
+//   The synthetic model is valid as a proxy because it preserves the invariants
+//   that make the access pattern meaningful for PMC measurement:
+//     - 64-byte alignment: SyntheticChunk is alignas(64), matching the §5.3
+//       requirement that alignof(Chunk) >= 64 (each chunk header fits one cache
+//       line).
+//     - 16-float row: Row = array<float,16> = 64 bytes, matching the §5.3
+//       "hot chunk header" width and the LocalTransform 4×4 matrix column
+//       layout used in the §9.5 BENCHMARK_CELL workload.
+//     - change-tick scan pattern: kChunkRows-per-chunk + partial last-chunk via
+//       row_count mirrors the real Chunk iteration contract (live row range,
+//       partial tail chunk, sequential reads within a chunk).
+//
+//   Once #562 (Archetype storage) and #572 (Query::iter) land, replace
+//   SyntheticChunk/ArchetypeStorage with real glibre::Archetype and
+//   glibre::Query, and repoint this function at Query::iter()'s chunk-walk.
+//   The PMC bracketing and verdict logic in the TEST_CASE requires no change.
 // ---------------------------------------------------------------------------
 [[nodiscard]] [[gnu::noinline]] float run_archetype_iter_hot_loop(
     const ArchetypeStorage* archetypes, std::uint32_t archetype_count
@@ -205,6 +234,18 @@ struct ArchetypeStorage {
                 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
                 for (const float f : chunk.rows[r]) {
                     acc += f;
+                    // Memory-clobber barrier: prevents clang/LTO from reducing
+                    // the inner accumulator to a compile-time constant.  The
+                    // "+r" constraint forces `acc` to be held in a register
+                    // across the barrier; "memory" tells the compiler that
+                    // arbitrary memory may have been read or written, so it
+                    // cannot hoist or merge the surrounding loads.  This is the
+                    // standard defensive pattern for benchmark hot loops and is
+                    // required because [[gnu::noinline]] alone does not defeat
+                    // LTO's cross-TU constant folding once #562/#572 wire in
+                    // real archetype storage.
+                    // NOLINTNEXTLINE(hicpp-no-assembler)
+                    __asm__ __volatile__("" : "+r"(acc) : : "memory");
                 }
                 // NOLINTEND(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
             }
@@ -241,25 +282,58 @@ struct ArchetypeStorage {
 //
 // Format (one JSON object, no trailing newline on last field):
 //   {
-//     "l1d_misses":    <uint64>,
-//     "loads_retired": <uint64>,
-//     "threshold_pct": 5,
-//     "miss_pct":      <float with 4 decimal places> | null,
-//     "verdict":       "pass" | "skip_zero_stub"
+//     "commit_sha":     "<GLIBRE_COMMIT_SHA env value, or empty string>",
+//     "entity_count":   <uint32>,
+//     "archetype_count":<uint32>,
+//     "row_bytes":      <uint32>,
+//     "chunk_rows":     <uint32>,
+//     "l1d_misses":     <uint64>,
+//     "loads_retired":  <uint64>,
+//     "threshold_pct":  5,
+//     "miss_pct":       <float with 4 decimal places> | null,
+//     "verdict":        "pass" | "skip_zero_stub"
 //   }
+//
+// Correlation fields rationale:
+//   commit_sha      — links a drift-past-5% alarm to the introducing commit.
+//                     Read from the GLIBRE_COMMIT_SHA environment variable
+//                     (set by CI) or left empty when running locally.
+//   entity_count    — workload size; confirms S1 fixture was used.
+//   archetype_count — number of archetypes walked; stable at 3 for S1.
+//   row_bytes       — bytes per row (64); confirms §5.3 alignment invariant.
+//   chunk_rows      — rows per chunk (16); confirms §5.3 chunk granularity.
 // ---------------------------------------------------------------------------
 void emit_artifact(
-    std::uint64_t l1d_misses, std::uint64_t loads_retired, const std::string& verdict
+    std::uint64_t l1d_misses,
+    std::uint64_t loads_retired,
+    const std::string& verdict,
+    std::uint32_t entity_count,
+    std::uint32_t archetype_count
 ) {
     const std::filesystem::path out = artifact_path();
     std::ofstream ofs(out);
     if (!ofs.is_open()) {
         // Best-effort: if we cannot write the artifact, do not fail the test.
-        // The CI upload step may log a missing artifact separately.
+        // WARN() logs the path so CI "artifact not found" errors can be
+        // correlated with the test log rather than appearing with no breadcrumb.
+        // plan #944's CI artifact-upload step depends on this file existing;
+        // a missing file with no test-side message would be confusing to debug.
+        WARN("emit_artifact: cannot open " + out.string());
         return;
     }
 
+    // Correlation: read commit SHA from GLIBRE_COMMIT_SHA env (set by CI).
+    // Empty string when running locally — the field is always present for
+    // schema stability; tools can distinguish "" from a real SHA.
+    const char* const commit_sha_env = std::getenv("GLIBRE_COMMIT_SHA");
+    const std::string commit_sha = (commit_sha_env != nullptr) ? commit_sha_env : "";
+
     ofs << "{\n";
+    ofs << R"(  "commit_sha": ")" << commit_sha << "\",\n";
+    ofs << "  \"entity_count\": " << entity_count << ",\n";
+    ofs << "  \"archetype_count\": " << archetype_count << ",\n";
+    ofs << "  \"row_bytes\": " << kRowBytes << ",\n";
+    ofs << "  \"chunk_rows\": " << kChunkRows << ",\n";
     ofs << "  \"l1d_misses\": " << l1d_misses << ",\n";
     ofs << "  \"loads_retired\": " << loads_retired << ",\n";
     ofs << "  \"threshold_pct\": 5,\n";
@@ -432,7 +506,13 @@ TEST_CASE("world/perf: archetype_iter_l1d_miss_under_5pct", "[world][perf][pmc][
     // ------------------------------------------------------------------
     // Step 6: Emit JSON artifact.
     // ------------------------------------------------------------------
-    emit_artifact(counters.l1d_misses, counters.loads_retired, verdict);
+    emit_artifact(
+        counters.l1d_misses,
+        counters.loads_retired,
+        verdict,
+        scene.entity_count,
+        scene.archetype_count
+    );
 }
 
 // NOLINTEND(cppcoreguidelines-avoid-do-while,misc-use-anonymous-namespace,
