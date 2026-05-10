@@ -62,7 +62,10 @@ in once GitHub repo is provisioned.
 
 <!-- This section uses bullet prose because the dependency graph is enumerable
      rather than chronological — the Bring-up DAG ASCII above is reserved for
-     time-ordered milestones. -->
+     time-ordered milestones. Cross-cutting initiatives use bullet prose rather
+     than the Epics table format because each child plan needs a one-line scope
+     description that the table's column shape can't accommodate without
+     truncation. -->
 
 Engine-wide reversal of PHILOSOPHY.md §11 (EASTL adoption). Rationale
 established in design spike #1033; decision record merged via PR #1034
