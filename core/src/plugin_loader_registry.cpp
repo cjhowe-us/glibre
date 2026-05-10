@@ -9,6 +9,15 @@
 //
 // Plans: #230 (ABI hash + version + name + deps gates, steps 4–7).
 //        #981 (phase-8 drain guard — validate_drain_phase).
+//        #1044 (EASTL → libc++ container migration).
+//
+// Container migration (plan #1044, reviews/decisions/eastl-removal.md):
+//   eastl::hash_map  →  std::pmr::unordered_map (OQ-2 fallback: std::pmr::flat_map
+//     alias not present in libc++ 22 despite __cpp_lib_flat_map = 202511).
+//   eastl::string    →  std::pmr::string
+//   eastl::string_view → std::string_view
+//   Heterogeneous lookup preserved via glibre::TransparentStringHash + std::equal_to<>.
+//
 // Out of scope: dlopen/dlsym (plan #229); post-gate actions 9–11
 //   (plugin_loader_actions.cpp, plan #231).
 
@@ -16,16 +25,36 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory_resource>
+#include <string>
 #include <string_view>
+#include <unordered_map>
+#include <utility>
 
 namespace glibre::core {
 
 // ---------------------------------------------------------------------------
 // PluginLoaderRegistry — constructor
+//
+// Initialises the memory resource pointer and constructs the unordered_map
+// with the supplied resource so all map storage is accounted under the
+// backing allocator (PerContextAllocatorResource for production, or
+// get_default_resource() for tests).
+//
+// `mr` is now REQUIRED (no default).  Every callsite must explicitly name
+// the resource it intends to use, making per-context tracking opt-in by
+// decision rather than by omission (MED-4 fix).
+//
+// RAII note: mr_ is declared before loaded_ in the header so that the
+// resource is initialised before the map's allocator captures the pointer.
 // ---------------------------------------------------------------------------
 
-PluginLoaderRegistry::PluginLoaderRegistry(SemVer host_engine_version) noexcept
-    : host_engine_version_{host_engine_version} {}
+PluginLoaderRegistry::PluginLoaderRegistry(
+    SemVer host_engine_version, std::pmr::memory_resource* mr
+) noexcept
+    : host_engine_version_{host_engine_version},
+      mr_{mr},
+      loaded_{mr_} {}
 
 // ---------------------------------------------------------------------------
 // validate_drain_phase — phase-8 precondition guard (plan #981).
@@ -62,15 +91,16 @@ Result<void> PluginLoaderRegistry::validate_drain_phase(Phase current_phase) noe
 // validate_manifest_abi_hash — gate 1a (plugin-abi.md step 4, manifest field)
 //
 // manifest.abi_hash must equal expected_abi_hash.
+// manifest.abi_hash is std::pmr::string; heterogeneous comparison against
+// std::string_view works because std::pmr::string::operator== is defined for
+// std::string_view arguments (operator==(std::string_view) via C++17 char_traits).
 // ---------------------------------------------------------------------------
 
 Result<void> PluginLoaderRegistry::validate_manifest_abi_hash(
-    const PluginManifest& manifest, eastl::string_view expected_abi_hash
+    const PluginManifest& manifest, std::string_view expected_abi_hash
 ) const noexcept {
 
-    // manifest.abi_hash is std::pmr::string; expected_abi_hash is eastl::string_view.
-    // Bridge via string_view so std::pmr::string::operator== can compare.
-    if (manifest.abi_hash != std::string_view{expected_abi_hash.data(), expected_abi_hash.size()}) {
+    if (manifest.abi_hash != expected_abi_hash) {
         return std::unexpected(glibre::Error{core::Error::PluginAbiHashMismatch});
     }
     return {};
@@ -85,7 +115,7 @@ Result<void> PluginLoaderRegistry::validate_manifest_abi_hash(
 // ---------------------------------------------------------------------------
 
 Result<void> PluginLoaderRegistry::validate_symbol_abi_hash(
-    eastl::string_view symbol_abi_hash, eastl::string_view expected_abi_hash
+    std::string_view symbol_abi_hash, std::string_view expected_abi_hash
 ) const noexcept {
 
     if (symbol_abi_hash != expected_abi_hash) {
@@ -97,7 +127,7 @@ Result<void> PluginLoaderRegistry::validate_symbol_abi_hash(
 // ---------------------------------------------------------------------------
 // validate_engine_version — gate 2 (plugin-abi.md step 5)
 //
-// manifest.min_engine_version ≤ host engine version.
+// manifest.min_engine_version <= host engine version.
 // The SemVer operator<= is defined in plugin_manifest.hpp.
 // ---------------------------------------------------------------------------
 
@@ -120,13 +150,13 @@ PluginLoaderRegistry::validate_engine_version(const PluginManifest& manifest) co
 // ---------------------------------------------------------------------------
 
 Result<void> PluginLoaderRegistry::validate_name_unique(
-    const PluginManifest& manifest, eastl::string_view file_path
+    const PluginManifest& manifest, std::string_view file_path
 ) const noexcept {
 
-    if (is_collision(eastl::string_view{manifest.name.c_str()}, file_path)) {
+    if (is_collision(std::string_view{manifest.name}, file_path)) {
         return std::unexpected(glibre::Error{core::Error::PluginNameCollision});
     }
-    // Name absent, or same name + same path → idempotent; not an error.
+    // Name absent, or same name + same path: idempotent; not an error.
     return {};
 }
 
@@ -135,15 +165,18 @@ Result<void> PluginLoaderRegistry::validate_name_unique(
 //
 // Every entry in manifest.depends_on must already be registered.
 // Returns on the first missing dependency.
+//
+// Heterogeneous lookup: std::string_view{dep} avoids materialising a
+// temporary std::pmr::string key per iteration (TransparentStringHash).
 // ---------------------------------------------------------------------------
 
 Result<void>
 PluginLoaderRegistry::validate_dependencies(const PluginManifest& manifest) const noexcept {
 
     for (const std::pmr::string& dep : manifest.depends_on) {
-        // Heterogeneous lookup: eastl::string_view{dep.data(), dep.size()} bridges
-        // the std::pmr::string element to the eastl::transparent_string_hash key.
-        if (loaded_.find(eastl::string_view{dep.data(), dep.size()}) == loaded_.end()) {
+        // Heterogeneous lookup: std::string_view avoids materialising a
+        // temporary std::pmr::string key per call (transparent hash + eq).
+        if (loaded_.find(std::string_view{dep}) == loaded_.end()) {
             return std::unexpected(glibre::Error{core::Error::PluginDependencyMissing});
         }
     }
@@ -154,13 +187,15 @@ PluginLoaderRegistry::validate_dependencies(const PluginManifest& manifest) cons
 // is_collision — name/path collision predicate (MED-4: single source of truth).
 //
 // Returns true when a plugin with the same name is already registered with a
-// DIFFERENT file path — the condition that must fire PluginNameCollision.
+// DIFFERENT file path -- the condition that must fire PluginNameCollision.
 // Same name + same path is idempotent (hot-reload re-registration); returns
 // false.  Name not present: returns false.
+//
+// Heterogeneous lookup on both name and path via std::string_view.
 // ---------------------------------------------------------------------------
 
 bool PluginLoaderRegistry::is_collision(
-    eastl::string_view name, eastl::string_view file_path
+    std::string_view name, std::string_view file_path
 ) const noexcept {
     const auto it = loaded_.find(name);
     if (it == loaded_.end()) {
@@ -170,7 +205,7 @@ bool PluginLoaderRegistry::is_collision(
 }
 
 // ---------------------------------------------------------------------------
-// validate_all — run gates 1–4 in order.
+// validate_all — run gates 1-4 in order.
 //
 // Both manifest.abi_hash and symbol_abi_hash must equal expected_abi_hash
 // per plugin-abi.md §step 4 ("the redundant check catches a malformed
@@ -182,9 +217,9 @@ bool PluginLoaderRegistry::is_collision(
 
 Result<void> PluginLoaderRegistry::validate_all(
     const PluginManifest& manifest,
-    eastl::string_view expected_abi_hash,
-    eastl::string_view symbol_abi_hash,
-    eastl::string_view file_path
+    std::string_view expected_abi_hash,
+    std::string_view symbol_abi_hash,
+    std::string_view file_path
 ) const noexcept {
 
     // Gate 1a: manifest-side ABI hash check (plugin-abi.md §step 4, leading check).
@@ -217,47 +252,78 @@ Result<void> PluginLoaderRegistry::validate_all(
 // Returns an error (without mutating the registry) if name is already
 // registered with a different path.  Same name + same path is an idempotent
 // no-op (returns success without re-inserting).
+//
+// Allocator correctness (HIGH-2 + HIGH-3 fixes):
+//   * PluginRecord is constructed in-place via try_emplace with a
+//     piecewise_construct + forward_as_tuple so the map's own polymorphic
+//     allocator (which wraps mr_) is propagated into PluginRecord via the
+//     uses-allocator protocol (PluginRecord::allocator_type typedef).
+//   * The map key std::pmr::string is constructed exactly ONCE from the
+//     name string_view.  The PluginRecord::name member is then populated
+//     inside PluginRecord's allocator-extended ctor from the same view --
+//     no second heap allocation for the name (HIGH-3).
+//   * Because PluginRecord carries allocator_type, std::pmr::unordered_map's
+//     try_emplace invokes PluginRecord's allocator-extended ctor with the
+//     map's own allocator, so rec.name and rec.path are initialised under
+//     mr_ from construction (not via copy-assign from a default-resource
+//     string) (HIGH-2).
 // ---------------------------------------------------------------------------
 
 Result<void> PluginLoaderRegistry::register_plugin(
-    const PluginManifest& manifest, eastl::string_view path
+    const PluginManifest& manifest, std::string_view path
 ) noexcept {
 
-    // Bridge manifest.name (std::pmr::string) → eastl::string_view once.
-    // All three uses below (collision check, idempotent lookup, and map key
-    // construction) draw from this single materialization.
-    const eastl::string_view name_sv{manifest.name.data(), manifest.name.size()};
+    const std::string_view name_sv{manifest.name};
 
-    // Unconditional precondition check — protects release builds from
+    // Unconditional precondition check -- protects release builds from
     // silent overwrites (replaces the former debug-only assert).
     if (is_collision(name_sv, path)) {
         return std::unexpected(glibre::Error{core::Error::PluginNameCollision});
     }
 
-    const auto it = loaded_.find(name_sv);
-    if (it != loaded_.end()) {
-        // Same name + same path: idempotent re-registration, no-op.
-        return {};
-    }
-
-    // Materialise one eastl::string for rec.name and reuse it as the map key.
-    eastl::string name_owned{name_sv.data(), name_sv.size()};
-
-    PluginRecord rec;
-    rec.name = name_owned;
-    rec.version = manifest.version;
-    rec.path = eastl::string{path.data(), path.size()};
-
-    loaded_.emplace(eastl::move(name_owned), eastl::move(rec));
+    // Construct key and value in-place via uses-allocator protocol.
+    //
+    // LOW-4 fix: collapse redundant contains() + emplace() into a single
+    // emplace call.  emplace returns pair<iterator, bool>; if the key is
+    // already present (same name + same path — is_collision returned false
+    // above, so paths match), inserted == false and we no-op as before.
+    // This eliminates one redundant hash + bucket walk per idempotent
+    // re-registration.
+    //
+    // HIGH-3 fix: name_sv is the single materialization of the plugin name;
+    // both the map key (std::pmr::string) and PluginRecord::name are
+    // constructed from the same string_view — no second heap allocation.
+    //
+    // HIGH-2 fix: emplace(piecewise_construct, ...) on a std::pmr::unordered_map
+    // detects uses_allocator<K> and uses_allocator<V> (both true: pmr::string
+    // has allocator_type; PluginRecord declares allocator_type) and injects
+    // the map's own polymorphic_allocator (which wraps mr_) into BOTH the key
+    // and value constructions via the trailing-allocator convention.
+    //
+    // Do NOT include the allocator in the forward_as_tuple arguments; the
+    // container appends it automatically.  Including it explicitly would pass
+    // two allocators (the explicit one plus the injected one), causing a
+    // "N+1 args to N-param ctor" compile error.
+    //
+    // The injected allocator wraps mr_ (the map's memory_resource), so
+    // rec.name, rec.path, and the map key all allocate under mr_ from
+    // construction — NOT under get_default_resource().
+    loaded_.emplace(
+        std::piecewise_construct,
+        std::forward_as_tuple(name_sv),
+        std::forward_as_tuple(name_sv, manifest.version, path)
+    );
     return {};
 }
 
 // ---------------------------------------------------------------------------
 // is_registered
+//
+// Heterogeneous lookup: std::string_view avoids materialising a temporary
+// std::pmr::string key per call (TransparentStringHash + std::equal_to<>).
 // ---------------------------------------------------------------------------
 
-bool PluginLoaderRegistry::is_registered(eastl::string_view name) const noexcept {
-    // Heterogeneous lookup: no eastl::string allocation per call.
+bool PluginLoaderRegistry::is_registered(std::string_view name) const noexcept {
     return loaded_.find(name) != loaded_.end();
 }
 

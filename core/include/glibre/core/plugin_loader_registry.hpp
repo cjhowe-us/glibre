@@ -34,18 +34,40 @@
 // host_engine_version_).  Mixing registry-of-records state with loader-
 // procedure logic would introduce a second reason to change this class (SRP).
 //
-// PHILOSOPHY §11: EASTL replaces std:: for runtime data structures.
-// std:: is retained for std::expected (Result alias) and std::filesystem.
+// Container + string migration (reviews/decisions/eastl-removal.md plan #1044):
+//   eastl::hash_map<eastl::string, V>  →  std::pmr::unordered_map<
+//       std::pmr::string, V,
+//       glibre::TransparentStringHash,
+//       std::equal_to<>                   // transparent equality
+//   >  backed by PerContextAllocatorResource{ContextTag::core}.
+//
+//   Open Question 2 resolution: __cpp_lib_flat_map = 202511 on the locked
+//   toolchain (Apple Silicon clang 22, macOS 26), so std::flat_map IS shipped.
+//   However std::pmr::flat_map does NOT exist as a namespace alias in libc++ 22
+//   (unlike std::pmr::unordered_map which is a C++17 alias).  Per the fallback
+//   rule ("if std::pmr::flat_* unavailable, use std::pmr::unordered_*"), this
+//   plan uses std::pmr::unordered_map.  A follow-up PLAN may add a
+//   std::flat_map-backed variant once the PMR alias lands in libc++.
+//
+//   eastl::string_view parameters → std::string_view (row 2, ships C++17).
+//   eastl::string members         → std::pmr::string (row 1, ships C++17).
+//
+//   Heterogeneous lookup (MED-3: no per-call key materialisation):
+//     loaded_.find(std::string_view{...})  — no std::pmr::string allocation
+//     per lookup; std::equal_to<> provides the transparent equality.
 //
 // PHILOSOPHY §9: "Plugin ABI gated by middleman dylib hash."
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <memory_resource>
+#include <string>
+#include <string_view>
+#include <unordered_map>
 
-#include <EASTL/functional.h>
-#include <EASTL/hash_map.h>
-#include <EASTL/string.h>
-#include <EASTL/string_view.h>
-#include <EASTL/vector.h>
+#include <glibre/alloc.hpp>
+#include <glibre/compat/transparent_string_hash.hpp>
 #include <glibre/core/frame_phase.hpp>
 #include <glibre/core/plugin_manifest.hpp>
 #include <glibre/error.hpp>
@@ -57,12 +79,37 @@ namespace glibre::core {
 //
 // Stored in the registry after a plugin passes all gates.  The record is
 // used by subsequent loads for name-collision and dependency checks.
+//
+// Allocator-awareness: PluginRecord declares allocator_type and an
+// allocator-extended constructor so that std::pmr::unordered_map's
+// try_emplace/piecewise_construct path constructs the value directly under
+// the map's allocator.  Without this, default-constructing a PluginRecord
+// and then copy-assigning pmr::string members falls back to
+// get_default_resource() for the destination (PMR's non-propagating
+// move-assign semantics), silently bypassing the per-context ceiling
+// enforced by PluginLoaderRegistry::mr_.
 // ---------------------------------------------------------------------------
 
 struct PluginRecord {
-    eastl::string name;  // manifest.name  — must be unique
-    SemVer version;      // manifest.version
-    eastl::string path;  // filesystem path to the .dylib (may be empty in tests)
+    using allocator_type = std::pmr::polymorphic_allocator<std::byte>;
+
+    // No default ctor: every PluginRecord must be allocator-aware (HIGH-2 fix,
+    // plan #1044).  If you need a default-resource record in tests, construct
+    // explicitly with std::pmr::polymorphic_allocator<std::byte>{}.
+    PluginRecord() = delete;
+
+    // Allocator-extended constructor: wires name and path to the supplied
+    // allocator so both strings live under the caller's memory resource.
+    explicit PluginRecord(
+        std::string_view name_sv, SemVer ver, std::string_view path_sv, const allocator_type& alloc
+    )
+        : name{name_sv, alloc},
+          version{ver},
+          path{path_sv, alloc} {}
+
+    std::pmr::string name;  // manifest.name  — must be unique
+    SemVer version;         // manifest.version
+    std::pmr::string path;  // filesystem path to the .dylib (may be empty in tests)
 };
 
 // ---------------------------------------------------------------------------
@@ -71,12 +118,28 @@ struct PluginRecord {
 // Thread safety: None.  Mutations must happen during phase 8 (HotReload)
 // when the world is already drained (frame-phases.md §8).  No external
 // locking is provided; the engine's frame-phase barrier is the only guard.
+//
+// Allocator: PluginLoaderRegistry holds a PerContextAllocatorResource backed
+// by the core context allocator (ContextTag::core).  All PMR containers in
+// this class allocate under the core context ceiling (perf-budget.md §1).
+// The allocator is injected at construction time; production callers pass the
+// real PerContextAllocator; tests may pass any std::pmr::memory_resource*.
+//
+// Member declaration order (critical for RAII):
+//   mr_ must be declared before loaded_ so the resource outlives the map.
 // ---------------------------------------------------------------------------
 
 class PluginLoaderRegistry {
 public:
     // -----------------------------------------------------------------------
-    // PluginLoaderRegistry() — default-constructed, empty registry.
+    // PluginLoaderRegistry(host_engine_version, mr) — resource-injected ctor.
+    //
+    // `mr` backs all PMR string and map storage in this registry.  The
+    // parameter is REQUIRED: callers must explicitly choose a resource.
+    // Production callers pass a PerContextAllocatorResource (perf-budget.md
+    // §1 core ceiling).  Tests pass std::pmr::get_default_resource()
+    // explicitly so per-context tracking is consciously opt-in and no
+    // callsite silently falls through to the global default.
     //
     // The host engine version is injected at construction time so that it
     // participates in gate checks without coupling the registry to a global
@@ -84,7 +147,9 @@ public:
     // real `glibre_core_version` value.
     // -----------------------------------------------------------------------
 
-    explicit PluginLoaderRegistry(SemVer host_engine_version) noexcept;
+    explicit PluginLoaderRegistry(
+        SemVer host_engine_version, std::pmr::memory_resource* mr
+    ) noexcept;
 
     // -----------------------------------------------------------------------
     // validate_manifest_abi_hash — gate 1a (manifest field only).
@@ -99,7 +164,7 @@ public:
     // -----------------------------------------------------------------------
 
     [[nodiscard]] Result<void> validate_manifest_abi_hash(
-        const PluginManifest& manifest, eastl::string_view expected_abi_hash
+        const PluginManifest& manifest, std::string_view expected_abi_hash
     ) const noexcept;
 
     // -----------------------------------------------------------------------
@@ -114,7 +179,7 @@ public:
     // -----------------------------------------------------------------------
 
     [[nodiscard]] Result<void> validate_symbol_abi_hash(
-        eastl::string_view symbol_abi_hash, eastl::string_view expected_abi_hash
+        std::string_view symbol_abi_hash, std::string_view expected_abi_hash
     ) const noexcept;
 
     // -----------------------------------------------------------------------
@@ -142,9 +207,8 @@ public:
     // On collision returns core::Error::PluginNameCollision.
     // -----------------------------------------------------------------------
 
-    [[nodiscard]] Result<void> validate_name_unique(
-        const PluginManifest& manifest, eastl::string_view file_path
-    ) const noexcept;
+    [[nodiscard]] Result<void>
+    validate_name_unique(const PluginManifest& manifest, std::string_view file_path) const noexcept;
 
     // -----------------------------------------------------------------------
     // validate_dependencies — run gate 4 (dependency resolution).
@@ -200,9 +264,9 @@ public:
 
     [[nodiscard]] Result<void> validate_all(
         const PluginManifest& manifest,
-        eastl::string_view expected_abi_hash,
-        eastl::string_view symbol_abi_hash,
-        eastl::string_view file_path
+        std::string_view expected_abi_hash,
+        std::string_view symbol_abi_hash,
+        std::string_view file_path
     ) const noexcept;
 
     // -----------------------------------------------------------------------
@@ -224,13 +288,16 @@ public:
     // -----------------------------------------------------------------------
 
     [[nodiscard]] Result<void>
-    register_plugin(const PluginManifest& manifest, eastl::string_view path) noexcept;
+    register_plugin(const PluginManifest& manifest, std::string_view path) noexcept;
 
     // -----------------------------------------------------------------------
     // is_registered — query whether a plugin name is already registered.
+    //
+    // Heterogeneous lookup: std::string_view avoids materialising a temporary
+    // std::pmr::string key per call (TransparentStringHash + std::equal_to<>).
     // -----------------------------------------------------------------------
 
-    [[nodiscard]] bool is_registered(eastl::string_view name) const noexcept;
+    [[nodiscard]] bool is_registered(std::string_view name) const noexcept;
 
     // -----------------------------------------------------------------------
     // loaded_count — number of successfully registered plugins.
@@ -252,19 +319,31 @@ private:
     // -----------------------------------------------------------------------
 
     [[nodiscard]] bool
-    is_collision(eastl::string_view name, eastl::string_view file_path) const noexcept;
+    is_collision(std::string_view name, std::string_view file_path) const noexcept;
 
     SemVer host_engine_version_;
 
-    // key = plugin name (eastl::string), value = PluginRecord
-    // eastl::hash_map per PHILOSOPHY §11 (EASTL containers).
+    // mr_ must be declared before loaded_ (RAII: resource outlives map).
+    // Points to the backing resource injected at construction.  Production
+    // callers pass a PerContextAllocatorResource; tests pass get_default_resource().
+    std::pmr::memory_resource* mr_;
+
+    // key = plugin name (std::pmr::string), value = PluginRecord.
     //
-    // transparent_string_hash + equal_to<void> enable heterogeneous lookup:
-    //   loaded_.find(eastl::string_view{...})  — no eastl::string allocation
+    // Container choice (plan #1044, Open Question 2):
+    //   std::flat_map is shipped (__cpp_lib_flat_map = 202511) but
+    //   std::pmr::flat_map does NOT exist as a namespace alias in libc++ 22.
+    //   Fallback to std::pmr::unordered_map per eastl-removal.md OQ-2.
+    //
+    // TransparentStringHash + std::equal_to<> enable heterogeneous lookup:
+    //   loaded_.find(std::string_view{...})  — no std::pmr::string allocation
     //   per lookup (MED-3: avoids per-call key materialisation).
-    eastl::
-        hash_map<eastl::string, PluginRecord, eastl::transparent_string_hash, eastl::equal_to<void>>
-            loaded_;
+    std::pmr::unordered_map<
+        std::pmr::string,
+        PluginRecord,
+        glibre::TransparentStringHash,
+        std::equal_to<>>
+        loaded_;
 };
 
 }  // namespace glibre::core
