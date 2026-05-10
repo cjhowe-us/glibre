@@ -109,8 +109,8 @@ public:
     //
     // -fno-exceptions clean; noexcept.
     //
-    // FOLLOWUP(#249-wiring): add World& and PluginLoader& parameters when
-    // those are wired into FrameLoop::tick() (tracked under FOLLOWUP(ecs-world)).
+    // TODO(#1104): add (World&, PluginLoader&) per SPEC §5.8 once both are wired
+    // into FrameLoop::tick() (prerequisite: ECS World plan and PluginLoader wiring).
     [[nodiscard]] glibre::Result<std::size_t> step() noexcept {
         // Fast path: single relaxed-atomic load.
         // Per hot-reload-protocol.md §Decision and frame-phases.md open question

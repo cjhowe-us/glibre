@@ -495,7 +495,8 @@ TEST_CASE(
 //
 // Also verifies that set_phase_hooks() returns Result<void>:
 //   - Phase::HotReload → success (has_value).
-//   - Any other phase → core::Error::InvalidArgument (not has_value).
+//   - Any other phase (e.g. Phase::Input) → also success (has_value).
+//     All nine phases are stored; no phase is rejected.
 //
 // Authority: plan #599 §Unit Test Plan — phase_8_hook_wraps_barrier_call.
 //            SPEC §5.7 (PhaseHooks, set_phase_hooks returns Result<void>).

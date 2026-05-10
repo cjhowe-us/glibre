@@ -20,10 +20,10 @@
 // in registration order.
 //
 // PhaseHooks / set_phase_hooks() / Phase 8 hot_reload_queue_.step() call site
-// are per plan #599 (HotReloadBarrier call-site wiring).  Phase 8 fires
-// on_enter before step() and on_exit after, per SPEC §5.7 / §6.5.
-// execute_pending_reloads removed: HotReloadRequestQueue::step() (SPEC §5.8)
-// now encapsulates both the fast-path check and the slow-path stub.
+// are per plan #599 (HotReloadBarrier call-site wiring).  Phase 8 is a distinct
+// inline call in tick() (not via run_phase) per SPEC §6.5 — hooks fire around
+// step() in tick() directly.  execute_pending_reloads removed: step() (SPEC §5.8)
+// encapsulates both the fast-path check and the slow-path stub.
 
 #include "glibre/core/frame_loop.hpp"
 
@@ -98,14 +98,14 @@ void FrameLoop::set_phase_registry(PhaseRegistry* registry) noexcept { phase_reg
 // ---------------------------------------------------------------------------
 // set_phase_hooks — register observer hooks for a specific phase.  (plan #599)
 //
-// Currently stores hooks for Phase::HotReload (8) only.  Future plans extend
-// storage to all nine phases; for now a single PhaseHooks slot is sufficient
-// for the editor/e2e observer pattern described in the plan.
+// Stores hooks in phase_hooks_[ordinal - 1] for all nine phases (Input through
+// Present).  No phase is rejected; every caller receives a real stored entry
+// that fires on the next tick() call.
 //
-// Returns core::Error::InvalidArgument for any phase other than Phase::HotReload
-// so that callers wiring an observer for an unsupported phase receive an explicit
-// diagnostic rather than a silent no-op (LOW-1 round-1 review).  Future plans
-// extend the slot table and widen the accepted phase set.
+// Returns glibre::Result<void> per SPEC §5.7.  Always succeeds in this
+// implementation; the Result<void> return type is retained so that future
+// error paths (e.g., invalid phase ordinal guard) can be added without
+// changing the call-site signature.
 // ---------------------------------------------------------------------------
 
 [[nodiscard]] glibre::Result<void>
@@ -263,55 +263,20 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
         if (hooks.on_exit)
             hooks.on_exit(phase);
         break;
-    case Phase::HotReload: {
-        // Phase 8: hot-reload drain barrier (SPEC §4.6, plan #599, plan #249).
+    case Phase::HotReload:
+        // Phase 8 is dispatched directly from tick() as a distinct barrier call
+        // per SPEC §6.5 ("inserted between phases 7 and 8 as a distinct call
+        // rather than threaded through run_phase").  run_phase is NOT called for
+        // Phase::HotReload by tick().  This case is unreachable in normal execution
+        // and exists only to maintain switch exhaustiveness.
         //
-        // Execution order (plan #599):
-        //   (A) on_enter hook fires (if set via set_phase_hooks(Phase::HotReload))
-        //   (B) hot_reload_queue_.step() — single relaxed-atomic load on fast path
-        //       (pending_ == 0); drain→swap→migrate→resume on slow path
-        //       (SPEC §6.7; slow-path bodies in plans #249-#258).
-        //   (C) on_exit hook fires (if set)
-        //
-        // hot_reload_queue_.step() returns Result<std::size_t>:
-        //   0 — fast path (idle, no reloads pending).
-        //   N — N requests processed.
-        //   unexpected — slow-path refusal (propagated to tick() caller).
-        //
-        // Per hot-reload-protocol.md §Decision: "Plugin code does not execute
-        // during phase 8.  No system bodies run."  Both fast and slow paths
-        // return directly from this case, bypassing system dispatch.
-        //
-        // FOLLOWUP(plan-981-wiring): wire FramePhaseTracker / validate_drain_phase
-        // once that plan lands.  The GLIBRE_TESTING injection below exercises
-        // the "tick halts on phase failure" path from plan #247 Unit Test Plan.
-        //
-        // GLIBRE_TESTING injection: when inject_phase8_failure_ is armed,
-        // simulate a drain-phase refusal so tests can verify that frame_counter_
-        // and world_tick_ do not advance when Phase 8 fails.
-#ifdef GLIBRE_TESTING
-        if (inject_phase8_failure_) {
-            return std::unexpected(glibre::Error{core::Error::FramePhaseMisordered});
-        }
-#endif
-        // (A) on_enter hook — fires before step().
-        if (hooks.on_enter != nullptr) {
-            hooks.on_enter(Phase::HotReload);
-        }
-        // (B) step() — single relaxed-atomic load on fast path (SPEC §6.7).
-        //     Returns 0 when idle (fast path, no allocation, no observer event).
-        //     Propagate slow-path refusal errors back to tick() if they occur.
-        auto step_result = hot_reload_queue_.step();
-        // (C) on_exit hook — fires after step() regardless of result.
-        if (hooks.on_exit != nullptr) {
-            hooks.on_exit(Phase::HotReload);
-        }
-        if (!step_result) {
-            return std::unexpected(std::move(step_result.error()));
-        }
-        // Phase 8 never reaches system dispatch (no system bodies per protocol).
-        return {};
-    }
+        // TODO(plan-981-wiring): wire FramePhaseTracker / validate_drain_phase here
+        // when that plan lands and this case becomes reachable.
+        if (hooks.on_enter)
+            hooks.on_enter(phase);
+        if (hooks.on_exit)
+            hooks.on_exit(phase);
+        break;
     case Phase::Present: /* platform — drains transient arenas at frame end */
         // Phase 9 bookkeeping order (perf-budget.md §CI Gate Spec, plan #241;
         //                            plan #247 §Scope):
@@ -385,10 +350,16 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
 // ---------------------------------------------------------------------------
 // tick — advance one engine frame.
 //
-// Phases are walked in strict numeric order (1 through 9) using the
-// kPhaseTable as the authoritative ordering source.  A per-phase counter
-// (expected_ordinal) advances monotonically; run_phase validates it in
-// debug builds.
+// Phases 1–7 (Input through RenderSubmit) are dispatched through run_phase().
+// Phase 8 (HotReload) is a distinct call per SPEC §6.5: hot_reload_queue_.step()
+// is called directly here between phases 7 and 9, NOT threaded through run_phase.
+// This seam is load-bearing: Phase 8 has no system-schedule body (no reads/writes
+// dispatch); the §6.4 DAG machinery does not apply.  Hooks (on_enter/on_exit) are
+// fired inline around the step() call.
+// Phase 9 (Present) is dispatched through run_phase() after the barrier.
+//
+// A per-phase counter (expected_ordinal) advances monotonically; run_phase
+// validates it in debug builds.
 //
 // No heap allocation occurs inside this function.
 // ---------------------------------------------------------------------------
@@ -400,7 +371,11 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
     last_tick_phase_count_ = 0;
 #endif
 
+    // --- Phases 1–7: Input through RenderSubmit ---
     for (const PhaseDesc& desc : kPhaseTable) {
+        if (desc.id == Phase::HotReload) {
+            break;  // Phase 8 handled below as a distinct barrier call (SPEC §6.5)
+        }
         auto result = run_phase(desc.id, expected_ordinal);
         if (!result) {
             return result;  // propagate error; frame_index_ not incremented
@@ -416,6 +391,68 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
         ++last_tick_phase_count_;
 #endif
         ++expected_ordinal;
+    }
+
+    // --- Phase 8: HotReload barrier — distinct call per SPEC §6.5 ---
+    //
+    // SPEC §6.5 sketch (specs/core/SPEC.md §6.5):
+    //   run_phase(Phase::RenderSubmit, w, s);  // 7
+    //   barrier_.step(w, plugins_);             // 8: distinct, not via run_phase
+    //   run_phase(Phase::Present,      w, s);  // 9
+    //
+    // hot_reload_queue_.step() returns Result<std::size_t>:
+    //   0   — fast path (idle, no reloads pending; single relaxed-atomic load).
+    //   N   — N reload requests processed (drain → swap → migrate → resume).
+    //   err — slow-path refusal (propagated to tick() caller, halting the frame).
+    //
+    // PhaseHooks (on_enter / on_exit) fire around step() so that observers
+    // (editor, e2e) can wrap Phase 8 without owning the queue (plan #599 §Scope).
+    //
+    // TODO(#1104): add (World&, PluginLoader&) per SPEC §5.8 once both are wired.
+    {
+        constexpr auto k_hot_reload_ordinal = static_cast<std::uint8_t>(Phase::HotReload);
+        const PhaseHooks& hooks = phase_hooks_[k_hot_reload_ordinal - 1u];
+
+#ifdef GLIBRE_TESTING
+        // GLIBRE_TESTING injection: when inject_phase8_failure_ is armed,
+        // simulate a drain-phase refusal so tests can verify that frame_counter_
+        // and world_tick_ do not advance when Phase 8 fails.
+        if (inject_phase8_failure_) {
+            return std::unexpected(glibre::Error{core::Error::FramePhaseMisordered});
+        }
+#endif
+
+        if (hooks.on_enter != nullptr) {
+            hooks.on_enter(Phase::HotReload);
+        }
+        auto step_result = hot_reload_queue_.step();
+        if (hooks.on_exit != nullptr) {
+            hooks.on_exit(Phase::HotReload);
+        }
+        if (!step_result) {
+            return std::unexpected(std::move(step_result.error()));
+        }
+
+#ifdef GLIBRE_TESTING
+        last_tick_phase_ordinals_[last_tick_phase_count_] = k_hot_reload_ordinal;
+        last_tick_per_phase_world_ticks_[last_tick_phase_count_] = world_tick_;
+        ++last_tick_phase_count_;
+#endif
+        expected_ordinal = k_hot_reload_ordinal + 1u;
+    }
+
+    // --- Phase 9: Present ---
+    {
+        auto result = run_phase(Phase::Present, expected_ordinal);
+        if (!result) {
+            return result;
+        }
+#ifdef GLIBRE_TESTING
+        last_tick_phase_ordinals_[last_tick_phase_count_] =
+            static_cast<std::uint8_t>(Phase::Present);
+        last_tick_per_phase_world_ticks_[last_tick_phase_count_] = world_tick_;
+        ++last_tick_phase_count_;
+#endif
     }
 
     ++frame_index_;

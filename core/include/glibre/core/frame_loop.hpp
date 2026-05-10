@@ -24,8 +24,9 @@
 //
 // Plan #599 additions:
 //   - PhaseHooks / PhaseHookFn: per-phase observer hook pair (on_enter / on_exit).
-//   - set_phase_hooks(): register observer hooks for Phase::HotReload.
-//   - Phase 8 body calls hot_reload_queue_.step() wrapped by phase_8_hooks_.
+//   - set_phase_hooks(): register observer hooks for any of the nine phases.
+//   - Phase 8 (HotReload): tick() calls hot_reload_queue_.step() as a distinct
+//     inline call (not via run_phase), with hooks firing around it per SPEC §6.5.
 //
 // Round-1 review reconciliation (HIGH-1, plan #599):
 //   hot_reload_barrier.hpp is removed; HotReloadRequestQueue is the single
@@ -70,9 +71,9 @@ namespace glibre::core {
 //
 // MED-2 PUSHBACK (round-1 review): PhaseHookFn does NOT carry World& in
 // this PR because World is not yet wired into FrameLoop::tick().  The SPEC
-// §5.7 shape is the target; the FOLLOWUP comment below is the gate.
+// §5.7 shape is the target; tracked as #1103.
 //
-// FOLLOWUP(ecs-world): once World& is threaded into tick(), change to:
+// TODO(#1103): once World& is threaded into tick(), change to:
 //   using PhaseHookFn = void (*)(World& world, Phase phase) noexcept;
 // and add world to every on_enter / on_exit call site below.
 // ---------------------------------------------------------------------------
@@ -311,8 +312,9 @@ private:
     // hot_reload_queue_ — the SPEC §4.6 aggregate: pending-reload counter and
     // step gate for Phase 8.  FrameLoop owns this as a value member (single
     // instance per FrameLoop, satisfying §4.6 invariant 6 "single-position
-    // barrier").  Phase 8 calls hot_reload_queue_.step() once per tick, wrapped
-    // by phase_8_hooks_.  Callers enqueue requests via hot_reload_queue().
+    // barrier").  tick() calls hot_reload_queue_.step() once per frame as a
+    // distinct inline call between phases 7 and 9 (SPEC §6.5, not via run_phase).
+    // Callers enqueue requests via hot_reload_queue().
     // Authority: plan #249; SPEC §5.8.
     HotReloadRequestQueue hot_reload_queue_;
 
