@@ -201,11 +201,14 @@ TEST_CASE("geometry_blas_recipe_record_schema_parses", "[geometry][schemas][blas
     const TypeDecl& td_desc = schema.types[1];
     CHECK(td_desc.fqn == eastl::string("glibre.geometry.BLASGeometryDescriptor"));
     CHECK(td_desc.version == 1);
-    // BLASGeometryDescriptor fields: tags 1,2 (2) + tags 10-13 (4) + tags 20-22 (3) + tag 30 (1) = 10.
+    // BLASGeometryDescriptor fields: tags 1,2 (2) + tags 10-13 (4) + tags 20-22 (3) + tag 30 (1)
+    // = 10.
     CHECK(td_desc.fields.size() == 10);
 }
 
-TEST_CASE("geometry_mesh_source_metadata_schema_parses", "[geometry][schemas][mesh_source_metadata]") {
+TEST_CASE(
+    "geometry_mesh_source_metadata_schema_parses", "[geometry][schemas][mesh_source_metadata]"
+) {
     auto result = parse_string(k_mesh_source_metadata_src, "geometry/MeshSourceMetadata.fory");
     REQUIRE(result.has_value());
 
