@@ -112,6 +112,11 @@ TEST_CASE("world: entity_foreign_world_arm_present", "[world][entity][error]") {
     CHECK(*inner == glibre::core::Error::EntityForeignWorld);
 
     // B (runtime): EntityForeignWorld and EntityStale must have distinct values.
+    // Kept as defensive documentation alongside the compile-time static_assert:
+    // the constexpr evaluation happens in this TU, but if enum layout were ever
+    // altered in a separate TU and the ODR-violated binary shipped, the runtime
+    // check would still catch it.  Non-blocking by policy but costs nothing to
+    // leave in.
     CHECK(
         static_cast<std::uint16_t>(glibre::core::Error::EntityForeignWorld) !=
         static_cast<std::uint16_t>(glibre::core::Error::EntityStale)
