@@ -36,6 +36,8 @@ add_library(glibre-core STATIC
     src/type_registry/type_registry.cpp  # TypeRegistry immutable-after-init lookup (plan #597)
     src/world/entity_allocator.cpp       # Generational entity allocator (plan #557)
     src/asset/asset_registry.cpp         # AssetRegistry process-wide singleton (plan #598)
+    src/schedule/dag_builder.cpp         # DAG builder: access-set + after/before topological sort (plan #584)
+    src/schedule/schedule.cpp            # Schedule: register/unregister/compile + CompiledPhase (plan #584)
 )
 
 # spdlog — structured logging.  Used by log_error.cpp (plan #236).
