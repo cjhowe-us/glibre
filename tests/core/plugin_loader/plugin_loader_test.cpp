@@ -405,10 +405,7 @@ TEST_CASE("invalid_manifest_returns_plugin_manifest_invalid", "[core][plugin_loa
 // loudly.
 // ---------------------------------------------------------------------------
 
-TEST_CASE(
-    "core/plugin_loader: load_returns_pmr_handle",
-    "[core][plugin_loader]"
-) {
+TEST_CASE("core/plugin_loader: load_returns_pmr_handle", "[core][plugin_loader]") {
 #ifndef GLIBRE_NOOP_DYLIB_PATH
     SKIP("GLIBRE_NOOP_DYLIB_PATH not defined; build with GLIBRE_BUILD_EXAMPLES=ON");
 #else
