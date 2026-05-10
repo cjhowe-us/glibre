@@ -232,8 +232,8 @@ private:
     // fn:  the callable.  Fixed storage, no heap pointer.
     // -----------------------------------------------------------------------
     struct SystemEntry {
-        eastl::string  fqn;
-        PhaseSystemFn  fn;
+        eastl::string fqn;
+        PhaseSystemFn fn;
 
         SystemEntry(eastl::string_view f, PhaseSystemFn cb) noexcept
             : fqn(f.data(), f.size()),

@@ -62,11 +62,9 @@ TEST_CASE("core/phase_registry: register_system_idempotent", "[core][phase_regis
     CHECK(reg.total_system_count() == 1U);
 
     // (b) Register a different fqn in the same phase — must create a new entry.
-    reg.register_system(
-        Phase::Transform, "core.transform.shadow_update", [&call_count]() noexcept {
-            ++call_count;
-        }
-    );
+    reg.register_system(Phase::Transform, "core.transform.shadow_update", [&call_count]() noexcept {
+        ++call_count;
+    });
     CHECK(reg.system_count(Phase::Transform) == 2U);
     CHECK(reg.total_system_count() == 2U);
 
@@ -97,8 +95,7 @@ TEST_CASE("core/phase_registry: register_system_idempotent", "[core][phase_regis
 //       invokes registered systems the expected number of times.
 // ===========================================================================
 TEST_CASE(
-    "core/phase_registry: register_system_idempotent frameloop smoke",
-    "[core][phase_registry]"
+    "core/phase_registry: register_system_idempotent frameloop smoke", "[core][phase_registry]"
 ) {
     using namespace glibre::core;
 
@@ -109,11 +106,9 @@ TEST_CASE(
     reg.register_system(Phase::Transform, "core.transform.propagate", [&call_count]() noexcept {
         ++call_count;
     });
-    reg.register_system(
-        Phase::Transform, "core.transform.shadow_update", [&call_count]() noexcept {
-            ++call_count;
-        }
-    );
+    reg.register_system(Phase::Transform, "core.transform.shadow_update", [&call_count]() noexcept {
+        ++call_count;
+    });
     REQUIRE(reg.system_count(Phase::Transform) == 2U);
 
     // Direct invocation baseline: 2 systems fire once each.

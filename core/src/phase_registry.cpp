@@ -30,7 +30,9 @@ namespace glibre::core {
 // register_system — add a system to a phase slot.
 // ---------------------------------------------------------------------------
 
-void PhaseRegistry::register_system(Phase phase, eastl::string_view fqn, PhaseSystemFn fn) noexcept {
+void PhaseRegistry::register_system(
+    Phase phase, eastl::string_view fqn, PhaseSystemFn fn
+) noexcept {
     // NOLINT: pro-bounds-*-array-index — phase_index() returns [0, kPhaseCount-1]
     // by construction from the closed-enum Phase (see phase_registry.hpp rationale).
     // NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
