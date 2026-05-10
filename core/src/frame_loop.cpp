@@ -13,6 +13,11 @@
 //
 // PerfBudget reset at phase 9 (Phase::Present) is per
 // perf-budget.md §CI Gate Spec and plan #241.
+//
+// PhaseRegistry system dispatch at each phase is per plan #245
+// (phase ownership + system register API).  Registered systems are
+// invoked inside run_phase() after the built-in MVP phase body,
+// in registration order.
 
 #include "glibre/core/frame_loop.hpp"
 
@@ -20,6 +25,7 @@
 #include <optional>
 
 #include "glibre/core/frame_phase.hpp"
+#include "glibre/core/phase_registry.hpp"
 #include "glibre/core/world_tick.hpp"
 #include "glibre/error.hpp"
 #include "glibre/perf_budget.hpp"
@@ -73,6 +79,16 @@ FrameLoop::register_transient_arena(glibre::TransientArena* arena) noexcept {
 // ---------------------------------------------------------------------------
 
 void FrameLoop::set_perf_budget(glibre::PerfBudget* budget) noexcept { perf_budget_ = budget; }
+
+// ---------------------------------------------------------------------------
+// set_phase_registry — attach (or detach) a PhaseRegistry.  (plan #245)
+//
+// Out-of-line for seam consistency.  See header doc-comment for contract.
+// ---------------------------------------------------------------------------
+
+void FrameLoop::set_phase_registry(PhaseRegistry* registry) noexcept {
+    phase_registry_ = registry;
+}
 
 // ---------------------------------------------------------------------------
 // present_reset_perf_budget — Phase::Present step (1).
@@ -254,6 +270,17 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
         advance_world_tick(world_tick_);  // (4) tick N complete; N+1 may begin
         ++frame_counter_;                 // (5) present-phase frame counter
         break;
+    }
+
+    // --- System dispatch (plan #245) ---
+    // After the built-in MVP phase body, invoke all registered systems for
+    // this phase in registration order.  No allocation occurs here — the
+    // iteration is a range walk over a pre-built eastl::vector inside
+    // PhaseRegistry::for_each_system().
+    //
+    // Null phase_registry_ means no systems registered (the default state).
+    if (phase_registry_ != nullptr) {
+        phase_registry_->for_each_system(phase, [](SystemFn& fn) { fn(); });
     }
 
     return {};  // success — no allocation
