@@ -123,7 +123,7 @@ TEST_CASE("shader_source_include_closure_rejects_escape_and_cycle", "[shader][sh
     auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
     REQUIRE_FALSE(result.has_value());
 
-    // eastl::variant holds glibre::shader::Error.
+    // std::variant holds glibre::shader::Error (per eastl-removal.md §4).
     const auto& err = result.error();
     const bool is_cycle =
         std::holds_alternative<glibre::shader::Error>(err.code()) &&
