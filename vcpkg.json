@@ -18,8 +18,7 @@
     "fmt",
     "xxhash",
     "blake3",
-    "shader-slang",
-    "eastl"
+    "shader-slang"
   ],
   "features": {
     "tests": {
