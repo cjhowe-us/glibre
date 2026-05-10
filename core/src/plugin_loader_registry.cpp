@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 namespace glibre::core {
 
@@ -67,7 +68,9 @@ Result<void> PluginLoaderRegistry::validate_manifest_abi_hash(
     const PluginManifest& manifest, eastl::string_view expected_abi_hash
 ) const noexcept {
 
-    if (manifest.abi_hash != expected_abi_hash) {
+    // manifest.abi_hash is std::pmr::string; expected_abi_hash is eastl::string_view.
+    // Bridge via string_view so std::pmr::string::operator== can compare.
+    if (manifest.abi_hash != std::string_view{expected_abi_hash.data(), expected_abi_hash.size()}) {
         return std::unexpected(glibre::Error{core::Error::PluginAbiHashMismatch});
     }
     return {};
@@ -137,10 +140,10 @@ Result<void> PluginLoaderRegistry::validate_name_unique(
 Result<void>
 PluginLoaderRegistry::validate_dependencies(const PluginManifest& manifest) const noexcept {
 
-    for (const eastl::string& dep : manifest.depends_on) {
-        // Heterogeneous lookup: eastl::string_view avoids materialising a
-        // temporary eastl::string key per call (transparent_string_hash).
-        if (loaded_.find(eastl::string_view{dep}) == loaded_.end()) {
+    for (const std::pmr::string& dep : manifest.depends_on) {
+        // Heterogeneous lookup: eastl::string_view{dep.data(), dep.size()} bridges
+        // the std::pmr::string element to the eastl::transparent_string_hash key.
+        if (loaded_.find(eastl::string_view{dep.data(), dep.size()}) == loaded_.end()) {
             return std::unexpected(glibre::Error{core::Error::PluginDependencyMissing});
         }
     }
@@ -220,24 +223,32 @@ Result<void> PluginLoaderRegistry::register_plugin(
     const PluginManifest& manifest, eastl::string_view path
 ) noexcept {
 
+    // Bridge manifest.name (std::pmr::string) → eastl::string_view once.
+    // All three uses below (collision check, idempotent lookup, and map key
+    // construction) draw from this single materialization.
+    const eastl::string_view name_sv{manifest.name.data(), manifest.name.size()};
+
     // Unconditional precondition check — protects release builds from
     // silent overwrites (replaces the former debug-only assert).
-    if (is_collision(eastl::string_view{manifest.name.c_str()}, path)) {
+    if (is_collision(name_sv, path)) {
         return std::unexpected(glibre::Error{core::Error::PluginNameCollision});
     }
 
-    const auto it = loaded_.find(manifest.name);
+    const auto it = loaded_.find(name_sv);
     if (it != loaded_.end()) {
         // Same name + same path: idempotent re-registration, no-op.
         return {};
     }
 
+    // Materialise one eastl::string for rec.name and reuse it as the map key.
+    eastl::string name_owned{name_sv.data(), name_sv.size()};
+
     PluginRecord rec;
-    rec.name = manifest.name;
+    rec.name = name_owned;
     rec.version = manifest.version;
     rec.path = eastl::string{path.data(), path.size()};
 
-    loaded_.emplace(manifest.name, eastl::move(rec));
+    loaded_.emplace(eastl::move(name_owned), eastl::move(rec));
     return {};
 }
 

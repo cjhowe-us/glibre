@@ -50,8 +50,8 @@ glibre::core::PluginManifest make_manifest(
     std::uint16_t patch = 0
 ) {
     glibre::core::PluginManifest m;
-    m.name = eastl::string{name};
-    m.abi_hash = eastl::string{abi_hash};
+    m.name = name;          // std::pmr::string from const char*
+    m.abi_hash = abi_hash;  // std::pmr::string from const char*
     m.version = glibre::core::SemVer{major, minor, patch};
     return m;
 }

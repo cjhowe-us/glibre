@@ -6,13 +6,19 @@
 //   - plugin_manifest_round_trip
 //   - plugin_manifest_open_returns_not_found_on_missing_path
 //
-// Scope: schema correctness and open() error paths.
+// Named test cases added by plan #1042 (EASTL → std::pmr migration):
+//   - core/plugin_manifest: pmr_string_fields_thread_allocator
+//
+// Scope: schema correctness, open() error paths, PMR allocator threading.
 // Out of scope: Fory serialisation (plan #225), loader sequence (#229..#231).
 
 #include <filesystem>
+#include <memory_resource>
+#include <string_view>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "glibre/alloc.hpp"
 #include "glibre/core/plugin_manifest.hpp"
 #include "glibre/error.hpp"
 
@@ -73,7 +79,7 @@ static PluginManifest make_test_manifest() {
 //  - The struct is an aggregate (static_assert in header guarantees this at
 //    compile time; this test exercises the runtime value path).
 //  - Copy construction and equality comparison are correct (operator==
-//    delegates to per-field EASTL/scalar equality).
+//    delegates to per-field std::pmr::string / scalar equality).
 //  - All sub-struct types (SemVer, ComponentDecl, SystemDecl, PassDecl,
 //    PanelDecl) round-trip correctly through copy.
 // ---------------------------------------------------------------------------
@@ -81,7 +87,7 @@ static PluginManifest make_test_manifest() {
 TEST_CASE("plugin_manifest_round_trip", "[core][plugin_manifest]") {
     const PluginManifest original = make_test_manifest();
 
-    // Copy — exercises eastl::string / eastl::vector deep-copy paths.
+    // Copy — exercises std::pmr::string / std::pmr::vector deep-copy paths.
     const PluginManifest copy = original;  // NOLINT(performance-unnecessary-copy-initialization)
 
     // Top-level scalar and string fields.
@@ -152,7 +158,7 @@ TEST_CASE("plugin_manifest_open_returns_not_found_on_missing_path", "[core][plug
     std::error_code ec;
     std::filesystem::remove(absent, ec);
 
-    const auto result = PluginManifest::open(eastl::string_view{absent.c_str()});
+    const auto result = PluginManifest::open(std::string_view{absent.c_str()});
 
     REQUIRE(!result.has_value());
 
@@ -162,4 +168,60 @@ TEST_CASE("plugin_manifest_open_returns_not_found_on_missing_path", "[core][plug
     const auto* core_err = std::get_if<glibre::core::Error>(&err.code());
     REQUIRE(core_err != nullptr);
     REQUIRE(*core_err == glibre::core::Error::PluginManifestNotFound);
+}
+
+// ---------------------------------------------------------------------------
+// Test: core/plugin_manifest: pmr_string_fields_thread_allocator
+//
+// Construct a real PluginManifest via the allocator-aware constructor, passing
+// a std::pmr::polymorphic_allocator backed by a PerContextAllocatorResource.
+// Populate name, abi_hash, and depends_on to force heap allocation.  Assert
+// that bytes_used() on the backing PerContextAllocator increases after
+// construction — confirming that manifest field storage is charged to the
+// per-context allocator rather than the global heap (perf-budget.md
+// §Allocator Rules #1).
+//
+// Plan #1042 — reviews/decisions/eastl-removal.md §3 PMR lifetime contract.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("core/plugin_manifest: pmr_string_fields_thread_allocator", "[core][plugin_manifest]") {
+    // Stand-alone PerContextAllocator.  Declared before mr so it outlives it
+    // (PerContextAllocatorResource holds a reference to the allocator).
+    glibre::PerContextAllocator alloc{glibre::ContextTag::core};
+    glibre::PerContextAllocatorResource mr{alloc};
+
+    // Confirm no bytes consumed before manifest construction.
+    const std::uint64_t bytes_before = alloc.bytes_used();
+
+    // Construct a real PluginManifest whose name/abi_hash/depends_on fields
+    // are backed by our PerContextAllocatorResource.
+    {
+        std::pmr::polymorphic_allocator<std::byte> pa{&mr};
+        PluginManifest manifest{pa};
+
+        // Populate string fields with values long enough to exceed any SSO
+        // buffer (std::pmr::string SSO on libc++ ≥ 19 is 22 bytes; this name
+        // is 35 chars, well above that threshold, so the assignment routes
+        // through the polymorphic_allocator and charges mr).
+        manifest.name = "glibre.render.example.plugin.module";  // 35 chars — above SSO
+        manifest.abi_hash =
+            "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";  // 64 chars
+        manifest.depends_on.push_back("glibre.core");
+        manifest.depends_on.push_back("glibre.platform");
+
+        // Bytes charged to the per-context allocator must have increased: the
+        // manifest's field storage is routed through mr, not get_default_resource().
+        const std::uint64_t bytes_after = alloc.bytes_used();
+        REQUIRE(bytes_after > bytes_before);
+
+        // Field values are preserved through the PMR allocation.
+        REQUIRE(manifest.name == "glibre.render.example.plugin.module");
+        REQUIRE(manifest.abi_hash.size() == 64u);
+        REQUIRE(manifest.depends_on.size() == 2u);
+        REQUIRE(manifest.depends_on[0] == "glibre.core");
+    }
+
+    // After manifest goes out of scope, its PMR fields are deallocated back
+    // through mr → alloc.  bytes_used() should return to (or below) bytes_before.
+    REQUIRE(alloc.bytes_used() <= bytes_before);
 }

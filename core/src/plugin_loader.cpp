@@ -243,7 +243,7 @@ glibre::Result<PluginLoader> PluginLoader::open(eastl::string_view dylib_path) {
     // the dlsym'd symbols above; no additional dlsym step is needed at that point.
     const std::string manifest_path = path_c + ".manifest";
     glibre::Result<PluginManifest> manifest_result =
-        PluginManifest::open(eastl::string_view{manifest_path.data(), manifest_path.size()});
+        PluginManifest::open(std::string_view{manifest_path.data(), manifest_path.size()});
 
     // Construct a valid PluginLoader and transfer all ownership.
     //
