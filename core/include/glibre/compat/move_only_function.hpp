@@ -25,7 +25,10 @@
 //
 //     1. Primary template: move_only_function<R(Args...)>
 //        Wraps std::function<R(Args...)> and forwards construction/invocation.
-//        Handles mutable call-signature forms.
+//        Exposes a NON-CONST operator() only — matching the real C++23 primary
+//        template's contract exactly.  The const call-form intentionally absent
+//        here; callers requiring const invocability must use the R(Args...) const
+//        partial specialisation.
 //
 //     2. Partial specialisation: move_only_function<R(Args...) const>
 //        Also wraps std::function<R(Args...)> (stripping the trailing `const`).
@@ -106,11 +109,12 @@ public:
     move_only_function& operator=(move_only_function&&) noexcept = default;
     ~move_only_function() = default;
 
-    // Invocation — mutable (for mutable call-signature forms).
+    // Invocation — mutable only, matching the real C++23 primary template contract.
+    // The real std::move_only_function<R(Args...)> provides ONLY a non-const
+    // operator(); the const call-form is reserved for the R(Args...) const partial
+    // specialisation below.  Exposing both here would misrepresent the contract and
+    // would silently accept code that will not compile against the real type.
     R operator()(Args... args) { return fn_(std::forward<Args>(args)...); }
-
-    // const invocation -- std::function::operator() is const; expose it.
-    R operator()(Args... args) const { return fn_(std::forward<Args>(args)...); }
 
     explicit operator bool() const noexcept { return static_cast<bool>(fn_); }
 

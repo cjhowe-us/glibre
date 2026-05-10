@@ -105,6 +105,25 @@ TEST_CASE("core/phase_registry: system_fn_uses_std_move_only_function", "[core][
         const_ref();
         REQUIRE(called == 1);
     }
+
+    // Round-trip: register_system → for_each_system, mirroring the real-type
+    // branch above.  Couples the polyfill-path type-identity assertion to the
+    // actual seam (register_system accepts PhaseSystemFn; for_each_system invokes
+    // it via const ref) so that both compile paths exercise the full
+    // register → invoke contract and not just isolated type properties.
+    {
+        auto* mr = std::pmr::get_default_resource();
+        PhaseRegistry reg{mr};
+
+        int called = 0;
+        reg.register_system(Phase::Transform, "test.polyfill.round_trip", [&called]() noexcept {
+            ++called;
+        });
+        REQUIRE(reg.system_count(Phase::Transform) == 1U);
+
+        reg.for_each_system(Phase::Transform, [](const PhaseSystemFn& fn) noexcept { fn(); });
+        REQUIRE(called == 1);
+    }
 #endif  // __cpp_lib_move_only_function
 }
 
