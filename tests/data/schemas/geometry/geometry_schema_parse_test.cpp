@@ -53,7 +53,7 @@ using namespace glibre::tools::foryc;
 // ---------------------------------------------------------------------------
 
 #ifndef GEOMETRY_SCHEMA_DIR
-#    error "GEOMETRY_SCHEMA_DIR must be set via target_compile_definitions in CMakeLists.txt"
+#error "GEOMETRY_SCHEMA_DIR must be set via target_compile_definitions in CMakeLists.txt"
 #endif
 
 // Parse the .fory file at GEOMETRY_SCHEMA_DIR/<filename> and return the result.
