@@ -178,7 +178,7 @@ TEST_CASE("world: entity_outside_slot_range_yields_EntityStale_in_mvp", "[world]
     // entity_allocator.cpp:88,101.  Slots are 0-based, so after one spawn
     // slot_count() == 1 and index 1 is the first index that is never valid.
     const glibre::core::Entity foreign_entity =
-        glibre::core::detail::pack(slot_count_after_one_spawn, /*generation=*/1u);
+        glibre::core::Entity::from_bits_for_testing(slot_count_after_one_spawn, /*generation=*/1u);
 
     // A. is_alive() must return false for an out-of-range entity.
     CHECK_FALSE(allocator.is_alive(foreign_entity));
