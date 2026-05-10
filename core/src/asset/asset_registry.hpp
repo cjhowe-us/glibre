@@ -100,28 +100,48 @@ public:
     //
     // On the first call for type T, a new AssetTable<T> is created and
     // assigned the next sequential type_tag.
+    //
+    // Accepts T by rvalue reference to avoid an unnecessary copy for
+    // move-only and large-payload types (SPEC §4.7 inv. 2).
     // -------------------------------------------------------------------------
     template<class T>
-    [[nodiscard]] AssetHandle<T> insert(T payload) noexcept {
-        return table_for<T>().insert(std::move(payload));  // forward as rvalue
+    [[nodiscard]] AssetHandle<T> insert(T&& payload) noexcept {
+        return table_for<T>().insert(std::move(payload));
     }
 
     // -------------------------------------------------------------------------
     // resolve<T>(handle) — resolve an AssetHandle<T> to a payload pointer.
     //
     // Returns core::Error::AssetStale on generation mismatch or out-of-range.
+    // If no table for T has been registered, returns AssetStale without
+    // mutating state (does NOT lazily create a table).
     // -------------------------------------------------------------------------
     template<class T>
     [[nodiscard]] Result<T*> resolve(AssetHandle<T> handle) noexcept {
-        return table_for<T>().resolve(handle);
+        AssetTable<T>* tbl = lookup_table<T>();
+        if (!tbl) {
+            return std::unexpected(
+                glibre::Error{
+                    core::Error::AssetStale,
+                    ErrorContext{__FILE__, __LINE__, "no table registered for type T"}
+                }
+            );
+        }
+        return tbl->resolve(handle);
     }
 
     // -------------------------------------------------------------------------
     // release<T>(handle) — retire an AssetHandle<T>.
+    //
+    // If no table for T has been registered, this is a no-op; does NOT
+    // lazily create a table (release is a read-path for type registration).
     // -------------------------------------------------------------------------
     template<class T>
     void release(AssetHandle<T> handle) noexcept {
-        table_for<T>().release(handle);
+        AssetTable<T>* tbl = lookup_table<T>();
+        if (tbl) {
+            tbl->release(handle);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -130,7 +150,7 @@ public:
     // Monotonically increasing; max kMaxAssetPayloadTypes (4).
     // Used in tests to verify per-T table instantiation.
     // -------------------------------------------------------------------------
-    [[nodiscard]] std::size_t registered_type_count() const noexcept { return next_type_tag_; }
+    [[nodiscard]] std::size_t registered_type_count() const noexcept { return type_count_; }
 
     // -------------------------------------------------------------------------
     // reset_for_testing() — clear all tables and reset the type counter.
@@ -145,13 +165,14 @@ public:
         for (auto& entry : tables_) {
             entry.reset();
         }
-        next_type_tag_ = 0;
-        // Reset type-token map so re-registration after reset assigns fresh
-        // indices (MED-4 fix: previously s_tag_index was process-lifetime and
-        // could produce UB casts if types were registered in a different order
-        // post-reset).  Nulling the map entries invalidates all prior tag
-        // assignments; the per-T kTypeToken statics remain live (they are
-        // process-lifetime) and will be looked up fresh on next table_for<T>().
+        type_count_ = 0;
+        // Reset type-token map and type_count_ so re-registration after reset
+        // assigns fresh indices (MED-4 fix: previously s_tag_index was
+        // process-lifetime and could produce UB casts if types were registered
+        // in a different order post-reset).  Nulling the map entries invalidates
+        // all prior tag assignments; the per-T kTypeToken statics remain live
+        // (they are process-lifetime) and will be looked up fresh on next
+        // table_for<T>().
         for (auto& token : type_token_map_) {
             token = nullptr;
         }
@@ -163,29 +184,61 @@ private:
         : alloc_{alloc} {}
 
     // -------------------------------------------------------------------------
+    // type_key<T>() — stable per-T identity token (RTTI-free).
+    //
+    // Returns the address of a function-local static char that is unique per
+    // template instantiation T and stable for the process lifetime.  All
+    // methods that need a per-T key (lookup_table, table_for) share this
+    // single helper so they agree on the same address.
+    // -------------------------------------------------------------------------
+    template<class T>
+    [[nodiscard]] static const void* type_key() noexcept {
+        static const char kToken = '\0';
+        return &kToken;
+    }
+
+    // -------------------------------------------------------------------------
+    // lookup_table<T>() — non-mutating lookup for a registered AssetTable<T>.
+    //
+    // Returns nullptr if no table for T has been registered yet.  Does NOT
+    // assign a new type_tag or create a table — safe to call from resolve()
+    // and release() which are read-only with respect to the type registry.
+    // -------------------------------------------------------------------------
+    template<class T>
+    [[nodiscard]] AssetTable<T>* lookup_table() noexcept {
+        const void* const key = type_key<T>();
+
+        for (std::size_t i = 0; i < type_count_; ++i) {
+            if (type_token_map_[i] == key) {
+                return static_cast<AssetTable<T>*>(tables_[i].ptr);
+            }
+        }
+        return nullptr;
+    }
+
+    // -------------------------------------------------------------------------
     // table_for<T>() — return (creating if necessary) the AssetTable<T>.
     //
-    // Type assignment is table-driven (type_index_map_ + next_type_tag_) so
+    // Type assignment is table-driven (type_token_map_ + type_count_) so
     // that reset_for_testing() can clear all state and re-assign correctly.
     //
     // Previously, a per-T function-local static held the tag index.  That
     // design was un-resetable: after reset_for_testing(), a type registered
     // before the reset would still hold its old index, while post-reset
     // registrations would start from 0 — if different types landed at the
-    // same index a UB cast would result.  The type_index_map_ array fixes
-    // this: reset_for_testing() clears the map and next_type_tag_ together.
+    // same index a UB cast would result.  The type_token_map_ array fixes
+    // this: reset_for_testing() clears the map and type_count_ together.
     // -------------------------------------------------------------------------
     template<class T>
     [[nodiscard]] AssetTable<T>& table_for() noexcept {
-        // Per-T unique token: address of a function-local static char is stable
-        // for the process lifetime and unique per template instantiation.
-        // No RTTI required (project compiles with -fno-rtti).
-        static const char kTypeToken = '\0';
-        const void* const key = &kTypeToken;
+        // Per-T unique token — shared with lookup_table<T>() via type_key<T>()
+        // so both functions agree on the same address (process-lifetime stable,
+        // unique per T, no RTTI required).
+        const void* const key = type_key<T>();
 
         // Look up existing tag assignment.
         std::size_t tag_index = kUnassigned;
-        for (std::size_t i = 0; i < next_type_tag_; ++i) {
+        for (std::size_t i = 0; i < type_count_; ++i) {
             if (type_token_map_[i] == key) {
                 tag_index = i;
                 break;
@@ -199,14 +252,14 @@ private:
             // out-of-bounds index (LOW-1 fix: release path must not fall
             // through to OOB table access).
             assert(
-                next_type_tag_ < kMaxAssetPayloadTypes &&
+                type_count_ < kMaxAssetPayloadTypes &&
                 "AssetRegistry: more than 4 payload types registered (2-bit type_tag limit)"
             );
-            if (next_type_tag_ >= kMaxAssetPayloadTypes) {
+            if (type_count_ >= kMaxAssetPayloadTypes) {
                 // Release-build safety: abort rather than writing OOB.
                 std::abort();
             }
-            tag_index = next_type_tag_++;
+            tag_index = type_count_++;
             type_token_map_[tag_index] = key;
         }
 
@@ -293,8 +346,10 @@ private:
     // Allocate up to kMaxAssetPayloadTypes tables.
     std::array<ErasedTable, kMaxAssetPayloadTypes> tables_{};
 
-    // Next type_tag to assign on first insert for a new type T.
-    std::size_t next_type_tag_{0};
+    // Number of distinct payload types registered so far (also the next
+    // type_tag value to assign).  Separate from type_token_map_ to keep
+    // the semantics of "registered count" distinct from "cursor position".
+    std::size_t type_count_{0};
 
     // Type-token map: type_token_map_[i] is the address of the per-T static
     // `kTypeToken` char in table_for<T>().  Each template instantiation gets a

@@ -25,9 +25,11 @@
 //   the index is stable for the slot's lifetime.
 //
 //   Slot layout:
-//     generation : uint32_t — current generation; 0 means never allocated.
-//     live       : bool     — true when the slot holds a live asset.
-//     payload    : T        — typed asset payload.
+//     generation : uint32_t      — current generation; 0 means never allocated.
+//     live       : bool          — true when the slot holds a live asset.
+//     payload    : optional<T>   — engaged while live; disengaged after release.
+//                                  optional avoids requiring T to be default-
+//                                  constructible (SPEC §4.7 inv. 2).
 //
 // ## Free list
 //
@@ -58,6 +60,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory_resource>
+#include <optional>
 #include <vector>
 
 #include <glibre/alloc.hpp>
@@ -120,7 +123,7 @@ public:
             free_list_.erase(free_list_.begin());
 
             auto& slot = slots_[static_cast<std::size_t>(idx)];
-            slot.payload = std::move(payload);
+            slot.payload.emplace(std::move(payload));
             slot.live = true;
             // generation was already incremented on release; reuse it directly.
             return detail::asset_pack<T>(idx, slot.generation, type_tag_);
@@ -128,7 +131,9 @@ public:
 
         // Append a new slot.
         const auto idx = static_cast<detail::AssetIndex>(slots_.size());
-        slots_.push_back(Slot{/*.generation=*/1, /*.live=*/true, std::move(payload)});
+        slots_.push_back(
+            Slot{/*.generation=*/1, /*.live=*/true, std::optional<T>{std::move(payload)}}
+        );
         return detail::asset_pack<T>(idx, 1u, type_tag_);
     }
 
@@ -170,7 +175,7 @@ public:
                 }
             );
         }
-        return &slot.payload;
+        return std::addressof(*slot.payload);
     }
 
     // -------------------------------------------------------------------------
@@ -199,6 +204,7 @@ public:
             return;  // stale: no-op
         }
         slot.live = false;
+        slot.payload.reset();  // destroy payload; slot is no longer live
         // Guard against 22-bit generation overflow (SPEC §6.8, §6.12.3).
         // After 2^22 release/reinsert cycles the slot is permanently retired —
         // leaked rather than silently reissued with a colliding generation.
@@ -228,11 +234,17 @@ public:
 private:
     // -------------------------------------------------------------------------
     // Slot — per-slot state in the slot vector (SPEC §6.8 Slot layout).
+    //
+    // payload is std::optional<T> rather than T{} to avoid requiring
+    // T to be default-constructible (SPEC §4.7 inv. 2: insert(T&&) contract
+    // permits move-only types).  payload is engaged by insert() via emplace()
+    // and disengaged by release() via reset(), so the storage is free when
+    // the slot is not live.
     // -------------------------------------------------------------------------
     struct Slot {
         detail::AssetGeneration generation{0};  // 0 = never allocated
         bool live{false};
-        T payload{};
+        std::optional<T> payload{std::nullopt};
     };
 
     // PMR resource — must be declared before slots_ and free_list_ so that it
