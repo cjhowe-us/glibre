@@ -173,42 +173,53 @@ TEST_CASE("plugin_manifest_open_returns_not_found_on_missing_path", "[core][plug
 // ---------------------------------------------------------------------------
 // Test: core/plugin_manifest: pmr_string_fields_thread_allocator
 //
-// Construct a PluginManifest whose string and vector fields allocate from a
-// custom PerContextAllocatorResource backed by ContextTag::core.  After
-// populating fields, assert that the backing allocator has recorded bytes
-// allocated (bytes_used() > 0), confirming that the PMR containers thread
-// their storage through the per-context resource rather than the global heap.
+// Construct a real PluginManifest via the allocator-aware constructor, passing
+// a std::pmr::polymorphic_allocator backed by a PerContextAllocatorResource.
+// Populate name, abi_hash, and depends_on to force heap allocation.  Assert
+// that bytes_used() on the backing PerContextAllocator increases after
+// construction — confirming that manifest field storage is charged to the
+// per-context allocator rather than the global heap (perf-budget.md
+// §Allocator Rules #1).
 //
 // Plan #1042 — reviews/decisions/eastl-removal.md §3 PMR lifetime contract.
 // ---------------------------------------------------------------------------
 
 TEST_CASE("core/plugin_manifest: pmr_string_fields_thread_allocator", "[core][plugin_manifest]") {
-    // Stand-alone PerContextAllocator with a generous ceiling so it will not
-    // abort on any plausible string/vector population in this test.
+    // Stand-alone PerContextAllocator.  Declared before mr so it outlives it
+    // (PerContextAllocatorResource holds a reference to the allocator).
     glibre::PerContextAllocator alloc{glibre::ContextTag::core};
     glibre::PerContextAllocatorResource mr{alloc};
 
-    // Confirm no bytes consumed before manifes construction.
+    // Confirm no bytes consumed before manifest construction.
     const std::uint64_t bytes_before = alloc.bytes_used();
 
-    // Build a non-trivial PluginManifest whose fields allocate heap storage.
-    // All PMR containers are default-constructed (use get_default_resource()),
-    // then we assign string values — the assignment triggers heap allocation
-    // under the pmr allocator associated with that container.
-    //
-    // To route allocations through mr, we construct the pmr containers with
-    // &mr explicitly before assigning.
-    std::pmr::string name_field{&mr};
-    name_field = "glibre.render";
+    // Construct a real PluginManifest whose name/abi_hash/depends_on fields
+    // are backed by our PerContextAllocatorResource.
+    {
+        std::pmr::polymorphic_allocator<std::byte> pa{&mr};
+        PluginManifest manifest{pa};
 
-    std::pmr::string hash_field{&mr};
-    hash_field = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+        // Populate string fields with values long enough to exceed any SSO
+        // buffer (std::pmr::string typically has a 15-byte SSO on libc++).
+        manifest.name = "glibre.render.plugin";  // 20 chars — above SSO threshold
+        manifest.abi_hash =
+            "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";  // 64 chars
+        manifest.depends_on.push_back("glibre.core");
+        manifest.depends_on.push_back("glibre.platform");
 
-    // Verify that bytes have been charged to our allocator (not the global heap).
-    const std::uint64_t bytes_after = alloc.bytes_used();
-    REQUIRE(bytes_after > bytes_before);
+        // Bytes charged to the per-context allocator must have increased: the
+        // manifest's field storage is routed through mr, not get_default_resource().
+        const std::uint64_t bytes_after = alloc.bytes_used();
+        REQUIRE(bytes_after > bytes_before);
 
-    // Verify the string content is preserved through the PMR allocation.
-    REQUIRE(name_field == "glibre.render");
-    REQUIRE(hash_field.size() == 64u);
+        // Field values are preserved through the PMR allocation.
+        REQUIRE(manifest.name == "glibre.render.plugin");
+        REQUIRE(manifest.abi_hash.size() == 64u);
+        REQUIRE(manifest.depends_on.size() == 2u);
+        REQUIRE(manifest.depends_on[0] == "glibre.core");
+    }
+
+    // After manifest goes out of scope, its PMR fields are deallocated back
+    // through mr → alloc.  bytes_used() should return to (or below) bytes_before.
+    REQUIRE(alloc.bytes_used() <= bytes_before);
 }

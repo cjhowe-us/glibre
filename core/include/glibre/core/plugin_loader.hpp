@@ -169,12 +169,12 @@ private:
     // Manifest read result from step 3.
     //
     // std::expected<PluginManifest, Error> is default-constructible to
-    // the value state (empty PluginManifest{}) because PluginManifest is
-    // an aggregate with all eastl::string/vector members that default-init
-    // to empty.  After open() returns success, manifest_result_ always
-    // holds either a valid PluginManifest or an error code — never the
-    // uninitialised default_construct value (the field is assigned before
-    // open() returns).
+    // the value state (empty PluginManifest{}) because PluginManifest's
+    // default constructor (polymorphic_allocator ctor with default argument)
+    // leaves all std::pmr::string/vector members empty.  After open() returns
+    // success, manifest_result_ always holds either a valid PluginManifest or
+    // an error code — never the uninitialised default-construct value (the
+    // field is assigned before open() returns).
     glibre::Result<PluginManifest> manifest_result_;
 };
 

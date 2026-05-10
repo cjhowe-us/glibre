@@ -223,27 +223,32 @@ Result<void> PluginLoaderRegistry::register_plugin(
     const PluginManifest& manifest, eastl::string_view path
 ) noexcept {
 
+    // Bridge manifest.name (std::pmr::string) → eastl::string_view once.
+    // All three uses below (collision check, idempotent lookup, and map key
+    // construction) draw from this single materialization.
+    const eastl::string_view name_sv{manifest.name.data(), manifest.name.size()};
+
     // Unconditional precondition check — protects release builds from
     // silent overwrites (replaces the former debug-only assert).
-    if (is_collision(eastl::string_view{manifest.name.c_str()}, path)) {
+    if (is_collision(name_sv, path)) {
         return std::unexpected(glibre::Error{core::Error::PluginNameCollision});
     }
 
-    // Bridge manifest.name (std::pmr::string) → eastl::string_view for
-    // heterogeneous lookup in the eastl::hash_map<eastl::string, ...>.
-    const eastl::string_view name_sv{manifest.name.data(), manifest.name.size()};
     const auto it = loaded_.find(name_sv);
     if (it != loaded_.end()) {
         // Same name + same path: idempotent re-registration, no-op.
         return {};
     }
 
+    // Materialise one eastl::string for rec.name and reuse it as the map key.
+    eastl::string name_owned{name_sv.data(), name_sv.size()};
+
     PluginRecord rec;
-    rec.name = eastl::string{manifest.name.data(), manifest.name.size()};
+    rec.name = name_owned;
     rec.version = manifest.version;
     rec.path = eastl::string{path.data(), path.size()};
 
-    loaded_.emplace(eastl::string{manifest.name.data(), manifest.name.size()}, eastl::move(rec));
+    loaded_.emplace(eastl::move(name_owned), eastl::move(rec));
     return {};
 }
 

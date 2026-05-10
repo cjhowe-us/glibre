@@ -180,15 +180,57 @@ struct PanelDecl {
 //   depends_on         tag 9 since 1
 //
 // PMR allocator threading (reviews/decisions/eastl-removal.md §3):
-//   PluginManifest members allocate from std::pmr::get_default_resource()
-//   when default-constructed — acceptable for tests and stub callers.
-//   Production callers (plan #229 loader) should wire a
-//   glibre::PerContextAllocatorResource backed by ContextTag::core so
-//   that manifest string/vector storage is tracked under the core context
-//   ceiling per perf-budget.md §Allocator Rules #1.
+//   PluginManifest carries an explicit polymorphic_allocator constructor
+//   (PluginManifest::PluginManifest(std::pmr::polymorphic_allocator<std::byte>))
+//   so callers can pass a PerContextAllocatorResource-backed allocator and have
+//   all string/vector storage charged to the core context ceiling per
+//   perf-budget.md §Allocator Rules #1.
+//
+//   Default construction uses std::pmr::get_default_resource() — acceptable
+//   in tests and stub callers that do not need per-context accounting.
+//
+//   The explicit allocator constructor makes the PluginManifest type non-aggregate
+//   (C++17: user-provided ctor removes aggregate status).  The is_aggregate_v
+//   static_assert below is removed accordingly.  The codegen pipeline (plan #225)
+//   uses Fory tag-sorted field layout, not C++ aggregate initialisation; the Fory
+//   deserialiser populates fields by tag after construction via the allocator ctor.
+//
+//   Production callsite threading (plan #229 loader → pass PerContextAllocatorResource
+//   into PluginManifest::open()) is tracked in [PLAN] issue #<defer-issue>; this PR
+//   ships the constructor API only.
 // ---------------------------------------------------------------------------
 
 struct PluginManifest {
+    // -----------------------------------------------------------------------
+    // Allocator-aware constructor (PMR ABI, perf-budget.md §Allocator Rules #1)
+    //
+    // All string and vector members are constructed from `alloc`.  Without
+    // this constructor, default-constructed PluginManifest fields silently
+    // route to std::pmr::get_default_resource() — bypassing per-context
+    // ceiling enforcement.
+    //
+    // Usage (production loader — plan #229):
+    //   glibre::PerContextAllocatorResource mr{core_alloc};
+    //   std::pmr::polymorphic_allocator<std::byte> pa{&mr};
+    //   PluginManifest m{pa};   // all fields use mr
+    //
+    // Default construction (tests, stub callers):
+    //   PluginManifest m;       // uses get_default_resource() — acceptable
+    // -----------------------------------------------------------------------
+    explicit PluginManifest(
+        std::pmr::polymorphic_allocator<std::byte> alloc =
+            std::pmr::polymorphic_allocator<std::byte>{}
+    )
+        : name{alloc},
+          version{},
+          abi_hash{alloc},
+          min_engine_version{},
+          components{alloc},
+          systems{alloc},
+          passes{alloc},
+          panels{alloc},
+          depends_on{alloc} {}
+
     // tag 1 — fully-qualified plugin id, e.g. "glibre.render".
     // Unique across loaded plugins; collision → core::Error::PluginNameCollision.
     std::pmr::string name;
@@ -252,14 +294,13 @@ struct PluginManifest {
     [[nodiscard]] static Result<PluginManifest> open(std::string_view path);
 };
 
-// static_assert: PluginManifest is an aggregate (no user-provided ctor,
-// no private/protected non-static data, no virtual functions, no base
-// classes with private/protected members).  The codegen pipeline requires
-// this property for POD-compatible layout synthesis.
-static_assert(
-    std::is_aggregate_v<PluginManifest>,
-    "PluginManifest must remain an aggregate for codegen compatibility"
-);
+// static_assert: PluginManifest is NOT asserted aggregate — it carries an
+// explicit allocator-aware constructor (see above).  The Fory codegen pipeline
+// (plan #225) populates fields by tag number after construction; it does not
+// rely on C++ aggregate initialisation.
+//
+// SemVer, ComponentDecl, SystemDecl, PassDecl, PanelDecl remain aggregates
+// (no user-provided ctors) — asserted below.
 static_assert(
     std::is_aggregate_v<SemVer>, "SemVer must remain an aggregate for codegen compatibility"
 );
