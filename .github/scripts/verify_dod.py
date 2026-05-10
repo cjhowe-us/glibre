@@ -71,7 +71,7 @@ def check_file_contains(arg: object) -> tuple[bool, str]:
     if not p.is_file():
         return False, f"{label} (file missing)"
     rc = subprocess.run(
-        ["grep", "-Eq", str(arg["regex"]), str(p)],
+        ["grep", "-Eq", "--", str(arg["regex"]), str(p)],
         check=False,
     ).returncode
     return rc == 0, label
