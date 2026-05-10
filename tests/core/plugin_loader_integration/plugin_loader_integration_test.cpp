@@ -57,6 +57,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 #include <EASTL/string_view.h>
 #include <catch2/catch_test_macros.hpp>
@@ -131,7 +132,9 @@ glibre::core::PluginManifest make_manifest(
 // ===========================================================================
 
 TEST_CASE("integration_dlopen_failure_propagates", "[core][integration]") {
-    const eastl::string_view nonexistent{"/tmp/glibre-integration-nonexistent-plugin.dylib"};
+    // const char* — implicitly converts to both std::string_view (PluginLoader::open)
+    // and eastl::string_view (registry API, still EASTL-backed pre-#1044 migration).
+    const char* nonexistent = "/tmp/glibre-integration-nonexistent-plugin.dylib";
 
     auto result = glibre::core::PluginLoader::open(nonexistent);
 
@@ -170,8 +173,9 @@ TEST_CASE("integration_missing_symbol_propagates", "[core][integration]") {
         "rebuild with tests/core/plugin_loader subdir (plan #229 target required)"
     );
 #else
-    const eastl::string_view stub_path{GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH};
-    REQUIRE_FALSE(stub_path.empty());
+    const char* stub_path = GLIBRE_STUB_NO_SYMBOLS_DYLIB_PATH;
+    REQUIRE(stub_path != nullptr);
+    REQUIRE(stub_path[0] != '\0');
 
     auto result = glibre::core::PluginLoader::open(stub_path);
 
@@ -214,8 +218,9 @@ TEST_CASE("integration_abi_hash_mismatch_propagates", "[core][integration]") {
         "this macro is unconditional; check CMakeLists.txt for glibre-plugin-stub-wrong-abi"
     );
 #else
-    const eastl::string_view stub_path{GLIBRE_STUB_WRONG_ABI_DYLIB_PATH};
-    REQUIRE_FALSE(stub_path.empty());
+    const char* stub_path = GLIBRE_STUB_WRONG_ABI_DYLIB_PATH;
+    REQUIRE(stub_path != nullptr);
+    REQUIRE(stub_path[0] != '\0');
 
     // Step 1-2: dlopen + dlsym must succeed — the stub exports all four symbols.
     auto loader_result = glibre::core::PluginLoader::open(stub_path);
@@ -299,8 +304,9 @@ TEST_CASE("integration_name_collision_propagates", "[core][integration]") {
         "rebuild with GLIBRE_BUILD_EXAMPLES=ON (noop plugin required for #232 DoD)"
     );
 #else
-    const eastl::string_view noop_path{GLIBRE_NOOP_DYLIB_PATH};
-    REQUIRE_FALSE(noop_path.empty());
+    const char* noop_path = GLIBRE_NOOP_DYLIB_PATH;
+    REQUIRE(noop_path != nullptr);
+    REQUIRE(noop_path[0] != '\0');
 
     glibre::core::PluginLoaderRegistry registry{kHostVersion};
 
@@ -383,8 +389,9 @@ TEST_CASE("integration_happy_path_loads_and_validates", "[core][integration]") {
         "rebuild with GLIBRE_BUILD_EXAMPLES=ON (noop plugin required for #232 DoD)"
     );
 #else
-    const eastl::string_view noop_path{GLIBRE_NOOP_DYLIB_PATH};
-    REQUIRE_FALSE(noop_path.empty());
+    const char* noop_path = GLIBRE_NOOP_DYLIB_PATH;
+    REQUIRE(noop_path != nullptr);
+    REQUIRE(noop_path[0] != '\0');
 
     // Step 1–2: load the noop plugin via the real OS dlopen/dlsym path.
     auto loader_result = glibre::core::PluginLoader::open(noop_path);
@@ -399,8 +406,8 @@ TEST_CASE("integration_happy_path_loads_and_validates", "[core][integration]") {
     // The noop plugin exports glibre_plugin_manifest_size = 0 (no blob in MVP).
     CHECK(loader.manifest_blob_size() == 0u);
 
-    // dylib_path round-trips the input.
-    CHECK(loader.dylib_path() == eastl::string{noop_path.data(), noop_path.size()});
+    // dylib_path round-trips the input (std::pmr::string per eastl-removal.md row 1).
+    CHECK(loader.dylib_path() == std::pmr::string{noop_path});
 
     // Step 3 (registry): construct a manifest whose abi_hash matches the noop
     // plugin's exported value.  Since the noop exports all-zeros, we use
@@ -469,8 +476,9 @@ TEST_CASE("integration_manifest_invalid_propagates", "[core][integration]") {
         "glibre-plugin-stub-invalid-manifest"
     );
 #else
-    const eastl::string_view stub_path{GLIBRE_STUB_INVALID_MANIFEST_DYLIB_PATH};
-    REQUIRE_FALSE(stub_path.empty());
+    const char* stub_path = GLIBRE_STUB_INVALID_MANIFEST_DYLIB_PATH;
+    REQUIRE(stub_path != nullptr);
+    REQUIRE(stub_path[0] != '\0');
 
     // Steps 1–2: dlopen + dlsym must succeed — the stub exports all four symbols.
     auto loader_result = glibre::core::PluginLoader::open(stub_path);
@@ -543,8 +551,9 @@ TEST_CASE("integration_engine_too_old_propagates", "[core][integration]") {
         "rebuild with GLIBRE_BUILD_EXAMPLES=ON (noop plugin required for #968 DoD)"
     );
 #else
-    const eastl::string_view noop_path{GLIBRE_NOOP_DYLIB_PATH};
-    REQUIRE_FALSE(noop_path.empty());
+    const char* noop_path = GLIBRE_NOOP_DYLIB_PATH;
+    REQUIRE(noop_path != nullptr);
+    REQUIRE(noop_path[0] != '\0');
 
     // Step 1–2: dlopen + dlsym must succeed — the noop plugin exports all four
     // required symbols.
@@ -623,8 +632,9 @@ TEST_CASE("integration_dependency_missing_propagates", "[core][integration]") {
         "rebuild with GLIBRE_BUILD_EXAMPLES=ON (noop plugin required for #968 DoD)"
     );
 #else
-    const eastl::string_view noop_path{GLIBRE_NOOP_DYLIB_PATH};
-    REQUIRE_FALSE(noop_path.empty());
+    const char* noop_path = GLIBRE_NOOP_DYLIB_PATH;
+    REQUIRE(noop_path != nullptr);
+    REQUIRE(noop_path[0] != '\0');
 
     // Step 1–2: dlopen + dlsym must succeed.
     auto loader_result = glibre::core::PluginLoader::open(noop_path);

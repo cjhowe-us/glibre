@@ -40,15 +40,17 @@
 //   only (plugin-abi.md §"Loader Sequence" preamble, frame-phases.md §8).
 //   No internal locking — single-threaded phase-8 invariant assumed.
 //
-// EASTL per PHILOSOPHY §11:
-//   All containers and strings in the public surface use eastl::, not std::.
-//   std:: is retained only for std::expected (Result alias) and std::byte.
+// std::pmr per reviews/decisions/eastl-removal.md matrix rows 1–3:
+//   eastl::string      → std::pmr::string  (row 1)
+//   eastl::string_view → std::string_view  (row 2)
+//   eastl::vector<T>   → std::pmr::vector<T> (row 3, not used directly here)
 
 #include <cstddef>
 #include <cstdint>
+#include <memory_resource>
+#include <string>
+#include <string_view>
 
-#include <EASTL/string.h>
-#include <EASTL/string_view.h>
 #include <glibre/alloc.hpp>              // AllocatorHandle, ContextTag
 #include <glibre/core/plugin_entry.hpp>  // RegisterFn — single source of truth (LOW-6)
 #include <glibre/core/plugin_manifest.hpp>
@@ -107,7 +109,7 @@ public:
     //
     // @param dylib_path  Filesystem path to the plugin .dylib.
     // ------------------------------------------------------------------
-    [[nodiscard]] static glibre::Result<PluginLoader> open(eastl::string_view dylib_path);
+    [[nodiscard]] static glibre::Result<PluginLoader> open(std::string_view dylib_path);
 
     // Destructor — dlclose(handle_) if handle_ is not nullptr.
     ~PluginLoader();
@@ -148,7 +150,7 @@ public:
     [[nodiscard]] RegisterFn register_fn() const noexcept;
 
     /// Filesystem path used to open this plugin.  Empty after move.
-    [[nodiscard]] const eastl::string& dylib_path() const noexcept;
+    [[nodiscard]] const std::pmr::string& dylib_path() const noexcept;
 
 private:
     // Private default constructor — only open() creates valid instances.
@@ -164,7 +166,7 @@ private:
     RegisterFn register_fn_{nullptr};
 
     // Filesystem path for diagnostics and plan #230 name-collision checks.
-    eastl::string dylib_path_;
+    std::pmr::string dylib_path_;
 
     // Manifest read result from step 3.
     //

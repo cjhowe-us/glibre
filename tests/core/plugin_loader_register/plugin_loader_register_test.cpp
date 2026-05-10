@@ -39,8 +39,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string_view>
 
-#include <EASTL/string_view.h>
 #include <catch2/catch_test_macros.hpp>
 #include <glibre/alloc.hpp>                       // AllocatorHandle, PerContextAllocator
 #include <glibre/core/context_tag_resolver.hpp>   // derive_context_tag (SRP unit, plan #989)
@@ -168,7 +168,7 @@ TEST_CASE("register_invokes_plugin_entry_point", "[core][register]") {
         "rebuild with GLIBRE_BUILD_EXAMPLES=ON (noop plugin required)"
     );
 #else
-    const eastl::string_view noop_path{GLIBRE_NOOP_DYLIB_PATH};
+    constexpr std::string_view noop_path{GLIBRE_NOOP_DYLIB_PATH};
     REQUIRE_FALSE(noop_path.empty());
 
     // Step 1–2: load the noop plugin.
@@ -239,7 +239,7 @@ TEST_CASE("register_failure_cleans_up_dlopen", "[core][register]") {
         "CMakeLists.txt must inject this macro for stub_register_fails target"
     );
 #else
-    const eastl::string_view stub_path{GLIBRE_STUB_REGISTER_FAILS_DYLIB_PATH};
+    constexpr std::string_view stub_path{GLIBRE_STUB_REGISTER_FAILS_DYLIB_PATH};
     REQUIRE_FALSE(stub_path.empty());
 
     // Step 1–2: load the failing stub — dlopen + dlsym must succeed.
@@ -640,7 +640,7 @@ TEST_CASE(
         "rebuild with GLIBRE_BUILD_EXAMPLES=ON (noop plugin required)"
     );
 #else
-    const eastl::string_view noop_path{GLIBRE_NOOP_DYLIB_PATH};
+    constexpr std::string_view noop_path{GLIBRE_NOOP_DYLIB_PATH};
     REQUIRE_FALSE(noop_path.empty());
 
     // Load the noop plugin — steps 1–2 of the loader sequence.

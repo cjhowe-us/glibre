@@ -202,10 +202,10 @@ Result<void> rebuild_schedule() noexcept {
 // as a permanent test-injection point that mirrors the MigrationStepFn seam
 // for step 11.
 //
-// Design note: rebuild_fn is a plain function pointer (not eastl::function<>)
-// to avoid heap allocation and vtable overhead.  All test-injection scenarios
-// supply file-scope function pointers, so the plain pointer is sufficient
-// (mirrors the MigrationStepFn design note in migrate_components).
+// Design note: rebuild_fn is a plain function pointer (not std::move_only_function<>)
+// to avoid heap allocation.  All test-injection scenarios supply file-scope function
+// pointers, so the plain pointer is sufficient (mirrors the MigrationStepFn design
+// note in migrate_components).
 // ---------------------------------------------------------------------------
 
 Result<void> rebuild_schedule(ScheduleRebuildFn rebuild_fn) noexcept {
@@ -245,10 +245,10 @@ Result<void> rebuild_schedule(ScheduleRebuildFn rebuild_fn) noexcept {
 //   no-op path (the non-null precondition only applies when from != to).
 //
 //   Design note: the step_fn parameter is intentionally a plain function
-//   pointer rather than eastl::function<>.  eastl::function carries heap
-//   allocation and vtable overhead.  All test-injection scenarios supply
-//   file-scope or lambda-converted-to-function-pointer callables, so the
-//   plain pointer is sufficient and avoids the allocation.
+//   pointer rather than std::move_only_function<>.  Plain function pointers
+//   avoid heap allocation.  All test-injection scenarios supply file-scope or
+//   lambda-converted-to-function-pointer callables, so the plain pointer is
+//   sufficient.
 //
 // TODO(#221): walk per-type migration tables once glibre-foryc emits them.
 //   Table format per plan #221: glibre_plugin_migrations_<TypeName> is an

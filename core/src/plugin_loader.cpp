@@ -19,13 +19,14 @@
 //   <dlfcn.h>   — dlopen, dlsym, dlclose, dlerror (POSIX)
 //   <cstdio>    — fprintf (for dlerror() diagnostic output at refusal site)
 //
-// Per PHILOSOPHY §11 and error-model.md §Decision 3:
-//   -fno-exceptions; no std:: containers; std::filesystem carve-out OK.
+// Per error-model.md §Decision 3:
+//   -fno-exceptions.  std::pmr containers via PerContextAllocatorResource
+//   per reviews/decisions/eastl-removal.md matrix rows 1-3.
 //
 // dlerror() note (HIGH finding round-1, addressed):
 //   POSIX specifies dlerror() returns a pointer to a thread-local static that
 //   may be overwritten by the next dlerror() call.  Storing it in a non-owning
-//   eastl::string_view (ErrorContext::detail) is therefore a dangling-pointer
+//   std::string_view (ErrorContext::detail) is therefore a dangling-pointer
 //   hazard once the Error escapes this function.
 //
 //   Fix: dlerror() text is emitted at the refusal site via fprintf(stderr),
@@ -59,9 +60,6 @@
 #include <string_view>
 #include <utility>
 
-#include <EASTL/string.h>
-#include <EASTL/string_view.h>
-
 #include "glibre/alloc.hpp"
 #include "glibre/core/context_tag_resolver.hpp"  // derive_context_tag (moved to SRP unit, MED-2)
 #include "glibre/core/plugin_manifest.hpp"
@@ -72,11 +70,10 @@ namespace glibre::core {
 namespace {
 
 // ---------------------------------------------------------------------------
-// Helper: convert eastl::string_view → std::string (NUL-terminated) for
-// dlopen and std::filesystem.  std::string is an explicit std:: carve-out
-// when bridging to POSIX/OS interfaces per PHILOSOPHY §11.
+// Helper: convert std::string_view → std::string (NUL-terminated) for
+// dlopen and std::filesystem.
 // ---------------------------------------------------------------------------
-[[nodiscard]] std::string to_std_string(eastl::string_view sv) {
+[[nodiscard]] std::string to_std_string(std::string_view sv) {
     return std::string{sv.data(), sv.size()};
 }
 
@@ -142,7 +139,7 @@ try_resolve_required(void* handle, const char* sym_name) noexcept {
 // PluginLoader::open
 // ---------------------------------------------------------------------------
 
-glibre::Result<PluginLoader> PluginLoader::open(eastl::string_view dylib_path) {
+glibre::Result<PluginLoader> PluginLoader::open(std::string_view dylib_path) {
     // Step 1: dlopen
     //
     // RTLD_NOW   — resolve all undefined symbols in the dylib immediately.
@@ -155,7 +152,7 @@ glibre::Result<PluginLoader> PluginLoader::open(eastl::string_view dylib_path) {
     void* const handle = dlopen(path_c.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (handle == nullptr) {
         // dlerror() returns a thread-local pointer invalidated by the next
-        // dlerror() call.  Storing it in a non-owning eastl::string_view
+        // dlerror() call.  Storing it in a non-owning std::string_view
         // inside ErrorContext::detail would create a dangling pointer once
         // the Error escapes this function (round-1 HIGH finding, addressed).
         //
@@ -273,7 +270,7 @@ glibre::Result<PluginLoader> PluginLoader::open(eastl::string_view dylib_path) {
     std::memcpy(&register_fn_tmp, &sym_register, sizeof(register_fn_tmp));
     loader.register_fn_ = register_fn_tmp;
 
-    loader.dylib_path_ = eastl::string{dylib_path.data(), dylib_path.size()};
+    loader.dylib_path_ = std::pmr::string{dylib_path.data(), dylib_path.size()};
     loader.manifest_result_ = std::move(manifest_result);
 
     return loader;
@@ -350,6 +347,6 @@ std::size_t PluginLoader::manifest_blob_size() const noexcept { return manifest_
 
 RegisterFn PluginLoader::register_fn() const noexcept { return register_fn_; }
 
-const eastl::string& PluginLoader::dylib_path() const noexcept { return dylib_path_; }
+const std::pmr::string& PluginLoader::dylib_path() const noexcept { return dylib_path_; }
 
 }  // namespace glibre::core
