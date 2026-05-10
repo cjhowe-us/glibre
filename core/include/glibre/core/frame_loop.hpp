@@ -28,6 +28,7 @@
 #include <span>
 
 #include "glibre/core/frame_phase.hpp"
+#include "glibre/core/hot_reload_request.hpp"
 #include "glibre/core/phase_registry.hpp"
 #include "glibre/core/world_tick.hpp"
 #include "glibre/error.hpp"
@@ -174,6 +175,21 @@ public:
     // transient_arena_count() — number of registered transient arenas.
     [[nodiscard]] std::size_t transient_arena_count() const noexcept { return arena_count_; }
 
+    // hot_reload_queue() — access the frame-owned HotReloadRequestQueue.
+    //
+    // Callers (filesystem watcher, editor, test harness) enqueue reload
+    // requests here.  Phase 8 reads pending_count() once per frame via this
+    // queue to decide whether to run the drain/swap/migrate/resume state
+    // machine or return immediately as a true no-op.
+    //
+    // Authority: reviews/decisions/hot-reload-protocol.md §Decision (trigger
+    // at step 1) and §Consequences (single relaxed atomic load for the
+    // fast-path).  plan #249 §Scope.
+    //
+    // Thread safety: enqueue() on the returned reference is thread-safe;
+    // the FrameLoop reads it only on the game-loop thread during Phase 8.
+    [[nodiscard]] HotReloadRequestQueue& hot_reload_queue() noexcept { return hot_reload_queue_; }
+
 private:
     // run_phase() — execute one phase.  Returns an error if the phase
     // ordinal does not match the expected_ordinal (debug builds only).
@@ -220,6 +236,15 @@ private:
     // Optional PhaseRegistry — for_each_system() called in every phase (plan #245).
     // Non-owning pointer; lifetime is caller-managed.  Null = no system dispatch.
     PhaseRegistry* phase_registry_{nullptr};
+
+    // hot_reload_queue_ — pending-reload counter for the Phase 8 fast-path.
+    //
+    // Phase 8 reads pending_count() once on entry; if zero, it returns {}
+    // immediately (true no-op: single relaxed atomic load, no fence, no cache
+    // flush per hot-reload-protocol.md §Consequences and frame-phases.md open
+    // question 1 resolution).  Callers enqueue requests via hot_reload_queue()
+    // before Phase 8 executes.  plan #249.
+    HotReloadRequestQueue hot_reload_queue_;
 
 #ifdef GLIBRE_TESTING
     // Under GLIBRE_TESTING builds the last tick's phase execution order is

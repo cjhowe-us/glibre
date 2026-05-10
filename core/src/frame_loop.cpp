@@ -25,6 +25,7 @@
 #include <optional>
 
 #include "glibre/core/frame_phase.hpp"
+#include "glibre/core/hot_reload_request.hpp"
 #include "glibre/core/phase_registry.hpp"
 #include "glibre/core/world_tick.hpp"
 #include "glibre/error.hpp"
@@ -143,6 +144,34 @@ void FrameLoop::present_reset_perf_budget() noexcept {
 }
 
 // ---------------------------------------------------------------------------
+// execute_pending_reloads — stub for the Phase 8 drain/swap/migrate/resume
+// state machine.
+//
+// Authority: reviews/decisions/hot-reload-protocol.md §"Protocol Sequence"
+// (four-step drain → swap → migrate → resume state machine).
+//
+// This stub stands in for the full implementation that will land in
+// plans #251+ when at least one reload request is pending.  It returns
+// core::Error::HotReloadRefused so that the Phase 8 fast-path exercises
+// its non-trivial branch in tests without coupling to the real state machine.
+//
+// The real body will: (1) drain all plugins in the queue, (2) swap vtables,
+// (3) migrate component storages, (4) resume (call register on new plugin).
+// Each step is guarded by atomicity and rollback as specified in the protocol.
+//
+// plan #249 §Scope: "Stub execute_pending_reloads returns
+// core::Error::HotReloadRefused — the real body lands in subsequent plans."
+// ---------------------------------------------------------------------------
+
+[[nodiscard]] static glibre::Result<void>
+execute_pending_reloads(glibre::core::HotReloadRequestQueue& queue) noexcept {
+    // TODO(plan-251): consume queue.pending_count() to iterate pending requests
+    // and implement the full drain → swap → migrate → resume state machine.
+    (void)queue;
+    return std::unexpected(glibre::Error{glibre::core::Error::HotReloadRefused});
+}
+
+// ---------------------------------------------------------------------------
 // run_phase — execute one phase slot.
 //
 // Debug-build ordinal guard: verifies that the Phase ordinal supplied at the
@@ -199,29 +228,42 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
         break;
     case Phase::RenderSubmit: /* render — MVP empty */
         break;
-    case Phase::HotReload: /* core (barrier) — MVP empty */
-                           // Phase 8: hot-reload drain barrier.
-                           //
-                           // In a live engine, plugin loader mutations (call_register,
-                           // rebuild_schedule, migrate_components) run here, guarded by
-                           // PluginLoaderRegistry::validate_drain_phase (plan #981 / PR #1012).
-                           //
-                           // FOLLOWUP(plan-981-wiring): replace the GLIBRE_TESTING stub below
-                           // with a real validate_drain_phase call once FramePhaseTracker is
-                           // wired through here (plan #981). The GLIBRE_TESTING branch simulates
-                           // the same FramePhaseMisordered path that validate_drain_phase emits.
-                           //
-                           // GLIBRE_TESTING injection: when inject_phase8_failure_ is armed,
-                           // simulate a drain-phase refusal so tests can verify that
-                           // frame_counter_ and world_tick_ do not advance when Phase 8 fails.
-                           // This exercises the "tick halts on phase failure" path from
-                           // plan #247 Unit Test Plan without requiring a live plugin loader.
+    case Phase::HotReload: {
+        // Phase 8: hot-reload drain barrier. (core (barrier) — pending-reload fast-path)
+        //
+        // Fast-path (plan #249): read the pending_reloads counter once with
+        // memory_order_relaxed.  If zero, return immediately — true no-op:
+        // no fence, no cache flush (hot-reload-protocol.md §Consequences,
+        // frame-phases.md open question 1 resolution).
+        //
+        // Non-zero path: delegate to execute_pending_reloads (stub for now;
+        // full drain → swap → migrate → resume body lands in plans #251+).
+        //
+        // FOLLOWUP(plan-981-wiring): wire FramePhaseTracker / validate_drain_phase
+        // once that plan lands.  The GLIBRE_TESTING injection below exercises
+        // the "tick halts on phase failure" path from plan #247 Unit Test Plan.
+        //
+        // GLIBRE_TESTING injection: when inject_phase8_failure_ is armed,
+        // bypass the counter check and simulate a drain-phase refusal so tests
+        // can verify that frame_counter_ and world_tick_ do not advance.
 #ifdef GLIBRE_TESTING
         if (inject_phase8_failure_) {
             return std::unexpected(glibre::Error{core::Error::FramePhaseMisordered});
         }
 #endif
-        break;
+        // Fast-path: single relaxed load — sub-microsecond when no reloads pending.
+        // Per hot-reload-protocol.md §Decision: "Plugin code does not execute
+        // during phase 8.  No system bodies run."  Both branches must bypass
+        // the system dispatch below, so we return directly rather than break.
+        if (hot_reload_queue_.pending_count() == 0) {
+            return {};  // true no-op — no system bodies per protocol §Decision
+        }
+        // Non-zero: run the drain/swap/migrate/resume state machine (stub).
+        // Returns (propagates the error from execute_pending_reloads); either
+        // way system dispatch at the end of run_phase is never reached for
+        // Phase 8 (protocol §Decision: no system bodies run in phase 8).
+        return execute_pending_reloads(hot_reload_queue_);
+    }
     case Phase::Present: /* platform — drains transient arenas at frame end */
         // Phase 9 bookkeeping order (perf-budget.md §CI Gate Spec, plan #241;
         //                            plan #247 §Scope):
