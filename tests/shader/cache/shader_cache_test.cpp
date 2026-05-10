@@ -53,12 +53,15 @@ struct TempDir {
     TempDir() {
         // Unique subdir under system temp.
         path = std::filesystem::temp_directory_path() /
-               ("glibre-cas-test-" + std::to_string(
+               ("glibre-cas-test-" +
+                std::to_string(
                     static_cast<std::uint64_t>(
-                        std::filesystem::last_write_time(
-                            std::filesystem::temp_directory_path()
-                        ).time_since_epoch().count()
-                    ) ^ reinterpret_cast<std::uint64_t>(this)));  // NOLINT
+                        std::filesystem::last_write_time(std::filesystem::temp_directory_path())
+                            .time_since_epoch()
+                            .count()
+                    ) ^
+                    reinterpret_cast<std::uint64_t>(this)
+                ));  // NOLINT
         std::filesystem::create_directories(path);
     }
 
@@ -123,8 +126,7 @@ TEST_CASE("blake3_hash_is_deterministic_across_repeated_calls", "[shader][cache]
     REQUIRE(hash1 == hash2);
 
     // Also verify via the convenience wrapper.
-    const glibre::shader::ShaderHash hash3 =
-        glibre::shader::cache::blake3_hash_buffer(bytes);
+    const glibre::shader::ShaderHash hash3 = glibre::shader::cache::blake3_hash_buffer(bytes);
     REQUIRE(hash1 == hash3);
 }
 
@@ -134,8 +136,8 @@ TEST_CASE("blake3_hash_input_composition_matches_spec_section_2", "[shader][cach
     // Verify that compute_artifact_hash() is equivalent to manually building
     // the same concatenated input in one Blake3Hasher.update() sequence.
 
-    const std::string source_str   = "preprocessed-source-bytes";
-    const std::string flags_str    = "--O3 --target metallib";
+    const std::string source_str = "preprocessed-source-bytes";
+    const std::string flags_str = "--O3 --target metallib";
 
     // Use a fixed all-zero PackedBytes to avoid depending on PermutationKey::to_bytes()
     // (permutation codec is implemented in a later plan).  The composition invariant
@@ -146,13 +148,9 @@ TEST_CASE("blake3_hash_input_composition_matches_spec_section_2", "[shader][cach
     const glibre::shader::CompileTarget target = glibre::shader::CompileTarget::MetalLib;
 
     // Path A: use compute_artifact_hash().
-    const glibre::shader::ShaderHash hash_a =
-        glibre::shader::cache::compute_artifact_hash(
-            as_bytes(source_str),
-            key_bytes,
-            as_bytes(flags_str),
-            target
-        );
+    const glibre::shader::ShaderHash hash_a = glibre::shader::cache::compute_artifact_hash(
+        as_bytes(source_str), key_bytes, as_bytes(flags_str), target
+    );
 
     // Path B: manually compose via Blake3Hasher — must be bit-identical to Path A.
     glibre::shader::cache::Blake3Hasher h;
@@ -165,23 +163,15 @@ TEST_CASE("blake3_hash_input_composition_matches_spec_section_2", "[shader][cach
     REQUIRE(hash_a == hash_b);
 
     // Sanity: different source must produce different hash.
-    const glibre::shader::ShaderHash hash_different =
-        glibre::shader::cache::compute_artifact_hash(
-            as_bytes("different-source"),
-            key_bytes,
-            as_bytes(flags_str),
-            target
-        );
+    const glibre::shader::ShaderHash hash_different = glibre::shader::cache::compute_artifact_hash(
+        as_bytes("different-source"), key_bytes, as_bytes(flags_str), target
+    );
     REQUIRE(hash_a != hash_different);
 
     // Sanity: different target must produce different hash.
-    const glibre::shader::ShaderHash hash_dxil =
-        glibre::shader::cache::compute_artifact_hash(
-            as_bytes(source_str),
-            key_bytes,
-            as_bytes(flags_str),
-            glibre::shader::CompileTarget::DXIL
-        );
+    const glibre::shader::ShaderHash hash_dxil = glibre::shader::cache::compute_artifact_hash(
+        as_bytes(source_str), key_bytes, as_bytes(flags_str), glibre::shader::CompileTarget::DXIL
+    );
     REQUIRE(hash_a != hash_dxil);
 }
 
@@ -196,8 +186,7 @@ TEST_CASE("cas_store_insert_if_absent_is_idempotent", "[shader][cache]") {
     glibre::shader::cache::CasStore store{tmp.path};
 
     const auto payload = make_payload("idempotency-test-blob");
-    const glibre::shader::ShaderHash hash =
-        glibre::shader::cache::blake3_hash_buffer(payload);
+    const glibre::shader::ShaderHash hash = glibre::shader::cache::blake3_hash_buffer(payload);
 
     // First insert.
     auto r1 = store.insert_if_absent(hash, payload);
@@ -223,28 +212,25 @@ TEST_CASE("cas_store_path_layout_matches_two_byte_prefix_sharding", "[shader][ca
     glibre::shader::cache::CasStore store{tmp.path};
 
     const auto payload = make_payload("path-layout-test");
-    const glibre::shader::ShaderHash hash =
-        glibre::shader::cache::blake3_hash_buffer(payload);
+    const glibre::shader::ShaderHash hash = glibre::shader::cache::blake3_hash_buffer(payload);
 
     auto r = store.insert_if_absent(hash, payload);
     REQUIRE(r.has_value());
 
     // Reconstruct expected path.
-    const std::filesystem::path expected =
-        glibre::shader::cache::cas_artifact_path(tmp.path, hash);
+    const std::filesystem::path expected = glibre::shader::cache::cas_artifact_path(tmp.path, hash);
 
     // File must exist at the expected CAS path.
     REQUIRE(std::filesystem::exists(expected));
 
     // Verify directory structure: artifacts/<aa>/<bb>/
     const std::string hex = glibre::shader::cache::shader_hash_to_hex(hash);
-    const std::string aa  = hex.substr(0, 2);
-    const std::string bb  = hex.substr(2, 2);
+    const std::string aa = hex.substr(0, 2);
+    const std::string bb = hex.substr(2, 2);
 
     REQUIRE(expected.parent_path().filename().string() == bb);
     REQUIRE(expected.parent_path().parent_path().filename().string() == aa);
-    REQUIRE(expected.parent_path().parent_path().parent_path().filename().string()
-            == "artifacts");
+    REQUIRE(expected.parent_path().parent_path().parent_path().filename().string() == "artifacts");
 
     // <hash> component is the full 64-char hex string.
     REQUIRE(expected.filename().string() == hex);
@@ -258,8 +244,7 @@ TEST_CASE("cas_store_get_returns_byte_equal_payload_for_inserted_hash", "[shader
     glibre::shader::cache::CasStore store{tmp.path};
 
     const auto payload = make_payload("round-trip-payload-12345678");
-    const glibre::shader::ShaderHash hash =
-        glibre::shader::cache::blake3_hash_buffer(payload);
+    const glibre::shader::ShaderHash hash = glibre::shader::cache::blake3_hash_buffer(payload);
 
     // Insert.
     REQUIRE(store.insert_if_absent(hash, payload).has_value());
@@ -279,16 +264,14 @@ TEST_CASE("cas_store_get_returns_byte_equal_payload_for_inserted_hash", "[shader
     REQUIRE(!miss.value().has_value());  // nullopt == miss
 }
 
-TEST_CASE("cas_store_returns_CacheCorrupt_on_blake3_self_check_failure",
-          "[shader][cache]") {
+TEST_CASE("cas_store_returns_CacheCorrupt_on_blake3_self_check_failure", "[shader][cache]") {
     // SPEC §4.6: "integrity self-check on read" — if the content hash of
     // the stored blob does not match the key, return Error::CacheCorrupt.
     TempDir tmp;
     glibre::shader::cache::CasStore store{tmp.path};
 
     const auto payload = make_payload("integrity-check-payload");
-    const glibre::shader::ShaderHash hash =
-        glibre::shader::cache::blake3_hash_buffer(payload);
+    const glibre::shader::ShaderHash hash = glibre::shader::cache::blake3_hash_buffer(payload);
 
     REQUIRE(store.insert_if_absent(hash, payload).has_value());
 
@@ -313,9 +296,11 @@ TEST_CASE("cas_store_returns_CacheCorrupt_on_blake3_self_check_failure",
     REQUIRE(is_corrupt);
 }
 
-TEST_CASE("cas_store_returns_CacheIntegrity_on_hash_collision_with_different_payload",
-          "[shader][cache]") {
-    // SPEC §4.6 unit-test plan item: "cas_store_returns_CacheIntegrity_on_hash_collision_with_different_payload"
+TEST_CASE(
+    "cas_store_returns_CacheIntegrity_on_hash_collision_with_different_payload", "[shader][cache]"
+) {
+    // SPEC §4.6 unit-test plan item:
+    // "cas_store_returns_CacheIntegrity_on_hash_collision_with_different_payload"
     //
     // This test verifies that when a file exists at the CAS path but the
     // content is different from what was computed (simulated by inserting
@@ -340,8 +325,7 @@ TEST_CASE("cas_store_returns_CacheIntegrity_on_hash_collision_with_different_pay
     const auto payload_a = make_payload("payload-A-for-collision-sim");
     const auto payload_b = make_payload("payload-B-different-content-xyz");
 
-    const glibre::shader::ShaderHash hash_a =
-        glibre::shader::cache::blake3_hash_buffer(payload_a);
+    const glibre::shader::ShaderHash hash_a = glibre::shader::cache::blake3_hash_buffer(payload_a);
 
     // Insert payload_a under hash_a.
     REQUIRE(store.insert_if_absent(hash_a, payload_a).has_value());
@@ -352,8 +336,10 @@ TEST_CASE("cas_store_returns_CacheIntegrity_on_hash_collision_with_different_pay
     {
         std::ofstream out{artifact_path, std::ios::binary | std::ios::trunc};
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-        out.write(reinterpret_cast<const char*>(payload_b.data()),
-                  static_cast<std::streamsize>(payload_b.size()));
+        out.write(
+            reinterpret_cast<const char*>(payload_b.data()),
+            static_cast<std::streamsize>(payload_b.size())
+        );
     }
 
     // get(hash_a) must detect the mismatch and return CacheCorrupt.

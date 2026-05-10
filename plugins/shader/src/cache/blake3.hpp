@@ -43,9 +43,7 @@ namespace glibre::shader::cache {
 
 class Blake3Hasher {
 public:
-    Blake3Hasher() noexcept {
-        blake3_hasher_init(&state_);
-    }
+    Blake3Hasher() noexcept { blake3_hasher_init(&state_); }
 
     // Non-copyable, non-movable.  Finalize once and discard.
     Blake3Hasher(const Blake3Hasher&) = delete;
@@ -57,15 +55,13 @@ public:
     }
 
     /// Feed a std::array directly (e.g. PermutationKey::PackedBytes).
-    template <std::size_t N>
+    template<std::size_t N>
     void update(const std::array<std::byte, N>& arr) noexcept {
         blake3_hasher_update(&state_, arr.data(), N);
     }
 
     /// Feed a single byte (e.g. CompileTarget discriminant).
-    void update_byte(std::byte b) noexcept {
-        blake3_hasher_update(&state_, &b, 1);
-    }
+    void update_byte(std::byte b) noexcept { blake3_hasher_update(&state_, &b, 1); }
 
     /// Produce the 32-byte BLAKE3 output.
     /// Must be called exactly once per hasher instance.
@@ -89,9 +85,7 @@ private:
 // Used for include-graph node hashes (§4.1).
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] inline ShaderHash blake3_hash_buffer(
-    std::span<const std::byte> data
-) noexcept {
+[[nodiscard]] inline ShaderHash blake3_hash_buffer(std::span<const std::byte> data) noexcept {
     Blake3Hasher h;
     h.update(data);
     return h.finalize();
@@ -103,10 +97,10 @@ private:
 // ---------------------------------------------------------------------------
 
 [[nodiscard]] inline ShaderHash compute_artifact_hash(
-    std::span<const std::byte>              preprocessed_bytes,
-    const PermutationKey::PackedBytes&      key_bytes,
-    std::span<const std::byte>              flags_bytes,
-    CompileTarget                           target
+    std::span<const std::byte> preprocessed_bytes,
+    const PermutationKey::PackedBytes& key_bytes,
+    std::span<const std::byte> flags_bytes,
+    CompileTarget target
 ) noexcept {
     Blake3Hasher h;
     h.update(preprocessed_bytes);

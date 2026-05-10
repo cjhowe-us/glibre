@@ -48,10 +48,8 @@ namespace glibre::shader::cache {
     return hex;
 }
 
-[[nodiscard]] std::filesystem::path cas_artifact_path(
-    const std::filesystem::path& root,
-    const ShaderHash&             hash
-) {
+[[nodiscard]] std::filesystem::path
+cas_artifact_path(const std::filesystem::path& root, const ShaderHash& hash) {
     // Extract first two hex-encoded bytes for two-level sharding.
     const auto b0 = static_cast<unsigned char>(hash.bytes[0]);
     const auto b1 = static_cast<unsigned char>(hash.bytes[1]);
@@ -70,9 +68,7 @@ namespace glibre::shader::cache {
 CasStore::CasStore(std::filesystem::path cache_root)
     : root_{std::move(cache_root)} {}
 
-const std::filesystem::path& CasStore::root() const noexcept {
-    return root_;
-}
+const std::filesystem::path& CasStore::root() const noexcept { return root_; }
 
 bool CasStore::has(const ShaderHash& hash) const {
     const auto path = cas_artifact_path(root_, hash);
@@ -80,8 +76,7 @@ bool CasStore::has(const ShaderHash& hash) const {
     return std::filesystem::exists(path, ec);
 }
 
-glibre::Result<std::optional<std::vector<std::byte>>>
-CasStore::get(const ShaderHash& hash) const {
+glibre::Result<std::optional<std::vector<std::byte>>> CasStore::get(const ShaderHash& hash) const {
     const auto path = cas_artifact_path(root_, hash);
 
     // Miss: file does not exist.
@@ -102,8 +97,7 @@ CasStore::get(const ShaderHash& hash) const {
 
     std::vector<std::byte> buf(file_size);
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-    if (!file.read(reinterpret_cast<char*>(buf.data()),
-                   static_cast<std::streamsize>(file_size))) {
+    if (!file.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(file_size))) {
         return std::unexpected(glibre::Error{shader::Error::CacheCorrupt});
     }
 
@@ -116,10 +110,8 @@ CasStore::get(const ShaderHash& hash) const {
     return std::optional<std::vector<std::byte>>{std::move(buf)};
 }
 
-glibre::Result<void> CasStore::insert_if_absent(
-    const ShaderHash&          hash,
-    std::span<const std::byte> data
-) {
+glibre::Result<void>
+CasStore::insert_if_absent(const ShaderHash& hash, std::span<const std::byte> data) {
     // Idempotency: if the key already exists, succeed immediately.
     const auto path = cas_artifact_path(root_, hash);
     {
@@ -149,8 +141,10 @@ glibre::Result<void> CasStore::insert_if_absent(
             return std::unexpected(glibre::Error{shader::Error::CacheIntegrity});
         }
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
-        if (!out.write(reinterpret_cast<const char*>(data.data()),
-                       static_cast<std::streamsize>(data.size()))) {
+        if (!out.write(
+                reinterpret_cast<const char*>(data.data()),
+                static_cast<std::streamsize>(data.size())
+            )) {
             // Write failed — clean up temp file.
             std::error_code ec;
             std::filesystem::remove(tmp_path, ec);

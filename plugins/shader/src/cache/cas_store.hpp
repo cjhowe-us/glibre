@@ -47,10 +47,8 @@ namespace glibre::shader::cache {
 
 /// Derive the CAS path for a given hash under root:
 ///   <root>/artifacts/<aa>/<bb>/<hex-hash>
-[[nodiscard]] std::filesystem::path cas_artifact_path(
-    const std::filesystem::path& root,
-    const ShaderHash&             hash
-);
+[[nodiscard]] std::filesystem::path
+cas_artifact_path(const std::filesystem::path& root, const ShaderHash& hash);
 
 // ---------------------------------------------------------------------------
 // CasStore
@@ -95,10 +93,8 @@ public:
     /// writing.  On success the blob is immutable and durable (sync'd).
     ///
     /// Error::CacheCorrupt: data is empty — not inserted.
-    [[nodiscard]] glibre::Result<void> insert_if_absent(
-        const ShaderHash&        hash,
-        std::span<const std::byte> data
-    );
+    [[nodiscard]] glibre::Result<void>
+    insert_if_absent(const ShaderHash& hash, std::span<const std::byte> data);
 
     /// Root path (for external integrity walkers).
     [[nodiscard]] const std::filesystem::path& root() const noexcept;
