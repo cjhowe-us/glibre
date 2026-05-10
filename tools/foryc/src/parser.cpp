@@ -169,7 +169,7 @@ private:
 // FORYC_ERR(code, detail_sv) — build a glibre::Error from a tools::Error
 // enumerator, capturing __FILE__ and __LINE__ at the *call site* (not here).
 // `detail_sv` must be a string literal (or similarly immortal storage)
-// because ErrorContext.detail is eastl::string_view — it does not own the bytes.
+// because ErrorContext.detail is std::string_view — it does not own the bytes.
 // Every call site in this file passes a string literal, satisfying the
 // lifetime requirement.
 //
@@ -181,10 +181,7 @@ private:
     std::unexpected<glibre::Error> {                                                               \
         glibre::Error {                                                                            \
             (code), glibre::ErrorContext {                                                         \
-                __FILE__, __LINE__, eastl::string_view {                                           \
-                    std::string_view{detail_literal}.data(),                                       \
-                        std::string_view{detail_literal}.size()                                    \
-                }                                                                                  \
+                __FILE__, __LINE__, std::string_view { detail_literal }                            \
             }                                                                                      \
         }                                                                                          \
     }

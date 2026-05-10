@@ -48,7 +48,7 @@ static Schema parse_ok(std::string_view src, std::string_view vpath = "<test>") 
 }
 
 static bool has_tools_error(const glibre::Error& e, glibre::tools::Error code) noexcept {
-    const auto* te = eastl::get_if<glibre::tools::Error>(&e.code());
+    const auto* te = std::get_if<glibre::tools::Error>(&e.code());
     return te && (*te == code);
 }
 

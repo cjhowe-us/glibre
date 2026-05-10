@@ -106,7 +106,7 @@ glibre::core::ColumnDescriptor make_desc(std::size_t size, std::size_t align) no
 /// Returns true iff the glibre::Error wraps core::Error::TypeUnregistered.
 bool is_type_unregistered(const glibre::Error& err) noexcept {
     using glibre::core::Error;
-    if (auto* e = eastl::get_if<Error>(&err.code())) {
+    if (auto* e = std::get_if<Error>(&err.code())) {
         return *e == Error::TypeUnregistered;
     }
     return false;
@@ -115,7 +115,7 @@ bool is_type_unregistered(const glibre::Error& err) noexcept {
 /// Returns true iff the glibre::Error wraps core::Error::TypeRegistryClosed.
 bool is_type_registry_closed(const glibre::Error& err) noexcept {
     using glibre::core::Error;
-    if (auto* e = eastl::get_if<Error>(&err.code())) {
+    if (auto* e = std::get_if<Error>(&err.code())) {
         return *e == Error::TypeRegistryClosed;
     }
     return false;
@@ -124,7 +124,7 @@ bool is_type_registry_closed(const glibre::Error& err) noexcept {
 /// Returns true iff the glibre::Error wraps core::Error::TypeRegistryGap.
 bool is_type_registry_gap(const glibre::Error& err) noexcept {
     using glibre::core::Error;
-    if (auto* e = eastl::get_if<Error>(&err.code())) {
+    if (auto* e = std::get_if<Error>(&err.code())) {
         return *e == Error::TypeRegistryGap;
     }
     return false;

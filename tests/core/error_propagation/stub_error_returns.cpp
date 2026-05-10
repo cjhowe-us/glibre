@@ -31,14 +31,18 @@
 //
 // This stub is a test-only artifact; it is not a plugin and does not export
 // the four canonical plugin ABI symbols (glibre_plugin_abi_hash, etc.).
+//
+// Migrated from EASTL to libc++ stdlib per
+// reviews/decisions/eastl-removal.md §4.
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <expected>
+#include <string_view>
+#include <variant>
 
-#include <EASTL/variant.h>
 #include <glibre/error.hpp>
 
 #include "transfer.hpp"
@@ -75,8 +79,8 @@ int32_t glibre_test_error_discriminant() noexcept {
     glibre::Result<void> r = std::unexpected(glibre::Error{glibre::core::Error::PluginInitFailed});
 
     // r is an error; extract the variant index of its error alternative.
-    // eastl::variant::index() returns the zero-based position of the active
-    // alternative.
+    // std::variant::index() returns the zero-based position of the active
+    // alternative.  Migrated from eastl::variant per eastl-removal.md §4.
     const std::size_t idx = r.error().code().index();
 
     // Return as int32_t (plain C integer) — safe for C-ABI crossing.
@@ -127,11 +131,13 @@ bool glibre_test_context_write(char* buf, std::size_t buf_size) noexcept {
     }
 
     // Populate ErrorContext with sentinel values.
+    // ErrorContext::file and ::detail are std::string_view post-migration per
+    // reviews/decisions/eastl-removal.md §4 (matrix row 2).
     // Line is __LINE__ at this exact call site — no hand-mirrored constant.
     glibre::ErrorContext ctx;
-    ctx.file = eastl::string_view{kSentinelFile};
+    ctx.file = std::string_view{kSentinelFile};
     ctx.line = __LINE__;  // captures the source line of this assignment
-    ctx.detail = eastl::string_view{kSentinelDetail};
+    ctx.detail = std::string_view{kSentinelDetail};
 
     // Round-trip through std::unexpected so the test verifies that
     // glibre::Result<void> carries ErrorContext through .error().where().
@@ -143,8 +149,8 @@ bool glibre_test_context_write(char* buf, std::size_t buf_size) noexcept {
     GlibreTestContextTransfer transfer{};
     transfer.line = r.error().where().line;
 
-    const eastl::string_view file_view = r.error().where().file;
-    const eastl::string_view detail_view = r.error().where().detail;
+    const std::string_view file_view = r.error().where().file;
+    const std::string_view detail_view = r.error().where().detail;
 
     const std::size_t file_copy = std::min(file_view.size(), kFileMax - 1u);
     const std::size_t detail_copy = std::min(detail_view.size(), kDetailMax - 1u);

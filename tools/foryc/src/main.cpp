@@ -156,7 +156,7 @@ static eastl::optional<Args> parse_args(int argc, char** argv) {
 
 static std::string_view error_name(const glibre::Error& e) noexcept {
     using glibre::tools::Error;
-    if (const auto* te = eastl::get_if<Error>(&e.code())) {
+    if (const auto* te = std::get_if<Error>(&e.code())) {
         switch (*te) {
         case Error::ForycSyntaxError:
             return "syntax error";

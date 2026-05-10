@@ -13,11 +13,15 @@
 //   - -fno-exceptions / -fno-rtti (error-model.md §Decision 3).
 //   - No REQUIRE_THROWS usage.
 //   - Tests are intentionally minimal — they pin the *contract*, not the impl.
+//
+// Migrated from EASTL to libc++ stdlib per
+// reviews/decisions/eastl-removal.md §4.
 
 #include <cstdint>
+#include <string_view>
 #include <type_traits>
+#include <variant>
 
-#include <EASTL/variant.h>
 #include <catch2/catch_test_macros.hpp>
 #include <glibre/error.hpp>
 #include <glibre/error_register.hpp>
@@ -26,7 +30,7 @@
 // TEST: error_variant_holds_alternative_per_context
 //
 // Construct glibre::Error with each registered per-context enumerator and
-// verify that eastl::holds_alternative<ctx::Error> returns true for the
+// verify that std::holds_alternative<ctx::Error> returns true for the
 // correct arm and false for all others.
 //
 // This is the primary contract test: the Variant discriminates correctly.
@@ -36,12 +40,12 @@ TEST_CASE("error_variant_holds_alternative_per_context", "[core][error][variant]
     SECTION("core::Error arm is selected when constructed from core::Error") {
         const glibre::Error err{glibre::core::Error::PluginAbiHashMismatch};
 
-        REQUIRE(eastl::holds_alternative<glibre::core::Error>(err.code()));
-        REQUIRE_FALSE(eastl::holds_alternative<glibre::render::Error>(err.code()));
-        REQUIRE_FALSE(eastl::holds_alternative<glibre::tools::Error>(err.code()));
+        REQUIRE(std::holds_alternative<glibre::core::Error>(err.code()));
+        REQUIRE_FALSE(std::holds_alternative<glibre::render::Error>(err.code()));
+        REQUIRE_FALSE(std::holds_alternative<glibre::tools::Error>(err.code()));
 
         // The stored value is the exact enumerator passed in.
-        const auto* arm = eastl::get_if<glibre::core::Error>(&err.code());
+        const auto* arm = std::get_if<glibre::core::Error>(&err.code());
         REQUIRE(arm != nullptr);
         REQUIRE(*arm == glibre::core::Error::PluginAbiHashMismatch);
     }
@@ -49,11 +53,11 @@ TEST_CASE("error_variant_holds_alternative_per_context", "[core][error][variant]
     SECTION("render::Error arm is selected when constructed from render::Error") {
         const glibre::Error err{glibre::render::Error::DeviceLost};
 
-        REQUIRE_FALSE(eastl::holds_alternative<glibre::core::Error>(err.code()));
-        REQUIRE(eastl::holds_alternative<glibre::render::Error>(err.code()));
-        REQUIRE_FALSE(eastl::holds_alternative<glibre::tools::Error>(err.code()));
+        REQUIRE_FALSE(std::holds_alternative<glibre::core::Error>(err.code()));
+        REQUIRE(std::holds_alternative<glibre::render::Error>(err.code()));
+        REQUIRE_FALSE(std::holds_alternative<glibre::tools::Error>(err.code()));
 
-        const auto* arm = eastl::get_if<glibre::render::Error>(&err.code());
+        const auto* arm = std::get_if<glibre::render::Error>(&err.code());
         REQUIRE(arm != nullptr);
         REQUIRE(*arm == glibre::render::Error::DeviceLost);
     }
@@ -61,11 +65,11 @@ TEST_CASE("error_variant_holds_alternative_per_context", "[core][error][variant]
     SECTION("tools::Error arm is selected when constructed from tools::Error") {
         const glibre::Error err{glibre::tools::Error::ForycSyntaxError};
 
-        REQUIRE_FALSE(eastl::holds_alternative<glibre::core::Error>(err.code()));
-        REQUIRE_FALSE(eastl::holds_alternative<glibre::render::Error>(err.code()));
-        REQUIRE(eastl::holds_alternative<glibre::tools::Error>(err.code()));
+        REQUIRE_FALSE(std::holds_alternative<glibre::core::Error>(err.code()));
+        REQUIRE_FALSE(std::holds_alternative<glibre::render::Error>(err.code()));
+        REQUIRE(std::holds_alternative<glibre::tools::Error>(err.code()));
 
-        const auto* arm = eastl::get_if<glibre::tools::Error>(&err.code());
+        const auto* arm = std::get_if<glibre::tools::Error>(&err.code());
         REQUIRE(arm != nullptr);
         REQUIRE(*arm == glibre::tools::Error::ForycSyntaxError);
     }
@@ -75,8 +79,10 @@ TEST_CASE("error_variant_holds_alternative_per_context", "[core][error][variant]
     // mirrors error_register.hpp — intentionally redundant for test-side
     // documentation: if the header-level assert is removed, the test still pins
     // the contract and the breakage is caught here.
+    // Migrated from eastl::variant_size_v to std::variant_size_v per
+    // reviews/decisions/eastl-removal.md §4 (matrix row 19).
     static_assert(
-        eastl::variant_size_v<glibre::Error::Variant> == glibre::kExpectedArmCount,
+        std::variant_size_v<glibre::Error::Variant> == glibre::kExpectedArmCount,
         "Variant arm count drifted from kExpectedArmCount — "
         "update error_register.hpp when adding a new context."
     );
@@ -133,9 +139,9 @@ TEST_CASE("result_alias_propagates_error_via_unexpected", "[core][error][result]
 
     // error() returns the glibre::Error that was wrapped in std::unexpected.
     const glibre::Error& err = r.error();
-    REQUIRE(eastl::holds_alternative<glibre::core::Error>(err.code()));
+    REQUIRE(std::holds_alternative<glibre::core::Error>(err.code()));
 
-    const auto* arm = eastl::get_if<glibre::core::Error>(&err.code());
+    const auto* arm = std::get_if<glibre::core::Error>(&err.code());
     REQUIRE(arm != nullptr);
     REQUIRE(*arm == sentinel);
 }
@@ -150,9 +156,11 @@ TEST_CASE("result_alias_propagates_error_via_unexpected", "[core][error][result]
 // ===========================================================================
 
 TEST_CASE("error_context_round_trip", "[core][error][context]") {
-    constexpr eastl::string_view test_file = "tests/core/error_variant/error_variant_test.cpp";
+    // ErrorContext::file and ::detail are std::string_view post-migration
+    // per reviews/decisions/eastl-removal.md §4 (matrix row 2).
+    constexpr std::string_view test_file = "tests/core/error_variant/error_variant_test.cpp";
     constexpr int test_line = 42;
-    constexpr eastl::string_view test_detail = "synthetic error for round-trip test";
+    constexpr std::string_view test_detail = "synthetic error for round-trip test";
 
     const glibre::ErrorContext ctx{
         .file = test_file,
@@ -162,8 +170,8 @@ TEST_CASE("error_context_round_trip", "[core][error][context]") {
     const glibre::Error err{glibre::core::Error::HotReloadRefused, ctx};
 
     // Variant arm is correct.
-    REQUIRE(eastl::holds_alternative<glibre::core::Error>(err.code()));
-    const auto* arm = eastl::get_if<glibre::core::Error>(&err.code());
+    REQUIRE(std::holds_alternative<glibre::core::Error>(err.code()));
+    const auto* arm = std::get_if<glibre::core::Error>(&err.code());
     REQUIRE(arm != nullptr);
     REQUIRE(*arm == glibre::core::Error::HotReloadRefused);
 

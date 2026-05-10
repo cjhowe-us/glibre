@@ -9,18 +9,25 @@
 //   - error_register_compile_time_arm_count
 //   - error_register_lists_known_contexts
 //
+// Named test cases added by plan #1040 (eastl::variant → std::variant migration):
+//   - core/error: variant_alias_uses_std_variant
+//
 // Design constraints:
 //   - -fno-exceptions (error-model.md §Decision 3).
 //   - No REQUIRE_THROWS usage.
 //   - All uniqueness checks are purely compile-time (static_assert) or
 //     runtime-mirrored via CHECK — the enums are fixed at compile time so
 //     there is no need for dynamic introspection.
+//
+// Migrated from EASTL to libc++ stdlib per
+// reviews/decisions/eastl-removal.md §4.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
+#include <variant>
 
-#include <EASTL/array.h>
 #include <catch2/catch_test_macros.hpp>
 #include <glibre/error_register.hpp>
 
@@ -45,7 +52,7 @@ namespace {
 /// Returns true if all elements in the array are distinct.
 /// Uses an O(n^2) pairwise comparison — arrays are small (< 20 entries).
 template<typename T, std::size_t N>
-constexpr bool all_distinct(const eastl::array<T, N>& arr) noexcept {
+constexpr bool all_distinct(const std::array<T, N>& arr) noexcept {
     for (std::size_t i = 0; i < N; ++i) {
         for (std::size_t j = i + 1; j < N; ++j) {
             if (arr[i] == arr[j]) {
@@ -62,7 +69,7 @@ constexpr bool all_distinct(const eastl::array<T, N>& arr) noexcept {
 
 /// All core::Error enumerator values, listed in declaration order.
 /// When a new enumerator is added to core::Error, add it here too.
-constexpr eastl::array<std::underlying_type_t<glibre::core::Error>, 21> kCoreErrorValues{{
+constexpr std::array<std::underlying_type_t<glibre::core::Error>, 21> kCoreErrorValues{{
     static_cast<std::uint16_t>(glibre::core::Error::PluginAbiHashMismatch),
     static_cast<std::uint16_t>(glibre::core::Error::PluginInitFailed),
     static_cast<std::uint16_t>(glibre::core::Error::SchemaMigrationFailed),
@@ -106,7 +113,7 @@ static_assert(
 // render::Error — enumerator values
 // ---------------------------------------------------------------------------
 
-constexpr eastl::array<std::underlying_type_t<glibre::render::Error>, 5> kRenderErrorValues{{
+constexpr std::array<std::underlying_type_t<glibre::render::Error>, 5> kRenderErrorValues{{
     static_cast<std::uint16_t>(glibre::render::Error::DeviceLost),
     static_cast<std::uint16_t>(glibre::render::Error::PipelineCompileFailed),
     static_cast<std::uint16_t>(glibre::render::Error::ResourceResidencyExceeded),
@@ -120,7 +127,7 @@ static_assert(all_distinct(kRenderErrorValues), "render::Error has duplicate enu
 // tools::Error — enumerator values
 // ---------------------------------------------------------------------------
 
-constexpr eastl::array<std::underlying_type_t<glibre::tools::Error>, 6> kToolsErrorValues{{
+constexpr std::array<std::underlying_type_t<glibre::tools::Error>, 6> kToolsErrorValues{{
     static_cast<std::uint16_t>(glibre::tools::Error::ForycSyntaxError),
     static_cast<std::uint16_t>(glibre::tools::Error::ForycDuplicateTag),
     static_cast<std::uint16_t>(glibre::tools::Error::ForycNonMonotoneVersion),
@@ -136,7 +143,7 @@ static_assert(all_distinct(kToolsErrorValues), "tools::Error has duplicate enume
 // ---------------------------------------------------------------------------
 // Added by plan #508 (ShaderSource open + include resolver + entry-point scanner).
 
-constexpr eastl::array<std::underlying_type_t<glibre::shader::Error>, 25> kShaderErrorValues{{
+constexpr std::array<std::underlying_type_t<glibre::shader::Error>, 25> kShaderErrorValues{{
     static_cast<std::uint16_t>(glibre::shader::Error::SourceNotFound),
     static_cast<std::uint16_t>(glibre::shader::Error::SourceParseFailed),
     static_cast<std::uint16_t>(glibre::shader::Error::IncludeEscape),
@@ -201,8 +208,10 @@ TEST_CASE("error_register_per_context_arms_unique", "[core][error_register]") {
 
 // Compile-time: verified in error_register.hpp via static_assert.
 // Runtime mirror below for Catch2 visibility.
+// Migrated from eastl::variant_size_v to std::variant_size_v per
+// reviews/decisions/eastl-removal.md §4 (matrix row 19).
 static_assert(
-    eastl::variant_size_v<glibre::Error::Variant> == glibre::kExpectedArmCount,
+    std::variant_size_v<glibre::Error::Variant> == glibre::kExpectedArmCount,
     "Variant arm count does not match kExpectedArmCount (runtime mirror — "
     "should be caught by error_register.hpp static_assert first)."
 );
@@ -210,7 +219,7 @@ static_assert(
 TEST_CASE("error_register_compile_time_arm_count", "[core][error_register]") {
     // The static_assert above already fires at compile time.
     // The runtime CHECK below makes the invariant visible in the test report.
-    constexpr std::size_t actual = eastl::variant_size_v<glibre::Error::Variant>;
+    constexpr std::size_t actual = std::variant_size_v<glibre::Error::Variant>;
     CHECK(actual == glibre::kExpectedArmCount);
 
     // Also verify the kAllErrorContexts array has the same length —
@@ -243,16 +252,16 @@ TEST_CASE("error_register_lists_known_contexts", "[core][error_register]") {
     REQUIRE(glibre::kAllErrorContexts.size() == glibre::kExpectedArmCount);
 
     // Index 0 corresponds to core::Error (first Variant arm).
-    CHECK(glibre::kAllErrorContexts[0] == eastl::string_view{"core"});
+    CHECK(glibre::kAllErrorContexts[0] == std::string_view{"core"});
 
     // Index 1 corresponds to render::Error.
-    CHECK(glibre::kAllErrorContexts[1] == eastl::string_view{"render"});
+    CHECK(glibre::kAllErrorContexts[1] == std::string_view{"render"});
 
     // Index 2 corresponds to tools::Error.
-    CHECK(glibre::kAllErrorContexts[2] == eastl::string_view{"tools"});
+    CHECK(glibre::kAllErrorContexts[2] == std::string_view{"tools"});
 
     // Index 3 corresponds to shader::Error (added by plan #508).
-    CHECK(glibre::kAllErrorContexts[3] == eastl::string_view{"shader"});
+    CHECK(glibre::kAllErrorContexts[3] == std::string_view{"shader"});
 
     // No duplicates in the context names list.
     bool has_duplicates = false;
@@ -264,4 +273,46 @@ TEST_CASE("error_register_lists_known_contexts", "[core][error_register]") {
         }
     }
     CHECK_FALSE(has_duplicates);
+}
+
+// ===========================================================================
+// Test: core/error: variant_alias_uses_std_variant
+//
+// Pins that glibre::Error::Variant is exactly std::variant<...> with the
+// four registered per-context error types.  Added by plan #1040 per
+// reviews/decisions/eastl-removal.md §4.
+//
+// This static_assert fires at compile time if the Variant alias ever drifts
+// from std::variant or if an arm is silently added/removed without updating
+// the arm-count static_assert in error_register.hpp.
+// ===========================================================================
+
+// Compile-time: Variant alias substrate must be std::variant, not eastl::variant.
+static_assert(
+    std::is_same_v<
+        glibre::Error::Variant,
+        std::variant<
+            glibre::core::Error,
+            glibre::render::Error,
+            glibre::tools::Error,
+            glibre::shader::Error>>,
+    "glibre::Error::Variant must be std::variant<core::Error, render::Error, "
+    "tools::Error, shader::Error> per eastl-removal.md §4."
+);
+
+TEST_CASE("core/error: variant_alias_uses_std_variant", "[core][error][variant]") {
+    // Runtime mirror: the static_assert above fires at compile time; this
+    // CHECK makes the invariant visible in the Catch2 test report.
+    constexpr bool is_std_variant = std::is_same_v<
+        glibre::Error::Variant,
+        std::variant<
+            glibre::core::Error,
+            glibre::render::Error,
+            glibre::tools::Error,
+            glibre::shader::Error>>;
+    CHECK(is_std_variant);
+
+    // Arm count is preserved: four contexts remain registered.
+    constexpr std::size_t arm_count = std::variant_size_v<glibre::Error::Variant>;
+    CHECK(arm_count == 4u);
 }

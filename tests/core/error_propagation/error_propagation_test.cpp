@@ -16,15 +16,14 @@
 //   GLIBRE_STUB_ERROR_RETURNS_DYLIB_PATH — path to stub_error_returns.dylib
 //
 // Design constraints:
-//   • -fno-exceptions / -fno-rtti (error-model.md §Decision 3).
-//   • EASTL for string_view (PHILOSOPHY §11).
-//   • dlopen/dlsym used directly — tests do not depend on PluginLoader.
+//   - -fno-exceptions / -fno-rtti (error-model.md §Decision 3).
+//   - dlopen/dlsym used directly — tests do not depend on PluginLoader.
 //     These tests target the C-ABI contract itself, not the loader machinery.
-//   • No REQUIRE_THROWS — -fno-exceptions build.
+//   - No REQUIRE_THROWS — -fno-exceptions build.
 //
 // Stub dylib contract (stub_error_returns.cpp):
 //   glibre_test_error_discriminant() -> int32_t
-//     Returns the eastl::variant index of core::Error arm = 0.
+//     Returns the std::variant index of core::Error arm = 0.
 //   glibre_test_error_code() -> uint16_t
 //     Returns underlying integer value of core::Error::PluginInitFailed.
 //   glibre_test_context_write(char* buf, size_t buf_size) -> bool
@@ -32,16 +31,19 @@
 //     extracts .error().where(), and writes a GlibreTestContextTransfer POD
 //     into the caller's buffer.  The line field is __LINE__ at the construction
 //     site — no hard-coded sentinel constant on the host side.
+//
+// Migrated from EASTL to libc++ stdlib per
+// reviews/decisions/eastl-removal.md §4.
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <dlfcn.h>  // dlopen, dlsym, dlclose — macOS / POSIX
+#include <memory>
+#include <string_view>
+#include <variant>
 
-#include <EASTL/string_view.h>
-#include <EASTL/unique_ptr.h>
-#include <EASTL/variant.h>
 #include <catch2/catch_test_macros.hpp>
 #include <glibre/error.hpp>
 
@@ -64,7 +66,7 @@ struct DlHandleDeleter {
     }
 };
 
-using DlHandle = eastl::unique_ptr<void, DlHandleDeleter>;
+using DlHandle = std::unique_ptr<void, DlHandleDeleter>;
 
 // Shared POD layout and sentinel constants from transfer.hpp.
 // Extracted to remove the "keep in sync" manual hazard (SRP: one definition).
@@ -162,11 +164,13 @@ TEST_CASE("c_abi_boundary_returns_error_code_no_exception", "[core][error_propag
     // Host-side compile-time structural check.
     //
     // Verify that the Variant layout assumed by kCoreErrorVariantIndex == 0 is
-    // still true in this compilation unit.  eastl::variant_size is a stronger
+    // still true in this compilation unit.  std::variant_size is a stronger
     // invariant than sizeof > 0: it locks the arm count the test depends on.
+    // Migrated from eastl::variant_size_v to std::variant_size_v per
+    // reviews/decisions/eastl-removal.md §4 (matrix row 19).
     // -------------------------------------------------------------------------
     static_assert(
-        eastl::variant_size_v<glibre::Error::Variant> >= 1u,
+        std::variant_size_v<glibre::Error::Variant> >= 1u,
         "glibre::Error::Variant must have at least one arm (core::Error)"
     );
     glibre::Error probe{glibre::core::Error::OutOfBudget};
@@ -225,8 +229,10 @@ TEST_CASE("error_propagation_preserves_error_context", "[core][error_propagation
     REQUIRE(wrote);
 
     // Verify file and detail match the sentinels baked into the stub.
-    CHECK(eastl::string_view{transfer.file} == eastl::string_view{kSentinelFile});
-    CHECK(eastl::string_view{transfer.detail} == eastl::string_view{kSentinelDetail});
+    // Migrated from eastl::string_view to std::string_view per
+    // reviews/decisions/eastl-removal.md §4 (matrix row 2).
+    CHECK(std::string_view{transfer.file} == std::string_view{kSentinelFile});
+    CHECK(std::string_view{transfer.detail} == std::string_view{kSentinelDetail});
 
     // Verify the line is a positive, non-zero source location.
     // The stub sets ctx.line = __LINE__ at the ErrorContext construction site;

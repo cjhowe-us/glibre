@@ -25,8 +25,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
+#include <variant>
 
-#include <EASTL/string_view.h>
 #include <catch2/catch_test_macros.hpp>
 #include <glibre/core/plugin_loader.hpp>
 #include <glibre/error.hpp>
@@ -41,7 +41,7 @@ namespace {
 /// Returns true if the error holds the expected core::Error arm.
 [[nodiscard]] bool holds_core_error(const glibre::Error& err, glibre::core::Error expected) {
     const auto& var = err.code();
-    const auto* ptr = eastl::get_if<glibre::core::Error>(&var);
+    const auto* ptr = std::get_if<glibre::core::Error>(&var);
     return (ptr != nullptr) && (*ptr == expected);
 }
 
