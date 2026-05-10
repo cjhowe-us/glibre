@@ -20,11 +20,15 @@
 //   - Fixtures live in tests/shader/source/fixtures/ and are referenced via
 //     GLIBRE_SHADER_FIXTURE_DIR, defined by the CMakeLists.txt compile definition.
 //   - No REQUIRE_THROWS.
+//   - Each test constructs a per-test PerContextAllocatorResource so that
+//     ShaderSource::open() allocations are tracked under ContextTag::shader
+//     (perf-budget.md §Allocator Rules #1, R1 HIGH-1 followup).
 
 #include <filesystem>
 #include <string>
 
 #include <catch2/catch_test_macros.hpp>
+#include <glibre/alloc.hpp>
 #include <glibre/shader/shader_source.hpp>
 
 // GLIBRE_SHADER_FIXTURE_DIR is defined by CMakeLists as a compile definition
@@ -36,6 +40,18 @@
 namespace {
 
 const std::filesystem::path kFixtureDir{GLIBRE_SHADER_FIXTURE_DIR};
+
+// Per-test allocator helper: each test that calls ShaderSource::open() must
+// provide a PerContextAllocatorResource backed by ContextTag::shader so that
+// all internal PMR allocations are counted under the shader ceiling
+// (perf-budget.md §Allocator Rules #1).
+//
+// Declare the PerContextAllocator BEFORE the resource (RAII order: resource
+// must destruct before allocator per alloc.hpp lifetime contract).
+struct ShaderTestAlloc {
+    glibre::PerContextAllocator alloc{glibre::ContextTag::shader};
+    glibre::PerContextAllocatorResource mr{alloc};
+};
 
 }  // namespace
 
@@ -49,11 +65,12 @@ const std::filesystem::path kFixtureDir{GLIBRE_SHADER_FIXTURE_DIR};
 // ===========================================================================
 
 TEST_CASE("shader_source_open_validates_entry_points", "[shader][shader_source]") {
+    ShaderTestAlloc ta;
     // project_root is the fixture directory itself for this test.
     const auto project_root = kFixtureDir;
     const auto project_rel = std::filesystem::path{"two_stage_shader.slang"};
 
-    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel, &ta.mr);
     REQUIRE(result.has_value());
 
     const auto& src = *result;
@@ -83,10 +100,11 @@ TEST_CASE("shader_source_open_validates_entry_points", "[shader][shader_source]"
 // ===========================================================================
 
 TEST_CASE("shader_source_resolves_includes", "[shader][shader_source]") {
+    ShaderTestAlloc ta;
     const auto project_root = kFixtureDir;
     const auto project_rel = std::filesystem::path{"root_a.slang"};
 
-    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel, &ta.mr);
     REQUIRE(result.has_value());
 
     const auto& src = *result;
@@ -117,10 +135,11 @@ TEST_CASE("shader_source_resolves_includes", "[shader][shader_source]") {
 // ===========================================================================
 
 TEST_CASE("shader_source_include_closure_rejects_escape_and_cycle", "[shader][shader_source]") {
+    ShaderTestAlloc ta;
     const auto project_root = kFixtureDir;
     const auto project_rel = std::filesystem::path{"cycle_a.slang"};
 
-    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel, &ta.mr);
     REQUIRE_FALSE(result.has_value());
 
     // std::variant holds glibre::shader::Error (per eastl-removal.md §4).
@@ -138,10 +157,11 @@ TEST_CASE("shader_source_include_closure_rejects_escape_and_cycle", "[shader][sh
 // ===========================================================================
 
 TEST_CASE("shader_source_open_returns_SourceNotFound_for_missing_path", "[shader][shader_source]") {
+    ShaderTestAlloc ta;
     const auto project_root = kFixtureDir;
     const auto project_rel = std::filesystem::path{"does_not_exist.slang"};
 
-    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel, &ta.mr);
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();
@@ -161,11 +181,13 @@ TEST_CASE("shader_source_open_returns_SourceNotFound_for_missing_path", "[shader
 TEST_CASE(
     "shader_source_preprocessed_total_hash_is_byte_stable_across_calls", "[shader][shader_source]"
 ) {
+    ShaderTestAlloc ta1;
+    ShaderTestAlloc ta2;
     const auto project_root = kFixtureDir;
     const auto project_rel = std::filesystem::path{"two_stage_shader.slang"};
 
-    auto r1 = glibre::shader::ShaderSource::open(project_root, project_rel);
-    auto r2 = glibre::shader::ShaderSource::open(project_root, project_rel);
+    auto r1 = glibre::shader::ShaderSource::open(project_root, project_rel, &ta1.mr);
+    auto r2 = glibre::shader::ShaderSource::open(project_root, project_rel, &ta2.mr);
 
     REQUIRE(r1.has_value());
     REQUIRE(r2.has_value());
@@ -189,10 +211,11 @@ TEST_CASE(
     "shader_source_open_returns_EntryPointStageAmbiguous_on_dual_attributes",
     "[shader][shader_source]"
 ) {
+    ShaderTestAlloc ta;
     const auto project_root = kFixtureDir;
     const auto project_rel = std::filesystem::path{"dual_attr.slang"};
 
-    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel, &ta.mr);
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();
@@ -213,10 +236,11 @@ TEST_CASE(
 TEST_CASE(
     "include_resolver_rejects_absolute_path_with_IncludeEscape", "[shader][include_resolver]"
 ) {
+    ShaderTestAlloc ta;
     const auto project_root = kFixtureDir;
     const auto project_rel = std::filesystem::path{"escape_abs.slang"};
 
-    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel, &ta.mr);
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();
@@ -237,10 +261,11 @@ TEST_CASE(
 TEST_CASE(
     "include_resolver_rejects_upward_traversal_with_IncludeEscape", "[shader][include_resolver]"
 ) {
+    ShaderTestAlloc ta;
     const auto project_root = kFixtureDir;
     const auto project_rel = std::filesystem::path{"escape_dotdot.slang"};
 
-    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel, &ta.mr);
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();
@@ -260,10 +285,11 @@ TEST_CASE(
 // ===========================================================================
 
 TEST_CASE("include_resolver_detects_cycle_with_IncludeCycle", "[shader][include_resolver]") {
+    ShaderTestAlloc ta;
     const auto project_root = kFixtureDir;
     const auto project_rel = std::filesystem::path{"cycle_a.slang"};
 
-    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel, &ta.mr);
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();
@@ -284,10 +310,11 @@ TEST_CASE("include_resolver_detects_cycle_with_IncludeCycle", "[shader][include_
 TEST_CASE(
     "shader_source_open_returns_EncodingInvalid_for_non_utf8_content", "[shader][shader_source]"
 ) {
+    ShaderTestAlloc ta;
     const auto project_root = kFixtureDir;
     const auto project_rel = std::filesystem::path{"binary_content.slang"};
 
-    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel, &ta.mr);
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();
@@ -306,10 +333,11 @@ TEST_CASE(
 // ===========================================================================
 
 TEST_CASE("shader_source_open_returns_EncodingInvalid_for_empty_file", "[shader][shader_source]") {
+    ShaderTestAlloc ta;
     const auto project_root = kFixtureDir;
     const auto project_rel = std::filesystem::path{"empty_file.slang"};
 
-    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel, &ta.mr);
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();
@@ -334,10 +362,11 @@ TEST_CASE("shader_source_open_returns_EncodingInvalid_for_empty_file", "[shader]
 // ===========================================================================
 
 TEST_CASE("shader_source_cycle_detection_is_case_insensitive", "[shader][include_resolver]") {
+    ShaderTestAlloc ta;
     const auto project_root = kFixtureDir;
     const auto project_rel = std::filesystem::path{"cycle_self_caseinsensitive.slang"};
 
-    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel, &ta.mr);
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();
@@ -360,10 +389,11 @@ TEST_CASE("shader_source_cycle_detection_is_case_insensitive", "[shader][include
 // ===========================================================================
 
 TEST_CASE("shader_source_same_stage_dup_is_collapsed_not_ambiguous", "[shader][shader_source]") {
+    ShaderTestAlloc ta;
     const auto project_root = kFixtureDir;
     const auto project_rel = std::filesystem::path{"same_stage_dup.slang"};
 
-    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel, &ta.mr);
     REQUIRE(result.has_value());
 
     const auto& src = *result;
@@ -389,10 +419,11 @@ TEST_CASE(
     "shader_source_open_returns_EncodingInvalid_for_utf8_isolated_continuation",
     "[shader][shader_source]"
 ) {
+    ShaderTestAlloc ta;
     const auto project_root = kFixtureDir;
     const auto project_rel = std::filesystem::path{"utf8_isolated_continuation.slang"};
 
-    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel, &ta.mr);
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();
@@ -415,10 +446,11 @@ TEST_CASE(
 TEST_CASE(
     "shader_source_open_returns_EncodingInvalid_for_utf8_overlong_nul", "[shader][shader_source]"
 ) {
+    ShaderTestAlloc ta;
     const auto project_root = kFixtureDir;
     const auto project_rel = std::filesystem::path{"utf8_overlong_nul.slang"};
 
-    auto result = glibre::shader::ShaderSource::open(project_root, project_rel);
+    auto result = glibre::shader::ShaderSource::open(project_root, project_rel, &ta.mr);
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();

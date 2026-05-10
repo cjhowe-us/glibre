@@ -30,16 +30,23 @@ namespace glibre::shader::detail {
 /// State passed through the recursive include resolution.
 ///
 /// Lifetime contract: PreprocessContext is a call-scoped aggregate.
-/// It MUST NOT outlive the path and vector arguments passed at construction.
+/// It MUST NOT outlive the path, vector, and memory_resource arguments passed
+/// at construction.
 ///   - project_root  : borrowed; caller owns the path object for the full
 ///                     duration of expand_includes (and any recursive calls).
 ///                     Do NOT store a PreprocessContext in a member field or
 ///                     return it from a function — that would dangle this ref.
 ///   - include_closure: borrowed reference into the caller's accumulator.
+///   - mr            : memory resource used for visit_stack strings and all
+///                     PMR containers inside expand_includes / read_file.
+///                     Must be the same resource passed to ShaderSource::open()
+///                     so that every allocation is tagged under ContextTag::shader
+///                     (perf-budget.md §Allocator Rules #1).
 struct PreprocessContext {
     // caller owns; do not extend lifetime beyond the enclosing expand_includes call.
     const std::filesystem::path& project_root;
     std::pmr::vector<IncludeNode>& include_closure;  // accumulates as we expand
+    std::pmr::memory_resource* mr;                   // allocation resource (never null)
     std::pmr::vector<std::pmr::string> visit_stack;  // for cycle detection
 };
 
@@ -58,7 +65,10 @@ struct PreprocessContext {
 /// empty files.  Returns Error::SourceNotFound if the path does not exist
 /// or cannot be read.  Returns Error::EncodingInvalid for non-UTF-8 or empty
 /// content.
+///
+/// mr — allocates the returned string under this resource so the allocation
+///      is counted under ContextTag::shader (perf-budget.md §Allocator Rules #1).
 [[nodiscard]] std::expected<std::pmr::string, Error>
-read_and_normalize_file(const std::filesystem::path& path);
+read_and_normalize_file(const std::filesystem::path& path, std::pmr::memory_resource* mr);
 
 }  // namespace glibre::shader::detail

@@ -48,7 +48,7 @@ namespace {
 // ---------------------------------------------------------------------------
 
 [[nodiscard]] std::expected<std::pmr::string, Error>
-read_file_raw(const std::filesystem::path& path) {
+read_file_raw(const std::filesystem::path& path, std::pmr::memory_resource* mr) {
     // Open binary — we handle newline normalisation at the UTF-8 validation
     // layer rather than in the OS read.
     FILE* f = std::fopen(path.c_str(), "rb");  // NOLINT(cppcoreguidelines-owning-memory)
@@ -71,7 +71,7 @@ read_file_raw(const std::filesystem::path& path) {
 
     std::size_t file_size = static_cast<std::size_t>(file_size_l);
 
-    std::pmr::string buf;
+    std::pmr::string buf{mr};
     buf.resize(file_size);
 
     if (file_size > 0 && std::fread(buf.data(), 1, file_size, f) != file_size) {
@@ -131,6 +131,8 @@ read_file_raw(const std::filesystem::path& path) {
 }
 
 /// Strip UTF-8 BOM if present, validate remaining bytes, reject empty files.
+/// The input `bytes` already carries the mr from read_file_raw; no additional
+/// mr parameter needed here.
 [[nodiscard]] std::expected<std::pmr::string, Error>
 normalize_source_bytes(std::pmr::string bytes) {
     // Strip BOM (EF BB BF).
@@ -156,8 +158,9 @@ normalize_source_bytes(std::pmr::string bytes) {
 // Unified file-read entry point — raw read + normalization.
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] std::expected<std::pmr::string, Error> read_file(const std::filesystem::path& path) {
-    auto raw = read_file_raw(path);
+[[nodiscard]] std::expected<std::pmr::string, Error>
+read_file(const std::filesystem::path& path, std::pmr::memory_resource* mr) {
+    auto raw = read_file_raw(path, mr);
     if (!raw)
         return raw;
     return normalize_source_bytes(std::move(*raw));
@@ -171,8 +174,8 @@ normalize_source_bytes(std::pmr::string bytes) {
 // file; we lowercase path strings before comparison to catch such cases.
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] std::pmr::string ascii_lower(std::string_view sv) {
-    std::pmr::string out;
+[[nodiscard]] std::pmr::string ascii_lower(std::string_view sv, std::pmr::memory_resource* mr) {
+    std::pmr::string out{mr};
     out.resize(sv.size());
     for (std::size_t i = 0; i < sv.size(); ++i) {
         out[i] = static_cast<char>(std::tolower(static_cast<unsigned char>(sv[i])));
@@ -190,7 +193,7 @@ normalize_source_bytes(std::pmr::string bytes) {
 // ---------------------------------------------------------------------------
 
 [[nodiscard]] std::optional<std::pmr::string>
-scan_include_line(const char* line, std::size_t len) noexcept {
+scan_include_line(const char* line, std::size_t len, std::pmr::memory_resource* mr) noexcept {
     std::size_t pos = 0;
 
     // Skip leading horizontal whitespace.
@@ -237,7 +240,7 @@ scan_include_line(const char* line, std::size_t len) noexcept {
     if (path_len == 0)
         return std::nullopt;  // empty include path
 
-    return std::pmr::string{line + path_start, path_len};
+    return std::pmr::string{line + path_start, path_len, mr};
 }
 
 }  // namespace
@@ -248,7 +251,7 @@ std::expected<std::pmr::string, Error> expand_includes(
     PreprocessContext& ctx
 ) {
     std::filesystem::path current_dir = current_file.parent_path();
-    std::pmr::string expanded;
+    std::pmr::string expanded{ctx.mr};
     expanded.reserve(source_bytes.size());
 
     // Walk source bytes line-by-line without <sstream> or std::getline.
@@ -274,7 +277,7 @@ std::expected<std::pmr::string, Error> expand_includes(
         line_start = line_end + 1u;  // always advances: past '\n' or to src_len+1
 
         // Attempt to match a #include "..." directive.
-        auto include_path_opt = scan_include_line(line, line_len);
+        auto include_path_opt = scan_include_line(line, line_len, ctx.mr);
         if (include_path_opt) {
             std::filesystem::path include_rel{include_path_opt->c_str()};
 
@@ -288,19 +291,19 @@ std::expected<std::pmr::string, Error> expand_includes(
             // Step 2: compute project-relative path for the include node.
             std::filesystem::path proj_rel =
                 abs_path.lexically_relative(ctx.project_root).lexically_normal();
-            std::pmr::string proj_rel_str{proj_rel.native().c_str()};
+            std::pmr::string proj_rel_str{proj_rel.native().c_str(), ctx.mr};
 
             // Step 3: cycle detection — case-insensitive comparison (MED-2).
-            std::pmr::string proj_rel_lower = ascii_lower(proj_rel_str);
+            std::pmr::string proj_rel_lower = ascii_lower(proj_rel_str, ctx.mr);
             for (const auto& visited : ctx.visit_stack) {
-                std::pmr::string visited_lower = ascii_lower(visited);
+                std::pmr::string visited_lower = ascii_lower(visited, ctx.mr);
                 if (visited_lower == proj_rel_lower) {
                     return std::unexpected(Error::IncludeCycle);
                 }
             }
 
             // Step 4: read included file.
-            auto file_result = read_file(abs_path);
+            auto file_result = read_file(abs_path, ctx.mr);
             if (!file_result) {
                 // MED-4: §10 SourceNotFound covers both root-file and include-target
                 // failures.  The distinction is carried by context: callers of
@@ -315,7 +318,14 @@ std::expected<std::pmr::string, Error> expand_includes(
 
             // Step 5: build include node with content hash (R2 HIGH-1: shared helper).
             ShaderHash content_hash = blake3_hash(included_bytes.data(), included_bytes.size());
-            ctx.include_closure.push_back(IncludeNode{proj_rel_str, content_hash});
+            // Construct IncludeNode with the context mr so the string member also
+            // allocates under ContextTag::shader (perf-budget.md §Allocator Rules #1).
+            // PMR string copy uses the destination's allocator by default; supply mr
+            // explicitly so the IncludeNode's path string does not escape to the
+            // default resource.
+            ctx.include_closure.push_back(
+                IncludeNode{std::pmr::string{proj_rel_str.c_str(), ctx.mr}, content_hash}
+            );
 
             // Step 6: push onto visit stack and recurse.
             ctx.visit_stack.push_back(proj_rel_str);
@@ -342,11 +352,13 @@ std::expected<std::pmr::string, Error> expand_includes(
 }
 
 // ---------------------------------------------------------------------------
-// read_file: public entry point for shader_source.cpp (HIGH-4 normalisation).
+// read_and_normalize_file: public entry point for shader_source.cpp
+// (HIGH-4 normalisation).  Allocates the returned string under `mr`.
 // ---------------------------------------------------------------------------
 
-std::expected<std::pmr::string, Error> read_and_normalize_file(const std::filesystem::path& path) {
-    return read_file(path);
+std::expected<std::pmr::string, Error>
+read_and_normalize_file(const std::filesystem::path& path, std::pmr::memory_resource* mr) {
+    return read_file(path, mr);
 }
 
 }  // namespace glibre::shader::detail

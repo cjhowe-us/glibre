@@ -34,7 +34,9 @@ namespace glibre::shader {
 // ---------------------------------------------------------------------------
 
 glibre::Result<ShaderSource> ShaderSource::open(
-    const std::filesystem::path& project_root, const std::filesystem::path& project_relative
+    const std::filesystem::path& project_root,
+    const std::filesystem::path& project_relative,
+    std::pmr::memory_resource* mr
 ) {
     // Reject absolute project_relative (would escape the project root).
     if (project_relative.is_absolute()) {
@@ -52,21 +54,30 @@ glibre::Result<ShaderSource> ShaderSource::open(
 
     // Step 1: read + normalize root file (HIGH-4: BOM strip, UTF-8 check,
     // empty-file rejection via read_and_normalize_file).
-    auto root_result = detail::read_and_normalize_file(abs_path);
+    // All string allocations use mr so bytes are tracked under ContextTag::shader
+    // (perf-budget.md §Allocator Rules #1).
+    auto root_result = detail::read_and_normalize_file(abs_path, mr);
     if (!root_result) {
         return std::unexpected(root_result.error());
     }
     std::pmr::string root_bytes = std::move(*root_result);
 
     // Step 2: expand includes.
-    std::pmr::vector<IncludeNode> include_closure;
+    // include_closure is built with mr so the vector's storage and each IncludeNode
+    // string allocate under ContextTag::shader.
+    std::pmr::vector<IncludeNode> include_closure{mr};
     detail::PreprocessContext ctx{
-        project_root, include_closure, {}  // empty visit_stack
+        project_root,
+        include_closure,
+        mr,
+        std::pmr::vector<std::pmr::string>{mr}  // visit_stack: allocated under mr
     };
 
     // Push the root file onto the visit stack so it participates in cycle detection.
     auto proj_rel_norm = project_relative.lexically_normal();
-    std::pmr::string root_rel_str{proj_rel_norm.native().c_str(), proj_rel_norm.native().size()};
+    std::pmr::string root_rel_str{
+        proj_rel_norm.native().c_str(), proj_rel_norm.native().size(), mr
+    };
     ctx.visit_stack.push_back(root_rel_str);
 
     auto expanded_result = detail::expand_includes(root_bytes, abs_path, ctx);
@@ -77,7 +88,7 @@ glibre::Result<ShaderSource> ShaderSource::open(
 
     // Step 3: scan entry points from the EXPANDED source (so we also see
     // entry points declared in included files).
-    auto ep_result = detail::scan_entry_points(expanded);
+    auto ep_result = detail::scan_entry_points(expanded, mr);
     if (!ep_result) {
         return std::unexpected(ep_result.error());
     }
@@ -88,15 +99,21 @@ glibre::Result<ShaderSource> ShaderSource::open(
 
     // Step 5: pack into bytes for PreprocessedSource.
     // LOW-1 fix: use memcpy instead of a manual byte-cast loop.
-    std::pmr::vector<std::byte> expanded_bytes;
+    // Allocate expanded_bytes under mr for ContextTag::shader tracking.
+    std::pmr::vector<std::byte> expanded_bytes{mr};
     expanded_bytes.resize(expanded.size());
     std::memcpy(expanded_bytes.data(), expanded.data(), expanded.size());
 
     // Step 6: assemble ShaderSource.
     // MED-5: all fields are populated exactly here via move-only open().
     // No public setters exist; post-construction mutation is closed off.
-    ShaderSource src;
-    src.id_ = SourceId{root_rel_str};
+    //
+    // Construct src with mr so its PMR container members use the same resource.
+    // Move assignment of entry_points / include_closure is O(1) because the
+    // source and destination containers share the same memory_resource pointer
+    // (same mr passed through all construction sites above).
+    ShaderSource src{mr};
+    src.id_.project_relative_path = std::move(root_rel_str);
     src.entry_points_ = std::move(entry_points);
     src.preprocessed_ =
         PreprocessedSource{std::move(expanded_bytes), std::move(include_closure), total_hash};

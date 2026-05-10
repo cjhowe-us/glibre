@@ -204,6 +204,14 @@ public:
     ///
     /// project_root     — absolute path to the project source root.
     /// project_relative — path of the .slang file relative to project_root.
+    /// mr               — PMR memory resource used for all internal string and
+    ///                    vector allocations (include_closure, entry_points,
+    ///                    preprocessed bytes).  MUST be a
+    ///                    glibre::PerContextAllocatorResource backed by the
+    ///                    shader context's PerContextAllocator so that all
+    ///                    allocations are accounted under ContextTag::shader
+    ///                    (perf-budget.md §Allocator Rules #1).
+    ///                    Must outlive the returned ShaderSource.
     ///
     /// Returns shader::Error::SourceNotFound if the file does not exist.
     /// Returns shader::Error::IncludeEscape if any resolved include lies outside
@@ -214,15 +222,25 @@ public:
     ///
     /// The return type is glibre::Result<ShaderSource> = std::expected<ShaderSource,
     /// glibre::Error> per reviews/decisions/error-model.md §Decision 1.
-    static glibre::Result<ShaderSource>
-    open(const std::filesystem::path& project_root, const std::filesystem::path& project_relative);
+    static glibre::Result<ShaderSource> open(
+        const std::filesystem::path& project_root,
+        const std::filesystem::path& project_relative,
+        std::pmr::memory_resource* mr
+    );
 
     [[nodiscard]] const SourceId& id() const noexcept;
     [[nodiscard]] std::span<const EntryPoint> entry_points() const noexcept;
     [[nodiscard]] const PreprocessedSource& preprocessed() const noexcept;
 
 private:
-    ShaderSource() = default;
+    // Construct with an explicit memory resource so all PMR container members
+    // allocate under the provided resource (ContextTag::shader per
+    // perf-budget.md §Allocator Rules #1).  Called only from open().
+    // mr must outlive this ShaderSource.
+    explicit ShaderSource(std::pmr::memory_resource* mr)
+        : id_{SourceId{std::pmr::string{mr}}},
+          entry_points_{mr},
+          preprocessed_{std::pmr::vector<std::byte>{mr}, std::pmr::vector<IncludeNode>{mr}} {}
 
     SourceId id_{};
     std::pmr::vector<EntryPoint> entry_points_{};
