@@ -40,6 +40,7 @@
 //   - ABI hashing of system fn pointers — plugin manifest plan.
 
 #include <array>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 
@@ -244,9 +245,23 @@ private:
     //
     // Phase ordinals are 1..=9; subtract 1 for the 0-indexed array.
     // Phase is a closed enum class; valid values are 1..=9 only.
-    // No bounds check is performed in this inline helper (the debug assert
-    // in phase_desc() covers misuse when called via that accessor).
+    //
+    // Debug-only bounds check (mirrors frame_loop.cpp:158-162 pattern):
+    //   In debug builds, asserts that the underlying ordinal is in [1, kPhaseCount].
+    //   A static_cast<Phase>(0) or static_cast<Phase>(255) from a future caller
+    //   (e.g. deserialising Phase from manifest bytes) trips the assert rather than
+    //   silently returning an out-of-range array index.  In release builds the
+    //   check is compiled out (#ifndef NDEBUG), matching the project norm that
+    //   closed-enum preconditions are asserted in debug and trusted in release.
     [[nodiscard]] static constexpr std::size_t phase_index(Phase p) noexcept {
+#ifndef NDEBUG
+        const auto ordinal = static_cast<std::uint8_t>(p);
+        assert(
+            ordinal >= 1u && ordinal <= static_cast<std::uint8_t>(kPhaseCount) &&
+            "phase_index: Phase ordinal out of range [1, kPhaseCount]; "
+            "raw-cast or uninitialised Phase value passed"
+        );
+#endif
         return static_cast<std::size_t>(static_cast<std::uint8_t>(p)) - 1u;
     }
 

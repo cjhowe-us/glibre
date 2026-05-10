@@ -8,6 +8,7 @@
 // Named test cases (plan #245 Unit Test Plan / DoD):
 //   - core/phase_registry: register_system_idempotent
 //   - core/phase_registry: iteration_order_matches_registration_order
+//   - core/phase_registry: iteration_order_matches_registration_order frameloop smoke
 //   - core/phase_registry: per_phase_isolation
 //
 // Design constraints:
@@ -115,13 +116,18 @@ TEST_CASE(
     reg.for_each_system(Phase::Transform, [](const PhaseSystemFn& fn) noexcept { fn(); });
     REQUIRE(call_count == 2);
 
+    // Reset before tick so the delta assertion below is independent of the
+    // baseline invocation above.  A future refactor that adds or removes a
+    // direct for_each_system call cannot silently corrupt the tick assertion.
+    call_count = 0;
+
     // (e) Smoke: attach registry to FrameLoop and tick — must succeed.
     FrameLoop loop;
     loop.set_phase_registry(&reg);
     auto r = loop.tick();
     REQUIRE(r.has_value());
-    // After one tick the two Transform systems ran once more.
-    CHECK(call_count == 4);  // 2 (direct for_each above) + 2 (tick)
+    // One tick dispatches each Transform system exactly once (delta only).
+    CHECK(call_count == 2);
 }
 
 // ===========================================================================
@@ -196,11 +202,59 @@ TEST_CASE(
         CHECK(sequence[static_cast<std::size_t>(i)] == i);
         // NOLINTEND(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
     }
+}
 
-    // Second smoke pass: integrate with FrameLoop to confirm run_phase dispatch
-    // also preserves registration order.
-    seq_len = 0;
+// ===========================================================================
+// Test: iteration_order_matches_registration_order — FrameLoop smoke
+//
+// Separated from the for_each_system ordering assertions above per SRP:
+// verifying that FrameLoop::tick() dispatches in registration order is a
+// distinct concern from verifying that for_each_system() itself preserves
+// registration order.  Coupling both into one named DoD test would make the
+// test fail for two independent reasons.
+//
+// Verifies that:
+//   (f) FrameLoop::tick() dispatches Phase::PhysicsFixed systems in
+//       registration order (same [0..N-1] sequence as for_each_system).
+// ===========================================================================
+TEST_CASE(
+    "core/phase_registry: iteration_order_matches_registration_order frameloop smoke",
+    "[core][phase_registry]"
+) {
+    using namespace glibre::core;
 
+    PhaseRegistry reg;
+
+    constexpr int kCount = 5;
+    static_assert(kCount < 10, "kCount must be < 10; FQN uses '0'+i single-digit encoding");
+    std::array<int, kCount> sequence{};
+    int seq_len = 0;
+
+    for (int i = 0; i < kCount; ++i) {
+        std::array<char, 32> fqn{};
+        // NOLINTBEGIN(cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
+        fqn[0] = 'p';
+        fqn[1] = '.';
+        fqn[2] = 's';
+        fqn[3] = static_cast<char>('0' + i);
+        fqn[4] = '\0';
+        // NOLINTEND(cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
+
+        const int idx = i;
+        reg.register_system(
+            Phase::PhysicsFixed,
+            eastl::string_view{fqn.data(), 4U},
+            [idx, &sequence, &seq_len]() noexcept {
+                // NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
+                sequence[static_cast<std::size_t>(seq_len++)] = idx;
+                // NOLINTEND(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
+            }
+        );
+    }
+
+    REQUIRE(reg.system_count(Phase::PhysicsFixed) == static_cast<std::size_t>(kCount));
+
+    // (f) Smoke: FrameLoop::tick() must dispatch in registration order.
     FrameLoop loop;
     loop.set_phase_registry(&reg);
     auto r = loop.tick();
@@ -209,6 +263,10 @@ TEST_CASE(
     REQUIRE(seq_len == kCount);
     for (int i = 0; i < kCount; ++i) {
         // NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
+        INFO(
+            "position " << i << ": expected " << i << " got "
+                        << sequence[static_cast<std::size_t>(i)]
+        );
         CHECK(sequence[static_cast<std::size_t>(i)] == i);
         // NOLINTEND(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
     }
