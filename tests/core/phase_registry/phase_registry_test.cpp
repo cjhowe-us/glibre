@@ -31,6 +31,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "glibre/alloc.hpp"
 #include "glibre/compat/move_only_function.hpp"
 #include "glibre/core/frame_loop.hpp"
 #include "glibre/core/frame_phase.hpp"

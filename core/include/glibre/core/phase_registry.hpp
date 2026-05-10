@@ -137,11 +137,18 @@ static_assert(
 // Design note — std::pmr::memory_resource* vs. PerContextAllocatorResource:
 //   The header accepts the stdlib PMR interface rather than the concrete
 //   glibre type in order to avoid a direct include of glibre/alloc.hpp from
-//   this header, which would create a ContextTag redefinition conflict with
-//   glibre/perf_budget.hpp (both define glibre::ContextTag; reconciling them
-//   is tracked as a follow-up chore under initiative #1032).  Callers supply
-//   a glibre::PerContextAllocatorResource instance (or a monotonic_buffer_resource
-//   for tests) and pass its address.
+//   this header (a circular dependency concern: phase_registry.hpp is included
+//   by frame_loop.hpp which is included broadly).  Callers supply a
+//   glibre::PerContextAllocatorResource instance (or a monotonic_buffer_resource
+//   for tests) and pass its address.  The production callsite MUST supply
+//   PerContextAllocatorResource{PerContextAllocator{ContextTag::core}} per
+//   perf-budget.md §Allocator Rules #1 (chore #1070).
+//
+//   The prior note about a "ContextTag redefinition conflict with
+//   perf_budget.hpp" is obsolete: EASTL is removed (reviews/decisions/
+//   eastl-removal.md) and the single canonical ContextTag now lives in
+//   glibre/alloc.hpp.  Spike #1031 (iterate-phase-registry-allocator-tagging)
+//   was authored against the EASTL era and its premise no longer applies.
 // ---------------------------------------------------------------------------
 class PhaseRegistry {
 public:
@@ -161,12 +168,12 @@ public:
     //   PhaseRegistry reg{&mr};
     //   // or use std::pmr::get_default_resource() for the default heap
     //
-    // ContextTag duplication / allocator-shape question tracked under spike
-    // #1031 — this PR uses std::pmr::memory_resource* as the lowest-common-
-    // denominator interim shape (avoids a direct alloc.hpp include that would
-    // create a ContextTag redefinition conflict with perf_budget.hpp).  The
-    // spike will pick the canonical handle type once the design lands across
-    // the migration leaves.
+    // Production callers MUST pass a PerContextAllocatorResource backed by
+    // PerContextAllocator{ContextTag::core} per perf-budget.md §Allocator
+    // Rules #1 (chore #1070).  The lowest-common-denominator
+    // std::pmr::memory_resource* interface avoids a direct alloc.hpp include
+    // from this header.  Spike #1031 premise (EASTL ContextTag redefinition
+    // conflict) is obsolete post-EASTL-removal.
     explicit PhaseRegistry(std::pmr::memory_resource* mr) noexcept;
 
     PhaseRegistry(const PhaseRegistry&) = delete;
