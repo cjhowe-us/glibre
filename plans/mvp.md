@@ -56,6 +56,34 @@ in once GitHub repo is provisioned.
 |11 | tools    | Editor shell + scene tree + inspector + gizmo     | TBD   |
 |12 | e2e      | InputDriver + trace replay + golden assertions    | TBD   |
 
+## Cross-cutting initiatives
+
+### EASTL removal (initiative #1032)
+
+<!-- This section uses bullet prose because the dependency graph is enumerable
+     rather than chronological — the Bring-up DAG ASCII above is reserved for
+     time-ordered milestones. Cross-cutting initiatives use bullet prose rather
+     than the Epics table format because each child plan needs a one-line scope
+     description that the table's column shape can't accommodate without
+     truncation. -->
+
+Engine-wide reversal of PHILOSOPHY.md §11 (EASTL adoption). Rationale
+established in design spike #1033; decision record merged via PR #1034
+(`reviews/decisions/eastl-removal.md`). Every `#include <EASTL/...>` is
+replaced with the libc++ stdlib equivalent (`std::pmr::*` for engine code,
+plain `std::*` for tools). Breakdown spike #1037 partitioned the migration
+into 16 per-directory `[PLAN]` leaves + 2 build-cleanup chores:
+
+- core production: #1040 (error/variant keystone), #1041 (alloc), #1042
+  (plugin-manifest), #1043 (plugin-loader), #1044 (plugin-loader-registry),
+  #1045 (phase-registry), #1046 (context-tag-resolver)
+- plugins / tools: #1047 (plugin/shader), #1048 (tools/foryc)
+- tests: #1049 (tests/core/error — blocked_by #1040), #1050 (tests/core/plugin),
+  #1051 (tests/core/runtime), #1052 (tests/data), #1053 (tests/perf),
+  #1054 (tests/shader), #1055 (tests/tools/foryc)
+- build cleanup (blocked_by every migration plan above): #1056
+  (vcpkg-drop-eastl), #1057 (cmake-drop-eastl-link)
+
 ## Cross-cutting story imports
 
 Initial user-story batch mined from harmonius `US-*` candidates;
