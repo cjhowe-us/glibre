@@ -23,24 +23,29 @@ schema glibre.geometry.CookManifest {
   field cooked_at_unix_ms    : u64     tag 7  since 1
 
   // Cook-time options used (mirror of CookOptions in §5).
-  field meshopt_overdraw_threshold       : f32  tag 10 since 1
-  field meshopt_lod_error_threshold      : f32  tag 11 since 1
-  field meshopt_target_lod_count         : u8   tag 12 since 1
-  field meshopt_apply_vertex_cache_opt   : bool tag 13 since 1
-  field meshopt_apply_overdraw_opt       : bool tag 14 since 1
-  field meshopt_apply_vertex_fetch_opt   : bool tag 15 since 1
+  // NOTE: SPEC §7.1.1 declares literal-form defaults (e.g. `default 1.05`) on
+  // the fields below.  The foryc parser currently only accepts `default { ... }`
+  // brace-block syntax (parser.cpp:582) and cannot lex scalar literals, so those
+  // defaults are omitted here.  Tracked in spike #1027
+  // (iterate-data-foryc-literal-form-defaults).
+  field meshopt_overdraw_threshold       : f32  tag 10 since 1   // SPEC default 1.05  (#1027)
+  field meshopt_lod_error_threshold      : f32  tag 11 since 1   // SPEC default 0.01  (#1027)
+  field meshopt_target_lod_count         : u8   tag 12 since 1   // SPEC default 6     (#1027)
+  field meshopt_apply_vertex_cache_opt   : bool tag 13 since 1   // SPEC default true  (#1027)
+  field meshopt_apply_overdraw_opt       : bool tag 14 since 1   // SPEC default true  (#1027)
+  field meshopt_apply_vertex_fetch_opt   : bool tag 15 since 1   // SPEC default true  (#1027)
 
   field meshlet_max_vertices             : u8   tag 20 since 1   // hard-frozen 64; see §7.3
   field meshlet_max_triangles            : u8   tag 21 since 1   // hard-frozen 124; see §7.3
-  field meshlet_cone_weight              : f32  tag 22 since 1
-  field meshlet_sse_reference_distance_m : f32  tag 23 since 1
+  field meshlet_cone_weight              : f32  tag 22 since 1   // SPEC default 0.5   (#1027)
+  field meshlet_sse_reference_distance_m : f32  tag 23 since 1   // SPEC default 1.0   (#1027)
 
   field draco_profile                    : u8   tag 30 since 1   // DracoQuantisationProfile
-  field draco_speed                      : u8   tag 31 since 1
+  field draco_speed                      : u8   tag 31 since 1   // SPEC default 5     (#1027)
 
-  field pak_target_page_size_bytes       : u32  tag 40 since 1
-  field pak_max_page_size_bytes          : u32  tag 41 since 1
-  field pak_enable_blas_recipe           : bool tag 42 since 1
+  field pak_target_page_size_bytes       : u32  tag 40 since 1   // SPEC default 65536  (#1027)
+  field pak_max_page_size_bytes          : u32  tag 41 since 1   // SPEC default 262144 (#1027)
+  field pak_enable_blas_recipe           : bool tag 42 since 1   // SPEC default true   (#1027)
 
   // Cooker bookkeeping for diagnostics & roll-up reports.
   field cooked_meshlet_group_count       : u32  tag 50 since 1
