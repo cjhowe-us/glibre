@@ -40,7 +40,6 @@ add_executable(glibre-core-world-perf-tests
 target_link_libraries(glibre-core-world-perf-tests
     PRIVATE
         Catch2::Catch2WithMain
-        glibre::test_contract
 )
 
 target_compile_features(glibre-core-world-perf-tests PRIVATE cxx_std_23)
@@ -71,7 +70,11 @@ target_compile_options(glibre-core-world-perf-tests
         -Wall
         -Wextra
         -Wpedantic
-        # -Wno-c2y-extensions is inherited from glibre::test_contract (cmake/Compile.cmake).
+        # This target intentionally enables exceptions (core/tests/fixtures/s1.hpp uses
+        # `throw` for fixture I/O failures) so it cannot link glibre::test_contract
+        # (which inherits -fno-exceptions from glibre::compile_contract). The Catch2
+        # __COUNTER__ warning is suppressed here directly instead.
+        -Wno-c2y-extensions
 )
 
 include(CTest)
