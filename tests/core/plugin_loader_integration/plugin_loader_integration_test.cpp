@@ -40,10 +40,8 @@
 // Design constraints:
 //   • -fno-exceptions (error-model.md §Decision 3).
 //   • libc++ std::string_view throughout (reviews/decisions/eastl-removal.md row 2).
-//     PluginLoaderRegistry API: std::string_view (plan #1044 migration, PR #1072).
-//     PluginLoader::open(): eastl::string_view on this branch; migrated in
-//     plan #1043 / PR #1073 (auto-merge pending).  Pass const char* literals
-//     directly so the EASTL include is not required in test scope.
+//     PluginLoaderRegistry API: std::string_view (plan #1044, PR #1072).
+//     PluginLoader::open(): std::string_view (plan #1043, PR #1073).
 //   • Each test owns its own PluginLoaderRegistry (not a singleton).
 //
 // Coverage vs. plugin-abi.md §"Loader Sequence":
@@ -64,11 +62,6 @@
 #include <memory_resource>
 #include <string_view>
 
-// TODO: drop <EASTL/string_view.h> after #1044 merges and PluginLoaderRegistry
-// migrates its API (validate_all, register_plugin, is_registered, etc.) from
-// eastl::string_view to std::string_view.  Until then the registry call sites
-// below use eastl::string_view and this include is required.
-#include <EASTL/string_view.h>
 #include <catch2/catch_test_macros.hpp>
 #include <glibre/alloc.hpp>
 #include <glibre/core/plugin_loader.hpp>
@@ -151,8 +144,7 @@ glibre::PerContextAllocatorResource mr_{alloc_};
 // ===========================================================================
 
 TEST_CASE("integration_dlopen_failure_propagates", "[core][integration]") {
-    // const char* — implicitly converts to both std::string_view (PluginLoader::open)
-    // and eastl::string_view (registry API, still EASTL-backed pre-#1044 migration).
+    // const char* — implicitly converts to std::string_view (PluginLoader and registry APIs).
     const char* nonexistent = "/tmp/glibre-integration-nonexistent-plugin.dylib";
 
     auto result = glibre::core::PluginLoader::open(nonexistent, mr_);
