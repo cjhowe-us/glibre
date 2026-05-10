@@ -160,20 +160,17 @@ public:
     //   on_enter: immediately before the phase body executes.
     //   on_exit:  immediately after the phase body executes.
     //
-    // Currently only Phase::HotReload hooks are used (plan #599).  Support
-    // for other phases may be added by future plans; the implementation
-    // currently stores only the phase-8 hook pair.
+    // Hooks are stored for ALL nine phases (std::array<PhaseHooks, kPhaseCount>
+    // indexed by phase ordinal - 1).  Any caller wiring a hook for any phase
+    // receives a real stored entry that fires on the next tick — no silent
+    // no-ops (LOW-1, round-1 review: "caller wiring an observer for Phase::Input
+    // gets nothing back, and no diagnostic").
     //
     // Returns:
-    //   glibre::Result<void> — success when the phase is supported
-    //     (currently Phase::HotReload only).
-    //   core::Error::InvalidArgument — when a phase other than Phase::HotReload
-    //     is supplied.  This is a present-tense diagnostic: the SPEC §5.7 surface
-    //     supports all phases, but the implementation only stores phase-8 hooks;
-    //     returning an error prevents silent no-ops for wired observers (LOW-1
-    //     round-1 review: "caller wiring an observer for Phase::Input gets nothing
-    //     back, and no diagnostic").  Future plans extend storage to all phases
-    //     and this error path widens accordingly.
+    //   glibre::Result<void> — always success; the return type is
+    //   Result<void> per SPEC §5.7 and LOW-2 (round-1 review) so that future
+    //   error paths (e.g., invalid phase ordinal) can be added without changing
+    //   the call-site signature.
     //
     // Passing PhaseHooks{nullptr, nullptr} clears the hooks for that phase.
     //
@@ -320,12 +317,15 @@ private:
     // Authority: plan #249; SPEC §5.8.
     HotReloadRequestQueue hot_reload_queue_;
 
-    // phase_8_hooks_ — observer hooks for Phase::HotReload (plan #599).
+    // phase_hooks_ — observer hooks for all nine phases (plan #599).
     //
-    // on_enter fires before hot_reload_queue_.step(); on_exit fires after.
-    // Null function pointers are skipped silently.  Registered via
-    // set_phase_hooks(Phase::HotReload, ...).
-    PhaseHooks phase_8_hooks_{};
+    // Indexed by phase ordinal - 1 (Input=0 through Present=8).
+    // on_enter fires before the phase body; on_exit fires after.
+    // Null function pointers are skipped silently.
+    // Registered via set_phase_hooks(Phase, PhaseHooks).
+    // Authority: SPEC §5.7; LOW-1 round-1 review (all phases covered, no
+    // silent no-ops for unsupported phases).
+    std::array<PhaseHooks, kPhaseCount> phase_hooks_{};
 
 #ifdef GLIBRE_TESTING
     // Under GLIBRE_TESTING builds the last tick's phase execution order is

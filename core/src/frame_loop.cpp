@@ -110,22 +110,12 @@ void FrameLoop::set_phase_registry(PhaseRegistry* registry) noexcept { phase_reg
 
 [[nodiscard]] glibre::Result<void>
 FrameLoop::set_phase_hooks(Phase phase, PhaseHooks hooks) noexcept {
-    if (phase == Phase::HotReload) {
-        phase_8_hooks_ = hooks;
-        return {};
-    }
-    // Other phases: not yet supported — return InvalidArgument so callers get
-    // an explicit diagnostic instead of a silent no-op (LOW-1, round-1 review).
-    return std::unexpected(
-        glibre::Error{
-            core::Error::InvalidArgument,
-            glibre::ErrorContext{
-                .file = "core/src/frame_loop.cpp",
-                .line = __LINE__,
-                .detail = "set_phase_hooks: only Phase::HotReload is supported in this plan",
-            },
-        }
-    );
+    // All nine phases are stored in phase_hooks_[] indexed by ordinal - 1.
+    // No phase is rejected; every caller receives stored hooks that fire on tick().
+    // Return type is Result<void> per SPEC §5.7 (LOW-2, round-1 review).
+    const auto idx = static_cast<std::size_t>(static_cast<std::uint8_t>(phase) - 1u);
+    phase_hooks_[idx] = hooks;
+    return {};
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +208,12 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
     (void)expected_ordinal;
 #endif
 
+    // Phase hooks index: ordinal - 1 (Input=0 through Present=8).
+    // Hooks fire around EVERY phase body — on_enter before, on_exit after.
+    // This resolves LOW-1 (round-1 review): no phase is silently no-op'd.
+    const auto hook_idx = static_cast<std::size_t>(static_cast<std::uint8_t>(phase) - 1u);
+    const PhaseHooks& hooks = phase_hooks_[hook_idx];
+
     // --- Empty MVP phase bodies ---
     // Each phase slot executes nothing in this skeleton.  Future plans
     // for each owning context will inject bodies here (or through a
@@ -226,18 +222,32 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
     // and to give the CI a stable hook for phase-level benchmarking.
     switch (phase) {
     case Phase::Input: /* platform — MVP empty */
+        if (hooks.on_enter) hooks.on_enter(phase);
+        if (hooks.on_exit) hooks.on_exit(phase);
         break;
     case Phase::Logic: /* gameplay/scripting — reserved empty */
+        if (hooks.on_enter) hooks.on_enter(phase);
+        if (hooks.on_exit) hooks.on_exit(phase);
         break;
     case Phase::PhysicsFixed: /* physics — MVP empty */
+        if (hooks.on_enter) hooks.on_enter(phase);
+        if (hooks.on_exit) hooks.on_exit(phase);
         break;
     case Phase::Animation: /* animation — reserved empty */
+        if (hooks.on_enter) hooks.on_enter(phase);
+        if (hooks.on_exit) hooks.on_exit(phase);
         break;
     case Phase::Transform: /* core — MVP empty */
+        if (hooks.on_enter) hooks.on_enter(phase);
+        if (hooks.on_exit) hooks.on_exit(phase);
         break;
     case Phase::CullExtract: /* render — MVP empty */
+        if (hooks.on_enter) hooks.on_enter(phase);
+        if (hooks.on_exit) hooks.on_exit(phase);
         break;
     case Phase::RenderSubmit: /* render — MVP empty */
+        if (hooks.on_enter) hooks.on_enter(phase);
+        if (hooks.on_exit) hooks.on_exit(phase);
         break;
     case Phase::HotReload: {
         // Phase 8: hot-reload drain barrier (SPEC §4.6, plan #599, plan #249).
@@ -271,16 +281,16 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
         }
 #endif
         // (A) on_enter hook — fires before step().
-        if (phase_8_hooks_.on_enter != nullptr) {
-            phase_8_hooks_.on_enter(Phase::HotReload);
+        if (hooks.on_enter != nullptr) {
+            hooks.on_enter(Phase::HotReload);
         }
         // (B) step() — single relaxed-atomic load on fast path (SPEC §6.7).
         //     Returns 0 when idle (fast path, no allocation, no observer event).
         //     Propagate slow-path refusal errors back to tick() if they occur.
         auto step_result = hot_reload_queue_.step();
         // (C) on_exit hook — fires after step() regardless of result.
-        if (phase_8_hooks_.on_exit != nullptr) {
-            phase_8_hooks_.on_exit(Phase::HotReload);
+        if (hooks.on_exit != nullptr) {
+            hooks.on_exit(Phase::HotReload);
         }
         if (!step_result) {
             return std::unexpected(std::move(step_result.error()));
@@ -320,6 +330,8 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
         //   "core barrier carve-out" documented in the existing comment and
         //   tracked under [SPIKE] iterate-frame-phases-core-barrier-carveout.
 
+        if (hooks.on_enter) hooks.on_enter(phase);
+
         // (0a) Stub: acquire next drawable.
         // TODO(plan:render-swapchain): render plugin registers acquire callback.
 
@@ -329,10 +341,13 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
         present_reset_perf_budget();          // (1) zero counters before leak detect
         if (auto r = present_drain_arenas();  // (2)+(3) drain + optional leak error
             !r) {
+            if (hooks.on_exit) hooks.on_exit(phase);
             return r;
         }
         advance_world_tick(world_tick_);  // (4) tick N complete; N+1 may begin
         ++frame_counter_;                 // (5) present-phase frame counter
+
+        if (hooks.on_exit) hooks.on_exit(phase);
         break;
     }
 
