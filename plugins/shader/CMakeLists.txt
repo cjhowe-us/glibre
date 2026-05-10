@@ -34,6 +34,8 @@ add_library(glibre-shader STATIC
     src/source/include_resolver.cpp
     src/source/entry_point_scanner.cpp
     src/descriptor/descriptor_layout.cpp  # plan #1087 — DescriptorLayout::derive
+    src/cache/blake3.cpp                  # plan #516 — BLAKE3 hasher (ShaderHash)
+    src/cache/cas_store.cpp               # plan #516 — CAS filesystem store (§4.6, §7.5)
 )
 
 # Public include path: plugins/shader/include (exposes glibre/shader/shader.hpp
@@ -47,6 +49,8 @@ target_include_directories(glibre-shader
         # Internal source headers (preprocessor.hpp, include_resolver.hpp,
         # entry_point_scanner.hpp) are in src/source/ — not on the public path.
         ${CMAKE_CURRENT_SOURCE_DIR}/src/source
+        # Internal cache headers (blake3.hpp, cas_store.hpp) — plan #516.
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/cache
 )
 
 target_link_libraries(glibre-shader
