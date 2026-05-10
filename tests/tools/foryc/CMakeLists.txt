@@ -32,7 +32,7 @@ target_include_directories(foryc-parser-tests
 target_link_libraries(foryc-parser-tests
     PRIVATE
         Catch2::Catch2WithMain
-        glibre::core   # glibre::Error + EASTL
+        glibre::core   # glibre::Error (std::variant-based; eastl-removal.md §4)
         glibre::compile_contract
 )
 
@@ -67,7 +67,7 @@ target_include_directories(foryc-emit-header-tests
 target_link_libraries(foryc-emit-header-tests
     PRIVATE
         Catch2::Catch2WithMain
-        glibre::core   # glibre::Error + EASTL
+        glibre::core   # glibre::Error (std::variant-based; eastl-removal.md §4)
         glibre::compile_contract
 )
 
@@ -102,25 +102,18 @@ target_include_directories(foryc-emit-migration-tests
 target_link_libraries(foryc-emit-migration-tests
     PRIVATE
         Catch2::Catch2WithMain
-        glibre::core   # glibre::Error + EASTL
+        glibre::core   # glibre::Error (std::variant-based; eastl-removal.md §4)
         glibre::compile_contract
 )
 
 # Pass include paths to the round-trip compile test so it can supply
 # -I flags when invoking clang++ as a subprocess.
 # GLIBRE_CORE_INCLUDE_DIR: path to core/include (provides glibre/error.hpp).
-# GLIBRE_VCPKG_INCLUDE_DIR: vcpkg installed include dir (provides EASTL headers).
-#
-# find_package(EASTL) here ensures the EASTL target exists in this scope
-# before get_target_property queries it (the target is also pulled in via
-# glibre::core, but may not be visible at this CMakeLists evaluation time
-# if core/ is processed after tools/foryc in the cmake add_subdirectory order).
-find_package(EASTL CONFIG REQUIRED)
-get_target_property(_eastl_inc EASTL INTERFACE_INCLUDE_DIRECTORIES)
+# glibre/error.hpp uses only libc++ headers (std::variant, std::expected, etc.) —
+# no EASTL dependency since eastl-removal.md §4 migration (plan #1060 / PR #1086).
 target_compile_definitions(foryc-emit-migration-tests
     PRIVATE
         GLIBRE_CORE_INCLUDE_DIR="${CMAKE_SOURCE_DIR}/core/include"
-        GLIBRE_VCPKG_INCLUDE_DIR="${_eastl_inc}"
 )
 
 target_compile_features(foryc-emit-migration-tests PRIVATE cxx_std_23)
@@ -154,7 +147,7 @@ target_include_directories(foryc-emit-manifest-tests
 target_link_libraries(foryc-emit-manifest-tests
     PRIVATE
         Catch2::Catch2WithMain
-        glibre::core   # glibre::Error + EASTL
+        glibre::core   # glibre::Error (std::variant-based; eastl-removal.md §4)
         glibre::compile_contract
 )
 

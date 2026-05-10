@@ -8,9 +8,9 @@
 //   - foryc_emit_manifest_includes_abi_hash
 //   - foryc_emit_manifest_round_trip_via_compile
 //
-// PHILOSOPHY §11: EASTL replaces std containers/strings in the IR.
-//   std:: retained for: std::expected (glibre::Result), std::string_view,
-//   std::filesystem, std::system (subprocess invocation), dlfcn.h.
+// PHILOSOPHY §11 (post-eastl-removal.md): libc++ stdlib is canonical.
+//   All types use std::string, std::vector.  std::expected (glibre::Result),
+//   std::string_view, std::filesystem, std::system (subprocess invocation), dlfcn.h.
 
 #include <cstdint>
 #include <cstdlib>

@@ -13,9 +13,9 @@
 //   - foryc_parser_stores_migration_decls
 //   - foryc_emit_migration_round_trip_via_compile
 //
-// PHILOSOPHY §11: EASTL replaces std containers/strings in the IR.
-//   std:: retained for: std::expected (glibre::Result), std::string_view,
-//   std::filesystem, std::system (subprocess invocation), dlfcn.h.
+// PHILOSOPHY §11 (post-eastl-removal.md): libc++ stdlib is canonical.
+//   All IR types use std::string, std::vector.  std::expected (glibre::Result),
+//   std::string_view, std::filesystem, std::system (subprocess invocation), dlfcn.h.
 
 #include <cstdint>
 #include <cstdlib>
@@ -396,13 +396,14 @@ migrate_Widget_v1_to_v2(const WidgetV1&, WidgetV2&) {
     }
 
     // --- Compile the combined TU into a .dylib. ---
-    // HIGH-A fix: supply -I flags so the generated TU's #include "glibre/error.hpp"
-    // resolves correctly.  GLIBRE_CORE_INCLUDE_DIR and GLIBRE_VCPKG_INCLUDE_DIR
-    // are injected by the CMakeLists target_compile_definitions for this test binary.
+    // HIGH-A fix: supply -I flag so the generated TU's #include "glibre/error.hpp"
+    // resolves correctly.  GLIBRE_CORE_INCLUDE_DIR is injected by the CMakeLists
+    // target_compile_definitions for this test binary.
+    // glibre/error.hpp uses only libc++ headers (no EASTL) after eastl-removal.md §4
+    // migration (plan #1060), so no vcpkg -I flag is needed.
     const auto compile_cmd = std::format(
         "clang++ -std=c++23 -fno-exceptions -fno-rtti "
         "-I\"" GLIBRE_CORE_INCLUDE_DIR "\" "
-        "-I\"" GLIBRE_VCPKG_INCLUDE_DIR "\" "
         "-dynamiclib -o \"{}\" \"{}\" \"{}\" 2>&1",
         dylib_path.native(),
         preamble_path.native(),
@@ -657,10 +658,11 @@ std::expected<void, glibre::Error> migrate_Turbo_v3_to_v4(const TurboV3&, TurboV
     }
 
     // --- Compile into a .dylib. ---
+    // glibre/error.hpp uses only libc++ headers after eastl-removal.md §4
+    // migration; only -I GLIBRE_CORE_INCLUDE_DIR is needed.
     const auto compile_cmd = std::format(
         "clang++ -std=c++23 -fno-exceptions -fno-rtti "
         "-I\"" GLIBRE_CORE_INCLUDE_DIR "\" "
-        "-I\"" GLIBRE_VCPKG_INCLUDE_DIR "\" "
         "-dynamiclib -o \"{}\" \"{}\" \"{}\" 2>&1",
         dylib_path.native(),
         preamble_path.native(),
