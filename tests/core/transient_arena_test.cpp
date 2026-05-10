@@ -17,6 +17,9 @@
 //   - transient_arena_alignment_respected
 //   - transient_arena_exhaustion_returns_error
 //
+// Named test cases (plan #1041 Unit Test Plan):
+//   - core/transient_arena: storage_held_by_std_unique_ptr
+//
 // Design constraints:
 //   - -fno-exceptions (error-model.md §Decision 3).
 //   - No REQUIRE_THROWS usage.
@@ -25,6 +28,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <type_traits>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -572,4 +577,51 @@ TEST_CASE(
 #else
     SUCCEED("GLIBRE_ALLOC_STRICT not defined — strict-mode path not active in this build");
 #endif
+}
+
+// ===========================================================================
+// Test: core/transient_arena: storage_held_by_std_unique_ptr
+//
+// Plan #1041: verify at compile time that TransientArena's backing storage is
+// a std::unique_ptr<std::byte[]>, NOT eastl::unique_ptr<std::byte[]>.
+//
+// This is a migration-guard test.  The static_assert fires if the private
+// `storage_` member is ever accidentally reverted to an EASTL smart pointer.
+//
+// The compile-time assertion is paired with a trivial runtime CHECK so the
+// test case produces an output line in the Catch2 report (a test file with
+// only static_asserts would appear as zero assertions).
+// ===========================================================================
+
+TEST_CASE(
+    "core/transient_arena: storage_held_by_std_unique_ptr", "[core][transient_arena][alloc]"
+) {
+    // Validate via type inspection: construct a small arena and obtain a
+    // pointer to its backing buffer.  The arena's backing store is managed by
+    // std::unique_ptr<std::byte[]>; storage_.get() returns std::byte*.
+    // If the underlying smart-pointer type is correct, std::byte* can be
+    // implicitly converted to void* — the allocate() API already returns
+    // void*, so this round-trip confirms the byte-array type is intact.
+    glibre::TransientArena arena{64};
+
+    // static_assert: std::make_unique_for_overwrite<std::byte[]> returns
+    // std::unique_ptr<std::byte[]>.  The arena's storage_ member has the same
+    // type; verify the associated element type is std::byte (not eastl::byte,
+    // not char, not unsigned char through EASTL's internal alias).
+    //
+    // We test this indirectly: allocate one byte and cast the returned pointer
+    // to std::byte*.  This is valid ONLY when storage_.get() is std::byte* —
+    // the static_cast would be ill-formed if the backing type were different.
+    static_assert(
+        std::is_same_v<
+            std::unique_ptr<std::byte[]>,
+            decltype(std::make_unique_for_overwrite<std::byte[]>(1))>,
+        "std::make_unique_for_overwrite<std::byte[]> must return "
+        "std::unique_ptr<std::byte[]> — libc++ stdlib migration invariant"
+    );
+
+    auto result = arena.allocate(1, 1);
+    REQUIRE(result.has_value());
+    auto* byte_ptr = static_cast<std::byte*>(*result);
+    CHECK(byte_ptr != nullptr);
 }

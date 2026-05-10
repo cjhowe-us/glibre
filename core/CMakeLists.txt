@@ -24,7 +24,7 @@ endif()
 add_library(glibre-core STATIC
     src/frame_loop.cpp
     src/phase_registry.cpp           # PhaseRegistry: per-phase system registration + dispatch (plan #245)
-    src/eastl_alloc.cpp              # EASTL operator new[] substrate (PHILOSOPHY §11)
+    src/eastl_alloc.cpp              # EASTL operator new[] substrate (PHILOSOPHY §11); deleted after all EASTL consumers migrate (plan #1041 defers to cmake-drop-eastl-link chore)
     src/plugin_manifest.cpp
     src/plugin_loader.cpp            # PluginLoader: dlopen+dlsym+manifest read (plan #229)
     src/plugin_loader_registry.cpp   # PluginLoaderRegistry: ABI+version+name+deps gates (plan #230)

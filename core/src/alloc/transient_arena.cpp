@@ -10,8 +10,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-
-#include <EASTL/unique_ptr.h>
+#include <memory>
 
 namespace glibre {
 
@@ -20,7 +19,9 @@ namespace glibre {
 // ---------------------------------------------------------------------------
 
 TransientArena::TransientArena(std::size_t capacity_bytes)
-    : storage_{capacity_bytes > 0 ? eastl::make_unique<std::byte[]>(capacity_bytes) : nullptr},
+    : storage_{
+          capacity_bytes > 0 ? std::make_unique_for_overwrite<std::byte[]>(capacity_bytes) : nullptr
+      },
       capacity_{capacity_bytes},
       cursor_{0},
       high_watermark_{0} {}
