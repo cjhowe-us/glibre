@@ -33,8 +33,9 @@
 //     real definition include the owning header alongside this one; this
 //     header has no transitive pull on ECS or render headers.
 //
-//   • PHILOSOPHY §11: public plugin ABI surfaces never expose eastl:: or
-//     std:: containers — they cross the boundary as POD spans / handles only.
+//   • PHILOSOPHY §11 (updated per reviews/decisions/eastl-removal.md): public plugin
+//     ABI surfaces never expose std:: or std::pmr:: containers — they cross the
+//     boundary as POD spans / handles only.
 //     PluginContext carries only references to engine-owned registries.
 //     The LogSink reference is spdlog-backed; spdlog itself is a compile-time
 //     dependency of the plugin (header-only), not a runtime ABI surface.

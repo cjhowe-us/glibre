@@ -19,13 +19,22 @@
 //   <dlfcn.h>   — dlopen, dlsym, dlclose, dlerror (POSIX)
 //   <cstdio>    — fprintf (for dlerror() diagnostic output at refusal site)
 //
-// Per PHILOSOPHY §11 and error-model.md §Decision 3:
-//   -fno-exceptions; no std:: containers; std::filesystem carve-out OK.
+// Per error-model.md §Decision 3:
+//   -fno-exceptions.  std::pmr containers via PerContextAllocatorResource
+//   per reviews/decisions/eastl-removal.md matrix rows 1-3.
+//
+// open() allocator contract (HIGH-1 + HIGH-2, round-2, addressed):
+//   Callers pass a std::pmr::memory_resource& that backs dylib_path_.
+//   The resource pointer is stored in mr_ (declared before dylib_path_)
+//   and initialised as dylib_path_{mr_}, so every allocation in dylib_path_
+//   is tracked under the caller's PerContextAllocator ceiling.
+//   The assign() form (HIGH-2) avoids constructing a default-resource
+//   temporary and instead writes directly into the backed storage.
 //
 // dlerror() note (HIGH finding round-1, addressed):
 //   POSIX specifies dlerror() returns a pointer to a thread-local static that
 //   may be overwritten by the next dlerror() call.  Storing it in a non-owning
-//   eastl::string_view (ErrorContext::detail) is therefore a dangling-pointer
+//   std::string_view (ErrorContext::detail) is therefore a dangling-pointer
 //   hazard once the Error escapes this function.
 //
 //   Fix: dlerror() text is emitted at the refusal site via fprintf(stderr),
@@ -59,9 +68,6 @@
 #include <string_view>
 #include <utility>
 
-#include <EASTL/string.h>
-#include <EASTL/string_view.h>
-
 #include "glibre/alloc.hpp"
 #include "glibre/core/context_tag_resolver.hpp"  // derive_context_tag (moved to SRP unit, MED-2)
 #include "glibre/core/plugin_manifest.hpp"
@@ -72,11 +78,10 @@ namespace glibre::core {
 namespace {
 
 // ---------------------------------------------------------------------------
-// Helper: convert eastl::string_view → std::string (NUL-terminated) for
-// dlopen and std::filesystem.  std::string is an explicit std:: carve-out
-// when bridging to POSIX/OS interfaces per PHILOSOPHY §11.
+// Helper: convert std::string_view → std::string (NUL-terminated) for
+// dlopen and std::filesystem.
 // ---------------------------------------------------------------------------
-[[nodiscard]] std::string to_std_string(eastl::string_view sv) {
+[[nodiscard]] std::string to_std_string(std::string_view sv) {
     return std::string{sv.data(), sv.size()};
 }
 
@@ -142,7 +147,8 @@ try_resolve_required(void* handle, const char* sym_name) noexcept {
 // PluginLoader::open
 // ---------------------------------------------------------------------------
 
-glibre::Result<PluginLoader> PluginLoader::open(eastl::string_view dylib_path) {
+glibre::Result<PluginLoader>
+PluginLoader::open(std::string_view dylib_path, std::pmr::memory_resource& mr) {
     // Step 1: dlopen
     //
     // RTLD_NOW   — resolve all undefined symbols in the dylib immediately.
@@ -155,7 +161,7 @@ glibre::Result<PluginLoader> PluginLoader::open(eastl::string_view dylib_path) {
     void* const handle = dlopen(path_c.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (handle == nullptr) {
         // dlerror() returns a thread-local pointer invalidated by the next
-        // dlerror() call.  Storing it in a non-owning eastl::string_view
+        // dlerror() call.  Storing it in a non-owning std::string_view
         // inside ErrorContext::detail would create a dangling pointer once
         // the Error escapes this function (round-1 HIGH finding, addressed).
         //
@@ -257,7 +263,7 @@ glibre::Result<PluginLoader> PluginLoader::open(eastl::string_view dylib_path) {
     // POSIX-specified to work on conformant platforms.  We use std::memcpy to
     // copy the bits between the two pointer types — this is the most portable
     // approach (avoids the reinterpret_cast UB flagged by MED finding round-1).
-    PluginLoader loader;
+    PluginLoader loader{&mr};
     loader.handle_ = handle;
     loader.abi_hash_ = *static_cast<const char* const*>(sym_abi_hash);
     loader.manifest_blob_ = *static_cast<const std::byte* const*>(sym_manifest);
@@ -273,11 +279,23 @@ glibre::Result<PluginLoader> PluginLoader::open(eastl::string_view dylib_path) {
     std::memcpy(&register_fn_tmp, &sym_register, sizeof(register_fn_tmp));
     loader.register_fn_ = register_fn_tmp;
 
-    loader.dylib_path_ = eastl::string{dylib_path.data(), dylib_path.size()};
+    // HIGH-2 fix: assign() writes directly into the mr_-backed storage
+    // without constructing a default-resource temporary.  The allocator is
+    // already bound in the private constructor (dylib_path_{mr_}), so assign()
+    // is allocation-correct — all storage comes from mr_.
+    loader.dylib_path_.assign(dylib_path.data(), dylib_path.size());
     loader.manifest_result_ = std::move(manifest_result);
 
     return loader;
 }
+
+// ---------------------------------------------------------------------------
+// Private constructor
+// ---------------------------------------------------------------------------
+
+PluginLoader::PluginLoader(std::pmr::memory_resource* mr) noexcept
+    : mr_{mr},
+      dylib_path_{mr_} {}
 
 // ---------------------------------------------------------------------------
 // Destructor
@@ -300,6 +318,11 @@ PluginLoader::PluginLoader(PluginLoader&& other) noexcept
       manifest_blob_{other.manifest_blob_},
       manifest_blob_size_{other.manifest_blob_size_},
       register_fn_{other.register_fn_},
+      // Transfer mr_ first so dylib_path_ is constructed with the source's
+      // resource.  Since both sides now share the same memory_resource*,
+      // std::pmr::string's move constructor can steal the allocation
+      // (allocators compare equal ↔ same memory_resource*).
+      mr_{other.mr_},
       dylib_path_{std::move(other.dylib_path_)},
       manifest_result_{std::move(other.manifest_result_)} {
     // Null out the source so its destructor is a no-op.
@@ -308,6 +331,9 @@ PluginLoader::PluginLoader(PluginLoader&& other) noexcept
     other.manifest_blob_ = nullptr;
     other.manifest_blob_size_ = 0;
     other.register_fn_ = nullptr;
+    // Reset source's mr_ to the default resource; its dylib_path_ is empty
+    // (moved-from) so no allocation through the original mr_ will occur.
+    other.mr_ = std::pmr::get_default_resource();
 }
 
 PluginLoader& PluginLoader::operator=(PluginLoader&& other) noexcept {
@@ -323,6 +349,11 @@ PluginLoader& PluginLoader::operator=(PluginLoader&& other) noexcept {
     manifest_blob_ = other.manifest_blob_;
     manifest_blob_size_ = other.manifest_blob_size_;
     register_fn_ = other.register_fn_;
+    // Transfer mr_ before assigning dylib_path_.  std::pmr::string's
+    // move-assignment with POCMA=false: if allocators differ, it copies
+    // rather than steals.  By taking the source's mr_ first we keep the
+    // same resource pointer on both sides so the string move can steal.
+    mr_ = other.mr_;
     dylib_path_ = std::move(other.dylib_path_);
     manifest_result_ = std::move(other.manifest_result_);
 
@@ -331,6 +362,8 @@ PluginLoader& PluginLoader::operator=(PluginLoader&& other) noexcept {
     other.manifest_blob_ = nullptr;
     other.manifest_blob_size_ = 0;
     other.register_fn_ = nullptr;
+    // Reset source's mr_ to the default resource after the move.
+    other.mr_ = std::pmr::get_default_resource();
     return *this;
 }
 
@@ -350,6 +383,6 @@ std::size_t PluginLoader::manifest_blob_size() const noexcept { return manifest_
 
 RegisterFn PluginLoader::register_fn() const noexcept { return register_fn_; }
 
-const eastl::string& PluginLoader::dylib_path() const noexcept { return dylib_path_; }
+const std::pmr::string& PluginLoader::dylib_path() const noexcept { return dylib_path_; }
 
 }  // namespace glibre::core

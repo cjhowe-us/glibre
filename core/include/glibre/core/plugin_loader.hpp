@@ -40,15 +40,33 @@
 //   only (plugin-abi.md §"Loader Sequence" preamble, frame-phases.md §8).
 //   No internal locking — single-threaded phase-8 invariant assumed.
 //
-// EASTL per PHILOSOPHY §11:
-//   All containers and strings in the public surface use eastl::, not std::.
-//   std:: is retained only for std::expected (Result alias) and std::byte.
+// std::pmr per reviews/decisions/eastl-removal.md matrix rows 1–3:
+//   eastl::string      → std::pmr::string  (row 1)
+//   eastl::string_view → std::string_view  (row 2)
+//   eastl::vector<T>   → std::pmr::vector<T> (row 3, not used directly here)
+//
+// ALLOCATOR CONTRACT (HIGH-1 + HIGH-2, round-2, addressed):
+//   open() requires a std::pmr::memory_resource& to back dylib_path_.
+//   The resource MUST outlive the PluginLoader (same contract as alloc.hpp
+//   §"PerContextAllocatorResource" lifetime contract).
+//   Pass *PerContextAllocatorResource backed by the core PerContextAllocator
+//   singleton for production code.  Tests may pass a local
+//   std::pmr::monotonic_buffer_resource or a PerContextAllocatorResource
+//   constructed from a local PerContextAllocator.
+//   This ensures dylib_path_ allocations land under the per-context ceiling
+//   (perf-budget.md §Allocator Rules #1) rather than the global heap
+//   (std::pmr::get_default_resource()).
+//   The mr_ pointer is stored as a member and transferred on move so that
+//   move-construction can propagate the same resource to the destination's
+//   dylib_path_, enabling the storage-steal path in std::pmr::string's move
+//   constructor (allocators are equal ↔ same memory_resource* value).
 
 #include <cstddef>
 #include <cstdint>
+#include <memory_resource>
+#include <string>
+#include <string_view>
 
-#include <EASTL/string.h>
-#include <EASTL/string_view.h>
 #include <glibre/alloc.hpp>              // AllocatorHandle, ContextTag
 #include <glibre/core/plugin_entry.hpp>  // RegisterFn — single source of truth (LOW-6)
 #include <glibre/core/plugin_manifest.hpp>
@@ -72,11 +90,17 @@ namespace glibre::core {
 //
 // Typical usage (plan #230 caller):
 //
-//   auto result = PluginLoader::open("plugins/render/librender.dylib");
+//   // 1. Construct a per-context allocator + resource pair.
+//   //    The resource MUST outlive the PluginLoader.
+//   glibre::PerContextAllocator alloc{glibre::ContextTag::core};
+//   glibre::PerContextAllocatorResource mr{alloc};
+//
+//   // 2. Open the plugin — dylib_path_ is backed by mr.
+//   auto result = PluginLoader::open("plugins/render/librender.dylib", mr);
 //   if (!result) { handle_error(result.error()); return; }
 //   PluginLoader& loader = *result;
-//   // inspect loader.manifest_result(), loader.abi_hash(), etc.
-//   // plan #230 adds the ABI-hash gate here.
+//   // 3. Inspect loader.manifest_result(), loader.abi_hash(), etc.
+//   //    plan #230 adds the ABI-hash gate here.
 //
 // PluginLoader is returned by value (as Result<PluginLoader>); the caller
 // receives a fully-initialised object or an error — never a half-open state.
@@ -106,8 +130,15 @@ public:
     // "manifest must be valid" gate; at this layer we only collect data.
     //
     // @param dylib_path  Filesystem path to the plugin .dylib.
+    // @param mr          PMR memory resource used for dylib_path_ storage.
+    //                    MUST outlive the returned PluginLoader.
+    //                    In production: pass *PerContextAllocatorResource backed
+    //                    by the core PerContextAllocator singleton.
+    //                    In tests: a local PerContextAllocatorResource or
+    //                    std::pmr::monotonic_buffer_resource is fine.
     // ------------------------------------------------------------------
-    [[nodiscard]] static glibre::Result<PluginLoader> open(eastl::string_view dylib_path);
+    [[nodiscard]] static glibre::Result<PluginLoader>
+    open(std::string_view dylib_path, std::pmr::memory_resource& mr);
 
     // Destructor — dlclose(handle_) if handle_ is not nullptr.
     ~PluginLoader();
@@ -148,11 +179,14 @@ public:
     [[nodiscard]] RegisterFn register_fn() const noexcept;
 
     /// Filesystem path used to open this plugin.  Empty after move.
-    [[nodiscard]] const eastl::string& dylib_path() const noexcept;
+    [[nodiscard]] const std::pmr::string& dylib_path() const noexcept;
 
 private:
-    // Private default constructor — only open() creates valid instances.
-    PluginLoader() = default;
+    // Private constructor — only open() creates valid instances.
+    // mr must point to a live memory_resource; the pointer is stored and
+    // used to back dylib_path_ so its allocations land under the caller's
+    // per-context ceiling rather than the global heap.
+    explicit PluginLoader(std::pmr::memory_resource* mr) noexcept;
 
     // OS dylib handle.  nullptr when moved from or before open().
     void* handle_{nullptr};
@@ -163,8 +197,25 @@ private:
     std::size_t manifest_blob_size_{0};
     RegisterFn register_fn_{nullptr};
 
+    // PMR resource backing dylib_path_.  Stored as a pointer (not reference)
+    // so PluginLoader remains movable — move transfers the pointer and the
+    // destination's dylib_path_ is constructed with the same resource, enabling
+    // the storage-steal path in std::pmr::string's move constructor.
+    //
+    // Declaration order: mr_ BEFORE dylib_path_ so the resource is
+    // initialised first; the string's constructor receives a valid pointer.
+    //
+    // MUST NOT be null for any live (non-moved-from) PluginLoader.
+    // After a move the source's mr_ is set to std::pmr::get_default_resource()
+    // and dylib_path_ is empty, so no allocation through the original mr_ occurs.
+    // NSDMI uses get_default_resource() so a default-constructed PluginLoader
+    // (e.g. inside Result<PluginLoader> before open() fills it) never holds a
+    // null pointer.  open() / the private ctor overrides this immediately.
+    std::pmr::memory_resource* mr_{std::pmr::get_default_resource()};
+
     // Filesystem path for diagnostics and plan #230 name-collision checks.
-    eastl::string dylib_path_;
+    // Backed by mr_ (HIGH-1 + HIGH-2, round-2, addressed).
+    std::pmr::string dylib_path_;
 
     // Manifest read result from step 3.
     //
