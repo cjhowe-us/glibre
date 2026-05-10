@@ -39,6 +39,7 @@
 static_assert(
     false,
     "frame_loop_ordering_test.cpp requires GLIBRE_TESTING=1; "
+    "uses last_tick_phase_ordinals() and last_tick_per_phase_world_ticks() — "
     "build with -DGLIBRE_BUILD_TESTS=ON (sets GLIBRE_TESTING PUBLIC on glibre-core)"
 );
 #endif

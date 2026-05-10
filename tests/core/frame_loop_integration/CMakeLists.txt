@@ -13,12 +13,13 @@ cmake_minimum_required(VERSION 4.3.0)
 #   - core/frame_loop_integration: empty_reserved_phases_no_op
 #
 # Test strategy:
-#   Uses the GLIBRE_TESTING-gated last_tick_phase_ordinals() accessor on
-#   FrameLoop (propagated PUBLIC from glibre-core when GLIBRE_BUILD_TESTS=ON)
-#   to observe per-tick phase execution order without requiring a live
-#   PhaseRegistry or system-registration API (plan #245, not yet landed).
-#   Tests are deterministic, allocation-free, and require no network or
-#   filesystem — they run under `ctest -L unit`.
+#   Uses two GLIBRE_TESTING-gated accessors on FrameLoop (propagated PUBLIC
+#   from glibre-core when GLIBRE_BUILD_TESTS=ON) to observe per-tick state:
+#     - last_tick_phase_ordinals()       : per-tick phase execution order
+#     - last_tick_per_phase_world_ticks(): per-phase world_tick snapshots
+#   Neither accessor requires a live PhaseRegistry or system-registration
+#   API (plan #245, not yet landed).  Tests are deterministic,
+#   allocation-free, and require no network or filesystem — `ctest -L unit`.
 # ---------------------------------------------------------------------------
 
 add_executable(glibre-core-frame-loop-integration-tests
