@@ -272,8 +272,8 @@ and `AllocatorHandle`. The adapter was first drafted on PR #1028
 (`feat/core-type-registry`) co-located inside `TypeRegistry`; round-2
 review MED-2 lifted it out (SRP: the adapter is owned by the allocator,
 not the registry; any future per-context PMR consumer reuses it
-without pulling `type_registry.hpp`). This record canonicalises the
-already-lifted shape — no further relocation is required.
+without pulling `type_registry.hpp`). This record canonicalises the shape introduced via PR #1028 (merged
+2026-05-10) — no further relocation is required.
 
 **Why one `core/include/glibre/alloc.hpp` and not a sibling
 `pmr_adapter.hpp`.** The adapter has zero state of its own beyond a
@@ -340,6 +340,27 @@ allocation succeeds, so PMR containers continue to grow past the
 budget at the price of a logged warning (perf-budget.md
 §Allocator Rules #3). Engine code MUST NOT catch the abort — there is
 no recovery contract here, by design.
+
+**Recoverability concession.** Adopting `std::pmr::*` containers via
+`PerContextMemoryResource` collapses the recoverable-error surface from
+`OutOfBudget` (typed via `std::expected<T, glibre::Error>`) down to
+`std::abort()` — since `std::pmr::memory_resource::do_allocate` cannot
+return failure without throwing (and the engine compiles
+`-fno-exceptions`). The native `PerContextAllocator::allocate` API
+preserves the `OutOfBudget` typed path; callers that need structured
+recovery (e.g., graceful-degrade on a ceiling breach rather than
+hard-abort) MUST stay on the native API instead of the PMR adapter.
+
+Practical guidance: callers reaching for `std::pmr::*` containers
+should pre-budget against the per-tag ceiling at construction time
+(perf-budget.md §Allocator Rules #2 — hard ceiling in
+diagnostic/debug builds). If a call site is recovery-critical or lives
+on a hot path where ceiling breach is plausible and the failure must
+surface as an `OutOfBudget` error rather than a process abort, keep
+that site on `PerContextAllocator::allocate` directly; use
+`PerContextAllocatorResource` only where the abort-on-breach contract
+is acceptable (the common case — non-critical steady-state allocations
+that are already pre-verified to stay within budget).
 
 **`do_deallocate` — straight forward.**
 

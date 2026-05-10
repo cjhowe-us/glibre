@@ -32,11 +32,7 @@
    mismatch.
 10. **Occam's razor at every decision**. Two collapsing requirements
     become one primitive. Record the collapse in the spec.
-11. **SUPERSEDED — see reviews/decisions/eastl-removal.md** (initiative #1032).
-    The EASTL adoption is being reversed in favour of libc++ stdlib +
-    `std::ranges` + PMR. The body below remains as historical context
-    until the follow-up `[CHORE] update-philosophy-md-eastl-removal`
-    rewrites the section in full.
+11. > **SUPERSEDED — see [reviews/decisions/eastl-removal.md](reviews/decisions/eastl-removal.md). §11 body retained until [CHORE] update-philosophy-md-eastl-removal lands.**
 
     **EASTL replaces the C++ standard library for runtime data
     structures**. All containers, strings, smart pointers, `optional`,
