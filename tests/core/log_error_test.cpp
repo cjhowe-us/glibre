@@ -223,6 +223,8 @@ TEST_CASE("core/log_error: tostring_complete_for_core_error", "[core][log_error]
     check(E::TypeUnregistered, "TypeUnregistered");
     // plan #597: TypeRegistryClosed — register_type() called after seal()
     check(E::TypeRegistryClosed, "TypeRegistryClosed");
+    // plan #597: TypeRegistryGap — codegen contract violation (gap in TypeId sequence)
+    check(E::TypeRegistryGap, "TypeRegistryGap");
 }
 
 // ---------------------------------------------------------------------------
