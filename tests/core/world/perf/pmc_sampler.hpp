@@ -130,6 +130,7 @@ PmcCounters PmcSampler::measure(F&& fn) {
     struct StopSamplingOnExit {
         PmcCounters result{};
         bool stopped{false};
+
         ~StopSamplingOnExit() noexcept {
             if (!stopped) {
                 result = PmcSampler::stop_sampling();
@@ -139,7 +140,7 @@ PmcCounters PmcSampler::measure(F&& fn) {
 
     PmcSampler::start_sampling();
     std::forward<F>(fn)();
-    guard.result  = PmcSampler::stop_sampling();
+    guard.result = PmcSampler::stop_sampling();
     guard.stopped = true;
     return guard.result;
 }
