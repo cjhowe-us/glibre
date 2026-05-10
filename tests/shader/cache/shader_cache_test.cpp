@@ -6,13 +6,15 @@
 // Authority: specs/shader/SPEC.md §4.6, §7.5.
 //
 // Named test cases (plan #516 Unit Test Plan + DoD):
-//   - shader/cache: blake3_hash_is_deterministic_across_repeated_calls
-//   - shader/cache: blake3_hash_input_composition_matches_spec_section_2
-//   - shader/cache: cas_store_insert_if_absent_is_idempotent
-//   - shader/cache: cas_store_path_layout_matches_two_byte_prefix_sharding
-//   - shader/cache: cas_store_get_returns_byte_equal_payload_for_inserted_hash
-//   - shader/cache: cas_store_returns_CacheCorrupt_on_blake3_self_check_failure
-//   - shader/cache: cas_store_returns_CacheIntegrity_on_hash_collision_with_different_payload
+//   blake3_hash_is_deterministic_across_repeated_calls
+//   blake3_hash_input_composition_matches_spec_section_2
+//   cas_store_insert_if_absent_is_idempotent
+//   cas_store_path_layout_matches_two_byte_prefix_sharding
+//   cas_store_get_returns_byte_equal_payload_for_inserted_hash
+//   cas_store_returns_CacheCorrupt_on_blake3_self_check_failure
+//   cas_store_get_returns_CacheCorrupt_when_stored_content_hash_mismatches_key
+//   cas_store_insert_if_absent_returns_CacheIntegrity_when_caller_hash_mismatches_data
+//   cas_store_insert_if_absent_returns_CacheCorrupt_when_existing_entry_content_mismatches_key
 //
 // Design constraints:
 //   - -fno-exceptions compatible (error-model.md §Decision 3).
@@ -21,6 +23,7 @@
 //     and cleaned up in section tear-down.
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -28,6 +31,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -51,17 +55,14 @@ struct TempDir {
     std::filesystem::path path;
 
     TempDir() {
-        // Unique subdir under system temp.
-        path = std::filesystem::temp_directory_path() /
-               ("glibre-cas-test-" +
-                std::to_string(
-                    static_cast<std::uint64_t>(
-                        std::filesystem::last_write_time(std::filesystem::temp_directory_path())
-                            .time_since_epoch()
-                            .count()
-                    ) ^
-                    reinterpret_cast<std::uint64_t>(this)
-                ));  // NOLINT
+        // Unique subdir: pid + monotonically incrementing counter.
+        // pid makes the name unique across processes; the atomic counter
+        // ensures uniqueness within a single test-runner process even
+        // when TempDir instances are constructed concurrently.
+        static std::atomic<std::uint64_t> counter{0};
+        const std::uint64_t id = (static_cast<std::uint64_t>(::getpid()) << 32u) |
+                                 counter.fetch_add(1u, std::memory_order_relaxed);
+        path = std::filesystem::temp_directory_path() / ("glibre-cas-test-" + std::to_string(id));
         std::filesystem::create_directories(path);
     }
 
@@ -297,32 +298,19 @@ TEST_CASE("cas_store_returns_CacheCorrupt_on_blake3_self_check_failure", "[shade
 }
 
 TEST_CASE(
-    "cas_store_returns_CacheIntegrity_on_hash_collision_with_different_payload", "[shader][cache]"
+    "cas_store_get_returns_CacheCorrupt_when_stored_content_hash_mismatches_key", "[shader][cache]"
 ) {
-    // SPEC §4.6 unit-test plan item:
-    // "cas_store_returns_CacheIntegrity_on_hash_collision_with_different_payload"
+    // SPEC §10 error table: CacheCorrupt = "a CAS file fails its BLAKE3 self-check".
+    // SPEC §4.6: "integrity self-check on read".
     //
-    // This test verifies that when a file exists at the CAS path but the
-    // content is different from what was computed (simulated by inserting
-    // a payload whose hash we then forcibly overwrite the file for a different
-    // payload's hash), get() returns CacheCorrupt (content tamper detection).
-    //
-    // True BLAKE3 collisions are computationally infeasible.  We simulate the
-    // scenario by:
-    //   1. Computing hash_A for payload_A.
-    //   2. Inserting payload_A under hash_A (success).
-    //   3. Computing hash_B for payload_B.
-    //   4. Overwriting the CAS file at the path for hash_A with payload_B's content.
-    //   5. Calling get(hash_A) — the content is payload_B but hash is hash_A
-    //      → BLAKE3 self-check fails → CacheCorrupt.
-    //
-    // The test is named "CacheIntegrity" per the plan's unit-test plan entry;
-    // the wire-format error returned by get() for a hash-mismatch is
-    // shader::Error::CacheCorrupt (§4.6: "integrity self-check on read").
+    // Simulates on-disk corruption by:
+    //   1. Inserting payload_A under hash_A (legitimately).
+    //   2. Overwriting the CAS file with payload_B's bytes out-of-band.
+    //   3. Calling get(hash_A) — BLAKE3(payload_B) != hash_A → CacheCorrupt.
     TempDir tmp;
     glibre::shader::cache::CasStore store{tmp.path};
 
-    const auto payload_a = make_payload("payload-A-for-collision-sim");
+    const auto payload_a = make_payload("payload-A-for-corruption-sim");
     const auto payload_b = make_payload("payload-B-different-content-xyz");
 
     const glibre::shader::ShaderHash hash_a = glibre::shader::cache::blake3_hash_buffer(payload_a);
@@ -330,7 +318,7 @@ TEST_CASE(
     // Insert payload_a under hash_a.
     REQUIRE(store.insert_if_absent(hash_a, payload_a).has_value());
 
-    // Overwrite CAS file with payload_b's bytes to simulate a collision.
+    // Overwrite CAS file out-of-band to simulate on-disk corruption.
     const std::filesystem::path artifact_path =
         glibre::shader::cache::cas_artifact_path(tmp.path, hash_a);
     {
@@ -354,6 +342,92 @@ TEST_CASE(
             return false;
         },
         got.error().code()
+    );
+    REQUIRE(is_corrupt);
+}
+
+TEST_CASE(
+    "cas_store_insert_if_absent_returns_CacheIntegrity_when_caller_hash_mismatches_data",
+    "[shader][cache]"
+) {
+    // SPEC §10 error table: CacheIntegrity = "a ShaderHash collision against a
+    // non-byte-equal payload during cooker insert".
+    // insert_if_absent() must verify BLAKE3(data) == hash before writing;
+    // if the caller supplies a hash that does not match the payload, the store
+    // must refuse with CacheIntegrity rather than silently persist a corrupt entry.
+    TempDir tmp;
+    glibre::shader::cache::CasStore store{tmp.path};
+
+    const auto payload_a = make_payload("payload-A-correct");
+    const auto payload_b = make_payload("payload-B-wrong-data");
+
+    // Compute the hash of payload_A, but pass payload_B as the data.
+    const glibre::shader::ShaderHash hash_a = glibre::shader::cache::blake3_hash_buffer(payload_a);
+
+    auto result = store.insert_if_absent(hash_a, payload_b);
+    REQUIRE(!result.has_value());  // must fail
+
+    const bool is_integrity = std::visit(
+        [](auto e) -> bool {
+            if constexpr (std::is_same_v<decltype(e), glibre::shader::Error>) {
+                return e == glibre::shader::Error::CacheIntegrity;
+            }
+            return false;
+        },
+        result.error().code()
+    );
+    REQUIRE(is_integrity);
+
+    // Nothing must have been written: the CAS path for hash_a must not exist.
+    const std::filesystem::path artifact_path =
+        glibre::shader::cache::cas_artifact_path(tmp.path, hash_a);
+    REQUIRE(!std::filesystem::exists(artifact_path));
+}
+
+TEST_CASE(
+    "cas_store_insert_if_absent_returns_CacheCorrupt_when_existing_entry_content_mismatches_key",
+    "[shader][cache]"
+) {
+    // SPEC §4.6 invariant 1 — idempotency: on an already-existing key,
+    // insert_if_absent() reads and re-hashes the existing blob.
+    // If the existing content's BLAKE3 hash does not match the key
+    // (the entry is internally corrupt), return CacheCorrupt rather than
+    // silently returning success.
+    TempDir tmp;
+    glibre::shader::cache::CasStore store{tmp.path};
+
+    const auto payload_a = make_payload("existing-entry-payload");
+    const auto payload_b = make_payload("corrupt-replacement-bytes");
+
+    const glibre::shader::ShaderHash hash_a = glibre::shader::cache::blake3_hash_buffer(payload_a);
+
+    // Insert legitimately first.
+    REQUIRE(store.insert_if_absent(hash_a, payload_a).has_value());
+
+    // Corrupt the existing CAS file out-of-band.
+    const std::filesystem::path artifact_path =
+        glibre::shader::cache::cas_artifact_path(tmp.path, hash_a);
+    {
+        std::ofstream out{artifact_path, std::ios::binary | std::ios::trunc};
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        out.write(
+            reinterpret_cast<const char*>(payload_b.data()),
+            static_cast<std::streamsize>(payload_b.size())
+        );
+    }
+
+    // A second insert_if_absent with the same hash must detect the corruption.
+    auto result = store.insert_if_absent(hash_a, payload_a);
+    REQUIRE(!result.has_value());
+
+    const bool is_corrupt = std::visit(
+        [](auto e) -> bool {
+            if constexpr (std::is_same_v<decltype(e), glibre::shader::Error>) {
+                return e == glibre::shader::Error::CacheCorrupt;
+            }
+            return false;
+        },
+        result.error().code()
     );
     REQUIRE(is_corrupt);
 }

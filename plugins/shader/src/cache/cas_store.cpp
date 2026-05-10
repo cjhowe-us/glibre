@@ -112,11 +112,44 @@ glibre::Result<std::optional<std::vector<std::byte>>> CasStore::get(const Shader
 
 glibre::Result<void>
 CasStore::insert_if_absent(const ShaderHash& hash, std::span<const std::byte> data) {
-    // Idempotency: if the key already exists, succeed immediately.
+    // Pre-condition: caller must provide a hash that matches the data.
+    // SPEC §4.6 invariant 1: "content-addressable: ShaderHash is the BLAKE3 of ..."
+    // A mismatch means the caller passed the wrong hash for this payload.
+    {
+        const ShaderHash computed = blake3_hash_buffer(data);
+        if (computed != hash) {
+            return std::unexpected(glibre::Error{shader::Error::CacheIntegrity});
+        }
+    }
+
+    // Idempotency: if the key already exists, verify the stored content matches
+    // before returning.  A mismatch here is a CacheCorrupt condition (the CAS
+    // store is internally inconsistent — an existing file under this path has
+    // different content than what this hash maps to).
     const auto path = cas_artifact_path(root_, hash);
     {
         std::error_code ec;
         if (std::filesystem::exists(path, ec)) {
+            // Read the existing blob and re-hash it.
+            std::ifstream existing{path, std::ios::binary | std::ios::ate};
+            if (!existing.is_open()) {
+                return std::unexpected(glibre::Error{shader::Error::CacheCorrupt});
+            }
+            const auto sz = static_cast<std::size_t>(existing.tellg());
+            existing.seekg(0, std::ios::beg);
+            std::vector<std::byte> existing_buf(sz);
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+            if (!existing.read(
+                    reinterpret_cast<char*>(existing_buf.data()), static_cast<std::streamsize>(sz)
+                )) {
+                return std::unexpected(glibre::Error{shader::Error::CacheCorrupt});
+            }
+            const ShaderHash existing_hash =
+                blake3_hash_buffer(std::span<const std::byte>{existing_buf});
+            if (existing_hash != hash) {
+                return std::unexpected(glibre::Error{shader::Error::CacheCorrupt});
+            }
+            // Content matches — true no-op.
             return {};
         }
     }

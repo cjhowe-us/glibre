@@ -48,6 +48,8 @@ public:
     // Non-copyable, non-movable.  Finalize once and discard.
     Blake3Hasher(const Blake3Hasher&) = delete;
     Blake3Hasher& operator=(const Blake3Hasher&) = delete;
+    Blake3Hasher(Blake3Hasher&&) = delete;
+    Blake3Hasher& operator=(Blake3Hasher&&) = delete;
 
     /// Feed arbitrary bytes into the hasher.
     void update(std::span<const std::byte> data) noexcept {

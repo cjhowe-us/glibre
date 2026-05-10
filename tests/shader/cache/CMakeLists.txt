@@ -13,7 +13,9 @@ cmake_minimum_required(VERSION 4.3.0)
 #   - shader/cache: cas_store_path_layout_matches_two_byte_prefix_sharding
 #   - shader/cache: cas_store_get_returns_byte_equal_payload_for_inserted_hash
 #   - shader/cache: cas_store_returns_CacheCorrupt_on_blake3_self_check_failure
-#   - shader/cache: cas_store_returns_CacheIntegrity_on_hash_collision_with_different_payload
+#   - shader/cache: cas_store_get_returns_CacheCorrupt_when_stored_content_hash_mismatches_key
+#   - shader/cache: cas_store_insert_if_absent_returns_CacheIntegrity_when_caller_hash_mismatches_data
+#   - shader/cache: cas_store_insert_if_absent_returns_CacheCorrupt_when_existing_entry_content_mismatches_key
 # ---------------------------------------------------------------------------
 
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
