@@ -24,6 +24,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <memory_resource>
 #include <string_view>
 #include <type_traits>
@@ -39,30 +40,72 @@
 // Test: system_fn_uses_std_move_only_function
 //
 // Verifies (plan #1045 §Unit Test Plan):
-//   static_assert that PhaseSystemFn is exactly std::move_only_function<void()>.
-//
-// This is a compile-time guard; the test passes if and only if the
-// static_assert in phase_registry.hpp compiles without error and the
-// type identity holds at the TEST_CASE expansion site.
+//   (a) PhaseSystemFn is exactly std::move_only_function<void() const>
+//       (compile-time type-identity pin).
+//   (b) PhaseSystemFn is invocable via a const PhaseSystemFn reference,
+//       which is the exact invocation path used inside for_each_system().
+//       Under the polyfill (std::function backing), only copy-constructible
+//       callables can be stored; the const-invocability assertion is the
+//       strongest portable check available without the real C++23 type.
+//   (c) When the real std::move_only_function is present, a move-only callable
+//       (unique_ptr-capturing lambda) is used to exercise actual move-only
+//       semantics.  This guard is conditioned on __cpp_lib_move_only_function
+//       because std::function (the polyfill backing) requires the callable to
+//       be CopyConstructible and cannot hold a non-copyable lambda.
 // ===========================================================================
 TEST_CASE("core/phase_registry: system_fn_uses_std_move_only_function", "[core][phase_registry]") {
     using namespace glibre::core;
 
-    // Compile-time assertion: PhaseSystemFn MUST be std::move_only_function<void()>.
-    // This pin ensures eastl::fixed_function was replaced and the typedef
-    // references the std:: type (or its polyfill under the same name).
+    // (a) Compile-time type-identity pin.
+    // PhaseSystemFn MUST be std::move_only_function<void() const> per
+    // reviews/decisions/eastl-removal.md matrix row 9.
     static_assert(
-        std::is_same_v<PhaseSystemFn, std::move_only_function<void()>>,
-        "PhaseSystemFn must be std::move_only_function<void()> per "
+        std::is_same_v<PhaseSystemFn, std::move_only_function<void() const>>,
+        "PhaseSystemFn must be std::move_only_function<void() const> per "
         "reviews/decisions/eastl-removal.md matrix row 9"
     );
 
-    // Runtime exercise: construct a PhaseSystemFn from a lambda and invoke it.
-    // Verifies the callable type is usable for the engine's system-dispatch pattern.
-    int called = 0;
-    PhaseSystemFn fn = [&called]() { ++called; };
-    fn();
-    REQUIRE(called == 1);
+#ifdef __cpp_lib_move_only_function
+    // (c) Real C++23 std::move_only_function — exercise move-only callable.
+    // unique_ptr-capturing lambdas are NOT CopyConstructible.  Constructing
+    // PhaseSystemFn from one proves the callable type genuinely accepts
+    // move-only closures (the polyfill cannot make this guarantee).
+    {
+        int called = 0;
+        auto sentinel = std::make_unique<int>(42);
+
+        PhaseSystemFn fn = [&called, s = std::move(sentinel)]() noexcept {
+            if (s && *s == 42) {
+                ++called;
+            }
+        };
+
+        // (b) Const-ref invocation path (mirrors for_each_system).
+        const PhaseSystemFn& const_ref = fn;
+        const_ref();
+        REQUIRE(called == 1);
+
+        // Verify PhaseSystemFn is NOT copy-constructible under the real type.
+        static_assert(
+            !std::is_copy_constructible_v<PhaseSystemFn>,
+            "PhaseSystemFn must be move-only when real std::move_only_function is in use"
+        );
+    }
+#else
+    // (b) Polyfill path: std::function backing requires CopyConstructible callables.
+    // Use a plain lambda to exercise the const-ref invocation path — the
+    // strongest assertion portable across the polyfill.
+    {
+        int called = 0;
+
+        PhaseSystemFn fn = [&called]() noexcept { ++called; };
+
+        // const-ref invocation — mirrors for_each_system()'s call site.
+        const PhaseSystemFn& const_ref = fn;
+        const_ref();
+        REQUIRE(called == 1);
+    }
+#endif  // __cpp_lib_move_only_function
 }
 
 // ===========================================================================

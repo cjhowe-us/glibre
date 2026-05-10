@@ -69,9 +69,17 @@ namespace glibre::core {
 // ---------------------------------------------------------------------------
 // PhaseSystemFn — callable type for one registered phase-system callback.
 //
-// void() signature: the system callback takes no arguments and returns void.
+// void() const signature: the system callback takes no arguments, returns void,
+// and is const-invocable.  The `const` on the call signature matches
+// std::move_only_function's C++23 contract for const-safe dispatch: when
+// for_each_system iterates via `const PhaseSystemFn& fn`, calling `fn()`
+// compiles because operator() is const on the `void() const` specialisation.
+// Without `const` here, the real C++23 std::move_only_function<void()> has a
+// non-const operator(), which would make `fn()` in for_each_system ill-formed
+// the moment the polyfill is deleted.  Using `void() const` is the correct
+// long-term signature and is valid under both the polyfill and the real type.
 //
-// std::move_only_function<void()> per reviews/decisions/eastl-removal.md
+// std::move_only_function<void() const> per reviews/decisions/eastl-removal.md
 // matrix row 9 (eastl::fixed_function → std::move_only_function) and Open
 // Question 1: "picks std::move_only_function<Sig> by default; only opens an
 // inline-storage polyfill if the per-context SPEC §9 micro-benchmark fires."
@@ -83,13 +91,20 @@ namespace glibre::core {
 // closure — they are distinct, and sharing a name would create two
 // `glibre::core::SystemFn` types in the same namespace.
 // ---------------------------------------------------------------------------
-using PhaseSystemFn = std::move_only_function<void()>;
+using PhaseSystemFn = std::move_only_function<void() const>;
 
+// Compile-time pin: PhaseSystemFn must remain std::move_only_function<void() const>.
+// Guard is conditional on __cpp_lib_move_only_function so it is only active when
+// the real libc++ type is present; under the polyfill the static_assert would be
+// tautological (polyfill aliases std::move_only_function to std::function, making
+// is_same always true regardless of the typedef) and would give false confidence.
+#ifdef __cpp_lib_move_only_function
 static_assert(
-    std::is_same_v<PhaseSystemFn, std::move_only_function<void()>>,
-    "PhaseSystemFn must be std::move_only_function<void()> per "
-    "reviews/decisions/eastl-removal.md matrix row 9"
+    !std::is_copy_constructible_v<PhaseSystemFn>,
+    "PhaseSystemFn must be move-only (std::move_only_function<void() const>); "
+    "a copy-constructible type was aliased — check reviews/decisions/eastl-removal.md matrix row 9"
 );
+#endif
 
 // ---------------------------------------------------------------------------
 // PhaseRegistry
@@ -145,6 +160,13 @@ public:
     //   std::pmr::monotonic_buffer_resource mr;
     //   PhaseRegistry reg{&mr};
     //   // or use std::pmr::get_default_resource() for the default heap
+    //
+    // ContextTag duplication / allocator-shape question tracked under spike
+    // #1031 — this PR uses std::pmr::memory_resource* as the lowest-common-
+    // denominator interim shape (avoids a direct alloc.hpp include that would
+    // create a ContextTag redefinition conflict with perf_budget.hpp).  The
+    // spike will pick the canonical handle type once the design lands across
+    // the migration leaves.
     explicit PhaseRegistry(std::pmr::memory_resource* mr) noexcept;
 
     PhaseRegistry(const PhaseRegistry&) = delete;
@@ -275,12 +297,11 @@ private:
     // -----------------------------------------------------------------------
     struct SystemEntry {
         std::pmr::string fqn;
-        // fn is mutable because the polyfill (std::function) has a non-const
-        // operator() while std::move_only_function::operator() is const in the
-        // real C++23 type.  Declaring mutable lets for_each_system's const-ref
-        // path compile correctly with both the polyfill and the real type.
-        // When the polyfill is deleted, mutable can be removed here.
-        mutable PhaseSystemFn fn;
+        // fn uses void() const call signature via PhaseSystemFn, so operator()
+        // is const on both the polyfill and the real C++23 type.  No mutable
+        // qualifier is needed — for_each_system iterates via const SystemEntry&
+        // and calls fn() without modifying the stored callable.
+        PhaseSystemFn fn;
 
         SystemEntry(std::string_view f, PhaseSystemFn cb, std::pmr::memory_resource* mr) noexcept
             : fqn(f, mr),
