@@ -38,12 +38,14 @@
 // -fno-exceptions clean.  No heap allocation inside this class beyond
 // the one backing-store allocation in the constructor.
 //
-// PerContextAllocator bypass (perf-budget.md §Allocator Rules #4):
-//   TransientArena allocates its backing store via
-//   `std::make_unique_for_overwrite<std::byte[]>(N)` (i.e. `::operator new[]`),
-//   bypassing PerContextAllocator's per-tag heap accounting.  This is by design —
-//   transient / per-frame arenas are exempted from the per-context ceiling because
-//   they are frame-bounded and freed at the next frame boundary (Phase::Present).
+// PerContextAllocator bypass — pre-existing behaviour (perf-budget.md §Allocator Rules #4):
+//   TransientArena has always allocated its backing store via `::operator new[]`
+//   (currently expressed as `std::make_unique_for_overwrite<std::byte[]>(N)`),
+//   bypassing PerContextAllocator's per-tag heap accounting.  This is by design:
+//   transient / per-frame arenas are explicitly exempted from the per-context
+//   ceiling because they are frame-bounded (drained at Phase::Present).
+//   The eastl-removal migration (refs #1041) preserves this exemption verbatim —
+//   no new bypass was introduced by that migration.
 
 #include <cstddef>
 #include <memory>
@@ -138,6 +140,18 @@ private:
     std::size_t capacity_{0};
     std::size_t cursor_{0};
     std::size_t high_watermark_{0};
+
+    // Paired static_assert: storage_ must be exactly storage_pointer.
+    // The public alias and this field declaration must stay in sync; if either
+    // is changed without the other, this assertion fires at compile time.
+    // Placed after storage_ so decltype(storage_) resolves within class scope.
+    // Companion to the test-side assert in core/transient_arena_test.cpp
+    // (test "core/transient_arena: storage_held_by_std_unique_ptr", refs #1051).
+    static_assert(
+        std::is_same_v<decltype(storage_), storage_pointer>,
+        "TransientArena::storage_ must be exactly storage_pointer "
+        "(std::unique_ptr<std::byte[]>) — eastl reversion guard (refs #1051)"
+    );
 };
 
 }  // namespace glibre
