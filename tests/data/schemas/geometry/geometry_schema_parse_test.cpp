@@ -27,15 +27,14 @@
 // for a Fory round-trip once the serializer is available.  This is consistent
 // with the deferral rationale in schema_migration_test.cpp (plan #977).
 //
-// PHILOSOPHY §11: EASTL replaces std containers.
-//   std:: retained for std::string_view (API boundary), std::filesystem,
-//   std::expected (glibre::Result).
+// PHILOSOPHY §11 (post eastl-removal.md): libc++ stdlib is canonical.
+//   EASTL headers removed; all string comparisons use std::string_view or
+//   const char* literals (eastl::string::operator==(const char*) is defined).
+//   Migrated per plan #1052 (reviews/decisions/eastl-removal.md rows 1, 2, 3).
 
 #include <filesystem>
 #include <string_view>
 
-#include <EASTL/string.h>
-#include <EASTL/vector.h>
 #include <catch2/catch_test_macros.hpp>
 
 #include "parser.hpp"
@@ -70,9 +69,12 @@ using namespace glibre::tools::foryc;
 // ---------------------------------------------------------------------------
 
 // Return the FieldDecl for the named field, or nullptr if not found.
+//
+// Comparison uses std::string_view over f.name's data/size to avoid
+// constructing an eastl::string from name (plan #1052 migration).
 static const FieldDecl* find_field(const TypeDecl& td, std::string_view name) noexcept {
     for (const auto& f : td.fields) {
-        if (f.name == eastl::string(name.data(), name.size()))
+        if (std::string_view(f.name.data(), f.name.size()) == name)
             return &f;
     }
     return nullptr;
@@ -91,9 +93,9 @@ TEST_CASE("geometry_cook_manifest_schema_parses", "[geometry][schemas][cook_mani
     REQUIRE(schema.types.size() == 1);
 
     const TypeDecl& td = schema.types[0];
-    CHECK(td.fqn == eastl::string("glibre.geometry.CookManifest"));
+    CHECK(td.fqn == "glibre.geometry.CookManifest");
     CHECK(td.version == 1);
-    CHECK(td.since_version == eastl::string("0.1.0"));
+    CHECK(td.since_version == "0.1.0");
 
     // Total field count from §7.1.1 schema block:
     //   tags 1-7 (7) + tags 10-15 (6) + tags 20-23 (4) + tags 30-31 (2) +
@@ -110,12 +112,12 @@ TEST_CASE("geometry_blas_recipe_record_schema_parses", "[geometry][schemas][blas
     REQUIRE(schema.types.size() == 2);
 
     const TypeDecl& td_blas = schema.types[0];
-    CHECK(td_blas.fqn == eastl::string("glibre.geometry.BLASRecipeRecord"));
+    CHECK(td_blas.fqn == "glibre.geometry.BLASRecipeRecord");
     CHECK(td_blas.version == 1);
     CHECK(td_blas.fields.size() == 6);
 
     const TypeDecl& td_desc = schema.types[1];
-    CHECK(td_desc.fqn == eastl::string("glibre.geometry.BLASGeometryDescriptor"));
+    CHECK(td_desc.fqn == "glibre.geometry.BLASGeometryDescriptor");
     CHECK(td_desc.version == 1);
     // BLASGeometryDescriptor fields: tags 1,2 (2) + tags 10-13 (4) + tags 20-22 (3) + tag 30 (1)
     // = 10.
@@ -132,9 +134,9 @@ TEST_CASE(
     REQUIRE(schema.types.size() == 1);
 
     const TypeDecl& td = schema.types[0];
-    CHECK(td.fqn == eastl::string("glibre.geometry.MeshSourceMetadata"));
+    CHECK(td.fqn == "glibre.geometry.MeshSourceMetadata");
     CHECK(td.version == 1);
-    CHECK(td.since_version == eastl::string("0.1.0"));
+    CHECK(td.since_version == "0.1.0");
     CHECK(td.fields.size() == 10);
 }
 
@@ -159,19 +161,19 @@ TEST_CASE(
     // source_content_hash — tag 3
     const FieldDecl* f_sch = find_field(td, "source_content_hash");
     REQUIRE(f_sch != nullptr);
-    CHECK(f_sch->type_name == eastl::string("u64"));
+    CHECK(f_sch->type_name == "u64");
     CHECK(f_sch->tag == 3);
 
     // format_hash — tag 4
     const FieldDecl* f_fh = find_field(td, "format_hash");
     REQUIRE(f_fh != nullptr);
-    CHECK(f_fh->type_name == eastl::string("u64"));
+    CHECK(f_fh->type_name == "u64");
     CHECK(f_fh->tag == 4);
 
     // foryc_abi_hash — tag 5
     const FieldDecl* f_ah = find_field(td, "foryc_abi_hash");
     REQUIRE(f_ah != nullptr);
-    CHECK(f_ah->type_name == eastl::string("u64"));
+    CHECK(f_ah->type_name == "u64");
     CHECK(f_ah->tag == 5);
 }
 
@@ -201,13 +203,13 @@ TEST_CASE(
     // meshlet_max_vertices — tag 20, type u8
     const FieldDecl* f_mv = find_field(td, "meshlet_max_vertices");
     REQUIRE(f_mv != nullptr);
-    CHECK(f_mv->type_name == eastl::string("u8"));
+    CHECK(f_mv->type_name == "u8");
     CHECK(f_mv->tag == 20);
 
     // meshlet_max_triangles — tag 21, type u8
     const FieldDecl* f_mt = find_field(td, "meshlet_max_triangles");
     REQUIRE(f_mt != nullptr);
-    CHECK(f_mt->type_name == eastl::string("u8"));
+    CHECK(f_mt->type_name == "u8");
     CHECK(f_mt->tag == 21);
 
     // Verify a schema with a different type for these fields would NOT match
@@ -226,7 +228,7 @@ schema glibre.geometry.CookManifestMutated {
     const FieldDecl* mf_mv = find_field(mutated_result->types[0], "meshlet_max_vertices");
     REQUIRE(mf_mv != nullptr);
     // Confirm that u32 != u8 — the widened type is detectably different.
-    CHECK(mf_mv->type_name != eastl::string("u8"));
+    CHECK(mf_mv->type_name != "u8");
 }
 
 // data/schemas/geometry/CookManifest: rejects_unknown_draco_profile_value
@@ -255,13 +257,13 @@ TEST_CASE(
     // draco_profile — tag 30, type u8 (closed-sum enum projection)
     const FieldDecl* f_dp = find_field(td, "draco_profile");
     REQUIRE(f_dp != nullptr);
-    CHECK(f_dp->type_name == eastl::string("u8"));
+    CHECK(f_dp->type_name == "u8");
     CHECK(f_dp->tag == 30);
 
     // draco_speed — tag 31, type u8
     const FieldDecl* f_ds = find_field(td, "draco_speed");
     REQUIRE(f_ds != nullptr);
-    CHECK(f_ds->type_name == eastl::string("u8"));
+    CHECK(f_ds->type_name == "u8");
     CHECK(f_ds->tag == 31);
 }
 
@@ -286,26 +288,26 @@ TEST_CASE(
     REQUIRE(result->types.size() == 2);
 
     const TypeDecl& td_blas = result->types[0];
-    CHECK(td_blas.fqn == eastl::string("glibre.geometry.BLASRecipeRecord"));
+    CHECK(td_blas.fqn == "glibre.geometry.BLASRecipeRecord");
 
     // descriptors — tag 12, type list<BLASGeometryDescriptor>
     const FieldDecl* f_desc = find_field(td_blas, "descriptors");
     REQUIRE(f_desc != nullptr);
-    CHECK(f_desc->type_name == eastl::string("list<BLASGeometryDescriptor>"));
+    CHECK(f_desc->type_name == "list<BLASGeometryDescriptor>");
     CHECK(f_desc->tag == 12);
 
     // lod0_descriptor_count — tag 11, type u32
     const FieldDecl* f_cnt = find_field(td_blas, "lod0_descriptor_count");
     REQUIRE(f_cnt != nullptr);
-    CHECK(f_cnt->type_name == eastl::string("u32"));
+    CHECK(f_cnt->type_name == "u32");
     CHECK(f_cnt->tag == 11);
 
     // BLASGeometryDescriptor: group_index is the sort key (tag 1)
     const TypeDecl& td_desc = result->types[1];
-    CHECK(td_desc.fqn == eastl::string("glibre.geometry.BLASGeometryDescriptor"));
+    CHECK(td_desc.fqn == "glibre.geometry.BLASGeometryDescriptor");
     const FieldDecl* f_gi = find_field(td_desc, "group_index");
     REQUIRE(f_gi != nullptr);
-    CHECK(f_gi->type_name == eastl::string("u32"));
+    CHECK(f_gi->type_name == "u32");
     CHECK(f_gi->tag == 1);
 }
 
@@ -334,19 +336,19 @@ TEST_CASE(
     // format_hash — tag 2, type u64
     const FieldDecl* f_fh = find_field(td, "format_hash");
     REQUIRE(f_fh != nullptr);
-    CHECK(f_fh->type_name == eastl::string("u64"));
+    CHECK(f_fh->type_name == "u64");
     CHECK(f_fh->tag == 2);
 
     // source_content_hash — tag 3, type u64
     const FieldDecl* f_sch = find_field(td, "source_content_hash");
     REQUIRE(f_sch != nullptr);
-    CHECK(f_sch->type_name == eastl::string("u64"));
+    CHECK(f_sch->type_name == "u64");
     CHECK(f_sch->tag == 3);
 
     // pak_path — tag 1, type string
     const FieldDecl* f_pp = find_field(td, "pak_path");
     REQUIRE(f_pp != nullptr);
-    CHECK(f_pp->type_name == eastl::string("string"));
+    CHECK(f_pp->type_name == "string");
     CHECK(f_pp->tag == 1);
 }
 
@@ -371,30 +373,30 @@ TEST_CASE(
     // bounding_box_min — tag 10, type vec3f
     const FieldDecl* f_bbmin = find_field(td, "bounding_box_min");
     REQUIRE(f_bbmin != nullptr);
-    CHECK(f_bbmin->type_name == eastl::string("vec3f"));
+    CHECK(f_bbmin->type_name == "vec3f");
     CHECK(f_bbmin->tag == 10);
 
     // bounding_box_max — tag 11, type vec3f
     const FieldDecl* f_bbmax = find_field(td, "bounding_box_max");
     REQUIRE(f_bbmax != nullptr);
-    CHECK(f_bbmax->type_name == eastl::string("vec3f"));
+    CHECK(f_bbmax->type_name == "vec3f");
     CHECK(f_bbmax->tag == 11);
 
     // source_content_hash — tag 4, type u64
     // (§7.1.3 invariant 2: must equal PakHeader.source_content_hash)
     const FieldDecl* f_sch = find_field(td, "source_content_hash");
     REQUIRE(f_sch != nullptr);
-    CHECK(f_sch->type_name == eastl::string("u64"));
+    CHECK(f_sch->type_name == "u64");
     CHECK(f_sch->tag == 4);
 
     // source_vertex_count + source_triangle_count — tags 12/13, type u32
     const FieldDecl* f_vc = find_field(td, "source_vertex_count");
     REQUIRE(f_vc != nullptr);
-    CHECK(f_vc->type_name == eastl::string("u32"));
+    CHECK(f_vc->type_name == "u32");
     CHECK(f_vc->tag == 12);
 
     const FieldDecl* f_tc = find_field(td, "source_triangle_count");
     REQUIRE(f_tc != nullptr);
-    CHECK(f_tc->type_name == eastl::string("u32"));
+    CHECK(f_tc->type_name == "u32");
     CHECK(f_tc->tag == 13);
 }
