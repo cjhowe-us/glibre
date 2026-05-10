@@ -16,6 +16,17 @@ namespace glibre {
 
 // ---------------------------------------------------------------------------
 // Constructor
+//
+// OOM behaviour: `std::make_unique_for_overwrite<std::byte[]>` throws
+// `std::bad_alloc` on allocation failure.  Under `-fno-exceptions` the
+// compiler converts unhandled throws to `std::terminate()`, so an OOM will
+// abort the process rather than propagate a Result<>.  This matches the prior
+// `eastl::make_unique<std::byte[]>` behaviour (same abort-on-OOM posture).
+//
+// A future fallible factory `static Result<TransientArena> create(size_t)`
+// can return `unexpected{OutOfBudget}` instead of aborting.  That refactor
+// changes the public construction API and is tracked in the spike opened as
+// part of PR #1062 round-2 review response.
 // ---------------------------------------------------------------------------
 
 TransientArena::TransientArena(std::size_t capacity_bytes)

@@ -618,13 +618,9 @@ TEST_CASE(
         "— eastl::unique_ptr reversion guard (refs #1041)"
     );
 
-    // Runtime portion: construct a small arena and confirm allocate() returns
-    // a non-null pointer, proving the backing store initialisation path is
-    // intact after the std::make_unique_for_overwrite<std::byte[]> (C++23)
-    // constructor change.
-    glibre::TransientArena arena{64};
-    auto result = arena.allocate(1, 1);
-    REQUIRE(result.has_value());
-    auto* byte_ptr = static_cast<std::byte*>(*result);
-    CHECK(byte_ptr != nullptr);
+    // The static_assert above is the load-bearing assertion — it fires at
+    // compile time if the field type drifts from storage_pointer.  A runtime
+    // allocate() round-trip is already covered by the "allocate basic path"
+    // test case; duplicating it here adds no marginal coverage.
+    SUCCEED("compile-time guard above is the load-bearing assertion");
 }

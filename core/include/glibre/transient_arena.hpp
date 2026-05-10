@@ -18,6 +18,14 @@
 //   aborting, so callers can fall back gracefully in release builds and
 //   the CI diagnostic build catches budget violations via REQUIRE checks.
 //
+// PerContextAllocator bypass (perf-budget.md §Allocator Rules #4):
+//   TransientArena allocates its backing store via
+//   `std::make_unique_for_overwrite<std::byte[]>(N)` (i.e. `::operator new[]`),
+//   bypassing PerContextAllocator's per-tag heap accounting.  This is by design
+//   per `reviews/decisions/perf-budget.md` §Allocator Rules #4 — transient /
+//   per-frame arenas are exempted from the per-context ceiling because they are
+//   frame-bounded and freed at the next frame boundary (end of Phase::Present).
+//
 // API:
 //   TransientArena arena{256 * 1024};       // 256 KiB backing store
 //   Result<void*> p = arena.allocate(64, 16);
@@ -127,7 +135,7 @@ public:
     [[nodiscard]] glibre::Result<void> assert_drained() const noexcept;
 
 private:
-    std::unique_ptr<std::byte[]> storage_;
+    storage_pointer storage_;
     std::size_t capacity_{0};
     std::size_t cursor_{0};
     std::size_t high_watermark_{0};
