@@ -7,7 +7,8 @@ verify_dod.py reads GITHUB_REPOSITORY, ISSUE_NUMBER, and ISSUE_BODY at
 module-level during the first import.  We must set sentinel values before
 pytest collection (which triggers test-file imports), so we use the
 ``pytest_configure`` hook — the earliest conftest hook that executes before
-collection.  This avoids polluting process env beyond the test session.
+collection.  ``pytest_unconfigure`` is the symmetric counterpart: it pops
+the same keys at session end so they do not leak into the calling process.
 
 After import, a function-scoped autouse fixture re-applies the sentinels
 via ``monkeypatch.setenv`` for each test so any test that overrides them
@@ -51,6 +52,21 @@ def pytest_configure(config: pytest.Config) -> None:  # noqa: ARG001
 
     for key, value in _SENTINEL_ENV.items():
         os.environ.setdefault(key, value)
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:  # noqa: ARG001
+    """Remove the sentinel env vars set by ``pytest_configure`` at session end.
+
+    Symmetric teardown: each key that ``pytest_configure`` wrote via
+    ``setdefault`` is popped here so the vars do not leak into any parent
+    process or shell that captures the pytest subprocess env.  Keys already
+    absent (e.g. if they were set externally) are not touched — ``pop``
+    with a default is safe here.
+    """
+    import os
+
+    for key in _SENTINEL_ENV:
+        os.environ.pop(key, None)
 
 
 @pytest.fixture(autouse=True)

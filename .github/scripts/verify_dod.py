@@ -130,9 +130,11 @@ def check_unit_test_named(arg: object) -> tuple[bool, str]:
     name *arg* exists under tests/.
 
     Implementation notes:
-    - Uses Python re with re.DOTALL so the pattern matches across newlines.
-      clang-format (ColumnLimit: 100) wraps long TEST_CASE invocations onto
-      two lines, e.g.::
+    - Uses Python ``re`` with ``\\s*`` to match across newlines.  Python's
+      ``\\s`` matches ``\\n`` natively (unlike POSIX-extended grep, which does
+      not span lines).  No ``re.DOTALL`` flag is needed: the pattern contains
+      no ``.`` metacharacter.  clang-format (ColumnLimit: 100) wraps long
+      TEST_CASE invocations onto two lines, e.g.::
 
           TEST_CASE(
               "core/type_registry: lookup_unregistered_yields_TypeUnregistered",
@@ -143,16 +145,20 @@ def check_unit_test_named(arg: object) -> tuple[bool, str]:
       spurious dod:failed results for tests that exist and run green.
     - Restricts the file scan to .cpp / .hpp so pytest files that
       contain 'TEST_CASE' in docstrings or fixture content are not scanned.
+    - Skips symlinks inside the rglob walk — Python 3.12 follows directory
+      symlinks by default; skipping them prevents infinite loops on circular
+      or deeply nested test-tree symlinks.
     """
     name = str(arg)
     label = f"unit_test_named: {name}"
     pattern = re.compile(
         r'(?:TEST_CASE|SCENARIO)\s*\(\s*"' + re.escape(name) + r'"',
-        flags=re.DOTALL,
     )
     tests_root = Path("tests")
     extensions = {".cpp", ".hpp"}
     for src_file in tests_root.rglob("*"):
+        if src_file.is_symlink():
+            continue
         if src_file.suffix not in extensions:
             continue
         try:
