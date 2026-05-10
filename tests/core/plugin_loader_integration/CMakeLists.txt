@@ -68,7 +68,9 @@ target_compile_options(glibre-plugin-stub-wrong-abi PRIVATE
     -Wextra
     -Wpedantic
     -Wno-unused-parameter
-    -Wno-c2y-extensions
+    # -Wno-c2y-extensions omitted: this stub contains no Catch2 includes and
+    # therefore no __COUNTER__ expansions that trigger the warning.  The flag is
+    # only needed (and provided) by glibre::test_contract for Catch2 executables.
 )
 
 # ---------------------------------------------------------------------------
@@ -112,7 +114,9 @@ target_compile_options(glibre-plugin-stub-invalid-manifest PRIVATE
     -Wextra
     -Wpedantic
     -Wno-unused-parameter
-    -Wno-c2y-extensions
+    # -Wno-c2y-extensions omitted: this stub contains no Catch2 includes and
+    # therefore no __COUNTER__ expansions that trigger the warning.  The flag is
+    # only needed (and provided) by glibre::test_contract for Catch2 executables.
 )
 
 # Create a sidecar <stub>.manifest file at build time so the loader's sidecar
