@@ -3,9 +3,9 @@
 //
 // Engine-wide error type.  Per reviews/decisions/error-model.md:
 //   - Every public boundary returns std::expected<T, glibre::Error>.
-//   - glibre::Error is a tagged union (eastl::variant) over per-context
-//     error enums (PHILOSOPHY §11 — EASTL is the substrate for runtime
-//     data structures; std::variant is not permitted in engine code).
+//   - glibre::Error is a tagged union (std::variant) over per-context
+//     error enums.  Migrated from eastl::variant per
+//     reviews/decisions/eastl-removal.md §4.
 //   - Engine code compiles with -fno-exceptions.
 //
 // New contexts append their own enum to the Variant; old enums are
@@ -14,12 +14,9 @@
 #include <concepts>
 #include <cstdint>
 #include <expected>
+#include <string_view>
 #include <type_traits>
-
-// EASTL substrate types — PHILOSOPHY §11 mandates eastl:: for variant
-// and string_view in engine code (not std::).
-#include <EASTL/string_view.h>
-#include <EASTL/variant.h>
+#include <variant>
 
 namespace glibre {
 
@@ -183,28 +180,27 @@ enum class Error : std::uint16_t {
 // -----------------------------------------------------------------------
 // ErrorContext — source-location attachment (optional human hint)
 //
-// Uses eastl::string_view per PHILOSOPHY §11 and error-model.md
-// §Type-Sketch (which shows eastl::string_view in ErrorContext fields).
+// Uses std::string_view per reviews/decisions/eastl-removal.md §4
+// (matrix row 2: eastl::string_view → std::string_view).
 // -----------------------------------------------------------------------
 
 struct ErrorContext {
-    eastl::string_view file{};    // __FILE__
-    int line{0};                  // __LINE__
-    eastl::string_view detail{};  // optional human hint, never load-bearing
+    std::string_view file{};    // __FILE__
+    int line{0};                // __LINE__
+    std::string_view detail{};  // optional human hint, never load-bearing
 };
 
 // -----------------------------------------------------------------------
 // glibre::Error — tagged union over per-context enumerations
 //
-// Uses eastl::variant per PHILOSOPHY §11 and error-model.md §Type-Sketch
-// (which explicitly shows "eastl::variant" in the Variant typedef) and
-// SPEC §1322.  std::variant is not permitted in engine code outside
-// tools/editor.
+// Variant alias uses std::variant per reviews/decisions/eastl-removal.md §4
+// (matrix row 14: eastl::variant → std::variant).  The class Error wrapper,
+// the Result<T> alias, and the ErrorContext field set are unchanged.
 // -----------------------------------------------------------------------
 
 class Error {
 public:
-    using Variant = eastl::variant<
+    using Variant = std::variant<
         core::Error,
         render::Error,
         tools::Error,
@@ -255,7 +251,7 @@ using Result = std::expected<T, Error>;
 //      by the constexpr construction below; the [[nodiscard]] attribute on
 //      code() is a declaration invariant enforced by code review.
 //
-// Note: the invariant that eastl::variant_size_v<Variant> == kExpectedArmCount
+// Note: the invariant that std::variant_size_v<Variant> == kExpectedArmCount
 // already lives in error_register.hpp (which includes this header) to avoid a
 // circular include.  That static_assert is part of the same contract and is
 // considered logically co-located here.

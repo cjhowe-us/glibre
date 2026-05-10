@@ -15,8 +15,8 @@
 //     -fno-exceptions (Catch2 3.x is compatible when REQUIRE_THROWS is absent).
 
 #include <cstdint>
+#include <variant>
 
-#include <EASTL/variant.h>
 #include <catch2/catch_test_macros.hpp>
 #include <glibre/error.hpp>
 
@@ -130,7 +130,7 @@ TEST_CASE("glibre_try_propagates_error_unchanged", "[core][error][glibre_try]") 
 
     REQUIRE_FALSE(result.has_value());
 
-    const auto* arm = eastl::get_if<glibre::core::Error>(&result.error().code());
+    const auto* arm = std::get_if<glibre::core::Error>(&result.error().code());
     REQUIRE(arm != nullptr);
     REQUIRE(*arm == sentinel);
 }
@@ -164,7 +164,7 @@ TEST_CASE("glibre_try_works_with_void_result", "[core][error][glibre_try]") {
         auto result = caller_with_void_step(sentinel);
 
         REQUIRE_FALSE(result.has_value());
-        const auto* arm = eastl::get_if<glibre::core::Error>(&result.error().code());
+        const auto* arm = std::get_if<glibre::core::Error>(&result.error().code());
         REQUIRE(arm != nullptr);
         REQUIRE(*arm == sentinel);
     }
@@ -200,7 +200,7 @@ TEST_CASE("glibre_try_in_nested_calls", "[core][error][glibre_try]") {
         auto result = caller_chained_fail_second(sentinel);
 
         REQUIRE_FALSE(result.has_value());
-        const auto* arm = eastl::get_if<glibre::core::Error>(&result.error().code());
+        const auto* arm = std::get_if<glibre::core::Error>(&result.error().code());
         REQUIRE(arm != nullptr);
         REQUIRE(*arm == sentinel);
     }

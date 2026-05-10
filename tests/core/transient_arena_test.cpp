@@ -25,6 +25,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
+#include <variant>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -182,12 +184,12 @@ TEST_CASE(
 
         // The error must be core::Error::OutOfBudget.
         const glibre::Error& err = check.error();
-        const auto* core_err = eastl::get_if<glibre::core::Error>(&err.code());
+        const auto* core_err = std::get_if<glibre::core::Error>(&err.code());
         REQUIRE(core_err != nullptr);
         CHECK(*core_err == glibre::core::Error::OutOfBudget);
 
         // The detail must be "transient arena leak" (perf-budget.md §4).
-        CHECK(err.where().detail == eastl::string_view{"transient arena leak"});
+        CHECK(err.where().detail == std::string_view{"transient arena leak"});
     }
 
     // After drain(), assert_drained() must succeed again.
@@ -320,7 +322,7 @@ TEST_CASE("transient_arena_exhaustion_returns_error", "[core][transient_arena]")
     REQUIRE_FALSE(r2.has_value());
 
     const glibre::Error& err = r2.error();
-    const auto* core_err = eastl::get_if<glibre::core::Error>(&err.code());
+    const auto* core_err = std::get_if<glibre::core::Error>(&err.code());
     REQUIRE(core_err != nullptr);
     CHECK(*core_err == glibre::core::Error::TransientArenaExhausted);
 
@@ -332,7 +334,7 @@ TEST_CASE("transient_arena_exhaustion_returns_error", "[core][transient_arena]")
     auto r3 = zero_arena.allocate(1, 1);
     REQUIRE_FALSE(r3.has_value());
 
-    const auto* zero_err = eastl::get_if<glibre::core::Error>(&r3.error().code());
+    const auto* zero_err = std::get_if<glibre::core::Error>(&r3.error().code());
     REQUIRE(zero_err != nullptr);
     CHECK(*zero_err == glibre::core::Error::TransientArenaExhausted);
 
@@ -404,7 +406,7 @@ TEST_CASE("transient_arena_register_null_returns_invalid_argument", "[core][tran
     REQUIRE_FALSE(result.has_value());
 
     const glibre::Error& err = result.error();
-    const auto* core_err = eastl::get_if<glibre::core::Error>(&err.code());
+    const auto* core_err = std::get_if<glibre::core::Error>(&err.code());
     REQUIRE(core_err != nullptr);
     CHECK(*core_err == glibre::core::Error::NullArgument);
 
@@ -499,12 +501,12 @@ TEST_CASE(
     REQUIRE_FALSE(tick_result.has_value());
 
     const glibre::Error& err = tick_result.error();
-    const auto* core_err = eastl::get_if<glibre::core::Error>(&err.code());
+    const auto* core_err = std::get_if<glibre::core::Error>(&err.code());
     REQUIRE(core_err != nullptr);
     CHECK(*core_err == glibre::core::Error::OutOfBudget);
 
     // The detail string must identify the leak (perf-budget.md §Allocator Rules #4).
-    CHECK(err.where().detail == eastl::string_view{"transient arena leak"});
+    CHECK(err.where().detail == std::string_view{"transient arena leak"});
 
     // Under drain-then-aggregate, the arena must be EMPTY after tick() even
     // though a leak was detected.  Arena state is consistent for the next frame.
@@ -561,7 +563,7 @@ TEST_CASE(
     REQUIRE_FALSE(tick_result.has_value());
 
     const glibre::Error& err = tick_result.error();
-    const auto* core_err = eastl::get_if<glibre::core::Error>(&err.code());
+    const auto* core_err = std::get_if<glibre::core::Error>(&err.code());
     REQUIRE(core_err != nullptr);
     CHECK(*core_err == glibre::core::Error::OutOfBudget);
 

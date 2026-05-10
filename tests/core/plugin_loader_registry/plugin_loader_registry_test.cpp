@@ -85,7 +85,7 @@ glibre::core::PluginManifest make_manifest_with_deps(const char* name, Deps... d
 /// Extract the core::Error variant arm.  Returns nullptr if the error holds
 /// a different arm (e.g. tools::Error or render::Error).
 [[nodiscard]] const glibre::core::Error* as_core_error(const glibre::Error& err) noexcept {
-    return eastl::get_if<glibre::core::Error>(&err.code());
+    return std::get_if<glibre::core::Error>(&err.code());
 }
 
 }  // anonymous namespace

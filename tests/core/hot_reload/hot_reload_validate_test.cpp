@@ -82,7 +82,7 @@ TEST_CASE("hot_reload_rejects_abi_hash_mismatch", "[core][hot_reload]") {
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();
-    const auto* code = eastl::get_if<glibre::core::Error>(&err.code());
+    const auto* code = std::get_if<glibre::core::Error>(&err.code());
     REQUIRE(code != nullptr);
     CHECK(*code == glibre::core::Error::PluginAbiHashMismatch);
 }
@@ -147,7 +147,7 @@ TEST_CASE("hot_reload_rejects_name_mismatch", "[core][hot_reload]") {
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();
-    const auto* code = eastl::get_if<glibre::core::Error>(&err.code());
+    const auto* code = std::get_if<glibre::core::Error>(&err.code());
     REQUIRE(code != nullptr);
     CHECK(*code == glibre::core::Error::PluginNameMismatch);
 }
@@ -174,7 +174,7 @@ TEST_CASE("hot_reload_rejects_major_version_change", "[core][hot_reload]") {
 
         REQUIRE_FALSE(result.has_value());
         const auto& err = result.error();
-        const auto* code = eastl::get_if<glibre::core::Error>(&err.code());
+        const auto* code = std::get_if<glibre::core::Error>(&err.code());
         REQUIRE(code != nullptr);
         CHECK(*code == glibre::core::Error::HotReloadRefused);
     }
@@ -187,7 +187,7 @@ TEST_CASE("hot_reload_rejects_major_version_change", "[core][hot_reload]") {
 
         REQUIRE_FALSE(result.has_value());
         const auto& err = result.error();
-        const auto* code = eastl::get_if<glibre::core::Error>(&err.code());
+        const auto* code = std::get_if<glibre::core::Error>(&err.code());
         REQUIRE(code != nullptr);
         CHECK(*code == glibre::core::Error::HotReloadRefused);
     }

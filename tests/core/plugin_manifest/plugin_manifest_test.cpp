@@ -159,7 +159,7 @@ TEST_CASE("plugin_manifest_open_returns_not_found_on_missing_path", "[core][plug
     const glibre::Error& err = result.error();
 
     // The error must be the core::Error variant arm.
-    const auto* core_err = eastl::get_if<glibre::core::Error>(&err.code());
+    const auto* core_err = std::get_if<glibre::core::Error>(&err.code());
     REQUIRE(core_err != nullptr);
     REQUIRE(*core_err == glibre::core::Error::PluginManifestNotFound);
 }

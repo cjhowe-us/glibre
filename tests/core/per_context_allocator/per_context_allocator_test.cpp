@@ -30,6 +30,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <thread>
+#include <variant>
 
 #include <EASTL/vector.h>
 #include <catch2/catch_test_macros.hpp>
@@ -89,9 +90,10 @@ TEST_CASE("per_context_allocator_rejects_alloc_over_ceiling", "[core][alloc]") {
 
     // Verify the error code is core::Error::OutOfBudget.
     const glibre::Error& err = r2.error();
+    const auto* core_err_ptr = std::get_if<glibre::core::Error>(&err.code());
     const bool is_out_of_budget =
-        eastl::holds_alternative<glibre::core::Error>(err.code()) &&
-        eastl::get<glibre::core::Error>(err.code()) == glibre::core::Error::OutOfBudget;
+        core_err_ptr != nullptr &&
+        *core_err_ptr == glibre::core::Error::OutOfBudget;
     CHECK(is_out_of_budget);
 
     // Counter must NOT have advanced on the rejected allocation.

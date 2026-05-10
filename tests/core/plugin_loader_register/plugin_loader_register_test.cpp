@@ -93,7 +93,7 @@ make_test_alloc_handle(glibre::PerContextAllocator& alloc) noexcept {
 /// Return the core::Error variant arm, or nullptr if the error belongs to a
 /// different context (render::Error, tools::Error, etc.).
 [[nodiscard]] const glibre::core::Error* as_core_error(const glibre::Error& err) noexcept {
-    return eastl::get_if<glibre::core::Error>(&err.code());
+    return std::get_if<glibre::core::Error>(&err.code());
 }
 
 /// Build a minimal valid PluginManifest that passes all registry gates when
@@ -284,7 +284,7 @@ TEST_CASE("register_failure_cleans_up_dlopen", "[core][register]") {
     // "carrying the inner error in ErrorContext::detail").
     // The stub returns core::Error::PluginInitFailed, so detail must be
     // "PluginInitFailed" (the stable to_string value from log_error.hpp).
-    CHECK(result.error().where().detail == eastl::string_view{"PluginInitFailed"});
+    CHECK(result.error().where().detail == std::string_view{"PluginInitFailed"});
 
     // Step 5: loader goes out of scope at end of test — destructor calls
     // dlclose.  If the RAII cleanup crashes or double-frees, the test runner

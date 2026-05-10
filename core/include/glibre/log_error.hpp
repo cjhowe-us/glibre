@@ -41,7 +41,7 @@
 // ---------------------------------------------------------------------------
 //
 // Each overload lives in its per-context namespace so that ADL finds the
-// correct overload when the variant alternative is unwrapped by eastl::visit.
+// correct overload when the variant alternative is unwrapped by std::visit.
 // External callers can also qualify explicitly: glibre::core::to_string(e).
 //
 // Adding a new enumerator without adding a matching arm fires -Wswitch, which
@@ -226,8 +226,10 @@ namespace glibre {
 // Once tag_string is extended for the new alternative, increment the
 // static_assert count to match.
 
+// Migrated from eastl::variant_size_v to std::variant_size_v per
+// reviews/decisions/eastl-removal.md §4 (matrix row 19).
 static_assert(
-    eastl::variant_size_v<Error::Variant> == 4,
+    std::variant_size_v<Error::Variant> == 4,
     "extend tag_string() when Error::Variant grows (add a new case and bump "
     "the static_assert count in log_error.hpp)"
 );
@@ -243,7 +245,7 @@ static_assert(
     case 3:
         return "shader::Error";
     }
-    // err.code().index() == eastl::variant_npos only when the variant holds
+    // err.code().index() == std::variant_npos only when the variant holds
     // valueless_by_exception state, which cannot occur in -fno-exceptions
     // builds.  std::unreachable() (C++23) eliminates any dead-code warning and
     // asserts this path is logically impossible.
@@ -255,9 +257,10 @@ static_assert(
 // ---------------------------------------------------------------------------
 
 [[nodiscard]] inline const char* variant_code_string(const Error& err) noexcept {
-    // eastl::visit dispatches on the active alternative in err.code().
+    // std::visit dispatches on the active alternative in err.code().
     // ADL finds the correct to_string overload in each per-context namespace.
-    return eastl::visit([](auto&& e) -> const char* { return to_string(e); }, err.code());
+    // Migrated from eastl::visit per reviews/decisions/eastl-removal.md §4.
+    return std::visit([](auto&& e) -> const char* { return to_string(e); }, err.code());
 }
 
 // ---------------------------------------------------------------------------

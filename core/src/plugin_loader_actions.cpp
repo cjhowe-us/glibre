@@ -148,8 +148,9 @@ Result<void> call_register(RegisterFn register_fn, PluginContext& ctx) noexcept 
     // glibre::variant_code_string() returns a const char* pointing to a
     // string literal from the hand-written to_string() overloads in log_error.hpp.
     // Those literals have static storage duration and are therefore safe to store
-    // in the eastl::string_view detail field — no pointer instability concern
+    // in the std::string_view detail field — no pointer instability concern
     // (contrast with dlerror() text per plugin-abi.md step 1 dlerror() note).
+    // ErrorContext::detail is std::string_view per eastl-removal.md §4 (row 2).
     if (auto r = register_fn(ctx); !r) {
         const char* inner_detail = glibre::variant_code_string(r.error());
         return std::unexpected(
@@ -160,7 +161,7 @@ Result<void> call_register(RegisterFn register_fn, PluginContext& ctx) noexcept 
                     .line = __LINE__,
                     // detail carries the inner error's stable enumerator name
                     // (plugin-abi.md §"Loader Sequence" step 9).
-                    .detail = eastl::string_view{inner_detail},
+                    .detail = std::string_view{inner_detail},
                 },
             }
         );

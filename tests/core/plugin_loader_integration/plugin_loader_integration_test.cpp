@@ -92,7 +92,7 @@ constexpr const char kRealExpectedHash[] =
 /// Return the core::Error variant arm, or nullptr if the error is a different
 /// context (render::Error, tools::Error, etc.).
 [[nodiscard]] const glibre::core::Error* as_core_error(const glibre::Error& err) noexcept {
-    return eastl::get_if<glibre::core::Error>(&err.code());
+    return std::get_if<glibre::core::Error>(&err.code());
 }
 
 /// Build a minimal valid PluginManifest that passes all registry gates.

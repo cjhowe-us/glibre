@@ -8,6 +8,9 @@
 // the glibre::Error variant alias in core. This is a deliberate central-
 // registration point."), plan #234.
 //
+// Migrated from EASTL to libc++ stdlib per
+// reviews/decisions/eastl-removal.md §4.
+//
 // ## Convention — how to add a new error context
 //
 //   1. Declare `enum class YourNs::Error : std::uint16_t { ... }` inside
@@ -23,7 +26,7 @@
 //   3. Open *this* file (`error_register.hpp`) and:
 //      a. Add a `// CONTEXT: <your-context>` line to the registered-contexts
 //         table below.
-//      b. Add `constexpr eastl::string_view` entry in `kAllErrorContexts`.
+//      b. Add `constexpr std::string_view` entry in `kAllErrorContexts`.
 //      c. Increment `kExpectedArmCount` by 1.
 //      d. The file-scope `static_assert` below will fail to compile if you
 //         forget step (c) — that is the intended compile-time guard.
@@ -58,7 +61,7 @@
 //       value unless explicitly assigned the same value — which is forbidden
 //       by this convention).
 //   R3. No two contexts define an enum with identical values such that
-//       variant_index_v would become ambiguous; eastl::variant enforces this
+//       variant_index_v would become ambiguous; std::variant enforces this
 //       by type identity, not by integer value.
 //
 // ## Why not a GLIBRE_REGISTER_ERROR_ENUM macro?
@@ -72,11 +75,11 @@
 //
 // --------------------------------------------------------------------------
 
+#include <array>
 #include <cstddef>
+#include <string_view>
+#include <variant>
 
-#include <EASTL/array.h>
-#include <EASTL/string_view.h>
-#include <EASTL/variant.h>
 #include <glibre/error.hpp>
 
 namespace glibre {
@@ -103,7 +106,7 @@ namespace glibre {
 /// Human-readable names for all currently registered error contexts.
 /// Entries are in the same order as glibre::Error::Variant arms.
 /// Used by glibre::log_error() to map variant_index → context tag string.
-inline constexpr eastl::array<eastl::string_view, 4> kAllErrorContexts{{
+inline constexpr std::array<std::string_view, 4> kAllErrorContexts{{
     "core",    // index 0 — glibre::core::Error
     "render",  // index 1 — glibre::render::Error
     "tools",   // index 2 — glibre::tools::Error
@@ -126,9 +129,12 @@ inline constexpr std::size_t kExpectedArmCount = 4;
 // If a new arm is added to Variant without updating kExpectedArmCount, this
 // fires immediately at compile time — preventing silent drift between the
 // variant definition and the registry documentation.
+//
+// Migrated from eastl::variant_size_v to std::variant_size_v per
+// reviews/decisions/eastl-removal.md §4 (matrix row 19).
 // --------------------------------------------------------------------------
 static_assert(
-    eastl::variant_size_v<glibre::Error::Variant> == kExpectedArmCount,
+    std::variant_size_v<glibre::Error::Variant> == kExpectedArmCount,
     "glibre::Error::Variant arm count does not match kExpectedArmCount in "
     "error_register.hpp.  Either increment kExpectedArmCount to reflect the "
     "new context, or remove the extra arm from Error::Variant."

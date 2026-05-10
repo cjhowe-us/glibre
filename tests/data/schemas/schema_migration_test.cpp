@@ -174,7 +174,8 @@ static std::expected<void, glibre::Error> chain_walk(
         }
         if (!found) {
             // Build detail string into the caller-provided scratch buffer.
-            // PHILOSOPHY §11: ErrorContext::detail is eastl::string_view (non-owning).
+            // ErrorContext::detail is std::string_view (non-owning) per
+            // reviews/decisions/eastl-removal.md §4 (matrix row 2).
             // Caller must keep detail_scratch alive until the error is consumed.
             detail_scratch = std::format("missing v{}->v{} provider", cur, cur + 1);
             return std::unexpected{glibre::Error{
@@ -182,7 +183,7 @@ static std::expected<void, glibre::Error> chain_walk(
                 glibre::ErrorContext{
                     .file = __FILE__,
                     .line = __LINE__,
-                    .detail = eastl::string_view(detail_scratch.data(), detail_scratch.size()),
+                    .detail = std::string_view(detail_scratch.data(), detail_scratch.size()),
                 }
             }};
         }
@@ -786,13 +787,13 @@ migrate_Broken_v2_to_v3(const BrokenV2& in, BrokenV3& out) {
 
     // The error must be core::Error::SchemaMigrationFailed.
     const glibre::Error& err = walk_result.error();
-    const auto* core_err = eastl::get_if<glibre::core::Error>(&err.code());
+    const auto* core_err = std::get_if<glibre::core::Error>(&err.code());
     REQUIRE(core_err != nullptr);
     CHECK(*core_err == glibre::core::Error::SchemaMigrationFailed);
 
     // Plan #977 Scope §3: the missing-pair info must appear in ErrorContext::detail.
     // chain_walk() enriches the error with "missing v<cur>->v<cur+1> provider".
-    const eastl::string_view detail = err.where().detail;
+    const std::string_view detail = err.where().detail;
     REQUIRE(!detail.empty());
     // Detail must contain "v1" and "v2" (the missing step from version 1 toward 2).
     const std::string detail_std(detail.data(), detail.size());

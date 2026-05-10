@@ -30,7 +30,7 @@ using namespace glibre::tools::foryc;
 // -----------------------------------------------------------------------
 
 static bool has_tools_error(const glibre::Error& e, glibre::tools::Error code) noexcept {
-    const auto* te = eastl::get_if<glibre::tools::Error>(&e.code());
+    const auto* te = std::get_if<glibre::tools::Error>(&e.code());
     return te && (*te == code);
 }
 
@@ -195,7 +195,7 @@ TEST_CASE("foryc_rejects_malformed_input", "[foryc][parser]") {
     REQUIRE(!result.has_value());
     // The parser should return some tools::Error variant, not a
     // core::Error or render::Error.
-    const auto* te = eastl::get_if<glibre::tools::Error>(&result.error().code());
+    const auto* te = std::get_if<glibre::tools::Error>(&result.error().code());
     CHECK(te != nullptr);
 }
 
