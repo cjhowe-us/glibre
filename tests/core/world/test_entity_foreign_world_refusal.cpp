@@ -156,9 +156,7 @@ namespace {
 
 }  // anonymous namespace
 
-TEST_CASE(
-    "world: entity_outside_slot_range_yields_EntityStale_in_mvp", "[world][entity][error]"
-) {
+TEST_CASE("world: entity_outside_slot_range_yields_EntityStale_in_mvp", "[world][entity][error]") {
     // Construct an allocator backed by the core context (ContextTag::core).
     glibre::PerContextAllocator alloc{glibre::ContextTag::core};
     glibre::core::EntityAllocator allocator{alloc};
