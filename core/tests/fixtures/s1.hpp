@@ -45,7 +45,7 @@ namespace glibre::testing {
 // ---------------------------------------------------------------------------
 
 struct S1Viewport {
-    std::uint32_t width  = 0u;
+    std::uint32_t width = 0u;
     std::uint32_t height = 0u;
 };
 
@@ -57,14 +57,14 @@ struct S1Viewport {
 // ---------------------------------------------------------------------------
 
 struct S1Budgets {
-    std::uint64_t core_cpu_sim_ns        = 0u;
-    std::uint64_t core_cpu_submit_ns     = 0u;
-    std::uint64_t render_cpu_sim_ns      = 0u;
-    std::uint64_t render_cpu_submit_ns   = 0u;
-    std::uint64_t geometry_cpu_sim_ns    = 0u;
+    std::uint64_t core_cpu_sim_ns = 0u;
+    std::uint64_t core_cpu_submit_ns = 0u;
+    std::uint64_t render_cpu_sim_ns = 0u;
+    std::uint64_t render_cpu_submit_ns = 0u;
+    std::uint64_t geometry_cpu_sim_ns = 0u;
     std::uint64_t geometry_cpu_submit_ns = 0u;
-    std::uint64_t physics_cpu_sim_ns     = 0u;
-    std::uint64_t physics_cpu_submit_ns  = 0u;
+    std::uint64_t physics_cpu_sim_ns = 0u;
+    std::uint64_t physics_cpu_submit_ns = 0u;
 };
 
 // ---------------------------------------------------------------------------
@@ -72,9 +72,9 @@ struct S1Budgets {
 // ---------------------------------------------------------------------------
 
 struct S1ArchetypeCounts {
-    std::uint32_t character     = 0u;   // 1
-    std::uint32_t prop          = 0u;   // 200
-    std::uint32_t dynamic_light = 0u;   // 8
+    std::uint32_t character = 0u;      // 1
+    std::uint32_t prop = 0u;           // 200
+    std::uint32_t dynamic_light = 0u;  // 8
 };
 
 // ---------------------------------------------------------------------------
@@ -84,13 +84,13 @@ struct S1ArchetypeCounts {
 // ---------------------------------------------------------------------------
 
 struct S1Scene {
-    std::uint32_t     entity_count    = 0u;
-    std::uint32_t     archetype_count = 0u;
-    std::uint32_t     system_count    = 0u;
-    S1ArchetypeCounts archetypes      = {};
-    S1Viewport        viewport        = {};
-    std::uint32_t     placement_seed  = 0u;
-    S1Budgets         budgets         = {};
+    std::uint32_t entity_count = 0u;
+    std::uint32_t archetype_count = 0u;
+    std::uint32_t system_count = 0u;
+    S1ArchetypeCounts archetypes = {};
+    S1Viewport viewport = {};
+    std::uint32_t placement_seed = 0u;
+    S1Budgets budgets = {};
 };
 
 // ---------------------------------------------------------------------------
@@ -119,7 +119,8 @@ inline std::filesystem::path locate_repo_root() {
     }
     throw std::runtime_error(
         "glibre::testing::load_s1(): cannot locate repo root from " __FILE__
-        ". Set GLIBRE_REPO_ROOT to the absolute repo path.");
+        ". Set GLIBRE_REPO_ROOT to the absolute repo path."
+    );
 }
 
 // trim: remove leading/trailing ASCII whitespace from a string, return result.
@@ -144,10 +145,10 @@ inline std::uint32_t parse_uint32(const std::string& s) {
 
 // ParsedLine: result of stripping a single line from the manifest.
 struct ParsedLine {
-    std::string  key;           // trimmed key (left of first colon)
-    std::string  val;           // trimmed value (right of first colon); empty for block headers
-    std::size_t  indent;        // leading space count (0 = top-level)
-    bool         has_val;       // true if a non-empty value was found
+    std::string key;     // trimmed key (left of first colon)
+    std::string val;     // trimmed value (right of first colon); empty for block headers
+    std::size_t indent;  // leading space count (0 = top-level)
+    bool has_val;        // true if a non-empty value was found
 };
 
 // parse_line: strip comment, split on first colon, return ParsedLine.
@@ -198,8 +199,7 @@ inline ParsedLine parse_line(std::string line) {
 
     std::ifstream ifs(manifest);
     if (!ifs.is_open()) {
-        throw std::runtime_error(
-            "glibre::testing::load_s1(): cannot open " + manifest.string());
+        throw std::runtime_error("glibre::testing::load_s1(): cannot open " + manifest.string());
     }
 
     S1Scene scene;
@@ -239,16 +239,25 @@ inline ParsedLine parse_line(std::string line) {
 
             if (!p.has_val) {
                 // Block header — switch section.
-                if      (p.key == "archetypes") { section = Section::Archetypes; }
-                else if (p.key == "viewport")   { section = Section::Viewport;   }
-                else if (p.key == "budgets")    { section = Section::Budgets;    }
-                else                            { section = Section::None;        }
+                if (p.key == "archetypes") {
+                    section = Section::Archetypes;
+                } else if (p.key == "viewport") {
+                    section = Section::Viewport;
+                } else if (p.key == "budgets") {
+                    section = Section::Budgets;
+                } else {
+                    section = Section::None;
+                }
             } else {
                 // Top-level scalar field.
                 section = Section::None;
-                if      (p.key == "entity_count")   { scene.entity_count   = detail::parse_uint32(p.val); }
-                else if (p.key == "system_count")   { scene.system_count   = detail::parse_uint32(p.val); }
-                else if (p.key == "placement_seed") { scene.placement_seed = detail::parse_uint32(p.val); }
+                if (p.key == "entity_count") {
+                    scene.entity_count = detail::parse_uint32(p.val);
+                } else if (p.key == "system_count") {
+                    scene.system_count = detail::parse_uint32(p.val);
+                } else if (p.key == "placement_seed") {
+                    scene.placement_seed = detail::parse_uint32(p.val);
+                }
                 // "version" is parsed but not stored (schema version, reserved for future use).
             }
             continue;
@@ -269,30 +278,46 @@ inline ParsedLine parse_line(std::string line) {
             } else if (p.indent == 4u && p.has_val && p.key == "count" && !arch_name.empty()) {
                 // Count field nested under an archetype name.
                 const std::uint32_t n = detail::parse_uint32(p.val);
-                if      (arch_name == "character")     { scene.archetypes.character     = n; }
-                else if (arch_name == "prop")          { scene.archetypes.prop          = n; }
-                else if (arch_name == "dynamic_light") { scene.archetypes.dynamic_light = n; }
+                if (arch_name == "character") {
+                    scene.archetypes.character = n;
+                } else if (arch_name == "prop") {
+                    scene.archetypes.prop = n;
+                } else if (arch_name == "dynamic_light") {
+                    scene.archetypes.dynamic_light = n;
+                }
             }
             break;
 
         case Section::Viewport:
             if (p.indent > 0u && p.has_val) {
-                if      (p.key == "width")  { scene.viewport.width  = detail::parse_uint32(p.val); }
-                else if (p.key == "height") { scene.viewport.height = detail::parse_uint32(p.val); }
+                if (p.key == "width") {
+                    scene.viewport.width = detail::parse_uint32(p.val);
+                } else if (p.key == "height") {
+                    scene.viewport.height = detail::parse_uint32(p.val);
+                }
             }
             break;
 
         case Section::Budgets:
             if (p.indent > 0u && p.has_val) {
                 auto& b = scene.budgets;
-                if      (p.key == "core_cpu_sim_ns")        { b.core_cpu_sim_ns        = detail::parse_uint64(p.val); }
-                else if (p.key == "core_cpu_submit_ns")     { b.core_cpu_submit_ns     = detail::parse_uint64(p.val); }
-                else if (p.key == "render_cpu_sim_ns")      { b.render_cpu_sim_ns      = detail::parse_uint64(p.val); }
-                else if (p.key == "render_cpu_submit_ns")   { b.render_cpu_submit_ns   = detail::parse_uint64(p.val); }
-                else if (p.key == "geometry_cpu_sim_ns")    { b.geometry_cpu_sim_ns    = detail::parse_uint64(p.val); }
-                else if (p.key == "geometry_cpu_submit_ns") { b.geometry_cpu_submit_ns = detail::parse_uint64(p.val); }
-                else if (p.key == "physics_cpu_sim_ns")     { b.physics_cpu_sim_ns     = detail::parse_uint64(p.val); }
-                else if (p.key == "physics_cpu_submit_ns")  { b.physics_cpu_submit_ns  = detail::parse_uint64(p.val); }
+                if (p.key == "core_cpu_sim_ns") {
+                    b.core_cpu_sim_ns = detail::parse_uint64(p.val);
+                } else if (p.key == "core_cpu_submit_ns") {
+                    b.core_cpu_submit_ns = detail::parse_uint64(p.val);
+                } else if (p.key == "render_cpu_sim_ns") {
+                    b.render_cpu_sim_ns = detail::parse_uint64(p.val);
+                } else if (p.key == "render_cpu_submit_ns") {
+                    b.render_cpu_submit_ns = detail::parse_uint64(p.val);
+                } else if (p.key == "geometry_cpu_sim_ns") {
+                    b.geometry_cpu_sim_ns = detail::parse_uint64(p.val);
+                } else if (p.key == "geometry_cpu_submit_ns") {
+                    b.geometry_cpu_submit_ns = detail::parse_uint64(p.val);
+                } else if (p.key == "physics_cpu_sim_ns") {
+                    b.physics_cpu_sim_ns = detail::parse_uint64(p.val);
+                } else if (p.key == "physics_cpu_submit_ns") {
+                    b.physics_cpu_submit_ns = detail::parse_uint64(p.val);
+                }
             }
             break;
         }
@@ -302,9 +327,15 @@ inline ParsedLine parse_line(std::string line) {
     // Derive archetype_count: number of distinct archetypes with count > 0.
     // ---------------------------------------------------------------------------
     scene.archetype_count = 0u;
-    if (scene.archetypes.character     > 0u) { ++scene.archetype_count; }
-    if (scene.archetypes.prop          > 0u) { ++scene.archetype_count; }
-    if (scene.archetypes.dynamic_light > 0u) { ++scene.archetype_count; }
+    if (scene.archetypes.character > 0u) {
+        ++scene.archetype_count;
+    }
+    if (scene.archetypes.prop > 0u) {
+        ++scene.archetype_count;
+    }
+    if (scene.archetypes.dynamic_light > 0u) {
+        ++scene.archetype_count;
+    }
 
     return scene;
 }
