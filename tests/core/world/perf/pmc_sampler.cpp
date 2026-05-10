@@ -54,21 +54,24 @@
 // macOS implementation — currently a zero-stub pending KPC entitlement
 // integration (see §Integration Notes above).
 //
-// Thread-local storage is used to hold the snapshot taken by start_sampling()
-// so that stop_sampling() can compute the delta without heap allocation.
-// TLS is safe here: PmcSampler::measure() is a single-threaded bracket
-// (start/stop on the same OS thread) and recursive calls are not supported
-// (nesting is undefined — the outer stop_sampling() would read whatever the
-// inner call wrote, yielding a delta of ~zero rather than the outer region's
-// counters).  This is acceptable for the smoke test's non-recursive use.
+// Thread-local storage is reserved for the snapshot that start_sampling() will
+// capture and stop_sampling() will diff against once the KPC entitlement
+// integration spike (follow-up to #944) lands.  Using TLS avoids heap
+// allocation and keeps start/stop on the same OS thread without synchronisation.
+//
+// In the current zero-stub the variable is intentionally inert (start_sampling
+// zeros it, stop_sampling returns {} directly) and exists solely to document
+// the storage contract for the integration spike.  It will become live once
+// kpc_get_thread_counters() calls are added to start_sampling()/stop_sampling().
 
 #include <cstring>
 
 namespace {
 
-// Zero-initialised snapshot; populated by start_sampling(), consumed by
-// stop_sampling().
-thread_local glibre::testing::PmcCounters g_snapshot{};
+// Reserved storage for KPC spike integration — currently inert (zero-stub).
+// start_sampling() will populate this; stop_sampling() will compute the delta.
+// See §Integration Notes above for the kperf/KPC API plan.
+thread_local glibre::testing::PmcCounters g_snapshot{};  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 }  // namespace
 

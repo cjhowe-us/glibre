@@ -2,7 +2,10 @@
 //
 // macOS-only PMC (Performance Monitor Counter) sampler helper.
 //
-// Authority: plan #944, reviews/decisions/perf-budget.md §CI Gate Spec #2.
+// Authority: plan #944 (this sampler) + plan #938 (L1D-miss alarm consumer).
+// perf-budget.md §CI Gate Spec #2 covers the MTLCounterSampleBuffer e2e gate
+// and does not yet cover the PMC-derived L1D-miss alarm; that section will be
+// added when plan #938 lands.
 //
 // Provides PmcSampler::measure([&]{...}) -> PmcCounters, a thin RAII wrapper
 // over the Apple Silicon kperf / KPC private API that captures hardware
