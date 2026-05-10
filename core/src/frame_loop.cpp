@@ -273,7 +273,7 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
     // --- System dispatch (plan #245) ---
     // After the built-in MVP phase body, invoke all registered systems for
     // this phase in registration order.  No allocation occurs here — the
-    // iteration is a range walk over a pre-built eastl::vector inside
+    // iteration is a range walk over a pre-built std::pmr::vector inside
     // PhaseRegistry::for_each_system().
     //
     // Null phase_registry_ means no systems registered (the default state).

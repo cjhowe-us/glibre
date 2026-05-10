@@ -3,7 +3,9 @@
 // Catch2 unit tests for glibre::core::PhaseRegistry.
 //
 // Authority: plan #245 (phase ownership + system register API).
+//            plan #1045 (migrate core/phase-registry EASTL -> libc++ stdlib).
 //            reviews/decisions/frame-phases.md §Decision.
+//            reviews/decisions/eastl-removal.md §1 (matrix rows 1-3, 9).
 //
 // Named test cases (plan #245 Unit Test Plan / DoD):
 //   - core/phase_registry: register_system_idempotent
@@ -11,20 +13,57 @@
 //   - core/phase_registry: iteration_order_matches_registration_order frameloop smoke
 //   - core/phase_registry: per_phase_isolation
 //
+// Named test cases (plan #1045 Unit Test Plan / DoD):
+//   - core/phase_registry: system_fn_uses_std_move_only_function
+//
 // Design constraints:
 //   - -fno-exceptions (error-model.md §Decision 3).
 //   - No REQUIRE_THROWS usage.
-//   - EASTL is the container substrate (PHILOSOPHY §11).
+//   - libc++ is the container substrate per reviews/decisions/eastl-removal.md.
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory_resource>
+#include <string_view>
+#include <type_traits>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "glibre/compat/move_only_function.hpp"
 #include "glibre/core/frame_loop.hpp"
 #include "glibre/core/frame_phase.hpp"
 #include "glibre/core/phase_registry.hpp"
+
+// ===========================================================================
+// Test: system_fn_uses_std_move_only_function
+//
+// Verifies (plan #1045 §Unit Test Plan):
+//   static_assert that PhaseSystemFn is exactly std::move_only_function<void()>.
+//
+// This is a compile-time guard; the test passes if and only if the
+// static_assert in phase_registry.hpp compiles without error and the
+// type identity holds at the TEST_CASE expansion site.
+// ===========================================================================
+TEST_CASE("core/phase_registry: system_fn_uses_std_move_only_function", "[core][phase_registry]") {
+    using namespace glibre::core;
+
+    // Compile-time assertion: PhaseSystemFn MUST be std::move_only_function<void()>.
+    // This pin ensures eastl::fixed_function was replaced and the typedef
+    // references the std:: type (or its polyfill under the same name).
+    static_assert(
+        std::is_same_v<PhaseSystemFn, std::move_only_function<void()>>,
+        "PhaseSystemFn must be std::move_only_function<void()> per "
+        "reviews/decisions/eastl-removal.md matrix row 9"
+    );
+
+    // Runtime exercise: construct a PhaseSystemFn from a lambda and invoke it.
+    // Verifies the callable type is usable for the engine's system-dispatch pattern.
+    int called = 0;
+    PhaseSystemFn fn = [&called]() { ++called; };
+    fn();
+    REQUIRE(called == 1);
+}
 
 // ===========================================================================
 // Test: register_system_idempotent
@@ -40,7 +79,12 @@
 TEST_CASE("core/phase_registry: register_system_idempotent", "[core][phase_registry]") {
     using namespace glibre::core;
 
-    PhaseRegistry reg;
+    // Use the default PMR heap resource for test fixtures.
+    // Engine code passes a PerContextAllocatorResource{ContextTag::core} here
+    // for ceiling enforcement; tests use the default heap resource to keep
+    // test fixtures simple and free of allocator-lifetime ordering concerns.
+    auto* mr = std::pmr::get_default_resource();
+    PhaseRegistry reg{mr};
 
     // Initially: no systems in any phase.
     REQUIRE(reg.system_count(Phase::Transform) == 0U);
@@ -70,10 +114,9 @@ TEST_CASE("core/phase_registry: register_system_idempotent", "[core][phase_regis
     CHECK(reg.total_system_count() == 2U);
 
     // (c) Idempotency is by string value, not pointer identity.
-    // Construct fqn from a separate string literal pointer to rule out any
-    // pointer-equality short-circuits (the literal address differs from the
-    // one used in the first registration above, but the content is equal).
-    const eastl::string_view fqn_again{"core.transform.propagate"};
+    // Construct fqn from a separate string_view to rule out any pointer-equality
+    // short-circuits (the literal address may differ but the content is equal).
+    const std::string_view fqn_again{"core.transform.propagate"};
     reg.register_system(Phase::Transform, fqn_again, []() noexcept {});
     CHECK(reg.system_count(Phase::Transform) == 2U);  // unchanged
 
@@ -100,7 +143,8 @@ TEST_CASE(
 ) {
     using namespace glibre::core;
 
-    PhaseRegistry reg;
+    auto* mr = std::pmr::get_default_resource();
+    PhaseRegistry reg{mr};
     int call_count = 0;
 
     // Register two distinct systems so there is work for the FrameLoop to do.
@@ -147,7 +191,8 @@ TEST_CASE(
 ) {
     using namespace glibre::core;
 
-    PhaseRegistry reg;
+    auto* mr = std::pmr::get_default_resource();
+    PhaseRegistry reg{mr};
 
     // Register kCount systems in order.  Each appends its index to `sequence`.
     constexpr int kCount = 5;
@@ -160,9 +205,9 @@ TEST_CASE(
 
     // Register kCount distinct systems in order.
     for (int i = 0; i < kCount; ++i) {
-        // Build a unique FQN.  eastl::string_view over a literal is safe for
-        // the duration of the loop body; the PhaseRegistry copies it into an
-        // eastl::string on registration.
+        // Build a unique FQN.  std::string_view over the char array is safe for
+        // the duration of the loop body; the PhaseRegistry copies it into a
+        // std::pmr::string on registration.
         std::array<char, 32> fqn{};
         // Manual integer-to-string to avoid std::sprintf in a -fno-exceptions TU.
         // NOLINTBEGIN(cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
@@ -177,7 +222,7 @@ TEST_CASE(
         const int idx = i;
         reg.register_system(
             Phase::PhysicsFixed,
-            eastl::string_view{fqn.data(), 4U},
+            std::string_view{fqn.data(), 4U},
             [idx, &sequence, &seq_len]() noexcept {
                 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
                 sequence[static_cast<std::size_t>(seq_len++)] = idx;
@@ -223,7 +268,8 @@ TEST_CASE(
 ) {
     using namespace glibre::core;
 
-    PhaseRegistry reg;
+    auto* mr = std::pmr::get_default_resource();
+    PhaseRegistry reg{mr};
 
     constexpr int kCount = 5;
     static_assert(kCount < 10, "kCount must be < 10; FQN uses '0'+i single-digit encoding");
@@ -243,7 +289,7 @@ TEST_CASE(
         const int idx = i;
         reg.register_system(
             Phase::PhysicsFixed,
-            eastl::string_view{fqn.data(), 4U},
+            std::string_view{fqn.data(), 4U},
             [idx, &sequence, &seq_len]() noexcept {
                 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-constant-array-index,cppcoreguidelines-pro-bounds-avoid-unchecked-container-access)
                 sequence[static_cast<std::size_t>(seq_len++)] = idx;
@@ -287,7 +333,8 @@ TEST_CASE(
 TEST_CASE("core/phase_registry: per_phase_isolation", "[core][phase_registry]") {
     using namespace glibre::core;
 
-    PhaseRegistry reg;
+    auto* mr = std::pmr::get_default_resource();
+    PhaseRegistry reg{mr};
 
     bool input_ran = false;
     bool transform_ran = false;
