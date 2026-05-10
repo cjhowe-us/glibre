@@ -49,8 +49,6 @@ endif()
 #   ensures glibre-types.dylib can be built and linked before codegen runs.
 # ---------------------------------------------------------------------------
 
-find_package(EASTL CONFIG REQUIRED)
-
 # ---------------------------------------------------------------------------
 # Codegen custom command — invokes glibre-foryc over data/schemas/**/*.fory
 #
@@ -123,16 +121,12 @@ file(GLOB_RECURSE GEN_SRCS
 # Sources:
 #   - data/src/types_anchor.cpp : permanent anchor TU; exports
 #     glibre_types_abi_version() so the dylib is non-empty before codegen.
-#   - data/src/eastl_alloc.cpp  : EASTL operator new[] substrate; duplicated
-#     from core/src/eastl_alloc.cpp so plugins can link glibre-types without
-#     linking glibre-core (plugin-abi.md §"Plugin file shape" rule 2).
 #   - ${GEN_SRCS}               : generated serialise/deserialise TUs
 #     emitted by glibre-foryc (plans #220/#225). Empty until those plans land.
 # ---------------------------------------------------------------------------
 
 add_library(glibre-types SHARED
     src/types_anchor.cpp
-    src/eastl_alloc.cpp
     ${GEN_SRCS}
 )
 
@@ -149,12 +143,8 @@ target_include_directories(glibre-types
         $<INSTALL_INTERFACE:include>
 )
 
-# EASTL is a PUBLIC dependency: consumers of glibre-types (plugins) inherit
-# the EASTL include path so they can use eastl:: containers in plugin code
-# that is type-compatible with types defined here.
 target_link_libraries(glibre-types
     PUBLIC
-        EASTL
     PRIVATE
         # Compile-flag contract: enforces -fno-exceptions, -fno-rtti,
         # -fvisibility=hidden project-wide (cmake/Compile.cmake).

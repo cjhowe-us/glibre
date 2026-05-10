@@ -21,7 +21,6 @@
 //
 // Design constraints:
 //   • -fno-exceptions (error-model.md §Decision 3).
-<<<<<<< HEAD
 //   • std::string_view / std::pmr::string per reviews/decisions/eastl-removal.md
 //     matrix rows 1–2 (migrated from EASTL by plan #1043).
 //   • GLIBRE_NOOP_DYLIB_PATH — compile-time path to glibre-plugin-noop.dylib,
