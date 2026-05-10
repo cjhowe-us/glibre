@@ -112,6 +112,13 @@ enum class Error : std::uint16_t {
     // lands post-MVP (SPEC §4.3 invariant 3, §3.3 deferral).
     // (plan #557 — Entity ID encoding + generational allocator)
     EntityForeignWorld,
+    // AssetHandle whose generation does not match the AssetTable slot's current
+    // generation — the handle was released and the slot reused (or the handle
+    // is default-constructed / foreign).  Returned by AssetTable::resolve()
+    // on a generation mismatch.  (plan #598 — AssetHandle generational table)
+    // Spec authority: specs/core/SPEC.md §4.7 invariant 1, §10 error table
+    // row "AssetStale".
+    AssetStale,
 };
 }  // namespace core
 

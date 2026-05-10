@@ -100,6 +100,9 @@ namespace glibre::core {
         return "EntityStale";
     case Error::EntityForeignWorld:
         return "EntityForeignWorld";
+    // plan #598: AssetStale — stale generational asset handle.
+    case Error::AssetStale:
+        return "AssetStale";
     }
     return "Unknown";
 }

@@ -35,6 +35,7 @@ add_library(glibre-core STATIC
     src/perf_budget.cpp              # Per-context perf-budget counters (plan #241)
     src/type_registry/type_registry.cpp  # TypeRegistry immutable-after-init lookup (plan #597)
     src/world/entity_allocator.cpp       # Generational entity allocator (plan #557)
+    src/asset/asset_registry.cpp         # AssetRegistry process-wide singleton (plan #598)
 )
 
 # spdlog — structured logging.  Used by log_error.cpp (plan #236).
