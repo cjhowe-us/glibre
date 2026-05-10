@@ -81,8 +81,8 @@ inline constexpr std::uint32_t kS1ViewportHeight = 1080u;
     constexpr std::uint32_t kGroupSize = kS1EntityCount / kS1ArchetypeCount;
 
     // Simulate per-archetype transform storage: 4x4 integer matrix (4*4 = 16 cells).
-    // std::array used informally in tests (no allocator, language aggregate);
-    // eastl::array is the §11-principled choice — collapse with #1003 macro/header refactor.
+    // std::array is the canonical choice per reviews/decisions/eastl-removal.md and
+    // PHILOSOPHY.md §11 (libc++ stdlib is the engine-wide standard; no EASTL).
     using Mat4i = std::array<std::int32_t, 16>;
 
     std::uint64_t acc = 0u;
