@@ -123,8 +123,8 @@
 # human-readable form the recorder lowers to canonical Fory bytes per
 # `glibre.e2e.AssertStatePayload.expected_fory_blob`. Concrete types:
 #   * `u32`, `u64`, `bool` are primitive Fory scalars.
-#   * `TypeId` is `core::TypeId { hash: u64 }` (specs/core/SPEC.md §4.9
-#     `TypeRegistry`); the codegen-emitted Fory schema is the wire.
+#   * `TypeId` is `core::TypeId { value: u64 }` (specs/core/SPEC.md §5.2
+#     `TypeId`); the codegen-emitted Fory schema is the wire.
 
 # ============================================================================
 # Setup — register types, override chunk capacity
