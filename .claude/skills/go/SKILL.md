@@ -50,7 +50,24 @@ Every dispatch must respect these (also enforced by `AGENTS.md`):
    a single `go-orchestrator` against that issue and stop the leaf
    picker for this turn. Orchestrator counts as one top-level slot;
    its nested children do not. If neither trigger applies, fall
-   through to Step 1.
+   through to Step 0.5.
+0.5. **Red-CI triage (highest priority — runs before leaf pick).**
+   Before picking any new leaf, query open PRs whose head-commit CI
+   is FAILURE or whose required checks include any non-SUCCESS state:
+   ```bash
+   gh pr list --state open --json number,headRefName,statusCheckRollup \
+     --jq '.[] | select(.statusCheckRollup[]? | .conclusion == "FAILURE") | "\(.number)\t\(.headRefName)"'
+   ```
+   For every red-CI PR, dispatch a `go-chore` (mechanical fix — lint,
+   format, single-line build error) or `go-coding` (non-trivial
+   regression) to push a fix commit to the same branch. Red-CI fixes
+   take priority over EVERY other dispatch in this tick — fill the
+   concurrency budget with red-CI fixes first, only then move to the
+   leaf picker / review pipeline. Stale red CI starves downstream
+   review rounds and pollutes the "unblocked leaves" view, so always
+   pay it down first. Subagents do NOT block on CI themselves (they
+   push and exit `status:done`); this triage step is the orchestrator's
+   compensating mechanism.
 1. **Query** GitHub for unblocked leaves; collect up to 2.
 2. **Filter** by SDLC stage: pick items in earliest open stage first
    (ideation → maintenance — see `references/sdlc.md`).
@@ -348,14 +365,20 @@ of the stop conditions above fires. The default lifecycle is:
 ```
 loop:
   1. Sync local main (git fetch + git pull --ff-only).
-  2. If any leaf is `dod:verified` since last tick, run Step 4c
+  2. Run Step 0.5 — RED-CI TRIAGE FIRST. Dispatch go-chore /
+     go-coding fixes for every open PR with non-green CI before
+     picking any leaf or review-pipeline work. Subagents never
+     block on CI themselves; this step is where red-CI debt gets
+     paid down.
+  3. If any leaf is `dod:verified` since last tick, run Step 4c
      (stage-transition) — open + dispatch the next-stage children.
-  3. If a top-level slot is free, run Steps 1–3 to fill the slot
-     with a fresh unblocked leaf (or a Step-5 review-pipeline tick
-     on an open PR).
-  4. Wait for the next completion notification (no polling).
-  5. On completion, run Step 4 (verify output + hand to review).
-  6. Goto 1.
+  4. If a top-level slot is free (after red-CI triage consumed
+     however many it needed), run Steps 1–3 to fill the slot with
+     a fresh unblocked leaf (or a Step-5 review-pipeline tick on
+     an open PR).
+  5. Wait for the next completion notification (no polling).
+  6. On completion, run Step 4 (verify output + hand to review).
+  7. Goto 1.
 ```
 
 **Stop condition.** **The loop runs until the user explicitly types

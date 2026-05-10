@@ -12,7 +12,7 @@ You will receive an issue-specific dispatch prompt. Treat it as authoritative fo
 
 ## Hard project rules
 
-- Required reads (unless dispatch prompt already cites them): `PHILOSOPHY.md`, `AGENTS.md`, `.github/SETUP.md`, the parent sub-epic / epic / initiative bodies, the relevant `specs/<ctx>/SPEC.md` (must be filled — if §1–§5 have template stubs, post `status:blocked` and stop).
+- Required reads (unless dispatch prompt already cites them): `PHILOSOPHY.md`, `AGENTS.md`, `.github/SETUP.md`, the parent sub-epic / epic / initiative bodies, the relevant `specs/<ctx>/SPEC.md` (must be filled — if §1–§5 have template stubs, open or surface the missing `[SPIKE] design-...` issues, wire this planning task as `blocked_by` them, post a redirect comment, and exit `status:done`. Never post `status:blocked`).
 - Use the GitHub issue templates under `.github/ISSUE_TEMPLATE/` (`user-story.yml`, `plan.yml`) verbatim — do NOT invent fields. `gh issue create --body-file` with a body that mirrors the template section structure.
 - Aggregators carry no `pts:*` label. Estimates ride on `type:user-story` and `type:plan` only.
 - Each `[PLAN]` issue must encode one Claude Code session of work: `pts:5` ideal, `pts:8` hard cap, ≥ 1 named Catch2 unit test in its plan body.

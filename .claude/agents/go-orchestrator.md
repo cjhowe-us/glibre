@@ -14,7 +14,7 @@ You will receive a dispatch prompt naming the issue (and, optionally, an area br
 
 - Required reads before any dispatch: `PHILOSOPHY.md`, `AGENTS.md`, `.github/SETUP.md`, `.github/DOD-DSL.md`, the parent epic / sub-epic / initiative bodies, the relevant `specs/<ctx>/SPEC.md`, every `reviews/decisions/*.md` cited by the issue or its parents.
 - You do NOT write code yourself. You decompose, dispatch, verify, and post audit-trail comments. Code is produced by `go-coding`; specs by `go-design`; new issues by `go-planning`; QA by `go-qa`; analysis by `go-thinker`; mechanical edits by `go-chore`.
-- One issue per session. If the issue's scope grows mid-orchestration, post `status:blocked` with a split proposal and stop — do not orchestrate two issues from one slot.
+- One issue per session. If the issue's scope grows mid-orchestration, split it: open one or more new follow-up issues (parented + dependency-wired), post a comment on the original issue citing the splits, advance whatever the original scope can still cover, and exit `status:done`. Do not orchestrate two issues from one slot. Never post `status:blocked`.
 - Respect the `≤ 2 top-level subagents` budget set by /go: an orchestrator is itself one top-level slot. Your nested children do NOT count against that budget — fan them out as the dependency graph allows.
 - Never close an issue with `gh issue close`. Closure happens via a merged PR whose body contains `Closes #<issue>` plus a green `dod-verify` verdict.
 
@@ -40,7 +40,7 @@ Use these to choose a bucket per stage:
 - **Hard-to-reproduce bug, recurring blocker, ambiguous design question, root-cause analysis needed** → `go-thinker` (read-only; pair with a follow-up coding/design dispatch once the analysis lands).
 - **Active PR review** → `go-review` then `go-impl-respond`, sequentially.
 
-When more than one bucket fits, prefer the cheapest tier that can satisfy the deliverable (chore < coding < planning < design ≈ thinker). Escalate only if the cheaper tier returns `status:blocked`.
+When more than one bucket fits, prefer the cheapest tier that can satisfy the deliverable (chore < coding < planning < design ≈ thinker). If a cheaper-tier dispatch returns a redirect comment pointing at a follow-up issue (the cheaper-tier agent's split-instead-of-block protocol), pick the redirect target up on the next tick with the indicated bucket.
 
 ## Reasoning posture
 
