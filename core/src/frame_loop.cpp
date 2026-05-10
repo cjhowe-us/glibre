@@ -164,8 +164,10 @@ void FrameLoop::present_reset_perf_budget() noexcept {
 // ---------------------------------------------------------------------------
 
 [[nodiscard]] static glibre::Result<void>
-execute_pending_reloads(glibre::core::HotReloadRequestQueue& /*queue*/) noexcept {
-    // TODO(plan-251): implement drain → swap → migrate → resume state machine.
+execute_pending_reloads(glibre::core::HotReloadRequestQueue& queue) noexcept {
+    // TODO(plan-251): consume queue.pending_count() to iterate pending requests
+    // and implement the full drain → swap → migrate → resume state machine.
+    (void)queue;
     return std::unexpected(glibre::Error{glibre::core::Error::HotReloadRefused});
 }
 
@@ -226,17 +228,17 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
         break;
     case Phase::RenderSubmit: /* render — MVP empty */
         break;
-    case Phase::HotReload: /* core (barrier) — pending-reload fast-path */
-                           // Phase 8: hot-reload drain barrier.
-                           //
-                           // Fast-path (plan #249): read the pending_reloads counter once with
-                           // memory_order_relaxed.  If zero, return immediately — true no-op:
-                           // no fence, no cache flush (hot-reload-protocol.md §Consequences,
-                           // frame-phases.md open question 1 resolution).
-                           //
-                           // Non-zero path: delegate to execute_pending_reloads (stub for now;
-                           // full drain → swap → migrate → resume body lands in plans #251+).
-                           //
+    case Phase::HotReload: {
+        // Phase 8: hot-reload drain barrier. (core (barrier) — pending-reload fast-path)
+        //
+        // Fast-path (plan #249): read the pending_reloads counter once with
+        // memory_order_relaxed.  If zero, return immediately — true no-op:
+        // no fence, no cache flush (hot-reload-protocol.md §Consequences,
+        // frame-phases.md open question 1 resolution).
+        //
+        // Non-zero path: delegate to execute_pending_reloads (stub for now;
+        // full drain → swap → migrate → resume body lands in plans #251+).
+        //
         // FOLLOWUP(plan-981-wiring): wire FramePhaseTracker / validate_drain_phase
         // once that plan lands.  The GLIBRE_TESTING injection below exercises
         // the "tick halts on phase failure" path from plan #247 Unit Test Plan.
@@ -250,11 +252,18 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
         }
 #endif
         // Fast-path: single relaxed load — sub-microsecond when no reloads pending.
+        // Per hot-reload-protocol.md §Decision: "Plugin code does not execute
+        // during phase 8.  No system bodies run."  Both branches must bypass
+        // the system dispatch below, so we return directly rather than break.
         if (hot_reload_queue_.pending_count() == 0) {
-            break;  // true no-op — fall through to system dispatch
+            return {};  // true no-op — no system bodies per protocol §Decision
         }
         // Non-zero: run the drain/swap/migrate/resume state machine (stub).
+        // Returns (propagates the error from execute_pending_reloads); either
+        // way system dispatch at the end of run_phase is never reached for
+        // Phase 8 (protocol §Decision: no system bodies run in phase 8).
         return execute_pending_reloads(hot_reload_queue_);
+    }
     case Phase::Present: /* platform — drains transient arenas at frame end */
         // Phase 9 bookkeeping order (perf-budget.md §CI Gate Spec, plan #241;
         //                            plan #247 §Scope):
