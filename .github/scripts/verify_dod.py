@@ -114,6 +114,7 @@ def check_workflow_passed(arg: object) -> tuple[bool, str]:
         "--repo", REPO,
         "--workflow", name,
         "--branch", "main",
+        "--status", "completed",
         "--limit", "1",
         "--json", "conclusion,status,databaseId",
     )
