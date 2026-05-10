@@ -40,6 +40,7 @@ add_executable(glibre-core-world-perf-tests
 target_link_libraries(glibre-core-world-perf-tests
     PRIVATE
         Catch2::Catch2WithMain
+        glibre::test_contract
 )
 
 target_compile_features(glibre-core-world-perf-tests PRIVATE cxx_std_23)
@@ -70,10 +71,7 @@ target_compile_options(glibre-core-world-perf-tests
         -Wall
         -Wextra
         -Wpedantic
-        # Catch2 TEST_CASE uses __COUNTER__ which clang >=21 flags as a C2y
-        # extension under -Wpedantic.  Suppress until Catch2 ships a fix or
-        # until we switch to a C2y language standard that makes it non-pedantic.
-        -Wno-c2y-extensions
+        # -Wno-c2y-extensions is inherited from glibre::test_contract (cmake/Compile.cmake).
 )
 
 include(CTest)

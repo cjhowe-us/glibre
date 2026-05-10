@@ -20,7 +20,7 @@ target_link_libraries(glibre-core-asset-handle-tests
     PRIVATE
         glibre::core
         Catch2::Catch2WithMain
-        glibre::compile_contract
+        glibre::test_contract
 )
 
 target_compile_features(glibre-core-asset-handle-tests PRIVATE cxx_std_23)
@@ -35,9 +35,7 @@ target_compile_options(glibre-core-asset-handle-tests PRIVATE
     -Wextra
     -Wpedantic
     -Wno-unused-parameter
-    # Catch2 3.x macros use __COUNTER__ which triggers -Wpedantic C2y
-    # extension warning with clang >= 22; suppress from third-party macro.
-    -Wno-c2y-extensions
+    # -Wno-c2y-extensions is inherited from glibre::test_contract (cmake/Compile.cmake).
 )
 
 # GLIBRE_TESTING is propagated PUBLIC from glibre-core when GLIBRE_BUILD_TESTS=ON,

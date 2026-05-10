@@ -56,7 +56,7 @@ target_link_libraries(schema-migration-tests
     PRIVATE
         Catch2::Catch2WithMain
         glibre::core   # glibre::Error
-        glibre::compile_contract
+        glibre::test_contract
 )
 
 # Inject include paths for the subprocess clang++ calls inside the tests.
@@ -81,7 +81,7 @@ target_compile_options(schema-migration-tests PRIVATE
     -Wextra
     -Wpedantic
     -Wno-unused-parameter
-    -Wno-c2y-extensions   # Catch2 uses __COUNTER__; suppress clang pedantic warning
+    # -Wno-c2y-extensions is inherited from glibre::test_contract (cmake/Compile.cmake).
 )
 
 include(CTest)

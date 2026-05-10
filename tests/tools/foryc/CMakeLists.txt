@@ -33,7 +33,7 @@ target_link_libraries(foryc-parser-tests
     PRIVATE
         Catch2::Catch2WithMain
         glibre::core   # glibre::Error (std::variant-based; eastl-removal.md §4)
-        glibre::compile_contract
+        glibre::test_contract
 )
 
 target_compile_features(foryc-parser-tests PRIVATE cxx_std_23)
@@ -45,7 +45,7 @@ target_compile_options(foryc-parser-tests PRIVATE
     -Wextra
     -Wpedantic
     -Wno-unused-parameter
-    -Wno-c2y-extensions
+    # -Wno-c2y-extensions is inherited from glibre::test_contract (cmake/Compile.cmake).
 )
 
 # ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ target_link_libraries(foryc-emit-header-tests
     PRIVATE
         Catch2::Catch2WithMain
         glibre::core   # glibre::Error (std::variant-based; eastl-removal.md §4)
-        glibre::compile_contract
+        glibre::test_contract
 )
 
 target_compile_features(foryc-emit-header-tests PRIVATE cxx_std_23)
@@ -80,7 +80,7 @@ target_compile_options(foryc-emit-header-tests PRIVATE
     -Wextra
     -Wpedantic
     -Wno-unused-parameter
-    -Wno-c2y-extensions
+    # -Wno-c2y-extensions is inherited from glibre::test_contract (cmake/Compile.cmake).
 )
 
 # ---------------------------------------------------------------------------
@@ -103,7 +103,7 @@ target_link_libraries(foryc-emit-migration-tests
     PRIVATE
         Catch2::Catch2WithMain
         glibre::core   # glibre::Error (std::variant-based; eastl-removal.md §4)
-        glibre::compile_contract
+        glibre::test_contract
 )
 
 # Pass include paths to the round-trip compile test so it can supply
@@ -125,7 +125,7 @@ target_compile_options(foryc-emit-migration-tests PRIVATE
     -Wextra
     -Wpedantic
     -Wno-unused-parameter
-    -Wno-c2y-extensions
+    # -Wno-c2y-extensions is inherited from glibre::test_contract (cmake/Compile.cmake).
 )
 
 # ---------------------------------------------------------------------------
@@ -148,7 +148,7 @@ target_link_libraries(foryc-emit-manifest-tests
     PRIVATE
         Catch2::Catch2WithMain
         glibre::core   # glibre::Error (std::variant-based; eastl-removal.md §4)
-        glibre::compile_contract
+        glibre::test_contract
 )
 
 target_compile_features(foryc-emit-manifest-tests PRIVATE cxx_std_23)
@@ -160,7 +160,7 @@ target_compile_options(foryc-emit-manifest-tests PRIVATE
     -Wextra
     -Wpedantic
     -Wno-unused-parameter
-    -Wno-c2y-extensions
+    # -Wno-c2y-extensions is inherited from glibre::test_contract (cmake/Compile.cmake).
 )
 
 include(CTest)
