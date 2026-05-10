@@ -69,7 +69,6 @@
 // eastl::string_view to std::string_view.  Until then the registry call sites
 // below use eastl::string_view and this include is required.
 #include <EASTL/string_view.h>
-
 #include <catch2/catch_test_macros.hpp>
 #include <glibre/alloc.hpp>
 #include <glibre/core/plugin_loader.hpp>
@@ -238,15 +237,9 @@ TEST_CASE("integration_abi_hash_mismatch_propagates", "[core][integration]") {
         "this macro is unconditional; check CMakeLists.txt for glibre-plugin-stub-wrong-abi"
     );
 #else
-<<<<<<< HEAD
-    const char* stub_path = GLIBRE_STUB_WRONG_ABI_DYLIB_PATH;
-    REQUIRE(stub_path != nullptr);
-    REQUIRE(stub_path[0] != '\0');
-=======
     constexpr const char* stub_path = GLIBRE_STUB_WRONG_ABI_DYLIB_PATH;
     REQUIRE(stub_path != nullptr);
     REQUIRE(*stub_path != '\0');
->>>>>>> origin/main
 
     // Step 1-2: dlopen + dlsym must succeed — the stub exports all four symbols.
     auto loader_result = glibre::core::PluginLoader::open(stub_path, mr_);
@@ -505,15 +498,9 @@ TEST_CASE("integration_manifest_invalid_propagates", "[core][integration]") {
         "glibre-plugin-stub-invalid-manifest"
     );
 #else
-<<<<<<< HEAD
-    const char* stub_path = GLIBRE_STUB_INVALID_MANIFEST_DYLIB_PATH;
-    REQUIRE(stub_path != nullptr);
-    REQUIRE(stub_path[0] != '\0');
-=======
     constexpr const char* stub_path = GLIBRE_STUB_INVALID_MANIFEST_DYLIB_PATH;
     REQUIRE(stub_path != nullptr);
     REQUIRE(*stub_path != '\0');
->>>>>>> origin/main
 
     // Steps 1–2: dlopen + dlsym must succeed — the stub exports all four symbols.
     auto loader_result = glibre::core::PluginLoader::open(stub_path, mr_);
