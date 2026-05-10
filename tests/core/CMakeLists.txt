@@ -24,6 +24,7 @@ add_subdirectory(perf_budget)                   # plan #241 — per-context perf
 add_subdirectory(hot_reload)                    # plan #250 — hot-reload manifest + ABI hash gate
 add_subdirectory(frame_loop_integration)         # plan #248 — frame-loop nine-phase ordering integration test
 add_subdirectory(perf_s1_fixture)               # plan #1003 — canonical S1 fixture loader + invariant tests
+add_subdirectory(world)                         # plan #944 — macOS PMC sampler helper
 
 add_executable(glibre-core-tests
     frame_loop_test.cpp
