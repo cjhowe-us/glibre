@@ -45,17 +45,12 @@
 // Not implemented (future plans #222–#225):
 //   - ABI hash emission
 //
-// PHILOSOPHY §11: EASTL replaces std containers. This file uses
-//   eastl::string, eastl::vector (IR storage).
-//   std:: is retained where EASTL has no equivalent:
-//     std::expected (no eastl::expected),
-//     std::filesystem (path type for parse_file API),
-//     std::string_view (zero-copy interop at API boundaries),
-//     std::string / std::ifstream / std::ostringstream (file I/O in
-//       parse_file — EASTL has no file-stream equivalent),
-//     std::isalpha / std::isdigit / std::from_chars (character classification
-//       and parsing, no EASTL equivalent).
-//   Container/string types in the IR are eastl::.
+// PHILOSOPHY §11: libc++ stdlib is canonical. This file uses
+//   std::string, std::vector (IR storage).
+//   Tools are one-shot CLIs, not engine plugins — no PMR allocators.
+//   std::expected (glibre::Result), std::filesystem, std::string_view,
+//   std::string / std::ifstream / std::ostringstream (file I/O),
+//   std::isalpha / std::isdigit / std::from_chars (character classification).
 //
 // Builtin type membership is derived from builtin_map.hpp — the single
 // source of truth shared with emit_header.cpp.
@@ -67,9 +62,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
-
-#include <EASTL/string.h>
-#include <EASTL/vector.h>
+#include <vector>
 
 #include "glibre/error.hpp"
 
@@ -82,8 +75,8 @@ namespace glibre::tools::foryc {
 // -----------------------------------------------------------------------
 
 struct FieldDecl {
-    eastl::string name;
-    eastl::string type_name;  // raw type string (may include generics)
+    std::string name;
+    std::string type_name;  // raw type string (may include generics)
     std::uint32_t tag{0};
     std::uint32_t since{0};
 };
@@ -101,20 +94,20 @@ struct FieldDecl {
 struct MigrationDecl {
     std::uint32_t from_version{0};
     std::uint32_t to_version{0};
-    eastl::string provider;  // raw provider symbol (quotes stripped)
+    std::string provider;  // raw provider symbol (quotes stripped)
 };
 
 struct TypeDecl {
-    eastl::string fqn;  // e.g. "glibre.core.Transform"
+    std::string fqn;  // e.g. "glibre.core.Transform"
     std::uint32_t version{0};
-    eastl::string since_version;  // semver string, may be empty
-    eastl::vector<FieldDecl> fields;
-    eastl::vector<MigrationDecl> migrations;  // populated by plan #221 parser
+    std::string since_version;  // semver string, may be empty
+    std::vector<FieldDecl> fields;
+    std::vector<MigrationDecl> migrations;  // populated by plan #221 parser
 };
 
 struct Schema {
-    eastl::vector<TypeDecl> types;  // one entry per `schema` block
-    eastl::string source_path;      // absolute path to the .fory file
+    std::vector<TypeDecl> types;  // one entry per `schema` block
+    std::string source_path;      // absolute path to the .fory file
 };
 
 // -----------------------------------------------------------------------

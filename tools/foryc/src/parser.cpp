@@ -11,8 +11,7 @@
 #include <cstring>
 #include <fstream>
 #include <sstream>
-
-#include <EASTL/unordered_set.h>
+#include <unordered_set>
 
 #include "fqn_mangle.hpp"
 
@@ -234,7 +233,7 @@ public:
 
     [[nodiscard]] ParseResult parse() {
         Schema schema;
-        schema.source_path = eastl::string(virtual_path_.data(), virtual_path_.size());
+        schema.source_path = std::string(virtual_path_.data(), virtual_path_.size());
 
         while (current_.kind != TokenKind::Eof) {
             if (current_.kind == TokenKind::Error)
@@ -292,7 +291,7 @@ private:
     // otherwise both mangle to "glibre__core__Foo".
     // Validation delegated to fqn_mangle::segment_contains_double_underscore
     // (fqn_mangle.hpp) so the same rule is reusable from any emitter.
-    [[nodiscard]] std::expected<eastl::string, glibre::Error> parse_fqn() {
+    [[nodiscard]] std::expected<std::string, glibre::Error> parse_fqn() {
         if (current_.kind != TokenKind::Ident)
             return FORYC_ERR(tools::Error::ForycSyntaxError, "expected schema FQN");
 
@@ -302,7 +301,7 @@ private:
                 "FQN segment contains '__' which is reserved for codegen mangling"
             );
 
-        eastl::string fqn(current_.text.data(), current_.text.size());
+        std::string fqn(current_.text.data(), current_.text.size());
         advance();
 
         while (current_.kind == TokenKind::Dot) {
@@ -315,18 +314,18 @@ private:
                     "FQN segment contains '__' which is reserved for codegen mangling"
                 );
             fqn += '.';
-            fqn += eastl::string(current_.text.data(), current_.text.size());
+            fqn += std::string(current_.text.data(), current_.text.size());
             advance();
         }
         return fqn;
     }
 
     // Parse a type name, which may include generic parameters: foo<bar,baz>
-    [[nodiscard]] std::expected<eastl::string, glibre::Error> parse_type_name() {
+    [[nodiscard]] std::expected<std::string, glibre::Error> parse_type_name() {
         if (current_.kind != TokenKind::Ident)
             return FORYC_ERR(tools::Error::ForycSyntaxError, "expected type name");
 
-        eastl::string name(current_.text.data(), current_.text.size());
+        std::string name(current_.text.data(), current_.text.size());
         advance();
 
         if (current_.kind == TokenKind::Lt) {
@@ -335,7 +334,7 @@ private:
             advance();  // consume '<'
             while (current_.kind != TokenKind::Gt && current_.kind != TokenKind::Eof) {
                 if (current_.kind == TokenKind::Ident) {
-                    name += eastl::string(current_.text.data(), current_.text.size());
+                    name += std::string(current_.text.data(), current_.text.size());
                     advance();
                 } else if (current_.kind == TokenKind::Comma) {
                     name += ',';
@@ -366,7 +365,7 @@ private:
         decl.fqn = std::move(*fqn_r);
 
         // Track seen tags for duplicate detection.
-        eastl::unordered_set<std::uint32_t> seen_tags;
+        std::unordered_set<std::uint32_t> seen_tags;
         bool version_seen = false;
         bool since_seen = false;
 
@@ -405,7 +404,7 @@ private:
                     );
                 // Strip surrounding quotes from the string literal.
                 const std::string_view raw = current_.text;
-                decl.since_version = eastl::string(raw.data() + 1, raw.size() - 2);
+                decl.since_version = std::string(raw.data() + 1, raw.size() - 2);
                 since_seen = true;
                 advance();
 
@@ -521,7 +520,7 @@ private:
             return FORYC_ERR(
                 tools::Error::ForycSyntaxError, "provider symbol must be a non-empty quoted string"
             );
-        eastl::string provider(raw.data() + 1, raw.size() - 2);
+        std::string provider(raw.data() + 1, raw.size() - 2);
         advance();
 
         MigrationDecl md;
@@ -537,7 +536,7 @@ private:
             return FORYC_ERR(tools::Error::ForycSyntaxError, "expected field name");
 
         FieldDecl fd;
-        fd.name = eastl::string(current_.text.data(), current_.text.size());
+        fd.name = std::string(current_.text.data(), current_.text.size());
         advance();
 
         if (!consume(TokenKind::Colon))
@@ -633,8 +632,8 @@ ParseResult parse_string(std::string_view source, std::string_view virtual_path)
 }
 
 ParseResult parse_file(const std::filesystem::path& path) noexcept {
-    // Read entire file into a std::string (PHILOSOPHY §11 permits std::
-    // for I/O utilities not covered by EASTL).
+    // Read entire file into a std::string (PHILOSOPHY §11: libc++ stdlib
+    // is canonical for one-shot CLI tools — plain std::, no PMR).
     std::ifstream ifs{path};
     if (!ifs) {
         return std::unexpected<glibre::Error>{glibre::Error{tools::Error::ForycIOError}};

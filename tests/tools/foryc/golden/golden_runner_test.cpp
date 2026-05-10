@@ -29,7 +29,6 @@
 #include <string>
 #include <string_view>
 
-#include <EASTL/string.h>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
@@ -43,18 +42,18 @@ namespace foryc = glibre::tools::foryc;
 // Helpers
 // -----------------------------------------------------------------------
 
-// Read a file into an eastl::string.  Returns an empty string on failure.
+// Read a file into a std::string.  Returns an empty string on failure.
 // Uses std::filesystem::file_size for the pre-sized buffer read (PHILOSOPHY
 // §11 permits std::filesystem; std::ifstream::read is a language I/O
 // primitive, not a container — plain iostreams streaming is avoided).
-static eastl::string slurp(const fs::path& p) {
+static std::string slurp(const fs::path& p) {
     std::error_code ec;
     const auto sz = fs::file_size(p, ec);
     if (ec || sz == 0)
         return {};
 
-    eastl::string buf;
-    buf.resize(static_cast<eastl::string::size_type>(sz));
+    std::string buf;
+    buf.resize(static_cast<std::string::size_type>(sz));
 
     std::ifstream ifs{p, std::ios::binary};
     if (!ifs)
@@ -67,8 +66,8 @@ static eastl::string slurp(const fs::path& p) {
     return buf;
 }
 
-// Write an eastl::string to a file.  Returns true on success.
-static bool splat(const fs::path& p, const eastl::string& content) {
+// Write an std::string to a file.  Returns true on success.
+static bool splat(const fs::path& p, const std::string& content) {
     std::ofstream ofs{p, std::ios::binary | std::ios::trunc};
     if (!ofs)
         return false;
@@ -86,23 +85,23 @@ static fs::path golden_dir() { return fs::path{GLIBRE_GOLDEN_DIR}; }
 
 // Produce a simple diagnostic string describing where `actual` and `expected`
 // differ.  Not a true unified diff — used only in FAIL() messages.
-static eastl::string simple_diff(const eastl::string& actual, const eastl::string& expected) {
-    eastl::string msg;
+static std::string simple_diff(const std::string& actual, const std::string& expected) {
+    std::string msg;
 
     // Find the first differing character position.
     const std::size_t n = std::min(actual.size(), expected.size());
-    std::size_t first_diff = eastl::string::npos;
+    std::size_t first_diff = std::string::npos;
     for (std::size_t i = 0; i < n; ++i) {
         if (actual[i] != expected[i]) {
             first_diff = i;
             break;
         }
     }
-    if (first_diff == eastl::string::npos && actual.size() != expected.size())
+    if (first_diff == std::string::npos && actual.size() != expected.size())
         first_diff = n;
 
-    if (first_diff == eastl::string::npos) {
-        return eastl::string("(no difference found — sizes match)\n");
+    if (first_diff == std::string::npos) {
+        return std::string("(no difference found — sizes match)\n");
     }
 
     // Find the approximate line number of the first difference.
@@ -112,13 +111,7 @@ static eastl::string simple_diff(const eastl::string& actual, const eastl::strin
             ++line;
     }
 
-    // std::format is retained by PHILOSOPHY §11 (not an EASTL-owned utility).
-    // Convert via std::format into a std::string then wrap into eastl::string
-    // once — avoids the to_string -> c_str -> eastl::string triple bounce.
-    msg += eastl::string(
-        std::format("First difference at byte offset {} (approx line {})\n", first_diff, line)
-            .c_str()
-    );
+    msg += std::format("First difference at byte offset {} (approx line {})\n", first_diff, line);
 
     // Show a context window around the difference.
     const std::size_t ctx_start = (first_diff > 80) ? first_diff - 80 : 0;
@@ -132,10 +125,7 @@ static eastl::string simple_diff(const eastl::string& actual, const eastl::strin
     msg += expected.substr(ctx_start, ctx_end_e - ctx_start);
     msg += "]\n";
 
-    msg += eastl::string(
-        std::format("actual size:   {}\nexpected size: {}\n", actual.size(), expected.size())
-            .c_str()
-    );
+    msg += std::format("actual size:   {}\nexpected size: {}\n", actual.size(), expected.size());
 
     return msg;
 }
@@ -153,17 +143,16 @@ static eastl::string simple_diff(const eastl::string& actual, const eastl::strin
 // -----------------------------------------------------------------------
 
 TEST_CASE("foryc_golden_emit_header_matches_expected", "[foryc][golden]") {
-    const eastl::string basename{GENERATE(
-        eastl::string{"minimal_struct"},
-        eastl::string{"nested_namespace"},
-        eastl::string{"all_scalars"},
-        eastl::string{"with_generics"}
+    const std::string basename{GENERATE(
+        std::string{"minimal_struct"},
+        std::string{"nested_namespace"},
+        std::string{"all_scalars"},
+        std::string{"with_generics"}
     )};
 
-    // Build std::filesystem paths from the eastl::string basename.
-    const std::string basename_std{basename.c_str(), basename.size()};
-    const fs::path fixture_path = golden_dir() / "fixtures" / (basename_std + ".fory");
-    const fs::path golden_path = golden_dir() / "expected" / (basename_std + ".hpp.golden");
+    // Build std::filesystem paths from the std::string basename.
+    const fs::path fixture_path = golden_dir() / "fixtures" / (basename + ".fory");
+    const fs::path golden_path = golden_dir() / "expected" / (basename + ".hpp.golden");
 
     INFO("fixture: " << fixture_path.native());
     INFO("golden:  " << golden_path.native());
@@ -181,14 +170,14 @@ TEST_CASE("foryc_golden_emit_header_matches_expected", "[foryc][golden]") {
     // so goldens are portable across machines.  Mutate schema.source_path
     // instead of duplicating emit_header's logic in a wrapper.
     foryc::Schema& schema = *parse_result;
-    schema.source_path = basename + eastl::string(".fory");
+    schema.source_path = basename + ".fory";
     auto emit_result = foryc::emit_header(schema);
-    INFO("emit_header failed for: " << basename.c_str() << ".fory");
+    INFO("emit_header failed for: " << basename << ".fory");
     CHECK(emit_result.has_value());
     if (!emit_result.has_value())
         return;
 
-    const eastl::string& actual = *emit_result;
+    const std::string& actual = *emit_result;
 
     // Step 3: UPDATE_GOLDEN mode — overwrite the golden and return.
     const char* update_env = std::getenv("GLIBRE_UPDATE_GOLDEN");
@@ -199,7 +188,7 @@ TEST_CASE("foryc_golden_emit_header_matches_expected", "[foryc][golden]") {
     }
 
     // Step 4: read existing golden.
-    const eastl::string expected = slurp(golden_path);
+    const std::string expected = slurp(golden_path);
     {
         INFO(
             "golden file missing or empty: " << golden_path.native()
@@ -215,7 +204,7 @@ TEST_CASE("foryc_golden_emit_header_matches_expected", "[foryc][golden]") {
     // (which abort on TestFailureException) continue running remaining GENERATE()
     // iterations after a mismatch.
     if (actual != expected) {
-        const eastl::string diff = simple_diff(actual, expected);
+        const std::string diff = simple_diff(actual, expected);
         INFO(
             "Golden mismatch for '" << basename.c_str() << "':\n"
                                     << diff.c_str()

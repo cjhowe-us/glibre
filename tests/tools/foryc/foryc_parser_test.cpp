@@ -56,12 +56,12 @@ schema glibre.test.Foo {
     REQUIRE(schema.types.size() == 1);
 
     const auto& td = schema.types[0];
-    CHECK(td.fqn == eastl::string("glibre.test.Foo"));
+    CHECK(td.fqn == "glibre.test.Foo");
     CHECK(td.version == 1);
-    CHECK(td.since_version == eastl::string("0.0.1"));
+    CHECK(td.since_version == "0.0.1");
     REQUIRE(td.fields.size() == 1);
-    CHECK(td.fields[0].name == eastl::string("x"));
-    CHECK(td.fields[0].type_name == eastl::string("u32"));
+    CHECK(td.fields[0].name == "x");
+    CHECK(td.fields[0].type_name == "u32");
     CHECK(td.fields[0].tag == 1);
     CHECK(td.fields[0].since == 1);
 }
@@ -81,8 +81,8 @@ schema Foo {
     const auto& schema = *result;
     REQUIRE(schema.types.size() == 1);
     CHECK(schema.types[0].fields.size() == 1);
-    CHECK(schema.types[0].fields[0].name == eastl::string("x"));
-    CHECK(schema.types[0].fields[0].type_name == eastl::string("u32"));
+    CHECK(schema.types[0].fields[0].name == "x");
+    CHECK(schema.types[0].fields[0].type_name == "u32");
 }
 
 TEST_CASE("rejects_duplicate_tag", "[foryc][parser]") {
@@ -228,10 +228,10 @@ schema glibre.core.Velocity {
     const auto& schema = *result;
     // Two schema blocks; migration is consumed but not stored.
     REQUIRE(schema.types.size() == 2);
-    CHECK(schema.types[0].fqn == eastl::string("glibre.core.Transform"));
+    CHECK(schema.types[0].fqn == "glibre.core.Transform");
     CHECK(schema.types[0].version == 3);
     CHECK(schema.types[0].fields.size() == 5);
-    CHECK(schema.types[1].fqn == eastl::string("glibre.core.Velocity"));
+    CHECK(schema.types[1].fqn == "glibre.core.Velocity");
     CHECK(schema.types[1].fields.size() == 2);
 }
 
@@ -327,6 +327,6 @@ schema glibre.core.Foo_Bar {
 )";
         auto result = parse_string(src, "single_underscore_ok.fory");
         REQUIRE(result.has_value());
-        CHECK(result->types[0].fqn == eastl::string("glibre.core.Foo_Bar"));
+        CHECK(result->types[0].fqn == "glibre.core.Foo_Bar");
     }
 }

@@ -97,16 +97,15 @@
 //     from the last "::" split in mig.provider, not from the type's namespace.
 //     This allows cross-context providers without link errors.
 //
-// PHILOSOPHY §11: EASTL replaces std containers/strings in the IR and the
-//   returned string.  std:: retained for std::expected (glibre::Result),
-//   std::string_view, and std::format.
+// PHILOSOPHY §11: libc++ stdlib is canonical. Tools are one-shot CLIs —
+//   plain std::string (no PMR). std::expected (glibre::Result),
+//   std::string_view, and std::format throughout.
 
 #pragma once
 
 #include <expected>
+#include <string>
 #include <string_view>
-
-#include <EASTL/string.h>
 
 #include "glibre/error.hpp"
 
@@ -145,7 +144,7 @@ namespace glibre::tools::foryc {
 //       so that callers building IR directly (without the parser) cannot
 //       silently produce non-injective mangles.  plan #1010,
 //       fory-codegen.md §"ABI Stability Rules" point 4.
-[[nodiscard]] glibre::Result<eastl::string>
+[[nodiscard]] glibre::Result<std::string>
 emit_migration(const Schema& schema, std::string_view source_path) noexcept;
 
 }  // namespace glibre::tools::foryc

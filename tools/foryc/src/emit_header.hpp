@@ -22,21 +22,19 @@
 //       vec3i → glibre::math::Vec3i   vec4i → glibre::math::Vec4i
 //       quatf → glibre::math::Quatf
 //       entity → glibre::core::EntityId
-//       string → eastl::string        bytes  → eastl::vector<std::byte>
-//       list<T> → eastl::vector<T_cpp>
-//       map<K,V> → eastl::unordered_map<K_cpp, V_cpp>
-//       option<T> → eastl::optional<T_cpp>
+//       string → std::string          bytes  → std::vector<std::byte>
+//       list<T> → std::vector<T_cpp>
+//       map<K,V> → std::unordered_map<K_cpp, V_cpp>
+//       option<T> → std::optional<T_cpp>
 //
-// PHILOSOPHY §11: EASTL replaces std containers/strings in the IR and in
-//   generated code bodies.  std:: retained for std::expected (glibre::Result),
-//   std::filesystem, std::string_view.
+// PHILOSOPHY §11: libc++ stdlib is canonical. Tools are one-shot CLIs —
+//   plain std::string (no PMR). std:: retained throughout.
 
 #pragma once
 
 #include <expected>
+#include <string>
 #include <string_view>
-
-#include <EASTL/string.h>
 
 #include "glibre/error.hpp"
 
@@ -58,7 +56,7 @@ namespace glibre::tools::foryc {
 //   - `#pragma once` guard.
 //   - `#include <glibre/types/_builtins.hpp>` when any field resolves to a
 //     math or entity builtin type (vec*f, vec*i, quatf, entity).
-//   - `#include <EASTL/...>` headers for container types.
+//   - `#include <optional>`, `#include <string>`, etc. for container types.
 //   - One `struct` for the TypeDecl, wrapped in namespaces derived from the
 //     FQN.  Fields are emitted tag-sorted ascending (ABI rule 1).
 //   - Struct marked `final`; `= default` ctor only (ABI rule 2).
@@ -66,7 +64,7 @@ namespace glibre::tools::foryc {
 // Error codes:
 //   tools::Error::ForycUnknownType  — a field type has no C++ mapping.
 //   tools::Error::ForycSyntaxError  — empty FQN or malformed IR.
-[[nodiscard]] glibre::Result<eastl::string>
+[[nodiscard]] glibre::Result<std::string>
 emit_header_for_type(const TypeDecl& td, std::string_view source_path) noexcept;
 
 // Emit C++ headers for all type(s) in `schema`.
@@ -81,12 +79,12 @@ emit_header_for_type(const TypeDecl& td, std::string_view source_path) noexcept;
 //   tools::Error::ForycEmptySchema  — schema.types is empty (reject early).
 //   tools::Error::ForycUnknownType  — a field type has no C++ mapping.
 //   tools::Error::ForycSyntaxError  — internal: empty FQN or malformed IR.
-[[nodiscard]] glibre::Result<eastl::string> emit_header(const Schema& schema) noexcept;
+[[nodiscard]] glibre::Result<std::string> emit_header(const Schema& schema) noexcept;
 
 // Translate a single .fory builtin type name to its C++ equivalent.
 // Exposed here for unit-testing and future reuse.
 //
 // Returns ForycUnknownType if `fory_type` has no mapping.
-[[nodiscard]] glibre::Result<eastl::string> map_builtin_to_cpp(std::string_view fory_type) noexcept;
+[[nodiscard]] glibre::Result<std::string> map_builtin_to_cpp(std::string_view fory_type) noexcept;
 
 }  // namespace glibre::tools::foryc

@@ -23,8 +23,6 @@
 #include <string_view>
 #include <unistd.h>
 
-#include <EASTL/string.h>
-#include <EASTL/vector.h>
 #include <catch2/catch_test_macros.hpp>
 
 #include "emit_manifest.hpp"
@@ -49,9 +47,9 @@ static PluginManifestSpec make_test_spec(
     const char* abi_hash_hex = "0000000000000000000000000000000000000000000000000000000000000000"
 ) {
     PluginManifestSpec spec;
-    spec.name = eastl::string(name);
+    spec.name = std::string(name);
     spec.version = ManifestSemVer{0, 1, 0};
-    spec.abi_hash = eastl::string(abi_hash_hex);
+    spec.abi_hash = std::string(abi_hash_hex);
     spec.min_engine_version = ManifestSemVer{0, 0, 0};
     return spec;
 }
@@ -80,45 +78,45 @@ TEST_CASE("foryc_emit_manifest_writes_plugin_manifest_blob", "[foryc][emit_manif
     auto result = emit_manifest(spec);
     REQUIRE(result.has_value());
 
-    const eastl::string& src = *result;
+    const std::string& src = *result;
 
     // The generated TU must include the standard headers.
-    CHECK(src.find("#include <cstddef>") != eastl::string::npos);
-    CHECK(src.find("#include <cstdint>") != eastl::string::npos);
+    CHECK(src.find("#include <cstddef>") != std::string::npos);
+    CHECK(src.find("#include <cstdint>") != std::string::npos);
 
     // The kManifestBytes array must be present and non-empty.
     // "sizeof(kManifestBytes)" must appear (for glibre_plugin_manifest_size).
-    CHECK(src.find("kManifestBytes") != eastl::string::npos);
-    CHECK(src.find("sizeof(kManifestBytes)") != eastl::string::npos);
+    CHECK(src.find("kManifestBytes") != std::string::npos);
+    CHECK(src.find("sizeof(kManifestBytes)") != std::string::npos);
 
     // The manifest_size symbol must be present.
-    CHECK(src.find("glibre_plugin_manifest_size") != eastl::string::npos);
+    CHECK(src.find("glibre_plugin_manifest_size") != std::string::npos);
 
     // The manifest pointer symbol must be present.
-    CHECK(src.find("glibre_plugin_manifest") != eastl::string::npos);
+    CHECK(src.find("glibre_plugin_manifest") != std::string::npos);
 
     // The plugin name must appear as a string literal in glibre_plugin_name.
     // e.g.: const char* glibre_plugin_name = "glibre.render";
-    CHECK(src.find("\"glibre.render\"") != eastl::string::npos);
+    CHECK(src.find("\"glibre.render\"") != std::string::npos);
 
     // The extern "C" block must be present.
-    CHECK(src.find("extern \"C\"") != eastl::string::npos);
+    CHECK(src.find("extern \"C\"") != std::string::npos);
 
     // The glibre_plugin_name global must be present.
-    CHECK(src.find("glibre_plugin_name") != eastl::string::npos);
+    CHECK(src.find("glibre_plugin_name") != std::string::npos);
 
     // The glibre_plugin_abi_hash global must be present.
     // plugin-abi.md §"Plugin file shape" item 3: extern "C" const char* global.
-    CHECK(src.find("glibre_plugin_abi_hash") != eastl::string::npos);
+    CHECK(src.find("glibre_plugin_abi_hash") != std::string::npos);
 
     // Blob initializer must contain hex byte literals (0xNN pattern).
-    CHECK(src.find("0x") != eastl::string::npos);
+    CHECK(src.find("0x") != std::string::npos);
 
     // The blob is a non-empty byte array: the name "glibre.render" alone
     // contributes 2 (len prefix) + 13 (chars) = 15 bytes, so the array is
     // guaranteed to have more than one element — the initializer must contain
     // a comma (separating at least two bytes).
-    CHECK(src.find(", ") != eastl::string::npos);
+    CHECK(src.find(", ") != std::string::npos);
 }
 
 // -----------------------------------------------------------------------
@@ -141,15 +139,15 @@ TEST_CASE("foryc_emit_manifest_includes_abi_hash", "[foryc][emit_manifest]") {
     auto result = emit_manifest(spec);
     REQUIRE(result.has_value());
 
-    const eastl::string& src = *result;
+    const std::string& src = *result;
 
     // The glibre_plugin_abi_hash global must contain the full 64-char hex string
     // as a string literal (plugin-abi.md §"Plugin file shape" item 3).
-    const eastl::string expected_literal = eastl::string("\"") + eastl::string(kHash64) + "\"";
-    CHECK(src.find(expected_literal) != eastl::string::npos);
+    const std::string expected_literal = std::string("\"") + std::string(kHash64) + "\"";
+    CHECK(src.find(expected_literal) != std::string::npos);
 
     // The const char* global must be present (not a function returning uint64_t).
-    CHECK(src.find("glibre_plugin_abi_hash") != eastl::string::npos);
+    CHECK(src.find("glibre_plugin_abi_hash") != std::string::npos);
 }
 
 // -----------------------------------------------------------------------
@@ -158,8 +156,8 @@ TEST_CASE("foryc_emit_manifest_includes_abi_hash", "[foryc][emit_manifest]") {
 
 TEST_CASE("foryc_emit_manifest_rejects_empty_name", "[foryc][emit_manifest]") {
     PluginManifestSpec spec;
-    spec.name = eastl::string{};  // empty name — should fail
-    spec.abi_hash = eastl::string(64, '0');
+    spec.name = std::string{};  // empty name — should fail
+    spec.abi_hash = std::string(64, '0');
 
     auto result = emit_manifest(spec);
     REQUIRE(!result.has_value());
@@ -168,8 +166,8 @@ TEST_CASE("foryc_emit_manifest_rejects_empty_name", "[foryc][emit_manifest]") {
 
 TEST_CASE("foryc_emit_manifest_rejects_empty_abi_hash", "[foryc][emit_manifest]") {
     PluginManifestSpec spec;
-    spec.name = eastl::string("glibre.test");
-    spec.abi_hash = eastl::string{};  // empty abi_hash — should fail
+    spec.name = "glibre.test";
+    spec.abi_hash = std::string{};  // empty abi_hash — should fail
 
     auto result = emit_manifest(spec);
     REQUIRE(!result.has_value());
@@ -178,40 +176,40 @@ TEST_CASE("foryc_emit_manifest_rejects_empty_abi_hash", "[foryc][emit_manifest]"
 
 TEST_CASE("foryc_emit_manifest_escapes_name_with_quotes", "[foryc][emit_manifest]") {
     PluginManifestSpec spec;
-    spec.name = eastl::string("has\"quote");
+    spec.name = std::string("has\"quote");
     spec.version = ManifestSemVer{1, 0, 0};
-    spec.abi_hash = eastl::string(64, '0');  // 64 zeros
+    spec.abi_hash = std::string(64, '0');  // 64 zeros
 
     auto result = emit_manifest(spec);
     REQUIRE(result.has_value());
 
     // The backslash-escaped form must appear; raw double-quote must not.
-    const eastl::string& src = *result;
-    CHECK(src.find("\\\"quote") != eastl::string::npos);
+    const std::string& src = *result;
+    CHECK(src.find("\\\"quote") != std::string::npos);
 }
 
 TEST_CASE("foryc_emit_manifest_depends_on_encoded_in_blob", "[foryc][emit_manifest]") {
     PluginManifestSpec spec;
-    spec.name = eastl::string("glibre.physics");
+    spec.name = "glibre.physics";
     spec.version = ManifestSemVer{0, 1, 0};
-    spec.abi_hash = eastl::string(64, '0');
-    spec.depends_on.push_back(eastl::string("glibre.core"));
-    spec.depends_on.push_back(eastl::string("glibre.types"));
+    spec.abi_hash = std::string(64, '0');
+    spec.depends_on.push_back("glibre.core");
+    spec.depends_on.push_back("glibre.types");
 
     auto result = emit_manifest(spec);
     REQUIRE(result.has_value());
 
-    const eastl::string& src = *result;
+    const std::string& src = *result;
 
     // The blob initializer must be non-empty and contain the depends_on data.
     // With two 11-char deps + length prefixes the array is well over 30 bytes.
-    CHECK(src.find("kManifestBytes") != eastl::string::npos);
+    CHECK(src.find("kManifestBytes") != std::string::npos);
 
     // The generated source must still export the four required symbols.
-    CHECK(src.find("glibre_plugin_manifest") != eastl::string::npos);
-    CHECK(src.find("glibre_plugin_manifest_size") != eastl::string::npos);
-    CHECK(src.find("glibre_plugin_abi_hash") != eastl::string::npos);
-    CHECK(src.find("glibre_plugin_name") != eastl::string::npos);
+    CHECK(src.find("glibre_plugin_manifest") != std::string::npos);
+    CHECK(src.find("glibre_plugin_manifest_size") != std::string::npos);
+    CHECK(src.find("glibre_plugin_abi_hash") != std::string::npos);
+    CHECK(src.find("glibre_plugin_name") != std::string::npos);
 }
 
 // -----------------------------------------------------------------------
@@ -242,7 +240,7 @@ TEST_CASE("foryc_emit_manifest_round_trip_via_compile", "[foryc][emit_manifest][
     auto emit_result = emit_manifest(spec);
     REQUIRE(emit_result.has_value());
 
-    const eastl::string& src_text = *emit_result;
+    const std::string& src_text = *emit_result;
 
     // --- Write the generated source to a per-test unique temp directory. ---
     // LOW-8 fix: avoid shared path races between parallel test runs.

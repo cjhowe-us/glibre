@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.30)
 # glibre-foryc — .fory schema compiler host tool (plans #219, #220, #221, #225)
 #
 # This target is a host-side tool only. glibre-core is linked for
-# glibre::Error; EASTL is propagated from core.
+# glibre::Error; libc++ stdlib is used directly (no EASTL, no PMR — plan #1048).
 #
 # Plan #219: parser skeleton (parser.{hpp,cpp}).
 # Plan #220: header emission pass (emit_header.{hpp,cpp}, builtin_map.hpp).
@@ -52,7 +52,7 @@ target_include_directories(glibre-foryc
 
 target_link_libraries(glibre-foryc
     PRIVATE
-        glibre::core   # provides glibre::Error + EASTL transitively
+        glibre::core   # provides glibre::Error transitively
         # Compile-flag contract: enforces -fno-exceptions, -fno-rtti,
         # -fvisibility=hidden project-wide (cmake/Compile.cmake).
         glibre::compile_contract
@@ -73,7 +73,7 @@ target_compile_options(glibre-foryc PRIVATE
     -Wextra
     -Wpedantic
     -Wno-unused-parameter
-    # Suppress -Wpedantic on C2y extension warnings from EASTL macros
+    # Suppress -Wpedantic on C2y extension warnings (e.g. from libc++ internals)
     -Wno-c2y-extensions
 )
 

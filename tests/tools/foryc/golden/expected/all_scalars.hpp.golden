@@ -10,10 +10,10 @@
 
 #include <glibre/types/_builtins.hpp>
 
-#include <EASTL/optional.h>
-#include <EASTL/string.h>
-#include <EASTL/unordered_map.h>
-#include <EASTL/vector.h>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace test {
 
@@ -39,8 +39,8 @@ struct AllScalars final {
     glibre::math::Vec4i q_vec4i{};
     glibre::math::Quatf r_quatf{};
     glibre::core::EntityId s_entity{};
-    eastl::string t_string{};
-    eastl::vector<std::byte> u_bytes{};
+    std::string t_string{};
+    std::vector<std::byte> u_bytes{};
 
     AllScalars() = default;
 };
