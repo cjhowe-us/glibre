@@ -90,13 +90,17 @@ namespace glibre::core {
 //
 // Typical usage (plan #230 caller):
 //
-//   // mr must be a long-lived PerContextAllocatorResource backed by the
-//   // context's PerContextAllocator (see alloc.hpp §"ALLOCATOR CONTRACT").
+//   // 1. Construct a per-context allocator + resource pair.
+//   //    The resource MUST outlive the PluginLoader.
+//   glibre::PerContextAllocator alloc{glibre::ContextTag::core};
+//   glibre::PerContextAllocatorResource mr{alloc};
+//
+//   // 2. Open the plugin — dylib_path_ is backed by mr.
 //   auto result = PluginLoader::open("plugins/render/librender.dylib", mr);
 //   if (!result) { handle_error(result.error()); return; }
 //   PluginLoader& loader = *result;
-//   // inspect loader.manifest_result(), loader.abi_hash(), etc.
-//   // plan #230 adds the ABI-hash gate here.
+//   // 3. Inspect loader.manifest_result(), loader.abi_hash(), etc.
+//   //    plan #230 adds the ABI-hash gate here.
 //
 // PluginLoader is returned by value (as Result<PluginLoader>); the caller
 // receives a fully-initialised object or an error — never a half-open state.
@@ -204,7 +208,10 @@ private:
     // MUST NOT be null for any live (non-moved-from) PluginLoader.
     // After a move the source's mr_ is set to std::pmr::get_default_resource()
     // and dylib_path_ is empty, so no allocation through the original mr_ occurs.
-    std::pmr::memory_resource* mr_;
+    // NSDMI uses get_default_resource() so a default-constructed PluginLoader
+    // (e.g. inside Result<PluginLoader> before open() fills it) never holds a
+    // null pointer.  open() / the private ctor overrides this immediately.
+    std::pmr::memory_resource* mr_{std::pmr::get_default_resource()};
 
     // Filesystem path for diagnostics and plan #230 name-collision checks.
     // Backed by mr_ (HIGH-1 + HIGH-2, round-2, addressed).
