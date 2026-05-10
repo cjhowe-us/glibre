@@ -53,21 +53,23 @@ namespace {
 // data using the target mr.
 BindingSlot copy_slot_with_mr(const BindingSlot& src, std::pmr::memory_resource* mr) {
     BindingSlot dst;
-    dst.kind           = src.kind;
+    dst.kind = src.kind;
     dst.register_space = src.register_space;
     dst.register_index = src.register_index;
-    dst.array_size     = src.array_size;
-    dst.stages         = src.stages;
-    dst.frequency      = src.frequency;
-    dst.name           = std::pmr::string{src.name.data(), src.name.size(), mr};
+    dst.array_size = src.array_size;
+    dst.stages = src.stages;
+    dst.frequency = src.frequency;
+    dst.name = std::pmr::string{src.name.data(), src.name.size(), mr};
     return dst;
 }
 
 // slot_less — ordering key for Pass 6 sort: (register_space, register_index, stage_mask bits).
 struct SlotLess {
     bool operator()(const BindingSlot& a, const BindingSlot& b) const noexcept {
-        if (a.register_space != b.register_space) return a.register_space < b.register_space;
-        if (a.register_index != b.register_index) return a.register_index < b.register_index;
+        if (a.register_space != b.register_space)
+            return a.register_space < b.register_space;
+        if (a.register_index != b.register_index)
+            return a.register_index < b.register_index;
         return a.stages.bits < b.stages.bits;
     }
 };
@@ -78,8 +80,7 @@ struct SlotLess {
 // DescriptorLayout::derive
 // ---------------------------------------------------------------------------
 
-glibre::Result<DescriptorLayout>
-DescriptorLayout::derive(
+glibre::Result<DescriptorLayout> DescriptorLayout::derive(
     const ReflectionBlob& blob, CompileTarget /*target*/, std::pmr::memory_resource* mr
 ) noexcept {
     // Construct layout with all vectors wired to mr.
@@ -93,13 +94,13 @@ DescriptorLayout::derive(
     // ------------------------------------------------------------------
     for (const BindingSlot& slot : blob.bindings) {
         switch (slot.frequency) {
-            case DescriptorFrequencyGroup::PerFrame:
-            case DescriptorFrequencyGroup::PerPass:
-            case DescriptorFrequencyGroup::PerMaterial:
-            case DescriptorFrequencyGroup::PerDraw:
-                break;
-            default:
-                return std::unexpected(glibre::Error{Error::DescriptorFrequencyMissing});
+        case DescriptorFrequencyGroup::PerFrame:
+        case DescriptorFrequencyGroup::PerPass:
+        case DescriptorFrequencyGroup::PerMaterial:
+        case DescriptorFrequencyGroup::PerDraw:
+            break;
+        default:
+            return std::unexpected(glibre::Error{Error::DescriptorFrequencyMissing});
         }
     }
 
@@ -109,21 +110,21 @@ DescriptorLayout::derive(
     // ------------------------------------------------------------------
     for (const BindingSlot& slot : blob.bindings) {
         switch (slot.frequency) {
-            case DescriptorFrequencyGroup::PerFrame:
-                schema.per_frame.slots.push_back(copy_slot_with_mr(slot, mr));
-                break;
-            case DescriptorFrequencyGroup::PerPass:
-                schema.per_pass.slots.push_back(copy_slot_with_mr(slot, mr));
-                break;
-            case DescriptorFrequencyGroup::PerMaterial:
-                schema.per_material.slots.push_back(copy_slot_with_mr(slot, mr));
-                break;
-            case DescriptorFrequencyGroup::PerDraw:
-                schema.per_draw.slots.push_back(copy_slot_with_mr(slot, mr));
-                break;
-            default:
-                // Unreachable: Pass 1 already validated all groups.
-                return std::unexpected(glibre::Error{Error::DescriptorFrequencyMissing});
+        case DescriptorFrequencyGroup::PerFrame:
+            schema.per_frame.slots.push_back(copy_slot_with_mr(slot, mr));
+            break;
+        case DescriptorFrequencyGroup::PerPass:
+            schema.per_pass.slots.push_back(copy_slot_with_mr(slot, mr));
+            break;
+        case DescriptorFrequencyGroup::PerMaterial:
+            schema.per_material.slots.push_back(copy_slot_with_mr(slot, mr));
+            break;
+        case DescriptorFrequencyGroup::PerDraw:
+            schema.per_draw.slots.push_back(copy_slot_with_mr(slot, mr));
+            break;
+        default:
+            // Unreachable: Pass 1 already validated all groups.
+            return std::unexpected(glibre::Error{Error::DescriptorFrequencyMissing});
         }
     }
 
@@ -157,10 +158,10 @@ DescriptorLayout::derive(
     // §4.5 inv. 3 requires slots be ordered for deterministic ordinal assignment.
     // ------------------------------------------------------------------
     SlotLess less{};
-    std::ranges::sort(schema.per_frame.slots,    less);
-    std::ranges::sort(schema.per_pass.slots,     less);
+    std::ranges::sort(schema.per_frame.slots, less);
+    std::ranges::sort(schema.per_pass.slots, less);
     std::ranges::sort(schema.per_material.slots, less);
-    std::ranges::sort(schema.per_draw.slots,     less);
+    std::ranges::sort(schema.per_draw.slots, less);
 
     // ------------------------------------------------------------------
     // Pass 7 — per-table cap check: Metal 4 baseline ≤ 31 slots per group.
@@ -168,11 +169,10 @@ DescriptorLayout::derive(
     // At MVP return DescriptorFrequencyAmbiguous as the closest existing arm.
     // ------------------------------------------------------------------
     constexpr std::size_t kMaxSlotsPerGroup = 31;
-    if (schema.per_frame.slots.size()    > kMaxSlotsPerGroup ||
-        schema.per_pass.slots.size()     > kMaxSlotsPerGroup ||
+    if (schema.per_frame.slots.size() > kMaxSlotsPerGroup ||
+        schema.per_pass.slots.size() > kMaxSlotsPerGroup ||
         schema.per_material.slots.size() > kMaxSlotsPerGroup ||
-        schema.per_draw.slots.size()     > kMaxSlotsPerGroup)
-    {
+        schema.per_draw.slots.size() > kMaxSlotsPerGroup) {
         return std::unexpected(glibre::Error{Error::DescriptorFrequencyAmbiguous});
     }
 
@@ -181,12 +181,9 @@ DescriptorLayout::derive(
     // Σ len(per_*.slots) + len(static_samplers) must equal len(blob.bindings).
     // Any mismatch indicates a bug in passes 2–3 (double-count or silent drop).
     // ------------------------------------------------------------------
-    const std::size_t total_placed =
-        schema.per_frame.slots.size() +
-        schema.per_pass.slots.size() +
-        schema.per_material.slots.size() +
-        schema.per_draw.slots.size() +
-        schema.static_samplers.size();
+    const std::size_t total_placed = schema.per_frame.slots.size() + schema.per_pass.slots.size() +
+                                     schema.per_material.slots.size() +
+                                     schema.per_draw.slots.size() + schema.static_samplers.size();
 
     if (total_placed != blob.bindings.size()) {
         return std::unexpected(glibre::Error{Error::DescriptorFrequencyAmbiguous});
@@ -201,10 +198,14 @@ DescriptorLayout::derive(
 
 const DescriptorTable& DescriptorLayout::table(DescriptorFrequencyGroup g) const noexcept {
     switch (g) {
-        case DescriptorFrequencyGroup::PerFrame:    return schema_.per_frame;
-        case DescriptorFrequencyGroup::PerPass:     return schema_.per_pass;
-        case DescriptorFrequencyGroup::PerMaterial: return schema_.per_material;
-        case DescriptorFrequencyGroup::PerDraw:     return schema_.per_draw;
+    case DescriptorFrequencyGroup::PerFrame:
+        return schema_.per_frame;
+    case DescriptorFrequencyGroup::PerPass:
+        return schema_.per_pass;
+    case DescriptorFrequencyGroup::PerMaterial:
+        return schema_.per_material;
+    case DescriptorFrequencyGroup::PerDraw:
+        return schema_.per_draw;
     }
     // Unreachable on well-formed inputs; all DescriptorFrequencyGroup values covered above.
     return schema_.per_frame;

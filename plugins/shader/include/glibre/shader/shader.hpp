@@ -389,7 +389,8 @@ private:
               DescriptorTable{std::pmr::vector<BindingSlot>{mr}},
               DescriptorTable{std::pmr::vector<BindingSlot>{mr}},
               std::pmr::vector<StaticSampler>{mr},
-              std::pmr::vector<PushConstantRange>{mr}} {}
+              std::pmr::vector<PushConstantRange>{mr}
+          } {}
 
     RootSignatureSchema schema_;
 };

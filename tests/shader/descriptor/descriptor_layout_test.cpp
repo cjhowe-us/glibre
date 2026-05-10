@@ -47,13 +47,13 @@ glibre::shader::BindingSlot make_binding_slot(
     std::string_view name
 ) {
     glibre::shader::BindingSlot slot;
-    slot.kind           = kind;
+    slot.kind = kind;
     slot.register_space = reg_space;
     slot.register_index = reg_index;
-    slot.array_size     = 1;
-    slot.stages         = glibre::shader::StageMask{0x01};  // Vertex stage bit
-    slot.frequency      = freq;
-    slot.name           = std::pmr::string{name.data(), name.size(), mr};
+    slot.array_size = 1;
+    slot.stages = glibre::shader::StageMask{0x01};  // Vertex stage bit
+    slot.frequency = freq;
+    slot.name = std::pmr::string{name.data(), name.size(), mr};
     return slot;
 }
 
@@ -90,19 +90,21 @@ TEST_CASE("descriptor_derive_uses_pmr_resource", "[shader][descriptor_layout]") 
     // the partition pass exercises all four tables.  The name strings are
     // allocated under blob_ta.mr to keep blob allocations separate.
     glibre::shader::ReflectionBlob blob{
-        .entry_points       = std::pmr::vector<glibre::shader::EntryPoint>{&blob_ta.mr},
-        .bindings           = std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr},
-        .vertex_io          = glibre::shader::VertexIOLayout{
-            std::pmr::vector<glibre::shader::VertexInputElement>{&blob_ta.mr}
-        },
-        .push_constants     = std::pmr::vector<glibre::shader::PushConstantRange>{&blob_ta.mr},
-        .material_parameters = glibre::shader::MaterialParameterBlock{
-            std::pmr::string{&blob_ta.mr},
-            0,
-            std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr}
-        },
-        .spec_constants     = std::pmr::vector<glibre::shader::SpecializationConstantSlot>{&blob_ta.mr},
-        .rt_payload_bytes   = 0,
+        .entry_points = std::pmr::vector<glibre::shader::EntryPoint>{&blob_ta.mr},
+        .bindings = std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr},
+        .vertex_io =
+            glibre::shader::VertexIOLayout{
+                std::pmr::vector<glibre::shader::VertexInputElement>{&blob_ta.mr}
+            },
+        .push_constants = std::pmr::vector<glibre::shader::PushConstantRange>{&blob_ta.mr},
+        .material_parameters =
+            glibre::shader::MaterialParameterBlock{
+                std::pmr::string{&blob_ta.mr},
+                0,
+                std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr}
+            },
+        .spec_constants = std::pmr::vector<glibre::shader::SpecializationConstantSlot>{&blob_ta.mr},
+        .rt_payload_bytes = 0,
     };
 
     // Add one ConstantBuffer binding in each frequency group.  Each has a
@@ -110,28 +112,32 @@ TEST_CASE("descriptor_derive_uses_pmr_resource", "[shader][descriptor_layout]") 
     blob.bindings.push_back(make_binding_slot(
         &blob_ta.mr,
         glibre::shader::BindingKind::ConstantBuffer,
-        0, 0,
+        0,
+        0,
         glibre::shader::DescriptorFrequencyGroup::PerFrame,
         "frame_uniforms"
     ));
     blob.bindings.push_back(make_binding_slot(
         &blob_ta.mr,
         glibre::shader::BindingKind::ConstantBuffer,
-        0, 1,
+        0,
+        1,
         glibre::shader::DescriptorFrequencyGroup::PerPass,
         "pass_uniforms"
     ));
     blob.bindings.push_back(make_binding_slot(
         &blob_ta.mr,
         glibre::shader::BindingKind::SampledImage,
-        0, 0,
+        0,
+        0,
         glibre::shader::DescriptorFrequencyGroup::PerMaterial,
         "albedo_texture"
     ));
     blob.bindings.push_back(make_binding_slot(
         &blob_ta.mr,
         glibre::shader::BindingKind::ConstantBuffer,
-        0, 2,
+        0,
+        2,
         glibre::shader::DescriptorFrequencyGroup::PerDraw,
         "draw_data"
     ));
@@ -155,22 +161,22 @@ TEST_CASE("descriptor_derive_uses_pmr_resource", "[shader][descriptor_layout]") 
     // SECONDARY ASSERTIONS: structural correctness of the derived layout.
     // One slot per frequency group.
     const auto& schema = result->schema();
-    CHECK(schema.per_frame.slots.size()    == 1u);
-    CHECK(schema.per_pass.slots.size()     == 1u);
+    CHECK(schema.per_frame.slots.size() == 1u);
+    CHECK(schema.per_pass.slots.size() == 1u);
     CHECK(schema.per_material.slots.size() == 1u);
-    CHECK(schema.per_draw.slots.size()     == 1u);
+    CHECK(schema.per_draw.slots.size() == 1u);
 
     // Verify slot names were copied correctly (content, not just pointer).
-    CHECK(schema.per_frame.slots[0].name    == "frame_uniforms");
-    CHECK(schema.per_pass.slots[0].name     == "pass_uniforms");
+    CHECK(schema.per_frame.slots[0].name == "frame_uniforms");
+    CHECK(schema.per_pass.slots[0].name == "pass_uniforms");
     CHECK(schema.per_material.slots[0].name == "albedo_texture");
-    CHECK(schema.per_draw.slots[0].name     == "draw_data");
+    CHECK(schema.per_draw.slots[0].name == "draw_data");
 
     // Verify table() accessor agrees with schema().
-    CHECK(result->table(glibre::shader::DescriptorFrequencyGroup::PerFrame).slots.size()    == 1u);
-    CHECK(result->table(glibre::shader::DescriptorFrequencyGroup::PerPass).slots.size()     == 1u);
+    CHECK(result->table(glibre::shader::DescriptorFrequencyGroup::PerFrame).slots.size() == 1u);
+    CHECK(result->table(glibre::shader::DescriptorFrequencyGroup::PerPass).slots.size() == 1u);
     CHECK(result->table(glibre::shader::DescriptorFrequencyGroup::PerMaterial).slots.size() == 1u);
-    CHECK(result->table(glibre::shader::DescriptorFrequencyGroup::PerDraw).slots.size()     == 1u);
+    CHECK(result->table(glibre::shader::DescriptorFrequencyGroup::PerDraw).slots.size() == 1u);
 }
 
 // ===========================================================================
@@ -192,30 +198,32 @@ TEST_CASE(
     ShaderTestAlloc derive_ta;
 
     glibre::shader::ReflectionBlob blob{
-        .entry_points        = std::pmr::vector<glibre::shader::EntryPoint>{&blob_ta.mr},
-        .bindings            = std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr},
-        .vertex_io           = glibre::shader::VertexIOLayout{
-            std::pmr::vector<glibre::shader::VertexInputElement>{&blob_ta.mr}
-        },
-        .push_constants      = std::pmr::vector<glibre::shader::PushConstantRange>{&blob_ta.mr},
-        .material_parameters = glibre::shader::MaterialParameterBlock{
-            std::pmr::string{&blob_ta.mr},
-            0,
-            std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr}
-        },
-        .spec_constants      = std::pmr::vector<glibre::shader::SpecializationConstantSlot>{&blob_ta.mr},
-        .rt_payload_bytes    = 0,
+        .entry_points = std::pmr::vector<glibre::shader::EntryPoint>{&blob_ta.mr},
+        .bindings = std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr},
+        .vertex_io =
+            glibre::shader::VertexIOLayout{
+                std::pmr::vector<glibre::shader::VertexInputElement>{&blob_ta.mr}
+            },
+        .push_constants = std::pmr::vector<glibre::shader::PushConstantRange>{&blob_ta.mr},
+        .material_parameters =
+            glibre::shader::MaterialParameterBlock{
+                std::pmr::string{&blob_ta.mr},
+                0,
+                std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr}
+            },
+        .spec_constants = std::pmr::vector<glibre::shader::SpecializationConstantSlot>{&blob_ta.mr},
+        .rt_payload_bytes = 0,
     };
 
     // Add a slot with an out-of-range frequency group value.
     glibre::shader::BindingSlot bad_slot;
-    bad_slot.kind           = glibre::shader::BindingKind::ConstantBuffer;
+    bad_slot.kind = glibre::shader::BindingKind::ConstantBuffer;
     bad_slot.register_space = 0;
     bad_slot.register_index = 0;
-    bad_slot.array_size     = 1;
-    bad_slot.stages         = glibre::shader::StageMask{0x01};
-    bad_slot.frequency      = static_cast<glibre::shader::DescriptorFrequencyGroup>(0xFF);
-    bad_slot.name           = std::pmr::string{"bad_slot", &blob_ta.mr};
+    bad_slot.array_size = 1;
+    bad_slot.stages = glibre::shader::StageMask{0x01};
+    bad_slot.frequency = static_cast<glibre::shader::DescriptorFrequencyGroup>(0xFF);
+    bad_slot.name = std::pmr::string{"bad_slot", &blob_ta.mr};
     blob.bindings.push_back(std::move(bad_slot));
 
     auto result = glibre::shader::DescriptorLayout::derive(
@@ -225,10 +233,9 @@ TEST_CASE(
     REQUIRE_FALSE(result.has_value());
 
     const auto& err = result.error();
-    const bool is_missing =
-        std::holds_alternative<glibre::shader::Error>(err.code()) &&
-        std::get<glibre::shader::Error>(err.code()) ==
-            glibre::shader::Error::DescriptorFrequencyMissing;
+    const bool is_missing = std::holds_alternative<glibre::shader::Error>(err.code()) &&
+                            std::get<glibre::shader::Error>(err.code()) ==
+                                glibre::shader::Error::DescriptorFrequencyMissing;
     CHECK(is_missing);
 }
 
@@ -241,26 +248,27 @@ TEST_CASE(
 // ===========================================================================
 
 TEST_CASE(
-    "descriptor_derive_empty_blob_succeeds_with_no_allocations",
-    "[shader][descriptor_layout]"
+    "descriptor_derive_empty_blob_succeeds_with_no_allocations", "[shader][descriptor_layout]"
 ) {
     ShaderTestAlloc blob_ta;
     ShaderTestAlloc derive_ta;
 
     glibre::shader::ReflectionBlob blob{
-        .entry_points        = std::pmr::vector<glibre::shader::EntryPoint>{&blob_ta.mr},
-        .bindings            = std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr},
-        .vertex_io           = glibre::shader::VertexIOLayout{
-            std::pmr::vector<glibre::shader::VertexInputElement>{&blob_ta.mr}
-        },
-        .push_constants      = std::pmr::vector<glibre::shader::PushConstantRange>{&blob_ta.mr},
-        .material_parameters = glibre::shader::MaterialParameterBlock{
-            std::pmr::string{&blob_ta.mr},
-            0,
-            std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr}
-        },
-        .spec_constants      = std::pmr::vector<glibre::shader::SpecializationConstantSlot>{&blob_ta.mr},
-        .rt_payload_bytes    = 0,
+        .entry_points = std::pmr::vector<glibre::shader::EntryPoint>{&blob_ta.mr},
+        .bindings = std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr},
+        .vertex_io =
+            glibre::shader::VertexIOLayout{
+                std::pmr::vector<glibre::shader::VertexInputElement>{&blob_ta.mr}
+            },
+        .push_constants = std::pmr::vector<glibre::shader::PushConstantRange>{&blob_ta.mr},
+        .material_parameters =
+            glibre::shader::MaterialParameterBlock{
+                std::pmr::string{&blob_ta.mr},
+                0,
+                std::pmr::vector<glibre::shader::BindingSlot>{&blob_ta.mr}
+            },
+        .spec_constants = std::pmr::vector<glibre::shader::SpecializationConstantSlot>{&blob_ta.mr},
+        .rt_payload_bytes = 0,
     };
 
     const std::uint64_t bytes_before = derive_ta.alloc.bytes_used();
