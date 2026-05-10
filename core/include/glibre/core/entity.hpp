@@ -49,9 +49,13 @@ struct Entity {
     friend constexpr bool operator==(Entity, Entity) noexcept = default;
 
     /// Test-only factory: constructs Entity from raw (index, generation) bits.
+    /// Mirrors detail::pack inline to avoid a forward-declaration dance with
+    /// the detail namespace (defined below the struct).
     [[nodiscard]] static constexpr Entity
     from_bits_for_testing(std::uint32_t index, std::uint32_t generation) noexcept {
-        return detail::pack(index, generation);
+        return Entity{
+            (static_cast<std::uint64_t>(generation) << 32U) | static_cast<std::uint64_t>(index)
+        };
     }
 };
 
