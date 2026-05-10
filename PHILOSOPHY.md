@@ -32,24 +32,23 @@
    mismatch.
 10. **Occam's razor at every decision**. Two collapsing requirements
     become one primitive. Record the collapse in the spec.
-11. > **SUPERSEDED — see [reviews/decisions/eastl-removal.md](reviews/decisions/eastl-removal.md). §11 body retained until [CHORE] update-philosophy-md-eastl-removal lands.**
-
-    **EASTL replaces the C++ standard library for runtime data
-    structures**. All containers, strings, smart pointers, `optional`,
-    `variant`, `tuple`, `pair`, and `function` come from `eastl::`,
-    not `std::`. Reasons: explicit allocator-by-value (per-system
-    arenas, no global heap), no exceptions in the hot path, frame /
-    fixed / inline allocators, slot-map and intrusive list primitives,
-    deterministic iteration where required, debug instrumentation that
-    matches game-development workloads. `std::` is retained only for
-    language/runtime utilities EASTL does not own: `std::expected`,
-    `std::format`, `std::chrono`, `std::filesystem`, `std::thread` /
-    `std::mutex` / `std::atomic`, `std::source_location`,
-    `std::span` (when interop with non-EASTL APIs is required),
-    type-traits / concepts, `std::move` / `std::forward`. Public
-    plugin ABI surfaces never expose `std::` containers or
-    `eastl::` containers — they cross the boundary as POD spans /
-    handles only (see plugin-abi decision record).
+11. **libc++ standard library is canonical for runtime data structures**
+    (see [reviews/decisions/eastl-removal.md](reviews/decisions/eastl-removal.md)).
+    Containers, strings, smart pointers, `optional`, `variant`, `tuple`,
+    `pair`, and function objects come from `std::*` or `std::pmr::*`
+    (polymorphic allocators), not external libraries. The per-context
+    allocator substrate is `glibre::PerContextAllocatorResource` — a
+    `std::pmr::memory_resource` adapter that wraps `glibre::PerContextAllocator`
+    and threads the per-tag allocation budget through every `std::pmr::*`
+    container. `std::ranges` (C++20) is the canonical boundary-iteration
+    vocabulary; range concepts (`std::ranges::input_range auto`,
+    `std::span<const T>`) and pipe-syntax (`| std::views::filter(...) |
+    std::ranges::to<std::pmr::vector<T>>()`) replace hand-rolled iterator
+    pairs and loops. C++23/26 stdlib features not yet shipped by libc++ on
+    the locked toolchain are polyfilled under `core/include/glibre/compat/`
+    (one header per feature, deleted when libc++ catches up). Public plugin
+    ABI surfaces never expose `std::` or `std::pmr::` containers — they cross
+    the boundary as POD spans / handles only (see plugin-abi decision record).
 
 ## Anti-patterns we reject
 
