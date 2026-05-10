@@ -339,9 +339,11 @@ struct PanelDecl {
 //   uses Fory tag-sorted field layout, not C++ aggregate initialisation; the Fory
 //   deserialiser populates fields by tag after construction via the allocator ctor.
 //
-//   Production callsite threading (plan #229 loader → pass PerContextAllocatorResource
-//   into PluginManifest::open()) is tracked in [PLAN] issue #<defer-issue>; this PR
-//   ships the constructor API only.
+//   Production callsite threading (plan #1065): PluginManifest::open() now requires
+//   a std::pmr::memory_resource& so all manifest field storage is charged to the
+//   caller's per-context allocator.  The production caller (plan #229 PluginLoader)
+//   passes its existing mr reference through.  No silent bypass of per-context
+//   ceiling via std::pmr::get_default_resource() remains in the production path.
 // ---------------------------------------------------------------------------
 
 struct PluginManifest {
@@ -429,13 +431,32 @@ struct PluginManifest {
     //   core::Error::PluginManifestInvalid   — file exists but Fory
     //     deserialization fails (corrupt, wrong schema version, truncated).
     //
-    // Takes std::string_view so callers holding string literals, std::string,
-    // std::pmr::string, or char arrays do not need to materialise an extra copy.
+    // @param path  Filesystem path to the sidecar .manifest file.
+    //   Takes std::string_view so callers holding string literals, std::string,
+    //   std::pmr::string, or char arrays do not need to materialise an extra copy.
+    //
+    // @param mr  PMR memory resource used to back the returned PluginManifest's
+    //   string and vector fields.  MUST outlive the returned PluginManifest.
+    //   In production (plan #229 loader): pass the core PerContextAllocatorResource
+    //   so manifest string/vector storage is charged to the core context ceiling
+    //   (perf-budget.md §Allocator Rules #1 — no silent bypass of per-context
+    //   ceiling via std::pmr::get_default_resource()).
+    //   In tests: a local PerContextAllocatorResource or a
+    //   std::pmr::monotonic_buffer_resource are both acceptable.
+    //
+    //   Production callers MUST NOT pass *std::pmr::get_default_resource() —
+    //   that silently escapes per-context ceiling enforcement.  The explicit
+    //   parameter makes the intent visible at every call site.
+    //
+    //   Plan #1065 (perf-budget threading): this overload ships per-context
+    //   allocator threading into the open() call path; the constructor itself
+    //   was updated in plan #1042 / PR #1063.
     //
     // Note: implementation stub in core/src/plugin_manifest.cpp; full
     //   deserialization lands when glibre-foryc emits manifest.cpp (#225).
     // -----------------------------------------------------------------------
-    [[nodiscard]] static Result<PluginManifest> open(std::string_view path);
+    [[nodiscard]] static Result<PluginManifest>
+    open(std::string_view path, std::pmr::memory_resource& mr);
 };
 
 // static_assert: PluginManifest is NOT asserted aggregate — it carries an

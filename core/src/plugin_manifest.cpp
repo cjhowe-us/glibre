@@ -9,15 +9,24 @@
 //
 // Full deserialization (Fory binary decode) lands in plan #225.
 // Loader integration (dlopen → manifest-read → hash-check) lands in #229.
+//
+// Allocator threading (plan #1065):
+//   open() accepts a std::pmr::memory_resource& so the returned PluginManifest
+//   (on the success path) has its string/vector fields charged to the caller's
+//   per-context allocator rather than std::pmr::get_default_resource().  The
+//   stub error paths return before constructing a manifest so no allocations
+//   are needed on those paths, but the signature is stable for plan #225.
 
 #include "glibre/core/plugin_manifest.hpp"
 
 #include <filesystem>
+#include <memory_resource>
 #include <string_view>
 
 namespace glibre::core {
 
-Result<PluginManifest> PluginManifest::open(std::string_view path) {
+Result<PluginManifest>
+PluginManifest::open(std::string_view path, std::pmr::memory_resource& mr) {
     // Convert std::string_view to std::filesystem::path for OS stat call.
     // std::filesystem::path accepts std::string_view directly (C++17).
     const std::filesystem::path fs_path(path);
@@ -35,6 +44,13 @@ Result<PluginManifest> PluginManifest::open(std::string_view path) {
     // until glibre-foryc emits the Fory decode shim (plan #225).
     // Return Invalid so callers that reach here with a real file get a
     // predictable, diagnosable error rather than UB.
+    //
+    // mr is passed through so plan #225's full implementation can supply it
+    // to the PluginManifest constructor (PluginManifest{pa}) and charge all
+    // field allocations to the caller's per-context ceiling.
+    //
+    // Suppress "unused parameter" in the stub (plan #225 will use it).
+    (void)mr;
     return std::unexpected(glibre::Error{core::Error::PluginManifestInvalid});
 }
 
