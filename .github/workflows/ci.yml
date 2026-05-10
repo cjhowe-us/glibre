@@ -152,7 +152,9 @@ jobs:
   python-tests:
     # Runs the pytest suite under tests/infra/ — currently covers the
     # verify_dod.py multi-line TEST_CASE fix (plan #1035).
-    runs-on: macos-latest
+    # ubuntu-latest matches the dod-verify.yml production runner; pure Python
+    # tests have no macOS-specific behavior so there is no reason to use macOS.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

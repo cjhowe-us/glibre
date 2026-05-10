@@ -141,7 +141,7 @@ def check_unit_test_named(arg: object) -> tuple[bool, str]:
 
       grep -E does not span newlines under POSIX-extended regex, causing
       spurious dod:failed results for tests that exist and run green.
-    - Restricts the file scan to .cpp / .hpp / .cc so pytest files that
+    - Restricts the file scan to .cpp / .hpp so pytest files that
       contain 'TEST_CASE' in docstrings or fixture content are not scanned.
     """
     name = str(arg)
@@ -151,7 +151,7 @@ def check_unit_test_named(arg: object) -> tuple[bool, str]:
         flags=re.DOTALL,
     )
     tests_root = Path("tests")
-    extensions = {".cpp", ".hpp", ".cc"}
+    extensions = {".cpp", ".hpp"}
     for src_file in tests_root.rglob("*"):
         if src_file.suffix not in extensions:
             continue
