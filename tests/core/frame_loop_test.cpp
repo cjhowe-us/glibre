@@ -423,14 +423,12 @@ TEST_CASE(
     REQUIRE(loop.hot_reload_queue().step_count() == 0u);
 
     // --- Single idle tick: ContextTag::core heap_bytes delta must be 0 ---
-    const std::uint64_t heap_before_tick1 =
-        budget.sample(glibre::ContextTag::Core).heap_bytes;
+    const std::uint64_t heap_before_tick1 = budget.sample(glibre::ContextTag::Core).heap_bytes;
 
     auto result = loop.tick();
     REQUIRE(result.has_value());
 
-    const std::uint64_t heap_after_tick1 =
-        budget.sample(glibre::ContextTag::Core).heap_bytes;
+    const std::uint64_t heap_after_tick1 = budget.sample(glibre::ContextTag::Core).heap_bytes;
 
     // Zero delta: the idle fast path made no ContextTag::core allocations.
     // (load-bearing once plan #241 wires PerContextAllocator → budget;
@@ -450,19 +448,16 @@ TEST_CASE(
 
     // --- Nine more idle ticks: verify zero ContextTag::core allocation delta ---
     for (int i = 0; i < 9; ++i) {
-        const std::uint64_t heap_before =
-            budget.sample(glibre::ContextTag::Core).heap_bytes;
+        const std::uint64_t heap_before = budget.sample(glibre::ContextTag::Core).heap_bytes;
 
         auto r = loop.tick();
         REQUIRE(r.has_value());
 
-        const std::uint64_t heap_after =
-            budget.sample(glibre::ContextTag::Core).heap_bytes;
+        const std::uint64_t heap_after = budget.sample(glibre::ContextTag::Core).heap_bytes;
 
         INFO(
             "idle tick " << (i + 2)
-                         << ": ContextTag::core heap_bytes delta = "
-                         << (heap_after - heap_before)
+                         << ": ContextTag::core heap_bytes delta = " << (heap_after - heap_before)
         );
         CHECK(heap_after == heap_before);
         CHECK(loop.hot_reload_queue().pending_count() == 0u);

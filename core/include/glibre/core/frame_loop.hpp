@@ -177,8 +177,7 @@ public:
     // Thread safety: must not be called concurrently with tick().
     //
     // Plan #599 — PhaseHooks wiring for phase-8 barrier observers.
-    [[nodiscard]] glibre::Result<void>
-    set_phase_hooks(Phase phase, PhaseHooks hooks) noexcept;
+    [[nodiscard]] glibre::Result<void> set_phase_hooks(Phase phase, PhaseHooks hooks) noexcept;
 
     // set_phase_registry() — attach (or detach) a PhaseRegistry for system
     // dispatch.  (plan #245 — phase ownership + system register API)

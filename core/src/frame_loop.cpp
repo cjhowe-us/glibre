@@ -222,32 +222,46 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
     // and to give the CI a stable hook for phase-level benchmarking.
     switch (phase) {
     case Phase::Input: /* platform — MVP empty */
-        if (hooks.on_enter) hooks.on_enter(phase);
-        if (hooks.on_exit) hooks.on_exit(phase);
+        if (hooks.on_enter)
+            hooks.on_enter(phase);
+        if (hooks.on_exit)
+            hooks.on_exit(phase);
         break;
     case Phase::Logic: /* gameplay/scripting — reserved empty */
-        if (hooks.on_enter) hooks.on_enter(phase);
-        if (hooks.on_exit) hooks.on_exit(phase);
+        if (hooks.on_enter)
+            hooks.on_enter(phase);
+        if (hooks.on_exit)
+            hooks.on_exit(phase);
         break;
     case Phase::PhysicsFixed: /* physics — MVP empty */
-        if (hooks.on_enter) hooks.on_enter(phase);
-        if (hooks.on_exit) hooks.on_exit(phase);
+        if (hooks.on_enter)
+            hooks.on_enter(phase);
+        if (hooks.on_exit)
+            hooks.on_exit(phase);
         break;
     case Phase::Animation: /* animation — reserved empty */
-        if (hooks.on_enter) hooks.on_enter(phase);
-        if (hooks.on_exit) hooks.on_exit(phase);
+        if (hooks.on_enter)
+            hooks.on_enter(phase);
+        if (hooks.on_exit)
+            hooks.on_exit(phase);
         break;
     case Phase::Transform: /* core — MVP empty */
-        if (hooks.on_enter) hooks.on_enter(phase);
-        if (hooks.on_exit) hooks.on_exit(phase);
+        if (hooks.on_enter)
+            hooks.on_enter(phase);
+        if (hooks.on_exit)
+            hooks.on_exit(phase);
         break;
     case Phase::CullExtract: /* render — MVP empty */
-        if (hooks.on_enter) hooks.on_enter(phase);
-        if (hooks.on_exit) hooks.on_exit(phase);
+        if (hooks.on_enter)
+            hooks.on_enter(phase);
+        if (hooks.on_exit)
+            hooks.on_exit(phase);
         break;
     case Phase::RenderSubmit: /* render — MVP empty */
-        if (hooks.on_enter) hooks.on_enter(phase);
-        if (hooks.on_exit) hooks.on_exit(phase);
+        if (hooks.on_enter)
+            hooks.on_enter(phase);
+        if (hooks.on_exit)
+            hooks.on_exit(phase);
         break;
     case Phase::HotReload: {
         // Phase 8: hot-reload drain barrier (SPEC §4.6, plan #599, plan #249).
@@ -330,7 +344,8 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
         //   "core barrier carve-out" documented in the existing comment and
         //   tracked under [SPIKE] iterate-frame-phases-core-barrier-carveout.
 
-        if (hooks.on_enter) hooks.on_enter(phase);
+        if (hooks.on_enter)
+            hooks.on_enter(phase);
 
         // (0a) Stub: acquire next drawable.
         // TODO(plan:render-swapchain): render plugin registers acquire callback.
@@ -341,13 +356,15 @@ FrameLoop::run_phase(Phase phase, std::uint8_t expected_ordinal) noexcept {
         present_reset_perf_budget();          // (1) zero counters before leak detect
         if (auto r = present_drain_arenas();  // (2)+(3) drain + optional leak error
             !r) {
-            if (hooks.on_exit) hooks.on_exit(phase);
+            if (hooks.on_exit)
+                hooks.on_exit(phase);
             return r;
         }
         advance_world_tick(world_tick_);  // (4) tick N complete; N+1 may begin
         ++frame_counter_;                 // (5) present-phase frame counter
 
-        if (hooks.on_exit) hooks.on_exit(phase);
+        if (hooks.on_exit)
+            hooks.on_exit(phase);
         break;
     }
 
