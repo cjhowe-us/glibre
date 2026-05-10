@@ -35,24 +35,18 @@ namespace core {
 TypeRegistry::TypeRegistry(std::pmr::memory_resource* resource) noexcept
     : entries_(resource != nullptr ? resource : std::pmr::get_default_resource()) {}
 
-Result<const ColumnDescriptor*>
-TypeRegistry::lookup(TypeId id) const noexcept {
+Result<const ColumnDescriptor*> TypeRegistry::lookup(TypeId id) const noexcept {
     if (id.value >= entries_.size()) {
         return std::unexpected(Error{core::Error::TypeUnregistered});
     }
     return &entries_[id.value];
 }
 
-bool TypeRegistry::is_registered(TypeId id) const noexcept {
-    return id.value < entries_.size();
-}
+bool TypeRegistry::is_registered(TypeId id) const noexcept { return id.value < entries_.size(); }
 
-std::size_t TypeRegistry::count() const noexcept {
-    return entries_.size();
-}
+std::size_t TypeRegistry::count() const noexcept { return entries_.size(); }
 
-Result<void>
-TypeRegistry::register_type(TypeId id, ColumnDescriptor desc) noexcept {
+Result<void> TypeRegistry::register_type(TypeId id, ColumnDescriptor desc) noexcept {
     if (sealed_) {
         return std::unexpected(Error{core::Error::TypeRegistryClosed});
     }
@@ -64,12 +58,9 @@ TypeRegistry::register_type(TypeId id, ColumnDescriptor desc) noexcept {
     return {};
 }
 
-void TypeRegistry::seal() noexcept {
-    sealed_ = true;
-}
+void TypeRegistry::seal() noexcept { sealed_ = true; }
 
-Result<void>
-TypeRegistry::extend_during_load(TypeId id, ColumnDescriptor desc) noexcept {
+Result<void> TypeRegistry::extend_during_load(TypeId id, ColumnDescriptor desc) noexcept {
     // Bypasses sealed_ check — loader privilege (friend class PluginLoader).
     // Enforce contiguous assignment same as register_type.
     if (id.value != entries_.size()) {

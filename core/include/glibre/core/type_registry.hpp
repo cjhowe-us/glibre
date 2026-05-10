@@ -68,7 +68,7 @@ using DropFn = void (*)(void* ptr) noexcept;  // type-erased destructor thunk
 struct ColumnDescriptor {
     std::size_t size{0};      // sizeof(T)
     std::size_t align{0};     // alignof(T)
-    DropFn      drop{nullptr};  // nullptr → trivially-destructible
+    DropFn drop{nullptr};     // nullptr → trivially-destructible
     std::uint64_t layout{0};  // codegen-emitted SoA layout bitfield
 };
 
@@ -111,10 +111,10 @@ public:
 
     // Non-copyable, non-movable — the registry is a long-lived singleton
     // owned by World; no ownership transfer after construction.
-    TypeRegistry(const TypeRegistry&)            = delete;
+    TypeRegistry(const TypeRegistry&) = delete;
     TypeRegistry& operator=(const TypeRegistry&) = delete;
-    TypeRegistry(TypeRegistry&&)                 = delete;
-    TypeRegistry& operator=(TypeRegistry&&)      = delete;
+    TypeRegistry(TypeRegistry&&) = delete;
+    TypeRegistry& operator=(TypeRegistry&&) = delete;
 
     ~TypeRegistry() noexcept = default;
 
@@ -124,8 +124,7 @@ public:
     //   Ok(&descriptor)               — id is registered.
     //   Err(core::Error::TypeUnregistered) — id.value is out of range or the
     //                                        slot was never populated.
-    [[nodiscard]] Result<const ColumnDescriptor*>
-    lookup(TypeId id) const noexcept;
+    [[nodiscard]] Result<const ColumnDescriptor*> lookup(TypeId id) const noexcept;
 
     // is_registered(id) — convenience predicate, non-error-returning.
     //
@@ -151,8 +150,7 @@ public:
     // (the caller should assert rather than handle this in production code).
     //
     // Called by World bootstrap code and plugin registration before seal().
-    [[nodiscard]] Result<void>
-    register_type(TypeId id, ColumnDescriptor desc) noexcept;
+    [[nodiscard]] Result<void> register_type(TypeId id, ColumnDescriptor desc) noexcept;
 
     // seal() — freeze the registry.
     //
@@ -180,8 +178,7 @@ private:
     //   Ok(void)                        — registration succeeded.
     //   Err(core::Error::TypeUnregistered) — id.value is not the next slot
     //                                       (codegen contract violation).
-    [[nodiscard]] Result<void>
-    extend_during_load(TypeId id, ColumnDescriptor desc) noexcept;
+    [[nodiscard]] Result<void> extend_during_load(TypeId id, ColumnDescriptor desc) noexcept;
 
     friend class PluginLoader;
 

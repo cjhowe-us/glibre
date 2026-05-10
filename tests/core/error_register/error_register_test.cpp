@@ -171,7 +171,8 @@ TEST_CASE("error_register_per_context_arms_unique", "[core][error_register]") {
     // Making them visible in the Catch2 report means they appear in CI output
     // and are tracked as named test cases in the DoD.
 
-    // core::Error: 20 enumerators with sequential values 0..19 (plan #597 added TypeUnregistered+TypeRegistryClosed)
+    // core::Error: 20 enumerators with sequential values 0..19 (plan #597 added
+    // TypeUnregistered+TypeRegistryClosed)
     CHECK(all_distinct(kCoreErrorValues));
 
     // render::Error: 5 enumerators with sequential values 0..4

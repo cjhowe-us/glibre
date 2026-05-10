@@ -37,9 +37,9 @@ namespace {
 /// Make a non-trivial ColumnDescriptor with identifiable field values.
 glibre::core::ColumnDescriptor make_desc(std::size_t size, std::size_t align) noexcept {
     return glibre::core::ColumnDescriptor{
-        .size   = size,
-        .align  = align,
-        .drop   = nullptr,
+        .size = size,
+        .align = align,
+        .drop = nullptr,
         .layout = 0,
     };
 }
@@ -77,8 +77,9 @@ bool is_type_registry_closed(const glibre::Error& err) noexcept {
 //   C. is_registered() mirrors lookup() — returns false for the same ids.
 // ===========================================================================
 
-TEST_CASE("core/type_registry: lookup_unregistered_yields_TypeUnregistered",
-          "[core][type_registry]") {
+TEST_CASE(
+    "core/type_registry: lookup_unregistered_yields_TypeUnregistered", "[core][type_registry]"
+) {
     std::pmr::monotonic_buffer_resource buf{4096};
     glibre::core::TypeRegistry reg{&buf};
 
@@ -94,7 +95,7 @@ TEST_CASE("core/type_registry: lookup_unregistered_yields_TypeUnregistered",
         REQUIRE(r.has_value());
 
         // Slot 0 is registered; slot 1 is not.
-        auto ok  = reg.lookup(glibre::core::TypeId{0});
+        auto ok = reg.lookup(glibre::core::TypeId{0});
         auto bad = reg.lookup(glibre::core::TypeId{1});
 
         REQUIRE(ok.has_value());
@@ -127,8 +128,9 @@ TEST_CASE("core/type_registry: lookup_unregistered_yields_TypeUnregistered",
 //   C. is_sealed() reflects seal() state.
 // ===========================================================================
 
-TEST_CASE("core/type_registry: register_after_seal_yields_TypeRegistryClosed",
-          "[core][type_registry]") {
+TEST_CASE(
+    "core/type_registry: register_after_seal_yields_TypeRegistryClosed", "[core][type_registry]"
+) {
     std::pmr::monotonic_buffer_resource buf{4096};
     glibre::core::TypeRegistry reg{&buf};
 
@@ -202,16 +204,14 @@ namespace glibre::core {
 // real PluginLoader implementation.
 class PluginLoader {
 public:
-    static Result<void>
-    test_extend(TypeRegistry& reg, TypeId id, ColumnDescriptor desc) noexcept {
+    static Result<void> test_extend(TypeRegistry& reg, TypeId id, ColumnDescriptor desc) noexcept {
         return reg.extend_during_load(id, desc);
     }
 };
 
 }  // namespace glibre::core
 
-TEST_CASE("core/type_registry: register_during_plugin_register_admitted",
-          "[core][type_registry]") {
+TEST_CASE("core/type_registry: register_during_plugin_register_admitted", "[core][type_registry]") {
     std::pmr::monotonic_buffer_resource buf{4096};
     glibre::core::TypeRegistry reg{&buf};
 
@@ -223,8 +223,8 @@ TEST_CASE("core/type_registry: register_during_plugin_register_admitted",
 
     SECTION("extend_during_load admits registration after seal") {
         // Simulate PluginLoader calling extend_during_load for a newly-loaded plugin type.
-        auto result = glibre::core::PluginLoader::test_extend(
-            reg, glibre::core::TypeId{1}, make_desc(16, 8));
+        auto result =
+            glibre::core::PluginLoader::test_extend(reg, glibre::core::TypeId{1}, make_desc(16, 8));
         REQUIRE(result.has_value());
         CHECK(reg.count() == 2u);
 
@@ -237,8 +237,8 @@ TEST_CASE("core/type_registry: register_during_plugin_register_admitted",
 
     SECTION("extend_during_load enforces contiguous slot requirement") {
         // Slot 1 is the next valid slot; slot 3 skips over slots 1 and 2 → error.
-        auto result = glibre::core::PluginLoader::test_extend(
-            reg, glibre::core::TypeId{3}, make_desc(4, 4));
+        auto result =
+            glibre::core::PluginLoader::test_extend(reg, glibre::core::TypeId{3}, make_desc(4, 4));
         REQUIRE_FALSE(result.has_value());
         CHECK(is_type_unregistered(result.error()));
     }
@@ -266,28 +266,30 @@ TEST_CASE("core/type_registry: register_during_plugin_register_admitted",
 //   C. TypeRegistry carries no virtual functions (compile-time check).
 // ===========================================================================
 
-TEST_CASE("core/type_registry: lookup_o1_no_string_no_reflection",
-          "[core][type_registry]") {
+TEST_CASE("core/type_registry: lookup_o1_no_string_no_reflection", "[core][type_registry]") {
     // Compile-time: TypeRegistry must not have virtual functions.
-    static_assert(!std::is_polymorphic_v<glibre::core::TypeRegistry>,
-                  "TypeRegistry must not be polymorphic (no virtual functions).");
+    static_assert(
+        !std::is_polymorphic_v<glibre::core::TypeRegistry>,
+        "TypeRegistry must not be polymorphic (no virtual functions)."
+    );
 
     // Compile-time: ColumnDescriptor must be trivially-copyable (plain data).
-    static_assert(std::is_trivially_copyable_v<glibre::core::ColumnDescriptor>,
-                  "ColumnDescriptor must be trivially copyable (plain data, no strings).");
+    static_assert(
+        std::is_trivially_copyable_v<glibre::core::ColumnDescriptor>,
+        "ColumnDescriptor must be trivially copyable (plain data, no strings)."
+    );
 
     // Compile-time: TypeId must be trivially-copyable (codegen-emitted integer).
-    static_assert(std::is_trivially_copyable_v<glibre::core::TypeId>,
-                  "TypeId must be trivially copyable.");
+    static_assert(
+        std::is_trivially_copyable_v<glibre::core::TypeId>, "TypeId must be trivially copyable."
+    );
 
     std::pmr::monotonic_buffer_resource buf{8192};
     glibre::core::TypeRegistry reg{&buf};
 
     constexpr std::size_t kN = 8;
     for (std::size_t i = 0; i < kN; ++i) {
-        auto r = reg.register_type(
-            glibre::core::TypeId{i},
-            make_desc(i + 1, 1));
+        auto r = reg.register_type(glibre::core::TypeId{i}, make_desc(i + 1, 1));
         REQUIRE(r.has_value());
     }
 
@@ -301,9 +303,7 @@ TEST_CASE("core/type_registry: lookup_o1_no_string_no_reflection",
         }
     }
 
-    SECTION("count() == kN after kN registrations") {
-        CHECK(reg.count() == kN);
-    }
+    SECTION("count() == kN after kN registrations") { CHECK(reg.count() == kN); }
 }
 
 // ===========================================================================
@@ -324,16 +324,21 @@ TEST_CASE("core/type_registry: lookup_o1_no_string_no_reflection",
 //   D. After seal(), count() is stable (no further entries).
 // ===========================================================================
 
-TEST_CASE("core/type_registry: bootstrap_from_static_init_populates_count",
-          "[core][type_registry]") {
+TEST_CASE(
+    "core/type_registry: bootstrap_from_static_init_populates_count", "[core][type_registry]"
+) {
     std::pmr::monotonic_buffer_resource buf{8192};
     glibre::core::TypeRegistry reg{&buf};
 
     // Simulate glibre-types.dylib _registry.cpp static-init output:
     // three component types with typical ECS sizes.
-    struct SimulatedType { std::size_t size; std::size_t align; };
+    struct SimulatedType {
+        std::size_t size;
+        std::size_t align;
+    };
+
     const SimulatedType kBootstrapTypes[] = {
-        {4,  4},   // e.g. a 32-bit tag component
+        {4, 4},    // e.g. a 32-bit tag component
         {16, 16},  // e.g. a Vec4f position component
         {32, 8},   // e.g. a larger aggregate component
     };
@@ -342,8 +347,8 @@ TEST_CASE("core/type_registry: bootstrap_from_static_init_populates_count",
     // Static-init registration (before World::create()):
     for (std::size_t i = 0; i < kTypeCount; ++i) {
         auto r = reg.register_type(
-            glibre::core::TypeId{i},
-            make_desc(kBootstrapTypes[i].size, kBootstrapTypes[i].align));
+            glibre::core::TypeId{i}, make_desc(kBootstrapTypes[i].size, kBootstrapTypes[i].align)
+        );
         REQUIRE(r.has_value());
     }
 
@@ -355,7 +360,7 @@ TEST_CASE("core/type_registry: bootstrap_from_static_init_populates_count",
         for (std::size_t i = 0; i < kTypeCount; ++i) {
             auto d = reg.lookup(glibre::core::TypeId{i});
             REQUIRE(d.has_value());
-            CHECK(d.value()->size  == kBootstrapTypes[i].size);
+            CHECK(d.value()->size == kBootstrapTypes[i].size);
             CHECK(d.value()->align == kBootstrapTypes[i].align);
         }
     }
@@ -365,9 +370,7 @@ TEST_CASE("core/type_registry: bootstrap_from_static_init_populates_count",
         CHECK(reg.count() == kTypeCount);
 
         // Post-seal registration attempt returns TypeRegistryClosed.
-        auto post = reg.register_type(
-            glibre::core::TypeId{kTypeCount},
-            make_desc(4, 4));
+        auto post = reg.register_type(glibre::core::TypeId{kTypeCount}, make_desc(4, 4));
         REQUIRE_FALSE(post.has_value());
         CHECK(is_type_registry_closed(post.error()));
 
