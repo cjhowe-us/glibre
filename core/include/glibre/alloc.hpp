@@ -4,6 +4,14 @@
 // glibre::PerContextAllocator — tag-tracked heap allocator with per-context
 // ceiling enforcement.
 //
+// Also exports:
+//   glibre::PerContextAllocatorResource — std::pmr::memory_resource adaptor
+//     backed by a PerContextAllocator so that PMR containers (std::pmr::vector,
+//     etc.) track their allocations under the per-context ceiling.  Lifted here
+//     from TypeRegistry (SRP: the adaptor is owned by PerContextAllocator, not
+//     TypeRegistry; any future per-context PMR consumer — PhaseRegistry, plugin-
+//     owned-type tables — reuses this class without pulling type_registry.hpp).
+//
 // Authority: reviews/decisions/perf-budget.md §Allocator Rules #1-3, plan #238.
 //
 // ## Design
@@ -74,6 +82,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory_resource>
 
 #include "glibre/error.hpp"
 
@@ -425,6 +434,95 @@ public:
 private:
     PerContextAllocator& alloc_;
     ContextTag tag_;
+};
+
+// ---------------------------------------------------------------------------
+// PerContextAllocatorResource — std::pmr::memory_resource adaptor
+//
+// Authority: perf-budget.md §Allocator Rules #1, plan #597 (MED-2 SRP lift).
+//
+// ## Design
+//
+//   Wraps a PerContextAllocator so that PMR containers (std::pmr::vector,
+//   std::pmr::unordered_map, …) track their storage under the per-context
+//   ceiling.  Bypassing PerContextAllocator by constructing a PMR vector with
+//   std::pmr::get_default_resource() would silently escape ceiling enforcement.
+//
+//   do_is_equal() uses pointer identity (this == &other).  The rationale:
+//   PerContextAllocator is non-copyable (context singleton invariant per
+//   perf-budget.md §Allocator Rules #1); therefore each
+//   PerContextAllocatorResource wraps exactly one allocator instance and is
+//   equal only to itself.  Self-equality is the only meaningful case and avoids
+//   any cross-resource allocation-transfer by PMR containers.
+//
+// ## Usage
+//
+//   Store one PerContextAllocatorResource as a named member before any PMR
+//   container member — construction order matters because the PMR vector holds
+//   a non-owning pointer to its memory resource.
+//
+//   Example (TypeRegistry pattern):
+//     class Foo {
+//         glibre::PerContextAllocatorResource mr_{alloc};  // declared first
+//         std::pmr::vector<T> items_{&mr_};                // references mr_
+//     };
+//
+// ## Virtual dispatch
+//
+//   std::pmr::memory_resource requires virtual dispatch.  This is acceptable
+//   because PerContextAllocatorResource is used only at construction time (PMR
+//   containers resolve the resource pointer once and cache it); the overhead is
+//   not on any per-frame hot path.
+//
+// ## -fno-exceptions clean
+//   do_allocate() calls std::abort() on ceiling breach rather than throwing
+//   std::bad_alloc.  The engine does not recover from OOM; this matches the
+//   PerContextAllocator OOM contract in alloc.hpp.
+// ---------------------------------------------------------------------------
+
+class PerContextAllocatorResource final : public std::pmr::memory_resource {
+public:
+    // Construct a resource backed by the given allocator.
+    //
+    // Precondition: `alloc` must outlive this resource and any PMR container
+    // that holds a pointer to it (same lifetime constraint as AllocatorHandle).
+    explicit PerContextAllocatorResource(PerContextAllocator& alloc) noexcept
+        : alloc_{alloc} {}
+
+    // Non-copyable, non-movable — holds a reference to the allocator.
+    // Construct a new resource if you need a separate resource handle.
+    PerContextAllocatorResource(const PerContextAllocatorResource&) = delete;
+    PerContextAllocatorResource& operator=(const PerContextAllocatorResource&) = delete;
+    PerContextAllocatorResource(PerContextAllocatorResource&&) = delete;
+    PerContextAllocatorResource& operator=(PerContextAllocatorResource&&) = delete;
+
+    ~PerContextAllocatorResource() noexcept override = default;
+
+protected:
+    // do_allocate — forward to the backing PerContextAllocator.
+    //
+    // On ceiling breach (GLIBRE_ALLOC_STRICT builds), calls std::abort().
+    // The PMR interface expects a valid pointer or a thrown exception; since
+    // the engine compiles with -fno-exceptions, abort is the only option.
+    // Ceiling in diagnostic/debug builds is set by the ContextTag; production
+    // builds use the soft-warning path (see alloc.hpp §Shipping-build soft
+    // warning).
+    void* do_allocate(std::size_t bytes, std::size_t alignment) override;
+
+    // do_deallocate — forward to the backing PerContextAllocator.
+    void do_deallocate(void* p, std::size_t bytes, std::size_t alignment) noexcept override;
+
+    // do_is_equal — pointer identity.
+    //
+    // PerContextAllocator is non-copyable (single-instance-per-context per
+    // perf-budget.md §Allocator Rules #1).  Each PerContextAllocatorResource
+    // wraps exactly one allocator, so self-equality (this == &other) is the
+    // only meaningful equality and prevents cross-resource allocation-transfer
+    // by PMR containers (which call is_equal before swapping resources).
+    bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override;
+
+private:
+    PerContextAllocator& alloc_;
 };
 
 }  // namespace glibre

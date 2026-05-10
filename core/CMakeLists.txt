@@ -34,6 +34,7 @@ add_library(glibre-core STATIC
     src/alloc/transient_arena.cpp    # Per-context transient bump-pointer arena (plan #239)
     src/alloc/per_context_allocator.cpp  # Tag-tracked ceiling-enforced heap allocator (plan #238)
     src/perf_budget.cpp              # Per-context perf-budget counters (plan #241)
+    src/type_registry/type_registry.cpp  # TypeRegistry immutable-after-init lookup (plan #597)
 )
 
 # EASTL is the substrate container/string/variant library per PHILOSOPHY §11.
