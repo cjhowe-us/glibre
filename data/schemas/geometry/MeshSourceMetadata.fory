@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: Apache-2.0
+// data/schemas/geometry/MeshSourceMetadata.fory
+//
+// Authoring provenance record carried with MeshRegistrationDesc into
+// GeometryRegistry::register_mesh, emitted to the editor's content browser,
+// and logged at cook-time into the cook-driver's audit trail.  Persists
+// separately from the pak (under <pak-path>.metadata) so tooling can read
+// it without mapping the pak.
+//
+// Authority: specs/geometry/SPEC.md §7.1.3
+// FQN:       glibre.geometry.MeshSourceMetadata
+// Lifetime:  one per MeshSource registration; read-only metadata, never gating.
+
+schema glibre.geometry.MeshSourceMetadata {
+  version  1
+  since    "0.1.0"
+
+  // NOTE: SPEC §7.1.3 declares literal-form defaults on author, tool_version,
+  // authored_at_unix_ms, and license_tag.  The foryc parser currently only
+  // accepts `default { ... }` brace-block syntax (parser.cpp:582) and cannot
+  // lex scalar/string literals, so those defaults are omitted here.  Tracked
+  // in spike #1027 (iterate-data-foryc-literal-form-defaults).
+  field source_path         : string  tag 1  since 1   // e.g. "art/props/crate.fbx"
+  field author              : string  tag 2  since 1   // SPEC default ""  (#1027)
+  field tool_version        : string  tag 3  since 1   // SPEC default ""  (#1027)
+  field source_content_hash : u64     tag 4  since 1   // matches PakHeader / CookManifest
+  field authored_at_unix_ms : u64     tag 5  since 1   // SPEC default 0   (#1027)
+  field license_tag         : string  tag 6  since 1   // SPEC default ""  (#1027) free-form, content-policy
+  field bounding_box_min    : vec3f   tag 10 since 1
+  field bounding_box_max    : vec3f   tag 11 since 1
+  field source_vertex_count : u32     tag 12 since 1
+  field source_triangle_count : u32   tag 13 since 1
+}

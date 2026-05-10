@@ -90,3 +90,6 @@ include(Catch)
 # does not appear in the default run but IS discovered; CI must not rely on
 # its pass/fail status until the sanitizer preset is plumbed.
 catch_discover_tests(schema-migration-tests)
+
+# Geometry side-record schema parse tests (plan #696).
+add_subdirectory(geometry)
