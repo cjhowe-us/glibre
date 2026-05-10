@@ -248,8 +248,12 @@ PluginLoader::open(std::string_view dylib_path, std::pmr::memory_resource& mr) {
     // Both manifest_blob_ and manifest_blob_size_ are already captured from
     // the dlsym'd symbols above; no additional dlsym step is needed at that point.
     const std::string manifest_path = path_c + ".manifest";
+    // Pass `mr` through so manifest string/vector fields are charged to
+    // the caller's per-context allocator (plan #1065 — perf-budget.md
+    // §Allocator Rules #1).  No silent bypass of per-context ceiling via
+    // std::pmr::get_default_resource() on the manifest-read path.
     glibre::Result<PluginManifest> manifest_result =
-        PluginManifest::open(std::string_view{manifest_path.data(), manifest_path.size()});
+        PluginManifest::open(std::string_view{manifest_path.data(), manifest_path.size()}, mr);
 
     // Construct a valid PluginLoader and transfer all ownership.
     //
