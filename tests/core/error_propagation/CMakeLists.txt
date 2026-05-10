@@ -30,8 +30,8 @@ cmake_minimum_required(VERSION 4.3.0)
 # libc++ stdlib only per reviews/decisions/eastl-removal.md §4).
 #
 # glibre::compile_contract supplies -fno-exceptions/-fno-rtti and visibility
-# flags.  No EASTL dependency: stub_error_returns.cpp was migrated to
-# libc++ stdlib by plan #1049 (eastl-removal.md §4 migration sweep).
+# flags.  No EASTL dependency: migrated to libc++ stdlib per
+# reviews/decisions/eastl-removal.md §4 (plan #1049 migration sweep).
 # ---------------------------------------------------------------------------
 
 add_library(glibre-stub-error-returns MODULE
