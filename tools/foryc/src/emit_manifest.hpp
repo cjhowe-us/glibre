@@ -34,17 +34,16 @@
 //     [abi_hash-str][num_deps u16be]([dep-str]...)
 //   where u16be means two bytes, big-endian.
 //
-// PHILOSOPHY §11: EASTL replaces std containers/strings in the IR.
-//   std:: retained for: std::expected (glibre::Result), std::string_view.
+// PHILOSOPHY §11: libc++ stdlib is canonical. Tools are one-shot CLIs —
+//   plain std::string / std::vector (no PMR).
 
 #pragma once
 
 #include <cstdint>
 #include <expected>
+#include <string>
 #include <string_view>
-
-#include <EASTL/string.h>
-#include <EASTL/vector.h>
+#include <vector>
 
 #include "glibre/error.hpp"
 
@@ -85,11 +84,11 @@ struct ManifestSemVer {
 // ---------------------------------------------------------------------------
 
 struct PluginManifestSpec {
-    eastl::string name;                       // tag 1 — e.g. "glibre.render"
-    ManifestSemVer version{};                 // tag 2
-    eastl::string abi_hash;                   // tag 3 — 64-char blake3 hex
-    ManifestSemVer min_engine_version{};      // tag 4
-    eastl::vector<eastl::string> depends_on;  // tag 9
+    std::string name;                       // tag 1 — e.g. "glibre.render"
+    ManifestSemVer version{};               // tag 2
+    std::string abi_hash;                   // tag 3 — 64-char blake3 hex
+    ManifestSemVer min_engine_version{};    // tag 4
+    std::vector<std::string> depends_on;    // tag 9
 };
 
 // ---------------------------------------------------------------------------
@@ -114,6 +113,6 @@ struct PluginManifestSpec {
 //   tools::Error::ForycSyntaxError — spec.name or spec.abi_hash is empty
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] glibre::Result<eastl::string> emit_manifest(const PluginManifestSpec& spec) noexcept;
+[[nodiscard]] glibre::Result<std::string> emit_manifest(const PluginManifestSpec& spec) noexcept;
 
 }  // namespace glibre::tools::foryc

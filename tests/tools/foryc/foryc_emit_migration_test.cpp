@@ -28,7 +28,6 @@
 #include <string_view>
 #include <unistd.h>
 
-#include <EASTL/string.h>
 #include <catch2/catch_test_macros.hpp>
 
 #include "emit_migration.hpp"
@@ -76,44 +75,44 @@ schema glibre.core.Transform {
     REQUIRE(td.migrations.size() == 2);
     CHECK(td.migrations[0].from_version == 1);
     CHECK(td.migrations[0].to_version == 2);
-    CHECK(td.migrations[0].provider == eastl::string("glibre::core::migrate_Transform_v1_to_v2"));
+    CHECK(td.migrations[0].provider == "glibre::core::migrate_Transform_v1_to_v2");
     CHECK(td.migrations[1].from_version == 2);
     CHECK(td.migrations[1].to_version == 3);
-    CHECK(td.migrations[1].provider == eastl::string("glibre::core::migrate_Transform_v2_to_v3"));
+    CHECK(td.migrations[1].provider == "glibre::core::migrate_Transform_v2_to_v3");
 
     // Emit migration dispatcher.
     auto result = emit_migration(schema, "core/Transform.fory");
     REQUIRE(result.has_value());
 
-    const eastl::string& text = *result;
+    const std::string& text = *result;
 
     // Both provider forward-declarations must appear as C++ namespace-qualified
     // functions (NOT extern "C") per fory-codegen.md §"Migration Mechanic" point 2.
-    CHECK(text.find("glibre::core::migrate_Transform_v1_to_v2") != eastl::string::npos);
-    CHECK(text.find("glibre::core::migrate_Transform_v2_to_v3") != eastl::string::npos);
+    CHECK(text.find("glibre::core::migrate_Transform_v1_to_v2") != std::string::npos);
+    CHECK(text.find("glibre::core::migrate_Transform_v2_to_v3") != std::string::npos);
 
     // C linkage is NOT used for the provider forward-decls (namespaced C++ fns).
     // We check that "extern \"C\"" does NOT precede any provider decl.
     // The per-type table and export symbols do use extern "C", but the providers don't.
     // Simplest check: forward-decl uses std::expected return type (correct sig).
-    CHECK(text.find("std::expected<void, glibre::Error>") != eastl::string::npos);
+    CHECK(text.find("std::expected<void, glibre::Error>") != std::string::npos);
 
     // Per-type static table variable must be present — uses the mangled FQN
     // (plan #1010: "glibre.core.Transform" → "glibre__core__Transform").
-    CHECK(text.find("k_migrations_glibre__core__Transform") != eastl::string::npos);
+    CHECK(text.find("k_migrations_glibre__core__Transform") != std::string::npos);
 
     // Both from/to version pairs must appear as integer literals in the table.
-    CHECK(text.find("1, 2") != eastl::string::npos);
-    CHECK(text.find("2, 3") != eastl::string::npos);
+    CHECK(text.find("1, 2") != std::string::npos);
+    CHECK(text.find("2, 3") != std::string::npos);
 
     // The MigrationEntry struct definition must be present.
-    CHECK(text.find("MigrationEntry") != eastl::string::npos);
+    CHECK(text.find("MigrationEntry") != std::string::npos);
 
     // Per-type exported symbols must use the mangled FQN suffix (plan #1010).
     // "glibre.core.Transform" → symbol suffix "glibre__core__Transform".
-    CHECK(text.find("glibre_plugin_migrations_glibre__core__Transform") != eastl::string::npos);
+    CHECK(text.find("glibre_plugin_migrations_glibre__core__Transform") != std::string::npos);
     CHECK(
-        text.find("glibre_plugin_migrations_glibre__core__Transform_size") != eastl::string::npos
+        text.find("glibre_plugin_migrations_glibre__core__Transform_size") != std::string::npos
     );
 }
 
@@ -138,21 +137,21 @@ schema glibre.core.Velocity {
     auto result = emit_migration(schema, "core/Velocity.fory");
     REQUIRE(result.has_value());
 
-    const eastl::string& text = *result;
+    const std::string& text = *result;
 
     // No-migration path: must NOT contain k_migrations_<type> (the static table).
-    CHECK(text.find("k_migrations") == eastl::string::npos);
+    CHECK(text.find("k_migrations") == std::string::npos);
 
     // size must be 0.
-    CHECK(text.find("= 0") != eastl::string::npos);
+    CHECK(text.find("= 0") != std::string::npos);
 
     // Null pointer for the migrations pointer.
-    CHECK(text.find("nullptr") != eastl::string::npos);
+    CHECK(text.find("nullptr") != std::string::npos);
 
     // Per-type exported symbols must still appear — with mangled FQN suffix (plan #1010).
     // "glibre.core.Velocity" → symbol suffix "glibre__core__Velocity".
-    CHECK(text.find("glibre_plugin_migrations_glibre__core__Velocity") != eastl::string::npos);
-    CHECK(text.find("glibre_plugin_migrations_glibre__core__Velocity_size") != eastl::string::npos);
+    CHECK(text.find("glibre_plugin_migrations_glibre__core__Velocity") != std::string::npos);
+    CHECK(text.find("glibre_plugin_migrations_glibre__core__Velocity_size") != std::string::npos);
 }
 
 // -----------------------------------------------------------------------
@@ -174,26 +173,26 @@ schema glibre.physics.RigidBody {
     auto result = emit_migration(schema, "<test>");
     REQUIRE(result.has_value());
 
-    const eastl::string& text = *result;
+    const std::string& text = *result;
 
     // Exact export pattern (extern "C" linkage on the per-type symbols).
-    CHECK(text.find("extern \"C\"") != eastl::string::npos);
+    CHECK(text.find("extern \"C\"") != std::string::npos);
 
     // Per-type symbol names — with mangled FQN suffix (plan #1010).
     // "glibre.physics.RigidBody" → symbol suffix "glibre__physics__RigidBody".
-    CHECK(text.find("glibre_plugin_migrations_glibre__physics__RigidBody") != eastl::string::npos);
+    CHECK(text.find("glibre_plugin_migrations_glibre__physics__RigidBody") != std::string::npos);
     CHECK(
-        text.find("glibre_plugin_migrations_glibre__physics__RigidBody_size") != eastl::string::npos
+        text.find("glibre_plugin_migrations_glibre__physics__RigidBody_size") != std::string::npos
     );
 
     // std::size_t used for the size (PHILOSOPHY §11: std:: for non-EASTL utilities).
-    CHECK(text.find("std::size_t") != eastl::string::npos);
+    CHECK(text.find("std::size_t") != std::string::npos);
 }
 
 TEST_CASE("foryc_emit_migration_rejects_empty_schema", "[foryc][emit_migration]") {
     // A Schema with zero TypeDecls must return ForycEmptySchema.
     Schema schema;
-    schema.source_path = eastl::string("<empty>");
+    schema.source_path = "<empty>";
 
     auto result = emit_migration(schema, "<empty>");
     REQUIRE(!result.has_value());
@@ -229,10 +228,10 @@ schema glibre.data.Asset {
     REQUIRE(td.migrations.size() == 2);
     CHECK(td.migrations[0].from_version == 1);
     CHECK(td.migrations[0].to_version == 2);
-    CHECK(td.migrations[0].provider == eastl::string("glibre::data::migrate_Asset_v1_to_v2"));
+    CHECK(td.migrations[0].provider == "glibre::data::migrate_Asset_v1_to_v2");
     CHECK(td.migrations[1].from_version == 2);
     CHECK(td.migrations[1].to_version == 3);
-    CHECK(td.migrations[1].provider == eastl::string("glibre::data::migrate_Asset_v2_to_v3"));
+    CHECK(td.migrations[1].provider == "glibre::data::migrate_Asset_v2_to_v3");
 }
 
 // -----------------------------------------------------------------------
@@ -259,41 +258,41 @@ schema glibre.core.Transform {
     auto result = emit_migration(schema, "core/Transform.fory");
     REQUIRE(result.has_value());
 
-    const eastl::string& text = *result;
+    const std::string& text = *result;
 
     // The provider forward-declaration must be wrapped in the provider's
     // namespace (glibre::physics).
-    CHECK(text.find("namespace glibre::physics") != eastl::string::npos);
+    CHECK(text.find("namespace glibre::physics") != std::string::npos);
 
     // The fully-qualified provider reference in the table must use the
     // full path (glibre::physics::migrate_Transform_v1_to_v2).
-    CHECK(text.find("glibre::physics::migrate_Transform_v1_to_v2") != eastl::string::npos);
+    CHECK(text.find("glibre::physics::migrate_Transform_v1_to_v2") != std::string::npos);
 
     // The function signature uses the correct std::expected return type.
-    CHECK(text.find("std::expected<void, glibre::Error>") != eastl::string::npos);
+    CHECK(text.find("std::expected<void, glibre::Error>") != std::string::npos);
 
     // The versioned type forward-declarations (TransformV1, TransformV2) must
     // appear in the type's namespace (glibre::core), not the provider's.
     // Check that glibre::core namespace appears (for type fwd-decl) and that
     // the function fwd-decl uses fully-qualified type names (glibre::core::).
-    CHECK(text.find("namespace glibre::core") != eastl::string::npos);
+    CHECK(text.find("namespace glibre::core") != std::string::npos);
 
     // The provider function signature uses fully-qualified parameter types.
     // This ensures the fwd-decl is valid regardless of which namespace wraps it.
-    CHECK(text.find("glibre::core::TransformV1") != eastl::string::npos);
-    CHECK(text.find("glibre::core::TransformV2") != eastl::string::npos);
+    CHECK(text.find("glibre::core::TransformV1") != std::string::npos);
+    CHECK(text.find("glibre::core::TransformV2") != std::string::npos);
 
     // Verify the provider fwd-decl (inside glibre::physics) uses the
     // unqualified function name (not the fully-qualified glibre::physics:: prefix).
     // The namespace block owns the name; full qualification inside would be wrong.
     const auto physics_open = text.find("namespace glibre::physics");
     const auto physics_close = text.find("}  // namespace glibre::physics");
-    REQUIRE(physics_open != eastl::string::npos);
-    REQUIRE(physics_close != eastl::string::npos);
+    REQUIRE(physics_open != std::string::npos);
+    REQUIRE(physics_close != std::string::npos);
     REQUIRE(physics_open < physics_close);
-    const eastl::string physics_block(text.data() + physics_open, physics_close - physics_open);
+    const std::string physics_block(text.data() + physics_open, physics_close - physics_open);
     // Inside the namespace block, the function name is unqualified.
-    CHECK(physics_block.find("migrate_Transform_v1_to_v2") != eastl::string::npos);
+    CHECK(physics_block.find("migrate_Transform_v1_to_v2") != std::string::npos);
 }
 
 // -----------------------------------------------------------------------
@@ -337,7 +336,7 @@ schema glibre.test.Gadget {
     auto emit_result = emit_migration(*parse_result, "test/Widget.fory");
     REQUIRE(emit_result.has_value());
 
-    const eastl::string& gen_text = *emit_result;
+    const std::string& gen_text = *emit_result;
 
     // --- Write the generated source + a stub migration body to a temp dir. ---
     const fs::path tmp_base = fs::temp_directory_path() / "glibre_foryc_mig_test";
@@ -400,9 +399,8 @@ migrate_Widget_v1_to_v2(const WidgetV1&, WidgetV2&) {
 
     // --- Compile the combined TU into a .dylib. ---
     // HIGH-A fix: supply -I flags so the generated TU's #include "glibre/error.hpp"
-    // and "glibre/error.hpp"'s own #include <EASTL/...> both resolve.
-    // GLIBRE_CORE_INCLUDE_DIR and GLIBRE_VCPKG_INCLUDE_DIR are injected by
-    // the CMakeLists target_compile_definitions for this test binary.
+    // resolves correctly.  GLIBRE_CORE_INCLUDE_DIR and GLIBRE_VCPKG_INCLUDE_DIR
+    // are injected by the CMakeLists target_compile_definitions for this test binary.
     const auto compile_cmd = std::format(
         "clang++ -std=c++23 -fno-exceptions -fno-rtti "
         "-I\"" GLIBRE_CORE_INCLUDE_DIR "\" "
@@ -499,31 +497,31 @@ schema glibre.core.Sensor {
     auto result = emit_migration(schema, "core/Sensor.fory");
     REQUIRE(result.has_value());
 
-    const eastl::string& text = *result;
+    const std::string& text = *result;
 
     // The current_version symbol must appear with mangled FQN suffix (plan #1010).
     // "glibre.core.Sensor" → "glibre__core__Sensor"
-    CHECK(text.find("glibre_plugin_current_version_glibre__core__Sensor") != eastl::string::npos);
+    CHECK(text.find("glibre_plugin_current_version_glibre__core__Sensor") != std::string::npos);
 
     // Must use extern "C" linkage for dlsym-ability (fory-codegen.md §"ABI
     // Stability Rules" — exported C entry points cross dylib boundaries as C ABI).
-    CHECK(text.find("extern \"C\"") != eastl::string::npos);
+    CHECK(text.find("extern \"C\"") != std::string::npos);
 
     // Must use std::uint32_t (not int/uint32_t bare) per the plan spec.
-    CHECK(text.find("std::uint32_t") != eastl::string::npos);
+    CHECK(text.find("std::uint32_t") != std::string::npos);
 
     // The value must equal the schema version (5).
     // We look for "glibre_plugin_current_version_Sensor = 5" (spaces may vary
     // slightly, so search for the symbol name and "5" in the same vicinity by
     // checking the sub-string within a reasonable window).
     const auto sym_pos = text.find("glibre_plugin_current_version_glibre__core__Sensor");
-    REQUIRE(sym_pos != eastl::string::npos);
+    REQUIRE(sym_pos != std::string::npos);
     // Grab the rest of the line (up to 120 chars).
-    const eastl::string line(
+    const std::string line(
         text.data() + sym_pos,
-        eastl::string::size_type(std::min(std::size_t{120}, text.size() - sym_pos))
+        std::string::size_type(std::min(std::size_t{120}, text.size() - sym_pos))
     );
-    CHECK(line.find("5") != eastl::string::npos);
+    CHECK(line.find("5") != std::string::npos);
 
     // Also verify that a second type in the same schema gets its own symbol
     // with its own version (multi-type schema case).
@@ -542,30 +540,30 @@ schema glibre.core.Beta {
 
     auto multi_result = emit_migration(multi_schema, "core/multi.fory");
     REQUIRE(multi_result.has_value());
-    const eastl::string& mt = *multi_result;
+    const std::string& mt = *multi_result;
 
     // Mangled FQN suffix for multi-type schema (plan #1010):
     //   "glibre.core.Alpha" → "glibre__core__Alpha"
     //   "glibre.core.Beta"  → "glibre__core__Beta"
-    CHECK(mt.find("glibre_plugin_current_version_glibre__core__Alpha") != eastl::string::npos);
-    CHECK(mt.find("glibre_plugin_current_version_glibre__core__Beta") != eastl::string::npos);
+    CHECK(mt.find("glibre_plugin_current_version_glibre__core__Alpha") != std::string::npos);
+    CHECK(mt.find("glibre_plugin_current_version_glibre__core__Beta") != std::string::npos);
 
     // Each symbol carries its own version value.
     const auto alpha_pos = mt.find("glibre_plugin_current_version_glibre__core__Alpha");
-    REQUIRE(alpha_pos != eastl::string::npos);
-    const eastl::string alpha_line(
+    REQUIRE(alpha_pos != std::string::npos);
+    const std::string alpha_line(
         mt.data() + alpha_pos,
-        eastl::string::size_type(std::min(std::size_t{120}, mt.size() - alpha_pos))
+        std::string::size_type(std::min(std::size_t{120}, mt.size() - alpha_pos))
     );
-    CHECK(alpha_line.find("2") != eastl::string::npos);
+    CHECK(alpha_line.find("2") != std::string::npos);
 
     const auto beta_pos = mt.find("glibre_plugin_current_version_glibre__core__Beta");
-    REQUIRE(beta_pos != eastl::string::npos);
-    const eastl::string beta_line(
+    REQUIRE(beta_pos != std::string::npos);
+    const std::string beta_line(
         mt.data() + beta_pos,
-        eastl::string::size_type(std::min(std::size_t{120}, mt.size() - beta_pos))
+        std::string::size_type(std::min(std::size_t{120}, mt.size() - beta_pos))
     );
-    CHECK(beta_line.find("7") != eastl::string::npos);
+    CHECK(beta_line.find("7") != std::string::npos);
 }
 
 // -----------------------------------------------------------------------
@@ -605,17 +603,17 @@ schema glibre.test.Valve {
     auto emit_result = emit_migration(*parse_result, "test/Turbo.fory");
     REQUIRE(emit_result.has_value());
 
-    const eastl::string& gen_text = *emit_result;
+    const std::string& gen_text = *emit_result;
 
     // Confirm the symbols appear in the generated text before compiling.
     // Mangled FQN suffix (plan #1010):
     //   "glibre.test.Turbo" → "glibre__test__Turbo"
     //   "glibre.test.Valve" → "glibre__test__Valve"
     CHECK(
-        gen_text.find("glibre_plugin_current_version_glibre__test__Turbo") != eastl::string::npos
+        gen_text.find("glibre_plugin_current_version_glibre__test__Turbo") != std::string::npos
     );
     CHECK(
-        gen_text.find("glibre_plugin_current_version_glibre__test__Valve") != eastl::string::npos
+        gen_text.find("glibre_plugin_current_version_glibre__test__Valve") != std::string::npos
     );
 
     // --- Set up temp dir. ---
@@ -749,15 +747,15 @@ schema glibre.fx.Particle {
     auto result = emit_migration(schema, "multi_particle.fory");
     REQUIRE(result.has_value());
 
-    const eastl::string& text = *result;
+    const std::string& text = *result;
 
     // Both mangled symbols must appear.
-    CHECK(text.find("glibre_plugin_migrations_glibre__core__Particle") != eastl::string::npos);
-    CHECK(text.find("glibre_plugin_migrations_glibre__fx__Particle") != eastl::string::npos);
+    CHECK(text.find("glibre_plugin_migrations_glibre__core__Particle") != std::string::npos);
+    CHECK(text.find("glibre_plugin_migrations_glibre__fx__Particle") != std::string::npos);
 
     // Both current_version mangled symbols must appear.
-    CHECK(text.find("glibre_plugin_current_version_glibre__core__Particle") != eastl::string::npos);
-    CHECK(text.find("glibre_plugin_current_version_glibre__fx__Particle") != eastl::string::npos);
+    CHECK(text.find("glibre_plugin_current_version_glibre__core__Particle") != std::string::npos);
+    CHECK(text.find("glibre_plugin_current_version_glibre__fx__Particle") != std::string::npos);
 
     // Confirm the unqualified (non-mangled) name does NOT appear as a symbol
     // suffix on its own (it would appear only inside the mangled names above,
@@ -765,10 +763,10 @@ schema glibre.fx.Particle {
     // We check that the plain suffix pattern is absent as a standalone export.
     // The mangled names do contain "Particle" but as part of the longer token;
     // a bare "glibre_plugin_migrations_Particle" (unqualified) must NOT exist.
-    CHECK(text.find("glibre_plugin_migrations_Particle\n") == eastl::string::npos);
-    CHECK(text.find("glibre_plugin_migrations_Particle ") == eastl::string::npos);
-    CHECK(text.find("glibre_plugin_current_version_Particle\n") == eastl::string::npos);
-    CHECK(text.find("glibre_plugin_current_version_Particle ") == eastl::string::npos);
+    CHECK(text.find("glibre_plugin_migrations_Particle\n") == std::string::npos);
+    CHECK(text.find("glibre_plugin_migrations_Particle ") == std::string::npos);
+    CHECK(text.find("glibre_plugin_current_version_Particle\n") == std::string::npos);
+    CHECK(text.find("glibre_plugin_current_version_Particle ") == std::string::npos);
 }
 
 // -----------------------------------------------------------------------
@@ -800,23 +798,23 @@ schema glibre.core.Transform {
     auto result_multi = emit_migration(schema_multi, "Transform.fory");
     REQUIRE(result_multi.has_value());
 
-    const eastl::string& text_multi = *result_multi;
+    const std::string& text_multi = *result_multi;
 
     // "glibre.core.Transform" → the token "glibre__core__Transform" must appear.
-    CHECK(text_multi.find("glibre__core__Transform") != eastl::string::npos);
+    CHECK(text_multi.find("glibre__core__Transform") != std::string::npos);
 
     // The symbol families must all use the double-underscore mangled name.
     CHECK(
         text_multi.find("glibre_plugin_current_version_glibre__core__Transform") !=
-        eastl::string::npos
+        std::string::npos
     );
     CHECK(
-        text_multi.find("glibre_plugin_migrations_glibre__core__Transform") != eastl::string::npos
+        text_multi.find("glibre_plugin_migrations_glibre__core__Transform") != std::string::npos
     );
 
     // Single-underscore separator must NOT appear between the FQN components.
     // (i.e. "glibre_core_Transform" is the wrong scheme.)
-    CHECK(text_multi.find("glibre_core_Transform") == eastl::string::npos);
+    CHECK(text_multi.find("glibre_core_Transform") == std::string::npos);
 
     // Single-segment FQN (no dots): symbol must equal the type name unchanged.
     constexpr std::string_view src_bare = R"(
@@ -830,14 +828,14 @@ schema Widget {
     auto result_bare = emit_migration(schema_bare, "Widget.fory");
     REQUIRE(result_bare.has_value());
 
-    const eastl::string& text_bare = *result_bare;
+    const std::string& text_bare = *result_bare;
 
     // Single segment: symbol suffix is just "Widget" — no leading "__".
-    CHECK(text_bare.find("glibre_plugin_current_version_Widget") != eastl::string::npos);
-    CHECK(text_bare.find("glibre_plugin_migrations_Widget") != eastl::string::npos);
+    CHECK(text_bare.find("glibre_plugin_current_version_Widget") != std::string::npos);
+    CHECK(text_bare.find("glibre_plugin_migrations_Widget") != std::string::npos);
     // Confirm no spurious double-underscore was prepended.
-    CHECK(text_bare.find("glibre_plugin_current_version___Widget") == eastl::string::npos);
-    CHECK(text_bare.find("glibre_plugin_migrations___Widget") == eastl::string::npos);
+    CHECK(text_bare.find("glibre_plugin_current_version___Widget") == std::string::npos);
+    CHECK(text_bare.find("glibre_plugin_migrations___Widget") == std::string::npos);
 }
 
 // -----------------------------------------------------------------------
@@ -863,18 +861,18 @@ schema glibre.core.Transform {
     auto result = emit_migration(schema, "core/Transform.fory");
     REQUIRE(result.has_value());
 
-    const eastl::string& text = *result;
+    const std::string& text = *result;
 
     // The mangled token "glibre__core__Transform" must appear in the output.
-    CHECK(text.find("glibre__core__Transform") != eastl::string::npos);
+    CHECK(text.find("glibre__core__Transform") != std::string::npos);
 
     // All three symbol families use the mangled suffix.
     CHECK(
-        text.find("glibre_plugin_current_version_glibre__core__Transform") != eastl::string::npos
+        text.find("glibre_plugin_current_version_glibre__core__Transform") != std::string::npos
     );
-    CHECK(text.find("glibre_plugin_migrations_glibre__core__Transform") != eastl::string::npos);
+    CHECK(text.find("glibre_plugin_migrations_glibre__core__Transform") != std::string::npos);
     CHECK(
-        text.find("glibre_plugin_migrations_glibre__core__Transform_size") != eastl::string::npos
+        text.find("glibre_plugin_migrations_glibre__core__Transform_size") != std::string::npos
     );
 }
 
@@ -902,9 +900,9 @@ TEST_CASE(
     // FQN "glibre.co__re.Foo" has a segment ("co__re") containing "__".
     // The parser would have rejected this; emit_migration must also reject it.
     Schema schema;
-    schema.source_path = eastl::string("<synthetic>");
+    schema.source_path = "<synthetic>";
     TypeDecl td;
-    td.fqn = eastl::string("glibre.co__re.Foo");
+    td.fqn = "glibre.co__re.Foo";
     td.version = 1;
     schema.types.push_back(std::move(td));
 
@@ -914,9 +912,9 @@ TEST_CASE(
 
     // Also verify: a FQN whose *first* segment contains "__" is rejected.
     Schema schema2;
-    schema2.source_path = eastl::string("<synthetic2>");
+    schema2.source_path = "<synthetic2>";
     TypeDecl td2;
-    td2.fqn = eastl::string("gli__bre.core.Foo");
+    td2.fqn = "gli__bre.core.Foo";
     td2.version = 1;
     schema2.types.push_back(std::move(td2));
 
@@ -926,9 +924,9 @@ TEST_CASE(
 
     // Sanity: a clean FQN passes through to a valid result.
     Schema schema3;
-    schema3.source_path = eastl::string("<synthetic3>");
+    schema3.source_path = "<synthetic3>";
     TypeDecl td3;
-    td3.fqn = eastl::string("glibre.core.Foo");
+    td3.fqn = "glibre.core.Foo";
     td3.version = 1;
     schema3.types.push_back(std::move(td3));
 

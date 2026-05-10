@@ -21,15 +21,15 @@
 //   if (fqn_mangle::segment_contains_double_underscore(seg))
 //       return std::unexpected{glibre::Error{tools::Error::ForycInvalidIdentifier}};
 //   ...
-//   const eastl::string mangled = fqn_mangle::fqn_to_mangled(td.fqn);
+//   const std::string mangled = fqn_mangle::fqn_to_mangled(td.fqn);
 //
-// PHILOSOPHY §11: EASTL replaces std containers/strings.
+// PHILOSOPHY §11: libc++ stdlib is canonical. Tools are one-shot CLIs —
+// plain std::string (no PMR).
 
 #pragma once
 
+#include <string>
 #include <string_view>
-
-#include <EASTL/string.h>
 
 namespace glibre::tools::foryc::fqn_mangle {
 
@@ -66,8 +66,8 @@ namespace glibre::tools::foryc::fqn_mangle {
 //   "glibre.core.Transform" → "glibre__core__Transform"
 //   "glibre.Transform"      → "glibre__Transform"
 //   "Transform"             → "Transform"   (single segment: no dots, no change)
-[[nodiscard]] inline eastl::string fqn_to_mangled(const eastl::string& fqn) noexcept {
-    eastl::string out;
+[[nodiscard]] inline std::string fqn_to_mangled(const std::string& fqn) noexcept {
+    std::string out;
     out.reserve(fqn.size() * 2);  // upper bound: each char emits at most 2 chars ('.' → "__")
     for (std::size_t i = 0; i < fqn.size(); ++i) {
         if (fqn[i] == '.') {

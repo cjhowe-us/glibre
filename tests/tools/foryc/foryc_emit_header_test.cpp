@@ -74,13 +74,13 @@ schema Foo {
     auto result = emit_header(schema);
     REQUIRE(result.has_value());
 
-    const eastl::string& text = *result;
+    const std::string& text = *result;
 
     // Must contain the struct declaration.
-    CHECK(text.find("struct Foo") != eastl::string::npos);
+    CHECK(text.find("struct Foo") != std::string::npos);
 
     // Must contain the uint32_t field.
-    CHECK(text.find("uint32_t x") != eastl::string::npos);
+    CHECK(text.find("uint32_t x") != std::string::npos);
 }
 
 TEST_CASE("foryc_emits_header_for_nested_namespace", "[foryc][emit_header]") {
@@ -96,15 +96,15 @@ schema data.shapes.Circle {
     auto result = emit_header(schema);
     REQUIRE(result.has_value());
 
-    const eastl::string& text = *result;
+    const std::string& text = *result;
 
     // Expect `namespace data {` and `namespace shapes {` blocks.
-    CHECK(text.find("namespace data {") != eastl::string::npos);
-    CHECK(text.find("namespace shapes {") != eastl::string::npos);
-    CHECK(text.find("struct Circle") != eastl::string::npos);
+    CHECK(text.find("namespace data {") != std::string::npos);
+    CHECK(text.find("namespace shapes {") != std::string::npos);
+    CHECK(text.find("struct Circle") != std::string::npos);
     // Closing namespace comments.
-    CHECK(text.find("}  // namespace data") != eastl::string::npos);
-    CHECK(text.find("}  // namespace shapes") != eastl::string::npos);
+    CHECK(text.find("}  // namespace data") != std::string::npos);
+    CHECK(text.find("}  // namespace shapes") != std::string::npos);
 }
 
 TEST_CASE("foryc_emit_header_rejects_unknown_type", "[foryc][emit_header]") {
@@ -118,15 +118,15 @@ TEST_CASE("foryc_emit_header_rejects_unknown_type", "[foryc][emit_header]") {
     //
     // We construct the IR manually to bypass the parser's type check.
     Schema schema;
-    schema.source_path = eastl::string("<test>");
+    schema.source_path = "<test>";
 
     TypeDecl td;
-    td.fqn = eastl::string("test.Bad");
+    td.fqn = "test.Bad";
     td.version = 1;
 
     FieldDecl fd;
-    fd.name = eastl::string("x");
-    fd.type_name = eastl::string("NotABuiltin");
+    fd.name = "x";
+    fd.type_name = "NotABuiltin";
     fd.tag = 1;
     td.fields.push_back(std::move(fd));
 
@@ -157,16 +157,16 @@ schema glibre.test.Sorted {
     auto result = emit_header(schema);
     REQUIRE(result.has_value());
 
-    const eastl::string& text = *result;
+    const std::string& text = *result;
 
     // Locate each field; they must appear in tag order: a (tag1), b (tag2), z (tag3).
     const std::size_t pos_a = text.find("float a");
     const std::size_t pos_b = text.find("bool b");
     const std::size_t pos_z = text.find("uint32_t z");
 
-    REQUIRE(pos_a != eastl::string::npos);
-    REQUIRE(pos_b != eastl::string::npos);
-    REQUIRE(pos_z != eastl::string::npos);
+    REQUIRE(pos_a != std::string::npos);
+    REQUIRE(pos_b != std::string::npos);
+    REQUIRE(pos_z != std::string::npos);
 
     CHECK(pos_a < pos_b);
     CHECK(pos_b < pos_z);
@@ -200,8 +200,8 @@ TEST_CASE("foryc_map_builtin_scalars", "[foryc][emit_header][mapping]") {
         {"vec4i",  "glibre::math::Vec4i"},
         {"quatf",  "glibre::math::Quatf"},
         {"entity", "glibre::core::EntityId"},
-        {"string", "eastl::string"},
-        {"bytes",  "eastl::vector<std::byte>"},
+        {"string", "std::string"},
+        {"bytes",  "std::vector<std::byte>"},
     };
     // clang-format on
 
@@ -209,26 +209,26 @@ TEST_CASE("foryc_map_builtin_scalars", "[foryc][emit_header][mapping]") {
         auto r = map_builtin_to_cpp(c.fory);
         INFO("fory type: " << c.fory);
         REQUIRE(r.has_value());
-        CHECK(*r == eastl::string(c.cpp.data(), c.cpp.size()));
+        CHECK(*r == std::string(c.cpp.data(), c.cpp.size()));
     }
 }
 
 TEST_CASE("foryc_map_generic_list_type", "[foryc][emit_header][mapping]") {
     auto r = map_builtin_to_cpp("list<u32>");
     REQUIRE(r.has_value());
-    CHECK(*r == eastl::string("eastl::vector<uint32_t>"));
+    CHECK(*r == "std::vector<uint32_t>");
 }
 
 TEST_CASE("foryc_map_generic_option_type", "[foryc][emit_header][mapping]") {
     auto r = map_builtin_to_cpp("option<entity>");
     REQUIRE(r.has_value());
-    CHECK(*r == eastl::string("eastl::optional<glibre::core::EntityId>"));
+    CHECK(*r == "std::optional<glibre::core::EntityId>");
 }
 
 TEST_CASE("foryc_map_generic_map_type", "[foryc][emit_header][mapping]") {
     auto r = map_builtin_to_cpp("map<u32,string>");
     REQUIRE(r.has_value());
-    CHECK(*r == eastl::string("eastl::unordered_map<uint32_t, eastl::string>"));
+    CHECK(*r == "std::unordered_map<uint32_t, std::string>");
 }
 
 TEST_CASE("foryc_emits_generated_file_comment", "[foryc][emit_header]") {
@@ -245,10 +245,10 @@ schema glibre.test.Fwd {
     auto result = emit_header(schema);
     REQUIRE(result.has_value());
 
-    const eastl::string& text = *result;
-    CHECK(text.find("GENERATED FILE") != eastl::string::npos);
-    CHECK(text.find("#222") != eastl::string::npos);
-    CHECK(text.find("glibre-foryc") != eastl::string::npos);
+    const std::string& text = *result;
+    CHECK(text.find("GENERATED FILE") != std::string::npos);
+    CHECK(text.find("#222") != std::string::npos);
+    CHECK(text.find("glibre-foryc") != std::string::npos);
 }
 
 TEST_CASE("foryc_emits_pragma_once_guard", "[foryc][emit_header]") {
@@ -262,7 +262,7 @@ schema glibre.test.Guard {
     const auto schema = parse_ok(src);
     auto result = emit_header(schema);
     REQUIRE(result.has_value());
-    CHECK(result->find("#pragma once") != eastl::string::npos);
+    CHECK(result->find("#pragma once") != std::string::npos);
 }
 
 // -----------------------------------------------------------------------
@@ -286,9 +286,9 @@ schema glibre.abi.Foo {
     auto result = emit_header(schema);
     REQUIRE(result.has_value());
 
-    const eastl::string& text = *result;
+    const std::string& text = *result;
     // Exact token sequence mandated by ABI rule 2.
-    CHECK(text.find("struct Foo final {") != eastl::string::npos);
+    CHECK(text.find("struct Foo final {") != std::string::npos);
 }
 
 TEST_CASE("foryc_emit_header_emits_default_ctor", "[foryc][emit_header][abi]") {
@@ -305,15 +305,15 @@ schema glibre.abi.Bar {
     auto result = emit_header(schema);
     REQUIRE(result.has_value());
 
-    const eastl::string& text = *result;
+    const std::string& text = *result;
     // Exact ctor line mandated by ABI rule 2.
-    CHECK(text.find("Bar() = default;") != eastl::string::npos);
+    CHECK(text.find("Bar() = default;") != std::string::npos);
     // Negative guard: no user-defined ctor body (would contain a real '{').
     // `Bar() = default;` ends with ';', not '{'. The struct body's opening brace
     // appears only once, on the `struct Bar final {` line.
     // If a body-ctor appeared it would look like `Bar(...) {` or `Bar() {`.
     // We rely on the absence of "Bar() {" as the negative signal.
-    CHECK(text.find("Bar() {") == eastl::string::npos);
+    CHECK(text.find("Bar() {") == std::string::npos);
 }
 
 // -----------------------------------------------------------------------
@@ -325,7 +325,7 @@ TEST_CASE("foryc_emit_header_rejects_empty_schema", "[foryc][emit_header]") {
     // This guards against migration-only .fory files producing misleading
     // preamble-only output.
     Schema schema;
-    schema.source_path = eastl::string("<empty>");
+    schema.source_path = "<empty>";
     // schema.types is empty by default.
 
     auto result = emit_header(schema);
@@ -352,12 +352,12 @@ schema glibre.core.Transform {
     auto result = emit_header(schema);
     REQUIRE(result.has_value());
 
-    const eastl::string& text = *result;
-    CHECK(text.find("#include <glibre/types/_builtins.hpp>") != eastl::string::npos);
+    const std::string& text = *result;
+    CHECK(text.find("#include <glibre/types/_builtins.hpp>") != std::string::npos);
     // Must also contain the resolved C++ type names.
-    CHECK(text.find("glibre::math::Vec3f") != eastl::string::npos);
-    CHECK(text.find("glibre::math::Quatf") != eastl::string::npos);
-    CHECK(text.find("glibre::core::EntityId") != eastl::string::npos);
+    CHECK(text.find("glibre::math::Vec3f") != std::string::npos);
+    CHECK(text.find("glibre::math::Quatf") != std::string::npos);
+    CHECK(text.find("glibre::core::EntityId") != std::string::npos);
 }
 
 TEST_CASE("foryc_emit_header_no_builtins_include_for_scalar_only_schema", "[foryc][emit_header]") {
@@ -376,32 +376,24 @@ schema glibre.example.Widget {
     auto result = emit_header(schema);
     REQUIRE(result.has_value());
 
-    const eastl::string& text = *result;
-    CHECK(text.find("#include <glibre/types/_builtins.hpp>") == eastl::string::npos);
+    const std::string& text = *result;
+    CHECK(text.find("#include <glibre/types/_builtins.hpp>") == std::string::npos);
 }
 
 // -----------------------------------------------------------------------
-// libc++ stdlib migration guard — plan #1055 / eastl-removal.md
+// libc++ stdlib buffer guard — plan #1048 / eastl-removal.md
 //
-// Verifies that emit_header() produces a string buffer whose content is
-// accessible through std::string_view — the universal read-only view that
-// is constructible from both eastl::string (current production type) and
-// std::string (post-migrate(tools/foryc) #1048 type).
-//
-// All assertions use std::string_view so this test requires no changes
-// when #1048 migrates the production API return type from eastl::string
-// to std::string.  Only the binding annotation (`const auto&`) or an
-// explicit type annotation in that future PR will need updating.
+// Verifies that emit_header() produces a std::string buffer whose content
+// is accessible through std::string_view.  Migration to std::string
+// completed by plan #1048; this test uses std::string directly.
 //
 // Policy: eastl-removal.md §Consequences/Test-fixtures — Catch2 built-in
-// matchers work equally well on std::string_view slices; no custom
-// EASTL matchers are used here.
+// matchers work on std::string_view slices; no EASTL matchers needed.
 // -----------------------------------------------------------------------
 
 TEST_CASE("tools/foryc: emits_with_std_string_buffers", "[foryc][emit_header][stdlib]") {
     // Parse a schema with scalar fields only (no math/entity builtins).
-    // The emitted header must be accessible as a std::string_view buffer
-    // with no EASTL-specific accessor calls on the assertion side.
+    // The emitted header must be accessible as a std::string buffer.
     constexpr std::string_view src = R"(
 schema glibre.example.Counter {
   version 1
@@ -414,11 +406,7 @@ schema glibre.example.Counter {
     auto result = emit_header(schema);
     REQUIRE(result.has_value());
 
-    // Bind via std::string_view — constructible from both eastl::string
-    // (data() + size()) and std::string (after #1048 lands).
-    // NOTE: When migrate(tools/foryc) #1048 migrates the production API,
-    // the line below may be simplified to `const std::string& text = *result;`
-    // or kept as-is since std::string_view is constructible from std::string.
+    // Bind via std::string_view — plan #1048 migrated API to std::string.
     const std::string_view text{result->data(), result->size()};
 
     // --- Content assertions via std::string_view::find ---

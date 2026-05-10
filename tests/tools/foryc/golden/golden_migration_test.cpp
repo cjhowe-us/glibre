@@ -30,7 +30,7 @@
 #include <string>
 #include <string_view>
 
-#include <EASTL/string.h>
+
 #include <catch2/catch_test_macros.hpp>
 
 #include "emit_migration.hpp"
@@ -45,14 +45,14 @@ namespace foryc = glibre::tools::foryc;
 // deferred (no second user yet — PHILOSOPHY §2).
 // ---------------------------------------------------------------------------
 
-static eastl::string slurp(const fs::path& p) {
+static std::string slurp(const fs::path& p) {
     std::error_code ec;
     const auto sz = fs::file_size(p, ec);
     if (ec || sz == 0)
         return {};
 
-    eastl::string buf;
-    buf.resize(static_cast<eastl::string::size_type>(sz));
+    std::string buf;
+    buf.resize(static_cast<std::string::size_type>(sz));
 
     std::ifstream ifs{p, std::ios::binary};
     if (!ifs)
@@ -65,7 +65,7 @@ static eastl::string slurp(const fs::path& p) {
     return buf;
 }
 
-static bool splat(const fs::path& p, const eastl::string& content) {
+static bool splat(const fs::path& p, const std::string& content) {
     std::ofstream ofs{p, std::ios::binary | std::ios::trunc};
     if (!ofs)
         return false;
@@ -82,22 +82,22 @@ static bool splat(const fs::path& p, const eastl::string& content) {
 
 static fs::path golden_dir() { return fs::path{GLIBRE_GOLDEN_DIR}; }
 
-static eastl::string simple_diff(const eastl::string& actual, const eastl::string& expected) {
-    eastl::string msg;
+static std::string simple_diff(const std::string& actual, const std::string& expected) {
+    std::string msg;
 
     const std::size_t n = std::min(actual.size(), expected.size());
-    std::size_t first_diff = eastl::string::npos;
+    std::size_t first_diff = std::string::npos;
     for (std::size_t i = 0; i < n; ++i) {
         if (actual[i] != expected[i]) {
             first_diff = i;
             break;
         }
     }
-    if (first_diff == eastl::string::npos && actual.size() != expected.size())
+    if (first_diff == std::string::npos && actual.size() != expected.size())
         first_diff = n;
 
-    if (first_diff == eastl::string::npos)
-        return eastl::string("(no difference found — sizes match)\n");
+    if (first_diff == std::string::npos)
+        return std::string("(no difference found — sizes match)\n");
 
     std::size_t line = 1;
     for (std::size_t i = 0; i < first_diff && i < actual.size(); ++i) {
@@ -106,7 +106,7 @@ static eastl::string simple_diff(const eastl::string& actual, const eastl::strin
     }
 
     // std::format retained per PHILOSOPHY §11 (not an EASTL-owned utility).
-    msg += eastl::string(
+    msg += std::string(
         std::format("First difference at byte offset {} (approx line {})\n", first_diff, line)
             .c_str()
     );
@@ -122,7 +122,7 @@ static eastl::string simple_diff(const eastl::string& actual, const eastl::strin
     msg += expected.substr(ctx_start, ctx_end_e - ctx_start);
     msg += "]\n";
 
-    msg += eastl::string(
+    msg += std::string(
         std::format("actual size:   {}\nexpected size: {}\n", actual.size(), expected.size())
             .c_str()
     );
@@ -169,7 +169,7 @@ TEST_CASE("foryc_migration_golden_v1_to_v2_matches_expected", "[foryc][golden][m
     if (!emit_result.has_value())
         return;
 
-    const eastl::string& actual = *emit_result;
+    const std::string& actual = *emit_result;
 
     // Step 3: UPDATE_GOLDEN mode — overwrite the golden and return.
     const char* update_env = std::getenv("GLIBRE_UPDATE_GOLDEN");
@@ -180,7 +180,7 @@ TEST_CASE("foryc_migration_golden_v1_to_v2_matches_expected", "[foryc][golden][m
     }
 
     // Step 4: read existing golden.
-    const eastl::string expected = slurp(golden_path);
+    const std::string expected = slurp(golden_path);
     {
         INFO(
             "golden file missing or empty: " << golden_path.native()
@@ -193,7 +193,7 @@ TEST_CASE("foryc_migration_golden_v1_to_v2_matches_expected", "[foryc][golden][m
 
     // Step 5: byte-equality check with diagnostic diff on failure.
     if (actual != expected) {
-        const eastl::string diff = simple_diff(actual, expected);
+        const std::string diff = simple_diff(actual, expected);
         INFO(
             "Golden mismatch for 'v1_to_v2':\n"
             << diff.c_str() << "\nRun with GLIBRE_UPDATE_GOLDEN=1 to regenerate the golden."

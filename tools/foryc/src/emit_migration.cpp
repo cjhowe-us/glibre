@@ -9,10 +9,8 @@
 #include "emit_migration.hpp"
 
 #include <format>
+#include <string>
 #include <string_view>
-
-#include <EASTL/string.h>
-#include <EASTL/vector.h>
 
 #include "fqn_mangle.hpp"
 
@@ -21,19 +19,14 @@ namespace glibre::tools::foryc {
 namespace {
 
 // -----------------------------------------------------------------------
-// fmt_e — format a string and return it as an eastl::string.
+// fmt_e — format a string and return it as a std::string.
 //
-// std::format returns std::string.  Constructing eastl::string from
-// std::string::c_str() copies twice (format → std::string → eastl::string via
-// null-scan).  Using data() + size() avoids the null-scan and the second copy.
-// Codegen-time-only so the savings are minor, but avoiding the pattern
-// across 4 call sites also keeps the intent unambiguous.
+// Thin alias kept so call sites remain readable without changes.
 // -----------------------------------------------------------------------
 
 template<class... Args>
-[[nodiscard]] static eastl::string fmt_e(std::format_string<Args...> fmt, Args&&... args) noexcept {
-    const std::string s = std::format(fmt, std::forward<Args>(args)...);
-    return eastl::string(s.data(), s.size());
+[[nodiscard]] static std::string fmt_e(std::format_string<Args...> fmt, Args&&... args) noexcept {
+    return std::format(fmt, std::forward<Args>(args)...);
 }
 
 // -----------------------------------------------------------------------
@@ -45,21 +38,21 @@ template<class... Args>
 // -----------------------------------------------------------------------
 
 struct FqnParts {
-    eastl::string ns;         // C++ namespace ("::" separator), may be empty
-    eastl::string type_name;  // unqualified C++ class name
+    std::string ns;         // C++ namespace ("::" separator), may be empty
+    std::string type_name;  // unqualified C++ class name
 };
 
-[[nodiscard]] static FqnParts split_fqn(const eastl::string& fqn) noexcept {
+[[nodiscard]] static FqnParts split_fqn(const std::string& fqn) noexcept {
     FqnParts parts;
     // Find the last '.' separator.
     const auto last_dot = fqn.rfind('.');
-    if (last_dot == eastl::string::npos) {
+    if (last_dot == std::string::npos) {
         parts.type_name = fqn;
         return parts;
     }
     // Everything before the last dot, with '.' replaced by '::'.
-    const eastl::string prefix(fqn.data(), last_dot);
-    eastl::string ns_str;
+    const std::string prefix(fqn.data(), last_dot);
+    std::string ns_str;
     for (std::size_t i = 0; i < prefix.size(); ++i) {
         if (prefix[i] == '.') {
             ns_str += "::";
@@ -68,7 +61,7 @@ struct FqnParts {
         }
     }
     parts.ns = std::move(ns_str);
-    parts.type_name = eastl::string(fqn.data() + last_dot + 1, fqn.size() - last_dot - 1);
+    parts.type_name = std::string(fqn.data() + last_dot + 1, fqn.size() - last_dot - 1);
     return parts;
 }
 
@@ -98,9 +91,9 @@ struct FqnParts {
 //   codegen-emitted dispatcher."
 // -----------------------------------------------------------------------
 
-[[nodiscard]] static eastl::string emit_type_block(const TypeDecl& td) noexcept {
+[[nodiscard]] static std::string emit_type_block(const TypeDecl& td) noexcept {
     const FqnParts parts = split_fqn(td.fqn);
-    const eastl::string& type_name = parts.type_name;
+    const std::string& type_name = parts.type_name;
 
     // Mangle the full FQN into the C symbol suffix (plan #1010).
     // "glibre.core.Transform" → "glibre__core__Transform"
@@ -109,9 +102,9 @@ struct FqnParts {
     // and glibre.fx.Particle would collide without mangling).
     // fory-codegen.md §"ABI Stability Rules" point 4.
     // Shared helper from fqn_mangle.hpp — also reused by parser.cpp.
-    const eastl::string mangled = fqn_mangle::fqn_to_mangled(td.fqn);
+    const std::string mangled = fqn_mangle::fqn_to_mangled(td.fqn);
 
-    eastl::string out;
+    std::string out;
     out += "// ---- ";
     out += td.fqn;
     out += " ----\n";
@@ -162,8 +155,8 @@ struct FqnParts {
         // type headers.  In the real glibre-types.dylib build the
         // generated headers are on the include path, but forward-
         // declarations make the TU independently well-formed.
-        const eastl::string from_unq = type_name + fmt_e("V{}", mig.from_version);
-        const eastl::string to_unq = type_name + fmt_e("V{}", mig.to_version);
+        const std::string from_unq = type_name + fmt_e("V{}", mig.from_version);
+        const std::string to_unq = type_name + fmt_e("V{}", mig.to_version);
 
         // Emit struct forward-declarations in the type's namespace.
         if (!parts.ns.empty()) {
@@ -188,10 +181,10 @@ struct FqnParts {
         // Fully-qualified parameter type names for the provider fwd-decl.
         // Always qualify with the type's namespace so the declaration is
         // unambiguous even when the provider lives in a different namespace.
-        const eastl::string ns_prefix =
-            parts.ns.empty() ? eastl::string("") : (parts.ns + eastl::string("::"));
-        const eastl::string from_fq = ns_prefix + from_unq;
-        const eastl::string to_fq = ns_prefix + to_unq;
+        const std::string ns_prefix =
+            parts.ns.empty() ? std::string("") : (parts.ns + std::string("::"));
+        const std::string from_fq = ns_prefix + from_unq;
+        const std::string to_fq = ns_prefix + to_unq;
 
         // Derive the provider's own namespace and unqualified function name by
         // splitting mig.provider on the last "::".  This is independent of the
@@ -200,12 +193,12 @@ struct FqnParts {
         // "glibre::physics::migrate_Transform_v1_to_v2").  Using the type's
         // namespace for the fwd-decl would silently forward-declare the wrong
         // symbol and cause a link error.
-        eastl::string provider_ns;
-        eastl::string fn_name = mig.provider;
+        std::string provider_ns;
+        std::string fn_name = mig.provider;
         const auto last_sep = fn_name.rfind("::");
-        if (last_sep != eastl::string::npos) {
-            provider_ns = eastl::string(mig.provider.data(), last_sep);
-            fn_name = eastl::string(
+        if (last_sep != std::string::npos) {
+            provider_ns = std::string(mig.provider.data(), last_sep);
+            fn_name = std::string(
                 mig.provider.data() + last_sep + 2, mig.provider.size() - last_sep - 2
             );
         }
@@ -281,7 +274,7 @@ struct FqnParts {
 // emit_migration — public API
 // -----------------------------------------------------------------------
 
-[[nodiscard]] glibre::Result<eastl::string>
+[[nodiscard]] glibre::Result<std::string>
 emit_migration(const Schema& schema, std::string_view source_path) noexcept {
     if (schema.types.empty())
         return std::unexpected{glibre::Error{tools::Error::ForycEmptySchema}};
@@ -312,12 +305,12 @@ emit_migration(const Schema& schema, std::string_view source_path) noexcept {
     // Assemble the generated TU.
     // -----------------------------------------------------------------------
 
-    eastl::string out;
+    std::string out;
 
     // File-level header comment.
     out += "// GENERATED FILE — do not edit by hand.\n";
     out += "// Source: ";
-    out += eastl::string(source_path.data(), source_path.size());
+    out += std::string(source_path.data(), source_path.size());
     out += "\n";
     out += "// Generator: glibre-foryc (plan #221)\n";
     out += "//\n";
