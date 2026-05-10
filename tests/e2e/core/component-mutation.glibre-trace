@@ -75,7 +75,7 @@
 #   window_size:        1280x720
 #   dpi_scale:          1.0
 #   rng_seed:           0x0000_0000_0000_0001
-#   frame_budget:       max_frames=64                # 15 authored × ~4.3× safety
+#   frame_budget:       max_frames=64                # 18 authored × ~3.6× safety (frames 7, 12, 15 added by #916)
 #   golden_refs:        []                           # AssertEcsSnapshot/Screenshot not used
 #   fixture_layout:     tests/e2e/core/fixtures/component-mutation-components.md
 #
@@ -424,6 +424,15 @@ op: AssertState
                   swap-remove; F3 captures whether ≥ 1 such event fired
                   during the call. Reinforces id=7.
 
+# AssertLogContains id=9 is placed on a distinct successor frame (frame 7)
+# rather than on frame 6 alongside AssertState ids 3–8. Per specs/e2e/SPEC.md
+# §4.1.7 inv 4 (fail-fast), if any AssertState on frame 6 fails the runner
+# aborts immediately and any same-frame successor op is unreachable — the
+# log-channel diagnostic would be invisible precisely when state-checking fails.
+# A successor frame guarantees the log window spans a full frame boundary and
+# that id=9 runs independently of the frame-6 AssertState outcomes.
+# (refs #916; canonical pattern from entity-lifecycle PR #866)
+frame: 7
 op: AssertLogContains
   id:             9
   is_regex:       false
@@ -459,8 +468,8 @@ op: AssertLogContains
 #       row to begin with — we set up two rows in {A,B} below to make
 #       case (b) load-bearing).
 #
-# To make swap-remove load-bearing in {A,B}, frame 7 spawns a SECOND
-# entity (scratch_e) into archetype {A}, and frame 8 (F7 binding)
+# To make swap-remove load-bearing in {A,B}, frame 8 spawns a SECOND
+# entity (scratch_e) into archetype {A}, and frame 9 (F7 binding)
 # migrates scratch_e to {A,B}. The {A,B} archetype then has two
 # rows before F5 fires. The removal of B from world.A.target_entity
 # then forces scratch_e to swap into target_entity's vacated slot —
@@ -468,40 +477,40 @@ op: AssertLogContains
 # "the last row in its chunk swaps into the freed slot").
 #
 # Naming: bystander_e = the entity appended to scratch_ring at frame 3
-# (ring[0]); scratch_e = the entity appended at frame 7 (ring[1],
+# (ring[0]); scratch_e = the entity appended at frame 8 (ring[1],
 # ring head when F7 fires). These two names are used exclusively and
 # consistently throughout this file to avoid ambiguity for the F7
 # implementer.
 #
 # Note: after block 1's F3 migration, archetype {A} holds one row
-# (bystander_e from frame 3). Frame 7's F2 press appends scratch_e
-# (the SECOND ring element) to scratch_ring; frame 8's F7 migrates
+# (bystander_e from frame 3). Frame 8's F2 press appends scratch_e
+# (the SECOND ring element) to scratch_ring; frame 9's F7 migrates
 # scratch_e to {A,B}. F7 (not F3) is used here to keep F3 semantics
 # unambiguous: F3 always targets world.A.target_entity; F7 targets
 # the scratch_ring head = scratch_e (most recently appended).
 
-frame: 7
+frame: 8
 op: InputOp
   event:          KeyDown { key = F2, modifiers = {} }
   semantics:      debug-overlay → World::spawn() + World::set_component(
                   scratch_e, TypeIdOf<A>, A{value=3}). This is a
                   post-first F2 press — appends scratch_e to
                   world.A.scratch_ring; target_entity is preserved.
-                  Lands scratch_e in archetype {A}. Frame 8 follows
+                  Lands scratch_e in archetype {A}. Frame 9 follows
                   up with F7 to migrate scratch_e to {A,B}.
 
-frame: 8
+frame: 9
 op: InputOp
   event:          KeyDown { key = F7, modifiers = {} }
   semantics:      debug-overlay → World::set_component(scratch_e,
                   TypeIdOf<B>, B{value=43}). F7 targets scratch_e —
-                  the scratch_ring head (appended at frame 7, ring[1]).
+                  the scratch_ring head (appended at frame 8, ring[1]).
                   scratch_e migrates to archetype {A,B};
                   world.A.target_entity is unaffected. {A,B} now holds
                   two rows (target_entity + scratch_e) — the
                   precondition for an *observable* swap-remove on F5.
 
-frame: 9
+frame: 10
 op: InputOp
   event:          KeyDown { key = F5, modifiers = {} }
   semantics:      debug-overlay → World::remove_component(
@@ -512,7 +521,7 @@ op: InputOp
                   resource record (overwriting block 1's set
                   observations — see F5 description above).
 
-frame: 10
+frame: 11
 op: AssertState
   id:             10
   world:          A
@@ -555,8 +564,8 @@ op: AssertState
   path:           world.A.target_archetype_chunk_count
   expected:       u32 { value = 1 }
   evidence:       sanity gate — {A} holds one chunk after F5's
-                  reverse migration. (After frame 7's F2 spawned
-                  scratch_e into {A} and frame 8's F7 migrated it
+                  reverse migration. (After frame 8's F2 spawned
+                  scratch_e into {A} and frame 9's F7 migrated it
                   to {A,B}, archetype {A} held one row (bystander_e
                   from frame 3) immediately before F5; F5
                   re-introduces target_entity to {A}, giving 2 rows
@@ -594,6 +603,15 @@ op: AssertState
                   row (and instead corrupting some other invariant)
                   would fail this assertion. Reinforces id=14.
 
+# AssertLogContains id=16 is placed on a distinct successor frame (frame 12)
+# rather than on frame 11 alongside AssertState ids 10–15. Per specs/e2e/SPEC.md
+# §4.1.7 inv 4 (fail-fast), if any AssertState on frame 11 fails the runner
+# aborts immediately and any same-frame successor op is unreachable — the
+# log-channel diagnostic would be invisible precisely when state-checking fails.
+# A successor frame guarantees the log window spans a full frame boundary and
+# that id=16 runs independently of the frame-11 AssertState outcomes.
+# (refs #916; canonical pattern from entity-lifecycle PR #866)
+frame: 12
 op: AssertLogContains
   id:             16
   is_regex:       false
@@ -623,7 +641,7 @@ op: AssertLogContains
 # tag and as the post-call archetype set being byte-equal to the
 # pre-call archetype set.
 
-frame: 11
+frame: 13
 op: InputOp
   event:          KeyDown { key = F4, modifiers = {} }
   semantics:      debug-overlay → World::set_component(
@@ -636,20 +654,20 @@ op: InputOp
                   and the post-call archetype set into
                   world.A.target_archetype_set_after_refusal.
 
-frame: 12
 op: InputOp
   event:          KeyDown { key = F6, modifiers = {} }
   semantics:      debug-overlay → republish full accumulated debug-
                   resource table for the final assertion frame. F6
-                  fires here (frame 12) after F4's block-3 refusal
-                  (frame 11); F5 ran earlier at frame 9 and its
+                  fires here (frame 13) after F4's block-3 refusal
+                  (same frame, processed second per §4.1.5 inv 3
+                  input-ordering); F5 ran earlier at frame 10 and its
                   captured fields (world.A.last_remove_outcome, etc.)
                   remain stable since F4 does not overwrite them. F6
                   refreshes ALL fields in one snapshot so the
-                  frame-13 assertions see a coherent, atomic view of
+                  frame-14 assertions see a coherent, atomic view of
                   the accumulated debug state.
 
-frame: 13
+frame: 14
 op: AssertState
   id:             17
   world:          A
@@ -690,6 +708,15 @@ op: AssertState
                   and updated one of the two maps before discovering
                   the unregistered TypeId would fail this assertion.
 
+# AssertLogContains id=20 is placed on a distinct successor frame (frame 15)
+# rather than on frame 14 alongside AssertState ids 17–19. Per specs/e2e/SPEC.md
+# §4.1.7 inv 4 (fail-fast), if any AssertState on frame 14 fails the runner
+# aborts immediately and any same-frame successor op is unreachable — the
+# log-channel diagnostic would be invisible precisely when state-checking fails.
+# A successor frame guarantees the log window spans a full frame boundary and
+# that id=20 runs independently of the frame-14 AssertState outcomes.
+# (refs #916; canonical pattern from entity-lifecycle PR #866)
+frame: 15
 op: AssertLogContains
   id:             20
   is_regex:       false
@@ -706,7 +733,7 @@ op: AssertLogContains
 # Termination
 # ============================================================================
 
-frame: 14
+frame: 16
 op: End
   evidence:       specs/e2e/SPEC.md §4.1.1 inv 5 — exactly one End
                   op, emitted last; specs/e2e/SPEC.md §7.1.5
@@ -723,7 +750,9 @@ op: End
 #       ↦ AssertState id=8  (source swap-remove path executed;
 #                            load-bearing: {A} held 2 rows before F3)
 #       ↦ AssertLogContains id=9 ("archetype.migrate" — proves the
-#                                  migration handler ran)
+#                                  migration handler ran; on frame 7,
+#                                  successor to frame-6 AssertStates
+#                                  per §4.1.7 inv 4)
 #   "the public boundary observers see the mutation only after the
 #    migration completes"
 #       ↦ AssertState id=4  (set_component_observed_atomicity == true;
@@ -745,7 +774,9 @@ op: End
 #                            regression that fakes hole-free state)
 #       ↦ AssertLogContains id=16 ("swap-remove" in F5 log slice —
 #                                  proves the path executed at the
-#                                  observability axis)
+#                                  observability axis; on frame 12,
+#                                  successor to frame-11 AssertStates
+#                                  per §4.1.7 inv 4)
 #   (id=10 is the success gate that the remove call did not refuse.)
 #
 # Block 3 — unregistered TypeId refusal
@@ -757,7 +788,9 @@ op: End
 #       ↦ AssertState id=19 (forward/reverse maps unchanged — no
 #                            partial mutation on the map axis)
 #       ↦ AssertLogContains id=20 ("core::Error::TypeUnregistered"
-#                                  in log slice)
+#                                  in log slice; on frame 15, successor
+#                                  to frame-14 AssertStates per §4.1.7
+#                                  inv 4)
 #
 # Every Gherkin Then clause maps to ≥ 1 AssertOp. The atomicity clause
 # (block 1) is reinforced by an observer-bus probe (id=4) so a brief
@@ -778,15 +811,17 @@ op: End
 #  frame 3  — F2   : spawn bystander_e   → {A}  (makes block-1 swap-remove load-bearing)
 #  frame 4  — assert target_archetype_set == {A}
 #  frame 5  — F3   : migrate target_entity {A}→{A,B}  (2 rows in {A} at this point)
-#  frame 6  — asserts id=3..9
-#  frame 7  — F2   : spawn scratch_e → {A}
-#  frame 8  — F7   : migrate scratch_e {A}→{A,B}     (makes block-2 swap-remove load-bearing)
-#  frame 9  — F5   : remove B from target_entity {A,B}→{A}
-#  frame 10 — asserts id=10..16
-#  frame 11 — F4   : refusal call (PhantomTypeId)
-#  frame 12 — F6   : snapshot full debug-resource table
-#  frame 13 — asserts id=17..20
-#  frame 14 — End
+#  frame 6  — asserts id=3..8
+#  frame 7  — AssertLogContains id=9 (split from frame 6 by #916; §4.1.7 inv 4)
+#  frame 8  — F2   : spawn scratch_e → {A}
+#  frame 9  — F7   : migrate scratch_e {A}→{A,B}     (makes block-2 swap-remove load-bearing)
+#  frame 10 — F5   : remove B from target_entity {A,B}→{A}
+#  frame 11 — asserts id=10..15
+#  frame 12 — AssertLogContains id=16 (split from frame 11 by #916; §4.1.7 inv 4)
+#  frame 13 — F4 + F6 : refusal call (PhantomTypeId) + snapshot full debug-resource table
+#  frame 14 — asserts id=17..19
+#  frame 15 — AssertLogContains id=20 (split from frame 14 by #916; §4.1.7 inv 4)
+#  frame 16 — End
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # CI status (until implementation lands)
