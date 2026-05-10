@@ -15,12 +15,12 @@
 //   Step 3. Past the attribute, skip whitespace and additional [...] blocks,
 //           then match: <return_type> <ws> <fn_name> <ws>* '('.
 //   Step 4. Collect (fn_name, stage_str) pairs in source-encounter order
-//           using an eastl::vector (preserves deterministic first-occurrence
+//           using a std::pmr::vector (preserves deterministic first-occurrence
 //           order — PHILOSOPHY §7; fixes HIGH-1).
 //   Step 5. Detect duplicates: if any fn_name appears more than once with a
 //           different stage_str → EntryPointStageAmbiguous.
 //
-// No <regex>, <string>, <unordered_map>, or <vector> — PHILOSOPHY §11 (HIGH-2).
+// No <regex>, <unordered_map> — PHILOSOPHY §11 (HIGH-2).
 //
 // Note: this scanner deliberately avoids full Slang parsing.  Full parsing
 // is slangc's job (§4.3).
@@ -28,8 +28,7 @@
 #include "entry_point_scanner.hpp"
 
 #include <cstring>
-
-#include <EASTL/optional.h>
+#include <optional>
 
 namespace glibre::shader::detail {
 
@@ -115,7 +114,7 @@ match_literal(const char* base, std::size_t len, std::size_t& pos, const char* l
 // Stage-string → Stage enum mapping
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] eastl::optional<Stage> parse_stage(const char* str, std::size_t len) noexcept {
+[[nodiscard]] std::optional<Stage> parse_stage(const char* str, std::size_t len) noexcept {
     auto eq = [&](const char* lit) noexcept {
         std::size_t llen = std::strlen(lit);
         return llen == len && std::memcmp(str, lit, len) == 0;
@@ -132,7 +131,7 @@ match_literal(const char* base, std::size_t len, std::size_t& pos, const char* l
         return Stage::Amplification;
     if (eq("library"))
         return Stage::Library;
-    return eastl::nullopt;
+    return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------
@@ -140,8 +139,8 @@ match_literal(const char* base, std::size_t len, std::size_t& pos, const char* l
 // ---------------------------------------------------------------------------
 
 struct RawEntryPoint {
-    eastl::string stage_str;
-    eastl::string fn_name;
+    std::pmr::string stage_str;
+    std::pmr::string fn_name;
 };
 
 /// Walk `source` and collect (stage_str, fn_name) pairs in the order they
@@ -153,8 +152,8 @@ struct RawEntryPoint {
 ///   <return_type_ident> <ws+> <fn_name_ident> <ws>* '('
 ///
 /// Preserves first-occurrence source order (no hash maps) — PHILOSOPHY §7.
-eastl::vector<RawEntryPoint> extract_raw_entry_points(const char* src, std::size_t len) {
-    eastl::vector<RawEntryPoint> results;
+std::pmr::vector<RawEntryPoint> extract_raw_entry_points(const char* src, std::size_t len) {
+    std::pmr::vector<RawEntryPoint> results;
 
     std::size_t i = 0;
     while (i < len) {
@@ -193,7 +192,7 @@ eastl::vector<RawEntryPoint> extract_raw_entry_points(const char* src, std::size
 
         // We have a valid [shader("...")] attribute ending at pos.
         // stage_begin..stage_begin+stage_len are the stage bytes.
-        eastl::string stage_str{src + stage_begin, stage_len};
+        std::pmr::string stage_str{src + stage_begin, stage_len};
 
         // Step B: skip whitespace.
         skip_ws(src, len, pos);
@@ -237,7 +236,7 @@ eastl::vector<RawEntryPoint> extract_raw_entry_points(const char* src, std::size
         }
 
         // Valid entry point found.
-        eastl::string fn_name{src + fn_begin, fn_len};
+        std::pmr::string fn_name{src + fn_begin, fn_len};
         results.push_back(RawEntryPoint{std::move(stage_str), std::move(fn_name)});
 
         // Advance main cursor past the '[shader("...")]' attribute only, NOT
@@ -253,11 +252,12 @@ eastl::vector<RawEntryPoint> extract_raw_entry_points(const char* src, std::size
 
 }  // namespace
 
-std::expected<eastl::vector<EntryPoint>, Error> scan_entry_points(const eastl::string& source) {
+std::expected<std::pmr::vector<EntryPoint>, Error>
+scan_entry_points(const std::pmr::string& source) {
     const char* src = source.c_str();
     std::size_t len = source.size();
 
-    eastl::vector<RawEntryPoint> raw = extract_raw_entry_points(src, len);
+    std::pmr::vector<RawEntryPoint> raw = extract_raw_entry_points(src, len);
 
     // Detect duplicate / ambiguous entries using a linear search over the (small)
     // result set.  We keep insertion order intact — never use a hash map
@@ -290,8 +290,8 @@ std::expected<eastl::vector<EntryPoint>, Error> scan_entry_points(const eastl::s
 
     // Build result in source-encounter order, skipping unknown stage strings and
     // suppressed (duplicate same-stage) entries.
-    eastl::vector<EntryPoint> result;
-    result.reserve(static_cast<eastl::vector<EntryPoint>::size_type>(raw.size()));
+    std::pmr::vector<EntryPoint> result;
+    result.reserve(raw.size());
     for (const auto& rep : raw) {
         if (rep.fn_name.empty()) {
             continue;  // Suppressed duplicate same-stage entry.

@@ -20,9 +20,9 @@
 
 #include <expected>
 #include <filesystem>
+#include <string>
+#include <vector>
 
-#include <EASTL/string.h>
-#include <EASTL/vector.h>
 #include <glibre/shader/shader.hpp>
 
 namespace glibre::shader::detail {
@@ -39,17 +39,17 @@ namespace glibre::shader::detail {
 struct PreprocessContext {
     // caller owns; do not extend lifetime beyond the enclosing expand_includes call.
     const std::filesystem::path& project_root;
-    eastl::vector<IncludeNode>& include_closure;  // accumulates as we expand
-    eastl::vector<eastl::string> visit_stack;     // for cycle detection
+    std::pmr::vector<IncludeNode>& include_closure;  // accumulates as we expand
+    std::pmr::vector<std::pmr::string> visit_stack;  // for cycle detection
 };
 
 /// Expand the contents of `source_bytes` by resolving all #include "..."
 /// directives recursively into `ctx`.
 ///
-/// On success, returns the fully expanded text (UTF-8 bytes as eastl::string).
+/// On success, returns the fully expanded text (UTF-8 bytes as std::pmr::string).
 /// On error, returns Error::IncludeEscape or Error::IncludeCycle.
-[[nodiscard]] std::expected<eastl::string, Error> expand_includes(
-    const eastl::string& source_bytes,
+[[nodiscard]] std::expected<std::pmr::string, Error> expand_includes(
+    const std::pmr::string& source_bytes,
     const std::filesystem::path& current_file,
     PreprocessContext& ctx
 );
@@ -58,7 +58,7 @@ struct PreprocessContext {
 /// empty files.  Returns Error::SourceNotFound if the path does not exist
 /// or cannot be read.  Returns Error::EncodingInvalid for non-UTF-8 or empty
 /// content.
-[[nodiscard]] std::expected<eastl::string, Error>
+[[nodiscard]] std::expected<std::pmr::string, Error>
 read_and_normalize_file(const std::filesystem::path& path);
 
 }  // namespace glibre::shader::detail

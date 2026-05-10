@@ -14,7 +14,7 @@
 //      Error::EncodingInvalid if malformed.
 //   5. Run include expansion (preprocessor.hpp) → PreprocessedSource bytes
 //      plus include_closure accumulator.
-//   6. Run entry-point scanner → eastl::vector<EntryPoint>.
+//   6. Run entry-point scanner → std::pmr::vector<EntryPoint>.
 //   7. Compute total BLAKE3 over expanded bytes (detail::blake3_hash from shader_hash.hpp).
 //   8. Assemble and return ShaderSource.
 
@@ -56,24 +56,24 @@ glibre::Result<ShaderSource> ShaderSource::open(
     if (!root_result) {
         return std::unexpected(root_result.error());
     }
-    eastl::string root_bytes = std::move(*root_result);
+    std::pmr::string root_bytes = std::move(*root_result);
 
     // Step 2: expand includes.
-    eastl::vector<IncludeNode> include_closure;
+    std::pmr::vector<IncludeNode> include_closure;
     detail::PreprocessContext ctx{
         project_root, include_closure, {}  // empty visit_stack
     };
 
     // Push the root file onto the visit stack so it participates in cycle detection.
     auto proj_rel_norm = project_relative.lexically_normal();
-    eastl::string root_rel_str{proj_rel_norm.native().c_str(), proj_rel_norm.native().size()};
+    std::pmr::string root_rel_str{proj_rel_norm.native().c_str(), proj_rel_norm.native().size()};
     ctx.visit_stack.push_back(root_rel_str);
 
     auto expanded_result = detail::expand_includes(root_bytes, abs_path, ctx);
     if (!expanded_result) {
         return std::unexpected(expanded_result.error());
     }
-    eastl::string expanded = std::move(*expanded_result);
+    std::pmr::string expanded = std::move(*expanded_result);
 
     // Step 3: scan entry points from the EXPANDED source (so we also see
     // entry points declared in included files).
@@ -81,14 +81,14 @@ glibre::Result<ShaderSource> ShaderSource::open(
     if (!ep_result) {
         return std::unexpected(ep_result.error());
     }
-    eastl::vector<EntryPoint> entry_points = std::move(*ep_result);
+    std::pmr::vector<EntryPoint> entry_points = std::move(*ep_result);
 
     // Step 4: compute total hash over the expanded byte stream.
     ShaderHash total_hash = detail::blake3_hash(expanded.data(), expanded.size());
 
     // Step 5: pack into bytes for PreprocessedSource.
     // LOW-1 fix: use memcpy instead of a manual byte-cast loop.
-    eastl::vector<std::byte> expanded_bytes;
+    std::pmr::vector<std::byte> expanded_bytes;
     expanded_bytes.resize(expanded.size());
     std::memcpy(expanded_bytes.data(), expanded.data(), expanded.size());
 
@@ -114,8 +114,8 @@ const SourceId& ShaderSource::id() const noexcept { return id_; }
 // is populated only once (via open()) and has no public mutation path, so the
 // span lifetime matches the owning ShaderSource lifetime.  Callers must not
 // hold a span across a move of the ShaderSource.
-eastl::span<const EntryPoint> ShaderSource::entry_points() const noexcept {
-    return eastl::span<const EntryPoint>{entry_points_.data(), entry_points_.size()};
+std::span<const EntryPoint> ShaderSource::entry_points() const noexcept {
+    return std::span<const EntryPoint>{entry_points_.data(), entry_points_.size()};
 }
 
 const PreprocessedSource& ShaderSource::preprocessed() const noexcept { return preprocessed_; }
