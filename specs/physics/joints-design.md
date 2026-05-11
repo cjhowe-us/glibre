@@ -379,6 +379,14 @@ struct JointEndpointsView {
     float             accum_normal_impulse;   // last-substep Jolt impulse (for break check)
     float             accum_friction_impulse; // last-substep Jolt impulse
     bool              broken;            // sticky bit set when threshold trips, cleared at despawn
+    // endpoint_was_resolved is set at admission when body_id_allocator.in_use(body_a/b) returns
+    // true.  Used by the §3.4 dispatcher (and restore path §8.2.2) to distinguish
+    // JointDanglingEndpoint (timing-race despawn; was_resolved=true, in_use=false) from
+    // JointEndpointInvalid (authored garbage; was_resolved=false).  Cold: written once at
+    // add_joint, read only on the error / restore path.  NOT persisted to snapshot (on restore
+    // the bit is re-derived from in_use at replay time — see §8.2.2 step 4.B).
+    bool              endpoint_a_was_resolved = false;
+    bool              endpoint_b_was_resolved = false;
 };
 
 }  // namespace glibre::physics::detail
@@ -405,21 +413,24 @@ struct JointEndpointsView {
 3. **Endpoints are resolvable at admission.** `body_a` and `body_b`
    must resolve to live `BodyId`s in the world's `BodyIdAllocator`
    table at `add_joint` time. The cluster calls
-   `body_id_allocator.is_live(body_id)` for each endpoint before
-   forwarding to the middleman. Per
+   `body_id_allocator.in_use(body_id)` for each endpoint at admission
+   and records the result as `endpoint_was_resolved` on `JointEndpoint`
+   (see §3.5 cold-fields table). Every later check uses the stored bit
+   together with a fresh `in_use` query to select the correct arm. Per
    `reviews/decisions/physics-error-arm-joint-body-reconciliation.md`
    Alt C, two distinct arms apply:
    - `physics::Error::JointEndpointInvalid` (`error`) — authored-garbage
      handle: zero-init, cross-world, or a handle that was never live in
-     this world. Programming bug; caller must fix the code path that
-     produced the bad handle.
+     this world (`endpoint_was_resolved == false`). Programming bug;
+     caller must fix the code path that produced the bad handle.
    - `physics::Error::JointDanglingEndpoint` (`warn`) — the endpoint
      `BodyId` was once valid but the body was despawned between
-     author-time and `add_joint` commit (deferred-command timing race).
-     Caller re-fetches the live `BodyId` and re-issues.
+     author-time and `add_joint` commit (`endpoint_was_resolved == true`
+     but `in_use` returns false; timing race). Caller re-fetches the
+     live `BodyId` and re-issues.
    Cross-world `BodyId`s are detected via the per-world allocator (a
-   cross-world id is "not live in this world" and was never live in
-   this world → `JointEndpointInvalid`).
+   cross-world id is never `in_use` in this world and therefore
+   `endpoint_was_resolved` remains false → `JointEndpointInvalid`).
 4. **Anchor quaternions are unit-normalised.** `frame_a.rotation` and
    `frame_b.rotation` MUST satisfy `|q| ∈ [1 − 1e−6, 1 + 1e−6]` at
    admission; non-unit returns `physics::Error::ConfigInvalid` (§7.1.3
@@ -473,7 +484,16 @@ corresponding Jolt constraint subclass.
 
 ```cpp
 // physics/src/joints/joint.cpp — pseudocode for the dispatcher
-Result<JoltConstraintRef> add_joint_to_jolt(const JointEndpointsView& ep,
+//
+// NOTE: `bodies` here is the joints cluster's local seam handle
+// (`BodyIdAllocator::in_use`).  The cluster does NOT call the sibling
+// bodies-shapes cluster's `was_ever_live` / `is_live` — those APIs
+// belong to bodies-shapes-design.md §3.3 and are not part of the seam
+// exposed to joints.  Instead, the joints cluster records its own
+// `endpoint_was_resolved` bit on JointEndpointsView at admission time
+// (§3.5 cold-fields) and reads it on the error path.
+
+Result<JoltConstraintRef> add_joint_to_jolt(JointEndpointsView&        ep,
                                             const JointLimits*         limits,
                                             const JointMotor*          motor,
                                             const JointBreakThreshold* brk,
@@ -481,27 +501,34 @@ Result<JoltConstraintRef> add_joint_to_jolt(const JointEndpointsView& ep,
                                             const BodyIdAllocator& bodies) noexcept {
     // Step 1 — Endpoint validity (§3.2 invariant 3).
     // Three operationally distinct arms per reviews/decisions/physics-error-arm-joint-body-reconciliation.md Alt C:
-    //   JointEndpointInvalid  (error)  — authored-garbage handle: zero-init, cross-world, or never-live.
-    //   JointDanglingEndpoint (warn)   — once-valid handle whose body was despawned (timing race).
+    //   JointEndpointInvalid  (error)  — authored-garbage handle: zero-init, cross-world, or never-live
+    //                                   (endpoint_was_resolved == false at admission).
+    //   JointDanglingEndpoint (warn)   — once-valid handle whose body was despawned (timing race)
+    //                                   (endpoint_was_resolved == true, bodies.in_use() == false).
     //   Self-loop check fires JointEndpointInvalid regardless (programming bug, not a timing race).
-    const bool a_was_ever_live = bodies.was_ever_live(ep.body_a);
-    const bool b_was_ever_live = bodies.was_ever_live(ep.body_b);
-    if (!bodies.is_live(ep.body_a)) {
-        return std::unexpected{
-            a_was_ever_live
-                ? physics::Error::JointDanglingEndpoint   // body existed, then was despawned — timing race
-                : physics::Error::JointEndpointInvalid    // garbage handle: zero-init / cross-world / never-live
-        };
+
+    // Record whether each endpoint resolved at admission.  This is the only query we
+    // make against `bodies`; we do NOT call was_ever_live / is_live (which are absent
+    // from the BodyIdAllocator seam exposed to the joints cluster).
+    ep.endpoint_a_was_resolved = bodies.in_use(ep.body_a);
+    ep.endpoint_b_was_resolved = bodies.in_use(ep.body_b);
+
+    // At fresh add_joint time the stored bits double as the admission gate:
+    //   endpoint_was_resolved == false  →  garbage handle (zero-init / cross-world / never-live)
+    //                                      → JointEndpointInvalid (error)
+    //   endpoint_was_resolved == true   →  body is live; proceed.
+    // The JointDanglingEndpoint arm fires only on the restore path (§8.2.2 step 4.B), where
+    // endpoint_was_resolved was set true at snapshot-capture time but in_use() now returns
+    // false (timing-race despawn across the swap).
+    if (!ep.endpoint_a_was_resolved) {
+        return std::unexpected{physics::Error::JointEndpointInvalid};
     }
-    if (!bodies.is_live(ep.body_b)) {
-        return std::unexpected{
-            b_was_ever_live
-                ? physics::Error::JointDanglingEndpoint
-                : physics::Error::JointEndpointInvalid
-        };
+    if (!ep.endpoint_b_was_resolved) {
+        return std::unexpected{physics::Error::JointEndpointInvalid};
     }
     if (ep.body_a == ep.body_b) {
         return std::unexpected{physics::Error::JointEndpointInvalid};
+        // self-loop — programming bug, not a timing race
     }
 
     // Step 2 — Anchor frame validity (§3.2 invariant 4).
@@ -1220,7 +1247,7 @@ read-mostly during the substep.
 | Per-archetype scratch                | `cached_target` (`f32`)                                | Read+written at every entry barrier (motor walk).                                                       |
 | Per-archetype scratch                | `accum_normal_impulse`, `accum_friction_impulse` (`f32 × 2`) | Written at every exit barrier from Jolt; read in the same walk for the threshold compare.        |
 | Per-archetype scratch                | `broken` (`bool`)                                      | Read at every exit barrier (skip-already-broken fast path); written at trip; read by post-walk despawn pass. |
-| `JointReverseIndex`                  | `by_body_[body_id].empty()`                            | Read by the bodies-shapes `remove_body` gate; one `inplace_vector::empty()` per remove.            |
+| `JointReverseIndex`                  | `by_body_[body_id].empty()`                            | Read by the bodies-shapes `remove_body` gate; one PMR-vector `empty()` per remove.            |
 
 The `JointEndpoints` hot prefix (32 B) plus `JointMotor` /
 `JointBreakThreshold` (16 B / 8 B respectively) all fit comfortably
@@ -1236,7 +1263,8 @@ in one cache line; the per-archetype scratch row's `accum_*` +
 | `JointMotor` (ECS column)            | `max_force`, `damping`                                  | Read once at admission (Jolt's motor settings absorb them); per-substep walks read only `enabled` + `target_value`. |
 | `JointIdAllocator`                   | `next_id_`, `id_to_entity_`, `free_list_`              | Mutated at allocate / release; per-substep walks do not touch.                                          |
 | Per-archetype scratch                | `cached_ref` (Jolt constraint pointer)                 | Read at admission and at break-trip (for `JoltMiddleman::remove_constraint`); not per-substep.          |
-| `JointReverseIndex`                  | `by_body_[body_id]` (the `fixed_vector` itself)        | Mutated at admission / remove / break-trip; the bodies-shapes gate reads `empty()` only (a one-load fast path). |
+| `JointReverseIndex`                  | `by_body_[body_id]` (the `std::pmr::vector<JointId>` cell itself) | Mutated at admission / remove / break-trip; the bodies-shapes gate reads `empty()` only (a one-load fast path). |
+| Per-archetype scratch                | `endpoint_a_was_resolved`, `endpoint_b_was_resolved` (`bool × 2`) | Written once at `add_joint` admission (records whether each endpoint resolved via `in_use`); read only on the error / restore path (§3.4 dispatcher, §8.2.2 step 4.B). Not persisted to snapshot; re-derived at restore time. |
 
 ### 5.3 Layout enforcement
 
@@ -1253,16 +1281,21 @@ static_assert(sizeof(JointBreakThreshold)    <= 8,  "JointBreakThreshold is 2 ×
 static_assert(sizeof(JointBrokenEvent)       <= 16, "JointBrokenEvent fits one half cache line");
 ```
 
-The reverse index's per-cell `glibre::inplace_vector<JointId, 4>` (the
-`std::inplace_vector` P0843R14 polyfill from
-`core/include/glibre/compat/inplace_vector.hpp`) is sized at 4 inline
-`u32`s (16 B inline storage + 4 B size field = 20 B per cell, padded to
-24 B by alignment); `max_bodies = 1024` → ~24 KiB index footprint.
-Overflow beyond 4 elements promotes the cell value into the outer
-`std::pmr::vector` element; this is permitted but rare under the MVP S1
-fixture (~5–8 joints total in the ragdoll fixture, never > 4 per body).
-Per `reviews/decisions/eastl-removal.md` §"eastl::fixed_vector": use the
-polyfill until libc++ ships `std::inplace_vector` natively.
+The reverse index's `by_body_` is a `std::pmr::vector<std::pmr::vector<JointId>>`
+stamped with `physics_mr_`. Each inner cell is constructed with `.reserve(4)` at
+`JointReverseIndex::create` time, so the first four `JointId`s per body incur no
+additional heap allocation — the pre-reserved capacity is drawn from the physics
+arena upfront. This matches the profile of the former `inplace_vector<JointId, 4>`
+per `reviews/decisions/eastl-removal.md` option (c): PMR-vector + upfront `.reserve(N)`.
+`max_bodies = 1024` × (inner PMR header + 4 × 4 B reserved) ≈ 24 KiB index footprint
+from the physics arena. Overflow beyond 4 elements grows the inner vector into the
+arena; this is permitted but rare under the MVP S1 fixture (~5–8 joints total,
+never > 4 per body).
+
+The per-archetype scratch row's `endpoint_a_was_resolved` + `endpoint_b_was_resolved`
+pair adds 2 bytes (aligned to the next 4-byte boundary). The scratch row total remains
+well inside one cache line (`cached_ref` + `accum_*` × 2 + `broken` + 2 resolution bits
+≈ 24 B); no `static_assert` change required.
 
 ## 6. Concurrency
 
