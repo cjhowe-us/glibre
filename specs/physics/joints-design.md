@@ -43,9 +43,11 @@
 > Parent: #791 (sub-epic — Detailed Designs — physics). Sibling
 > `[SPIKE] task-breakdown-physics-joints-detailed` is blocked by
 > this deliverable. Spike #908 — `[SPIKE] iterate-physics-error-arm-
-> joint-body-reconciliation` — tracks the SPEC-level
-> `BodyStillReferencedByJoint` ↔ `JointDanglingEndpoint` arm split
-> referenced under §10 and §12 below.
+> joint-body-reconciliation` — **resolved** 2026-05-09 (commit
+> `865405e3`); the `BodyStillReferencedByJoint` ↔ `JointDanglingEndpoint`
+> arm split is now captured in
+> `reviews/decisions/physics-error-arm-joint-body-reconciliation.md`
+> and reflected in §3.4, §10.1, §10.5, §11.1, and §12 of this design.
 
 ## 1. Purpose
 
@@ -404,10 +406,20 @@ struct JointEndpointsView {
    must resolve to live `BodyId`s in the world's `BodyIdAllocator`
    table at `add_joint` time. The cluster calls
    `body_id_allocator.is_live(body_id)` for each endpoint before
-   forwarding to the middleman; an unresolved endpoint returns
-   `physics::Error::JointEndpointInvalid` (§3.5 + §10.1). Cross-world
-   `BodyId`s are detected the same way (the allocator is per-world;
-   a cross-world id is "not live in this world").
+   forwarding to the middleman. Per
+   `reviews/decisions/physics-error-arm-joint-body-reconciliation.md`
+   Alt C, two distinct arms apply:
+   - `physics::Error::JointEndpointInvalid` (`error`) — authored-garbage
+     handle: zero-init, cross-world, or a handle that was never live in
+     this world. Programming bug; caller must fix the code path that
+     produced the bad handle.
+   - `physics::Error::JointDanglingEndpoint` (`warn`) — the endpoint
+     `BodyId` was once valid but the body was despawned between
+     author-time and `add_joint` commit (deferred-command timing race).
+     Caller re-fetches the live `BodyId` and re-issues.
+   Cross-world `BodyId`s are detected via the per-world allocator (a
+   cross-world id is "not live in this world" and was never live in
+   this world → `JointEndpointInvalid`).
 4. **Anchor quaternions are unit-normalised.** `frame_a.rotation` and
    `frame_b.rotation` MUST satisfy `|q| ∈ [1 − 1e−6, 1 + 1e−6]` at
    admission; non-unit returns `physics::Error::ConfigInvalid` (§7.1.3
@@ -468,8 +480,25 @@ Result<JoltConstraintRef> add_joint_to_jolt(const JointEndpointsView& ep,
                                             JoltMiddleman& mm,
                                             const BodyIdAllocator& bodies) noexcept {
     // Step 1 — Endpoint validity (§3.2 invariant 3).
-    if (!bodies.is_live(ep.body_a) || !bodies.is_live(ep.body_b)) {
-        return std::unexpected{physics::Error::JointEndpointInvalid};
+    // Three operationally distinct arms per reviews/decisions/physics-error-arm-joint-body-reconciliation.md Alt C:
+    //   JointEndpointInvalid  (error)  — authored-garbage handle: zero-init, cross-world, or never-live.
+    //   JointDanglingEndpoint (warn)   — once-valid handle whose body was despawned (timing race).
+    //   Self-loop check fires JointEndpointInvalid regardless (programming bug, not a timing race).
+    const bool a_was_ever_live = bodies.was_ever_live(ep.body_a);
+    const bool b_was_ever_live = bodies.was_ever_live(ep.body_b);
+    if (!bodies.is_live(ep.body_a)) {
+        return std::unexpected{
+            a_was_ever_live
+                ? physics::Error::JointDanglingEndpoint   // body existed, then was despawned — timing race
+                : physics::Error::JointEndpointInvalid    // garbage handle: zero-init / cross-world / never-live
+        };
+    }
+    if (!bodies.is_live(ep.body_b)) {
+        return std::unexpected{
+            b_was_ever_live
+                ? physics::Error::JointDanglingEndpoint
+                : physics::Error::JointEndpointInvalid
+        };
     }
     if (ep.body_a == ep.body_b) {
         return std::unexpected{physics::Error::JointEndpointInvalid};
@@ -1904,7 +1933,8 @@ the per-primitive triggers and routes.
 
 | Arm                              | Trigger (in this cluster)                                                                              | Recovery        | Severity (default) | SPEC ref      |
 |----------------------------------|---------------------------------------------------------------------------------------------------------|-----------------|--------------------|---------------|
-| `JointEndpointInvalid`           | `add_joint` called with `body_a` / `body_b` not live in the world's `BodyIdAllocator` (cross-world handle, zero-init handle, body already despawned), or `body_a == body_b`. Detected by §3.4 dispatcher step 1 before any Jolt allocation. | Caller validates body endpoints (re-fetches live `BodyId`s, or re-orders to spawn bodies before joints) and re-issues. Physics **refuses** the joint add; no Jolt constraint is allocated. | `error` | SPEC §10.1 |
+| `JointEndpointInvalid`           | `add_joint` called with `body_a` / `body_b` as an authored-garbage handle: zero-init, cross-world, or a handle that was never live in this world. Also fires when `body_a == body_b` (self-loop). Detected by §3.4 dispatcher step 1 (the `was_ever_live` branch) before any Jolt allocation. Per `reviews/decisions/physics-error-arm-joint-body-reconciliation.md` Alt C — "authored-garbage handle" case only; the timing-race case routes to `JointDanglingEndpoint` below. | Caller fixes the gameplay-code path that produced the bad handle (re-orders body / joint spawn, or validates handle provenance before `add_joint`). Physics **refuses** the joint add; no Jolt constraint is allocated. | `error` | SPEC §10.1 |
+| `JointDanglingEndpoint`          | `add_joint` called with `body_a` / `body_b` where the endpoint `BodyId` was once valid in this world but the body has been despawned between author-time and `add_joint` commit (deferred-command timing race). The handle is non-zero and same-world but no longer resolves in `BodyIdAllocator::is_live`. Detected by §3.4 dispatcher step 1 (the `was_ever_live && !is_live` branch) before any Jolt allocation. Per Alt C — canonical construction site for this arm is `add_joint` (joints cluster); see reconciliation record. | Caller re-fetches the live endpoint `BodyId` and re-issues `add_joint`. Physics **refuses** the joint add; no Jolt constraint is allocated. | `warn` | SPEC §10.1 |
 | `JointKindUnsupported`           | `add_joint` called with a `JointKind` ordinal absent from this build's sealed sum (post-MVP `Spring` / `Generic6Dof` requested by a newer authoring tool); also surfaces from snapshot restore against an older build (§8.3 row 3). Detected by §3.4 dispatcher's switch's default arm. | Operator rebuilds the physics plugin with the missing joint kind compiled in (an ABI bump, PHILOSOPHY §9). Physics **refuses** the joint add or the snapshot restore. | `error` | SPEC §10.1 |
 | `JointBroken`                    | Mutation attempted on a joint whose `broken` sticky bit is set (the threshold tripped earlier in this substep but the despawn pass has not yet drained the row). Surfaces from `set_joint_motor`, `set_joint_limits`, and friends. Detected by §3.8 invariant 4. | Caller checks `is_joint_broken(jid)` before mutating, or removes the broken joint and adds a fresh one. Physics **refuses** the mutation; the broken joint stays broken. | `info` | SPEC §10.1 |
 | `BudgetExceeded`                 | `add_joint` past `PhysicsConfig::max_constraints` (§3.5 invariant 4). Surfaces from `JointIdAllocator::allocate`. Also surfaces during hot-reload restore if the snapshot's joint count exceeds the new world's `max_constraints` (§8.2.2). | Caller raises budget on fresh world; physics refuses. | `error` | SPEC §10.1 |
@@ -1947,15 +1977,25 @@ completeness:
   `physics-world` cluster (`physics-world-design.md` §10).
 
 Particularly load-bearing: **`BodyStillReferencedByJoint` is the
-bodies-cluster's arm, not this cluster's arm.** Per the spike #908
-reconciliation tracked in §12 below, the bodies-shapes
-`remove_body(BodyId)` path consults this cluster's
-`JointReverseIndex::any_joint_references(body_id)` and emits
-`BodyStillReferencedByJoint` on its own behalf
+bodies-cluster's arm, not this cluster's arm.** Per the resolved spike
+#908 (`reviews/decisions/physics-error-arm-joint-body-reconciliation.md`
+Alt C, merged 2026-05-09), the bodies-shapes `remove_body(BodyId)` path
+consults this cluster's `JointReverseIndex::any_joint_references(body_id)`
+and emits `BodyStillReferencedByJoint` on its own behalf
 (`bodies-shapes-design.md` §10.1). The joints cluster owns the index
-+ the symmetric `JointEndpointInvalid` arm (stale `BodyId` reaching
-`add_joint`); the bodies cluster owns the refusal arm at
-`remove_body`. Two arms, two detection sites, one round-trip.
+plus **three** `add_joint`-site arms with distinct severities and
+recovery rungs:
+
+| Arm                       | Ownership      | Canonical construction site  | Recovery rung                              | Severity |
+|---------------------------|----------------|------------------------------|--------------------------------------------|----------|
+| `JointEndpointInvalid`    | joints cluster | `add_joint` (§3.4 step 1)    | Fix authored garbage handle                | `error`  |
+| `JointDanglingEndpoint`   | joints cluster | `add_joint` (§3.4 step 1)    | Re-fetch live `BodyId` and re-issue        | `warn`   |
+| `BodyStillReferencedByJoint` | bodies cluster (routed) | `remove_body` (bodies cluster) | Remove joint(s) first, then remove body | `warn` |
+
+Three arms, three detection sites, three operationally distinct
+recovery rungs — per the Alt C resolution. `BodyStillReferencedByJoint`
+is listed here only as a routed-from-sibling arm; it is emitted and
+owned by the bodies aggregate exclusively.
 
 ### 10.6 Caller-side recovery posture
 
@@ -2008,9 +2048,10 @@ Lives under `tests/physics/joints/`.
 |----------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------|----------------|-------|
 | `physics/joints: add_joint_allocates_joint_id`                                   | `add_joint(...)` returns a `JointId` whose `valid()` is true and whose `raw()` is the next id from the allocator.                              | §3.5, §4.1.7   | #435  |
 | `physics/joints: add_joint_each_kind_constructs_jolt_constraint`                 | For each of Point / Hinge / Slider / Cone / Distance / SwingTwist, `add_joint` constructs a Jolt constraint via the corresponding decoder.     | §3.4.1–§3.4.6  | #435  |
-| `physics/joints: add_joint_refuses_dead_endpoint`                                | `add_joint` with `body_a` from a despawned entity → `JointEndpointInvalid`.                                                                    | §3.2 inv 3, §10.1 | #437 |
-| `physics/joints: add_joint_refuses_self_loop`                                    | `add_joint` with `body_a == body_b` → `JointEndpointInvalid`.                                                                                  | §3.2 inv 5, §10.1 | #437 |
-| `physics/joints: add_joint_refuses_cross_world_endpoint`                         | `add_joint` with `body_a` from world A used against world B → `JointEndpointInvalid` (the per-world allocator does not recognise the id).      | §3.2 inv 3, §10.1 | #437 |
+| `physics/joints: add_joint_refuses_dead_endpoint`                                | `add_joint` with `body_a` from a body that was once live but has since been despawned → `JointDanglingEndpoint` (`warn`). Distinct from the garbage-handle case: the `BodyId` was once valid in this world. Per Alt C (`reviews/decisions/physics-error-arm-joint-body-reconciliation.md`). | §3.2 inv 3, §10.1 | #437 |
+| `physics/joints: add_joint_refuses_self_loop`                                    | `add_joint` with `body_a == body_b` → `JointEndpointInvalid` (`error`). Programming bug; not a timing race.                                    | §3.2 inv 5, §10.1 | #437 |
+| `physics/joints: add_joint_refuses_cross_world_endpoint`                         | `add_joint` with `body_a` from world A used against world B → `JointEndpointInvalid` (`error`). The per-world allocator does not recognise the id (never-live in this world — authored-garbage case). | §3.2 inv 3, §10.1 | #437 |
+| `physics/joints: add_joint_refuses_zero_init_endpoint`                           | `add_joint` with `body_a = BodyId{}` (zero-init / null sentinel) → `JointEndpointInvalid` (`error`). Authored-garbage case; `was_ever_live` is false. | §3.2 inv 3, §10.1 | #437 |
 | `physics/joints: add_joint_refuses_non_unit_anchor_quaternion`                   | `add_joint` with `frame_a.rotation = Quat{0.5, 0, 0, 0.5}` (`|q| ≈ 0.707`) → `ConfigInvalid`.                                                  | §3.2 inv 4, §7.1.3 inv 4, §10.1 | (no story; CI invariant) |
 | `physics/joints: add_joint_refuses_motor_on_point`                               | `add_joint(Point, ..., motor.enabled = true)` → `ConfigInvalid` (Point joints reject motors per §3.4.1).                                       | §3.4.1, §3.6 inv 3 | (CI) |
 | `physics/joints: add_joint_refuses_motor_on_cone`                                | `add_joint(Cone, ..., motor.enabled = true)` → `ConfigInvalid` (Cone joints reject motors per §3.4.4).                                          | §3.4.4         | (CI) |
@@ -2131,40 +2172,28 @@ Each `[OPEN]` is a follow-up amendment trigger; resolution amends
 the matching SPEC section in place, not this design. Per the
 PHILOSOPHY §3 + workflow rule, no `[OPEN]` is discharged silently.
 
-- **[OPEN — SPEC AMENDMENT REQUIRED]** `BodyStillReferencedByJoint`
-  (SPEC §5 body/collider section, used by `bodies-shapes-design.md`
-  §10.1) and `JointDanglingEndpoint` (SPEC §4.1.7 invariant 1 prose,
-  SPEC §5 joints section) currently both describe the "body removed
-  while a joint references it" scenario, creating a naming
-  contradiction. The bodies-shapes design uses
-  `BodyStillReferencedByJoint` consistently at the `remove_body`
-  call site (bodies-cluster perspective: the body is the refused
-  actor); this joints design routes `JointDanglingEndpoint` to the
-  joints-cluster detection path for the symmetric case (a stale /
-  missing `BodyId` reaching `add_joint`). Specifically, this
-  design uses `JointEndpointInvalid` for both fresh-spawn
-  (zero-init handle, cross-world handle, body already despawned at
-  admission) and snapshot-restore (snapshot row's `body_a` / `body_b`
-  no longer resolves) cases; the `JointDanglingEndpoint` arm as
-  currently written in SPEC §4.1.7 invariant 1 prose is **not used
-  by this design**. The SPEC §4.1.7 invariant 1 prose must be
-  amended to: (a) name `BodyStillReferencedByJoint` at the
-  `remove_body` call site (bodies cluster's authority); (b) either
-  retire `JointDanglingEndpoint` entirely (collapsing into
-  `JointEndpointInvalid`) or repurpose it for the joints-cluster
-  symmetric case (e.g. "the snapshot row's body_a / body_b does not
-  resolve at restore-time" — the §10.4 row currently using
-  `JointEndpointInvalid (restore-time variant)`). Tracked by **spike
-  #908 — `[SPIKE] iterate-physics-error-arm-joint-body-reconciliation`**.
-  This is a blocker for the §10.1 enum addition + the §11
-  acceptance-test name finalisation; the implementation plan that
-  introduces `physics/include/glibre/physics/error.hpp` (the same
-  plan that adds `QueryFilterInvalid` /
-  `NumericalInstabilityDetected` / `DeterminismCheckFailed` per
-  SPEC §10.7) cannot land until #908 resolves the arm split.
-  Until #908 resolves, this design uses the names listed above; do
-  not implement against the current SPEC §4.1.7 invariant 1 prose
-  without first resolving the spike.
+- **[RESOLVED — 2026-05-09]** `BodyStillReferencedByJoint` vs
+  `JointDanglingEndpoint` arm split — spike #908 resolved by
+  `reviews/decisions/physics-error-arm-joint-body-reconciliation.md`
+  (commit `865405e3`, merged to `main` 2026-05-09). **Alternative C
+  adopted:** three operationally distinct arms with one canonical
+  construction site each, disambiguated by the owning aggregate's
+  reason-to-change:
+  - `BodyStillReferencedByJoint` (`warn`) — bodies cluster,
+    `remove_body` call site. Body cannot be destroyed while a live
+    joint holds it; caller removes the joint first.
+  - `JointDanglingEndpoint` (`warn`) — joints cluster, `add_joint`
+    call site. Endpoint `BodyId` was once valid but the body was
+    despawned between author-time and commit (timing race); caller
+    re-fetches live `BodyId` and re-issues.
+  - `JointEndpointInvalid` (`error`) — joints cluster, `add_joint`
+    call site. Authored-garbage handle (zero-init, cross-world, or
+    never-live); programming bug; caller fixes the code path.
+  This design's §3.4 dispatcher, §10.1 arm table, §10.5 prose, and
+  §11.1 test rows are updated to reflect Alt C. The SPEC §4.1.7
+  invariant 1 prose and SPEC §10.1 arm contracts were amended in the
+  same merge (see decision record §"Spec edits delivered alongside
+  this decision"). No further amendment is required by this design.
 
 - **[OPEN — SPEC AMENDMENT REQUIRED]** `SnapshotJointIdUnresolved`
   (referenced in §10.4 above) is the joint-side analog of
