@@ -336,12 +336,26 @@ component permitted to touch plugin dylibs.
     `core::Error::SystemScheduleCycle`. The loader rolls back
     the last plugin's registration and aborts that single load;
     other plugins keep running.
-11. **Migrate**: for each persistent component whose schema bumped
-    versions, run the `deserialize<T>` migration path against the
-    pre-swap snapshot (already detailed in fory-codegen.md
-    §"Migration Mechanic"). Failure → 
-    `core::Error::SchemaMigrationFailed`; reverse step 9 (call
-    `glibre_plugin_unregister` if exported), then dlclose, abort.
+11. **Schema alias resolution** *(formerly "Migrate" under the Fory
+    substrate — that step is superseded by the Flatbuffers ADR,
+    `reviews/decisions/flatbuffers-vs-fory.md` Q1)*: per-version
+    `migrate_T_vN_to_vN+1` functions are no longer part of plugin
+    load under the Flatbuffers ADR. Structural evolution via
+    `flatc --conform` is enforced at codegen time, and field/type
+    aliases are resolved by the SchemaRegistry's forward-map at
+    registration. The loader step here is therefore: for each
+    component type declared in the manifest whose FQN appears in the
+    SchemaRegistry's forward-map (type-rename alias path), resolve
+    the old FQN to the current canonical FQN before registering it
+    into the type registry. Failure of alias resolution (unknown
+    deprecated field or type) will produce `UnknownDeprecatedField`
+    / `UnknownDeprecatedType` error arms in the eventual
+    SchemaRegistry redesign PR; until that PR lands this step is a
+    no-op (no alias map yet, structural evolution only). Failure →
+    `core::Error::SchemaMigrationFailed` (retained for now to keep
+    the ABI hash stable; see failure-modes table note below);
+    reverse step 9 (call `glibre_plugin_unregister` if exported),
+    then dlclose, abort.
 12. **Resume**: phase 8 returns; phase 9 (present) runs; subsequent
     frames see the new plugin live.
 
@@ -397,7 +411,7 @@ extended monotonically; the new arms below are added under
 | 7           | unmet `depends_on` entry                | `PluginDependencyMissing`        |
 | 9           | `register()` returned `unexpected(...)` | `PluginInitFailed`               |
 | 10          | system schedule cycle                   | `SystemScheduleCycle`            |
-| 11          | migration step failed or chain missing  | `SchemaMigrationFailed`          |
+| 11          | alias resolution failed (deprecated field/type unresolvable) | `SchemaMigrationFailed` *(DEPRECATED — survives in `data::Error` until the SchemaRegistry redesign PR to keep ABI hash stable; will be replaced by `UnknownDeprecatedField` / `UnknownDeprecatedType` once that PR lands)* |
 | any         | refusal observed by hot-reload barrier  | `HotReloadRefused` (wraps inner) |
 
 `PluginAbiHashMismatch`, `SchemaMigrationFailed`, `HotReloadRefused`

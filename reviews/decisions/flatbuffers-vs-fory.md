@@ -91,10 +91,10 @@ spans.** The downstream design points are resolved as follows.
 
 | #   | Question                                                  | Resolution                                                                                                                                                                                                                                                                                                                                                                              |
 | --- | --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Q1  | Per-version `migrate_T_vN_to_vN+1` functions?             | **DROP.** Structural evolution only, enforced by `flatc --conform`. Two alias mechanisms: **field-rename aliases** (deprecate old field at original tag, add new field at next free tag; codegen emits both accessors with new aliasing old) AND **type-rename aliases** (SchemaRegistry holds forward-map of old-FQN → new-FQN; loader resolves deprecated FQNs transparently). Any change that is not append-or-deprecate-or-alias becomes a cook-time tool run, not a runtime migration. Closes #368, #492, #539; deletes `migration-dispatcher-design.md` (in a later PR). |
+| Q1  | Per-version `migrate_T_vN_to_vN+1` functions?             | **DROP.** Structural evolution only, enforced by `flatc --conform`. Two alias mechanisms: **field-rename aliases** (deprecate old field at original tag, add new field at next free tag; codegen emits both accessors with new aliasing old) AND **type-rename aliases** (SchemaRegistry holds forward-map of old-FQN → new-FQN; loader resolves deprecated FQNs transparently). Any change that is not append-or-deprecate-or-alias becomes a cook-time tool run, not a runtime migration. Issues #368, #492, #539 become **candidates for closure** via follow-up plan PRs that respect the story-closure rule (E2E green + manual PASS for stories; `closes #N` + dod-verify for plans/spikes). This ADR does **not** authorise direct `gh issue close` on these — closure is the verifier's verdict on the eventual cleanup PR, not the ADR's. Deletes `migration-dispatcher-design.md` (in a later PR). |
 | Q2  | `map<K,V>` builtin replacement?                            | **`[Pair<K,V>]` table-of-pairs + codegen sugar.** Codegen emits `[Pair<K,V>]` schema; C++ accessor exposes a `map<K,V>`-shaped surface (thin span/view; no `std::map` allocation).                                                                                                                                                                                                       |
-| Q3  | Codegen tool location + binary name?                       | Rename `tools/foryc/` → `tools/sergeant/`. Binary name: **`glbr-sergeant`**.                                                                                                                                                                                                                                                                                                             |
-| Q4  | Envelope shape?                                           | **Flatbuffers native size-prefix + `file_identifier`.** 4-byte magic for type tag, size-prefixed buffer for length. The glibre version field moves *inside* the Flatbuffers table as `schema_version: uint32`. The wrapper struct `EnvelopeHeader { fqn, version, payload_length, flags }` is **deleted**.                                                                              |
+| Q3  | Codegen tool location + binary name?                       | Rename `tools/foryc/` → `tools/sergeant/`. Binary name: **`glbr-sergeant`**. *(Note: all other glibre tools use the `glibre-` prefix; this tool intentionally uses the shorter `glbr-` prefix for terser CLI use. The naming deviation is user-chosen; if the preference changes when `tools/sergeant/CMakeLists.txt` is authored, the rename is a one-line CMake change.)*                                                                                                                                                                                                                                                                                                             |
+| Q4  | Envelope shape?                                           | **Flatbuffers native size-prefix + `file_identifier`.** 4-byte magic for type tag, size-prefixed buffer for length. The glibre version field moves *inside* the Flatbuffers table as `schema_version: uint32`. The wrapper struct `EnvelopeHeader { fqn, version, payload_length, flags }` is **deleted** as a separate wire envelope; the `flags` field is **not** dropped — it migrates inside the Flatbuffers root table as `flags: uint32 (id: 3)` alongside the version field. The forward-compat reservation in `specs/data/SPEC.md` §7.2.4 continues to apply at the table-field level rather than at the envelope level — new flags append at higher field IDs without invalidating the envelope shape.                                                                              |
 | Q5  | Keep `EnvelopeTruncated` / `ReservedTagViolation` errors? | **Keep both.** `EnvelopeTruncated` for explicit truncation reporting (e.g. partial reads from disk); `ReservedTagViolation` for defense-in-depth against non-codegen-authored buffers, even though `flatc --conform` catches the common case at build time.                                                                                                                              |
 | Q6  | C++ codegen — `flatc --cpp` direct, or hand-shaped POD?    | **Flip PHILOSOPHY §11.** Use `flatc --cpp` directly and Flatbuffers idioms (offset tables, `flatbuffers::Offset<T>`, `FlatBufferBuilder`, table-accessor pointers) at the plugin ABI surface. Plugins consume Flatbuffers-generated types directly. The §11 amendment explains why this is consistent with engine principles: zero-copy reads, deterministic offset layout, audited upstream library, and host-stable ABI is satisfied by Flatbuffers' offset stability rather than by `std::pmr::*` prohibition. |
 | Q7  | `SchemaSourceHash` input?                                 | **`.bfbs` binary schema bytes.** Canonicalization module deleted; `.bfbs` is canonical by construction (`flatc` produces deterministic output).                                                                                                                                                                                                                                          |
@@ -220,10 +220,22 @@ estimates per CLAUDE.md.
    Delete `migration-dispatcher-design.md`. Replace
    `data-error-design.md` to reflect retained-but-redocumented
    `EnvelopeTruncated` / `ReservedTagViolation` arms.
-4. **Issue churn.** Retitle and rebody plans #218–#232 to match the
-   new design (Fory references → Flatbuffers, `glibre-foryc` →
-   `glbr-sergeant`, migration plan #221 deleted as obsolete). Close
-   #368, #492, #539 with reference to this ADR.
+4. **Issue churn.** Retitle and rebody the currently-OPEN Fory-referencing
+   issues to match the new design (Fory references → Flatbuffers,
+   `glibre-foryc` → `glbr-sergeant`, migration-specific issues
+   re-evaluated as obsolete). The OPEN issues at the time this ADR
+   merged that reference Fory/foryc are: `[368, 407, 460, 492, 517,
+   539, 605, 607, 619, 627, 632, 638, 640, 654, 687]`. Do **not**
+   touch closed issues (several in the #218–#232 range are already
+   closed with dod:verified or dod:failed and must not be destructively
+   re-edited). Note: an earlier bulk sweep already retitled and rewrote
+   bodies on the 58 currently-open Fory-referencing issues with a
+   per-issue comment citing this ADR; Step 4's remaining work is
+   targeted closure decisions for the candidates identified in Q1
+   (#368, #492, #539), not a wholesale retitle. Each closure must
+   follow the story-closure rule (E2E green + manual PASS for stories;
+   `closes #N` + dod-verify for plans/spikes) — not direct
+   `gh issue close`.
 5. **vcpkg swap.** Replace `apache-fory` (overlay) with
    `flatbuffers` (first-party) in `vcpkg.json`; delete
    `vcpkg-overlay-ports/fory/`; refresh `vcpkg-configuration.json`.
@@ -249,7 +261,15 @@ estimates per CLAUDE.md.
 10. **Cleanup.** Delete the deprecated paths: any remaining `.fory`
     files, the empty `tools/foryc/` shell if step 6 left one,
     `migration-dispatcher-design.md`, the canonicalization module.
-    Update `plans/mvp.md` issue table to reflect retitled IDs.
+    Update `plans/mvp.md` to reflect both the issue table (retitled
+    IDs) and all prose-string occurrences of the old substrate:
+    specifically, occurrences of "Apache Fory", "Fory schemas",
+    "glibre-foryc" in `plans/mvp.md` (the executor can `grep -n
+    'Fory\|foryc' plans/mvp.md` at run time to locate the exact
+    lines — the list is not load-bearing in the ADR, but known sites
+    include the data-layer description ~line 24 and the data-row
+    ~line 49). This step is out of scope for the ADR PR itself and
+    belongs in the step-10 cleanup PR.
 
 PRs #920 and #961 remain `do-not-merge` during steps 1–6 and close
 out at steps 5 and 6 respectively.

@@ -67,6 +67,17 @@
     set. See `reviews/decisions/flatbuffers-vs-fory.md` for the
     full re-derivation.
 
+    **Flatbuffers buffer ownership across the dylib boundary.** Flatbuffers
+    buffers crossing the plugin ABI are passed as `std::span<const std::byte>`
+    over plugin-owned, plugin-allocated memory; the host **must not** call any
+    deallocator on those bytes. Mutating builders (`FlatBufferBuilder`) live
+    inside one dylib only and are never passed across the ABI seam. Plugins
+    that need to hand buffers to the host expose a `release()` C-ABI shim that
+    transfers ownership; the host treats released bytes as
+    `std::pmr::polymorphic_allocator<std::byte>`-owned by the host's
+    `PerContextAllocatorResource`. This preserves the original §11 invariant:
+    no third-party deallocator runs across the dylib boundary.
+
 ## Anti-patterns we reject
 
 - Cross-domain abstractions invented before two concrete users exist.
