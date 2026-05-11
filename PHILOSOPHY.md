@@ -34,6 +34,8 @@
     become one primitive. Record the collapse in the spec.
 11. **libc++ standard library is canonical for runtime data structures**
     (see [reviews/decisions/eastl-removal.md](reviews/decisions/eastl-removal.md)).
+    > Amended 2026-05-11 per reviews/decisions/flatbuffers-vs-fory.md.
+
     Containers, strings, smart pointers, `optional`, `variant`, `tuple`,
     `pair`, and function objects come from `std::*` or `std::pmr::*`
     (polymorphic allocators), not external libraries. The per-context
@@ -46,9 +48,46 @@
     std::ranges::to<std::pmr::vector<T>>()`) replace hand-rolled iterator
     pairs and loops. C++23/26 stdlib features not yet shipped by libc++ on
     the locked toolchain are polyfilled under `core/include/glibre/compat/`
-    (one header per feature, deleted when libc++ catches up). Public plugin
-    ABI surfaces never expose `std::` or `std::pmr::` containers — they cross
-    the boundary as POD spans / handles only (see plugin-abi decision record).
+    (one header per feature, deleted when libc++ catches up).
+
+    **Plugin ABI surface rules.** Public plugin ABI surfaces never expose
+    `std::` or `std::pmr::` containers — they cross the boundary as POD
+    spans / handles or as **Flatbuffers-generated accessor types**
+    (offset tables, `flatbuffers::Offset<T>`, `FlatBufferBuilder`,
+    table-accessor pointers). The libc++ container prohibition stands
+    because `std::*` layout depends on libc++ version and ABI flags,
+    which we cannot pin across plugin builds. Flatbuffers-generated
+    types satisfy the same offset-stable-ABI invariant via a different
+    mechanism: the offset-table layout is part of the Flatbuffers
+    binary format specification, so it is host-invariant by
+    construction and stable across every plugin compiled against the
+    same `.fbs` source. The `glibre_types_abi_hash` gate
+    (`reviews/decisions/plugin-abi.md` §ABI Hash Function) enforces
+    that every loaded plugin was built against an identical schema
+    set. See `reviews/decisions/flatbuffers-vs-fory.md` for the
+    full re-derivation.
+
+    **Flatbuffers buffer ownership across the dylib boundary — two mutually
+    exclusive regimes apply; for any given buffer, exactly one is in effect
+    and the call site must document which.**
+
+    *Clause A — Borrow semantics (default read path).* Flatbuffers buffers
+    crossing the plugin ABI in the read path are passed as
+    `std::span<const std::byte>` over plugin-owned, plugin-allocated memory.
+    The host borrows; it **MUST NOT** call any deallocator on those bytes; the
+    plugin owns the lifetime until the host's borrow returns. Mutating
+    `FlatBufferBuilder` instances always live inside one dylib and are never
+    passed across the ABI seam.
+
+    *Clause B — Ownership transfer (explicit, opt-in).* Plugins that need to
+    hand a buffer's ownership to the host (e.g. for cross-frame retention)
+    allocate the buffer through the host's `PerContextAllocatorResource` from
+    the start — obtained via `PluginContext::allocator_resource()` — and expose
+    a C-ABI shim `glibre_plugin_release_<schema>(std::byte*) noexcept`. Because
+    the allocator is the host's PMR resource, the host's deallocator is the
+    host's own; the plugin **MUST NOT** touch those bytes after the shim
+    returns. This preserves the original §11 invariant: no third-party
+    deallocator runs across the dylib boundary.
 
 ## Anti-patterns we reject
 
