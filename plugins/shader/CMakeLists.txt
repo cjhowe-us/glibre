@@ -39,6 +39,10 @@ add_library(glibre-shader STATIC
     # plan #514 — slangc reflection record ingester (§4.4, §6.3)
     src/reflection/slangc_reflection_record.cpp
     src/reflection/blob_builder.cpp
+    # plan #509 — PermutationKey codec + cross-product enumerator (§4.2)
+    src/permutation/packed_key.cpp
+    src/permutation/permutation_index.cpp
+    src/permutation/enumeration_table.cpp
 )
 
 # Public include path: plugins/shader/include (exposes glibre/shader/shader.hpp
@@ -67,6 +71,11 @@ target_include_directories(glibre-shader
         # depending on it out-of-band) is a broader architectural concern tracked
         # separately — see #1119.
         ${CMAKE_CURRENT_SOURCE_DIR}/src/reflection
+        # Internal permutation headers (axes.hpp, packed_key.hpp,
+        # permutation_index.hpp, enumeration_table.hpp) — plan #509.
+        # PRIVATE so no external consumer can depend on permutation internals;
+        # all public types flow through include/glibre/shader/shader.hpp.
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/permutation
 )
 
 target_link_libraries(glibre-shader
