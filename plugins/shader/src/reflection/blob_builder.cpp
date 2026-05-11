@@ -50,9 +50,16 @@ namespace {
 
 // ---------------------------------------------------------------------------
 // RawStage → Stage mapping
+//
+// Precondition: rs != RawStage::Unknown.  parse_entry_point in
+// slangc_reflection_record.cpp is the sole gatekeeper and already rejects
+// any entry point whose stage string did not map to a known enum value.
+// Reaching the Unknown arm would mean a caller bypassed the parser — that is
+// a programming error, not a recoverable runtime failure, so we signal it
+// with std::unreachable() rather than an error Result.
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] glibre::Result<Stage> translate_stage(RawStage rs) noexcept {
+[[nodiscard]] Stage translate_stage(RawStage rs) noexcept {
     switch (rs) {
     case RawStage::Vertex:
         return Stage::Vertex;
@@ -67,16 +74,22 @@ namespace {
     case RawStage::Library:
         return Stage::Library;
     case RawStage::Unknown:
-        return std::unexpected(glibre::Error{shader::Error::ReflectionExtractionFailed});
+        std::unreachable();
     }
-    return std::unexpected(glibre::Error{shader::Error::ReflectionExtractionFailed});
+    std::unreachable();
 }
 
 // ---------------------------------------------------------------------------
 // RawBindingKind → BindingKind mapping
+//
+// Precondition: rk != RawBindingKind::Unknown.  parse_parameter in
+// slangc_reflection_record.cpp is the sole gatekeeper and already rejects
+// any binding whose kind string did not map to a known enum value.
+// Reaching the Unknown arm signals a caller bypassed the parser (programming
+// error); use std::unreachable() rather than propagating a Result failure.
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] glibre::Result<BindingKind> translate_binding_kind(RawBindingKind rk) noexcept {
+[[nodiscard]] BindingKind translate_binding_kind(RawBindingKind rk) noexcept {
     switch (rk) {
     case RawBindingKind::ConstantBuffer:
         return BindingKind::ConstantBuffer;
@@ -95,9 +108,9 @@ namespace {
     case RawBindingKind::PushConstant:
         return BindingKind::PushConstant;
     case RawBindingKind::Unknown:
-        return std::unexpected(glibre::Error{shader::Error::ReflectionExtractionFailed});
+        std::unreachable();
     }
-    return std::unexpected(glibre::Error{shader::Error::ReflectionExtractionFailed});
+    std::unreachable();
 }
 
 // ---------------------------------------------------------------------------
@@ -154,7 +167,7 @@ build_reflection_blob(const SlangcReflectionRecord& rec, std::pmr::memory_resour
     // Deduplicate identical (name, stage) pairs; reject same-name different-stage.
     // -----------------------------------------------------------------------
     for (const RawEntryPoint& rep : rec.entry_points) {
-        GLIBRE_TRY(stage, translate_stage(rep.stage));
+        const Stage stage = translate_stage(rep.stage);
         const std::string_view canon =
             canonical_name(std::string_view{rep.name.data(), rep.name.size()});
         // Check for existing entry with the same name.
@@ -187,7 +200,7 @@ build_reflection_blob(const SlangcReflectionRecord& rec, std::pmr::memory_resour
     // frequency is left at PerDraw (default) — frequency_tagger classifies.
     // -----------------------------------------------------------------------
     for (const RawBinding& rb : rec.bindings) {
-        GLIBRE_TRY(kind, translate_binding_kind(rb.kind));
+        const BindingKind kind = translate_binding_kind(rb.kind);
         const std::string_view canon =
             canonical_name(std::string_view{rb.name.data(), rb.name.size()});
         blob.bindings.push_back(

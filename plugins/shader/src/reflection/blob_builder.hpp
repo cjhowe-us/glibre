@@ -32,9 +32,13 @@ namespace glibre::shader {
 // mr  — PMR memory resource for all allocations in the returned ReflectionBlob.
 //       Must outlive the returned blob.
 //
+// Precondition: rec must have been produced by ingest_slangc_reflection(); in
+// particular, no RawBinding may carry RawBindingKind::Unknown and no
+// RawEntryPoint may carry RawStage::Unknown — the parser enforces this and
+// reaching either Unknown arm in the translator is a programming error that
+// triggers std::unreachable() (not a recoverable Result failure).
+//
 // Returns shader::Error::ReflectionExtractionFailed if:
-//   - Any RawBinding carries RawBindingKind::Unknown.
-//   - Any RawEntryPoint carries RawStage::Unknown.
 //   - The same entry-point name appears with two different stages.
 //
 // The returned blob satisfies §4.4 invariant 2: calling build_reflection_blob()
