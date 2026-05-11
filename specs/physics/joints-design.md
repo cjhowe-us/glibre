@@ -798,14 +798,15 @@ public:
 
 private:
     JointReverseIndex() noexcept;
-    // Keyed by BodyId.raw(); each cell is a small inline-storage vector
-    // (glibre::inplace_vector<JointId, 4> — std::inplace_vector polyfill,
-    // core/include/glibre/compat/inplace_vector.hpp — P0843R14, C++26)
-    // since most bodies hold 0–4 joints (ragdoll knee = 1 hinge;
-    // shoulder = 1 swing-twist; vehicle wheel = 1 hinge; chain segment =
-    // 2 distance). Overflow-on-push_back → grows via the outer PMR vector;
-    // see reviews/decisions/eastl-removal.md §"eastl::fixed_vector".
-    std::pmr::vector<glibre::inplace_vector<JointId, 4>> by_body_;
+    // Keyed by BodyId.raw(); each cell is a std::pmr::vector<JointId>
+    // constructed with .reserve(4) at create time so that most bodies
+    // (ragdoll knee = 1 hinge; shoulder = 1 swing-twist; vehicle wheel
+    // = 1 hinge; chain segment = 2 distance) incur no additional heap
+    // allocation beyond the initial reserve.  Overflow beyond the initial
+    // reserve grows the inner vector inside the physics arena (rare under
+    // the MVP S1 fixture).  Per reviews/decisions/eastl-removal.md option
+    // (c): PMR-vector + upfront .reserve(N) replaces eastl::fixed_vector.
+    std::pmr::vector<std::pmr::vector<JointId>> by_body_;
 };
 
 }  // namespace glibre::physics::detail
@@ -1285,8 +1286,7 @@ The reverse index's `by_body_` is a `std::pmr::vector<std::pmr::vector<JointId>>
 stamped with `physics_mr_`. Each inner cell is constructed with `.reserve(4)` at
 `JointReverseIndex::create` time, so the first four `JointId`s per body incur no
 additional heap allocation — the pre-reserved capacity is drawn from the physics
-arena upfront. This matches the profile of the former `inplace_vector<JointId, 4>`
-per `reviews/decisions/eastl-removal.md` option (c): PMR-vector + upfront `.reserve(N)`.
+arena upfront. Per `reviews/decisions/eastl-removal.md` option (c): PMR-vector + upfront `.reserve(N)`.
 `max_bodies = 1024` × (inner PMR header + 4 × 4 B reserved) ≈ 24 KiB index footprint
 from the physics arena. Overflow beyond 4 elements grows the inner vector into the
 arena; this is permitted but rare under the MVP S1 fixture (~5–8 joints total,
@@ -1726,8 +1726,18 @@ joints::on_resume(snapshot const& s, JoltMiddleman& mm,
     brk    <- core.try_read_component<JointBreakThreshold>(entity) // optional
 
     // Endpoint resolution gate — §3.2 invariant 3 + §10.1.
-    if not bodies.is_live(ep.body_a) or not bodies.is_live(ep.body_b):
-      return std::unexpected{ Error::JointEndpointInvalid }
+    // At restore time endpoint_was_resolved is re-derived: any endpoint
+    // in the snapshot was resolved at capture time (the snapshot writer
+    // refused unresolved joints), so endpoint_was_resolved == true for
+    // all rows here.  A failing in_use() now means timing-race despawn
+    // across the swap → JointDanglingEndpoint (warn), not
+    // JointEndpointInvalid (error; that arm requires !was_resolved).
+    ep.endpoint_a_was_resolved = true   // re-derive: snapshot guarantees prior resolution
+    ep.endpoint_b_was_resolved = true
+    if not bodies.in_use(ep.body_a):
+      return std::unexpected{ Error::JointDanglingEndpoint }
+    if not bodies.in_use(ep.body_b):
+      return std::unexpected{ Error::JointDanglingEndpoint }
 
     // Reconstruct Jolt constraint via §3.4 dispatcher.
     cref <- add_joint_to_jolt(ep, limits, motor, brk, mm, bodies)
@@ -1775,7 +1785,7 @@ protocol's existing inner causes (`PluginAbiHashMismatch`,
 | Detection point                                                                                | `physics::Error` arm                | `core::Error` wrapper                          | SPEC §10.1 row |
 |-----------------------------------------------------------------------------------------------|-------------------------------------|------------------------------------------------|----------------|
 | Snapshot's `joint_ids` exceeds `PhysicsConfig.max_constraints`                                | `BudgetExceeded`                    | `HotReloadRefused { PluginInitFailed }`        | SPEC §10.1     |
-| Snapshot row's `body_a` / `body_b` no longer resolves to a live `BodyId` after body-restore   | `JointEndpointInvalid`              | `HotReloadRefused { PluginInitFailed }`        | SPEC §10.1     |
+| Snapshot row's `body_a` / `body_b` no longer resolves to a live `BodyId` after body-restore (endpoint_was_resolved=true at capture; timing-race despawn across swap) | `JointDanglingEndpoint`             | `HotReloadRefused { PluginInitFailed }`        | SPEC §10.1     |
 | Snapshot row's `kind` is an ordinal absent from this build's sealed sum (newer-cook descriptor)| `JointKindUnsupported`              | `HotReloadRefused { SchemaMigrationFailed }`   | SPEC §10.1     |
 | Snapshot row's `joint_id` does not resolve to a live ECS entity in the surviving world        | `SnapshotJointIdUnresolved` (analogous to `SnapshotBodyIdUnresolved`; see §12 OQ — pending SPEC §10.1 amendment) | `HotReloadRefused { PluginInitFailed }`        | (pending SPEC §10.1 amendment)     |
 
@@ -1791,8 +1801,9 @@ The cluster does **not** raise:
   `remove_body` call site, not at any joints-cluster path. The
   joints cluster owns the reverse index that the gate consults but
   the refusal itself is attributed to the bodies cluster
-  (`bodies-shapes-design.md` §10.1). See §10 + §12 below for the
-  reconciliation tracked by spike #908.
+  (`bodies-shapes-design.md` §10.1). The three-arm Alt-C split is
+  resolved: see `reviews/decisions/physics-error-arm-joint-body-reconciliation.md`
+  (commit `865405e3`, merged 2026-05-09) and §12 [RESOLVED — 2026-05-09].
 
 ### 8.4 Self-reload refusal
 
@@ -1898,9 +1909,10 @@ distinct allocations:
    forwarded at construction per `reviews/decisions/eastl-removal.md`
    §3 lifetime contract. See PHILOSOPHY.md §11 superseded notice.
 2. **`JointReverseIndex` itself** — one `std::make_unique` at the
-   same broker. ~24 B + the `by_body_` vector at
-   `max_bodies × sizeof(glibre::inplace_vector<JointId, 4>)`. Same PMR
-   resource threading.
+   same broker. ~24 B + the outer `by_body_` `std::pmr::vector` header +
+   `max_bodies` inner `std::pmr::vector<JointId>` headers each `.reserve(4)`
+   pre-allocated from the physics arena (≈ 24 KiB at `max_bodies = 1024`).
+   Same PMR resource threading.
 3. **Per-`add_joint` Jolt `Constraint*`** — one allocation per joint
    that crosses the table. Tagged inside the middleman per SPEC §9.4
    rule 5 ("Jolt's allocator is wrapped"); counts against the 16 MiB
@@ -1978,8 +1990,8 @@ the per-primitive triggers and routes.
 
 | Arm                              | Trigger (in this cluster)                                                                              | Recovery        | Severity (default) | SPEC ref      |
 |----------------------------------|---------------------------------------------------------------------------------------------------------|-----------------|--------------------|---------------|
-| `JointEndpointInvalid`           | `add_joint` called with `body_a` / `body_b` as an authored-garbage handle: zero-init, cross-world, or a handle that was never live in this world. Also fires when `body_a == body_b` (self-loop). Detected by §3.4 dispatcher step 1 (the `was_ever_live` branch) before any Jolt allocation. Per `reviews/decisions/physics-error-arm-joint-body-reconciliation.md` Alt C — "authored-garbage handle" case only; the timing-race case routes to `JointDanglingEndpoint` below. | Caller fixes the gameplay-code path that produced the bad handle (re-orders body / joint spawn, or validates handle provenance before `add_joint`). Physics **refuses** the joint add; no Jolt constraint is allocated. | `error` | SPEC §10.1 |
-| `JointDanglingEndpoint`          | `add_joint` called with `body_a` / `body_b` where the endpoint `BodyId` was once valid in this world but the body has been despawned between author-time and `add_joint` commit (deferred-command timing race). The handle is non-zero and same-world but no longer resolves in `BodyIdAllocator::is_live`. Detected by §3.4 dispatcher step 1 (the `was_ever_live && !is_live` branch) before any Jolt allocation. Per Alt C — canonical construction site for this arm is `add_joint` (joints cluster); see reconciliation record. | Caller re-fetches the live endpoint `BodyId` and re-issues `add_joint`. Physics **refuses** the joint add; no Jolt constraint is allocated. | `warn` | SPEC §10.1 |
+| `JointEndpointInvalid`           | `add_joint` called with `body_a` / `body_b` as an authored-garbage handle: zero-init, cross-world, or a handle that was never `in_use` in this world (`endpoint_was_resolved == false` at admission). Also fires when `body_a == body_b` (self-loop). Detected by §3.4 dispatcher step 1 before any Jolt allocation. Per `reviews/decisions/physics-error-arm-joint-body-reconciliation.md` Alt C — "authored-garbage handle" case only; the timing-race case routes to `JointDanglingEndpoint` below. | Caller fixes the gameplay-code path that produced the bad handle (re-orders body / joint spawn, or validates handle provenance before `add_joint`). Physics **refuses** the joint add; no Jolt constraint is allocated. | `error` | SPEC §10.1 |
+| `JointDanglingEndpoint`          | `add_joint` called with `body_a` / `body_b` where the endpoint `BodyId` was once valid in this world but the body has been despawned before `add_joint` commit (deferred-command timing race; `endpoint_was_resolved` cannot be true at admission since `in_use` is false). Surfaces on the **snapshot-restore path** when `endpoint_was_resolved` was set true at snapshot-capture time but `in_use()` returns false after body-restore (timing-race despawn across the swap). Detected by the §3.4 dispatcher admission gate and by §8.2.2 step 4.B. Per Alt C — canonical construction site is the joints cluster `add_joint` / restore path. | Caller re-fetches the live endpoint `BodyId` and re-issues `add_joint`; for restore failures, operator restores from a snapshot whose endpoints all resolve. Physics **refuses** the joint add or resume. | `warn` | SPEC §10.1 |
 | `JointKindUnsupported`           | `add_joint` called with a `JointKind` ordinal absent from this build's sealed sum (post-MVP `Spring` / `Generic6Dof` requested by a newer authoring tool); also surfaces from snapshot restore against an older build (§8.3 row 3). Detected by §3.4 dispatcher's switch's default arm. | Operator rebuilds the physics plugin with the missing joint kind compiled in (an ABI bump, PHILOSOPHY §9). Physics **refuses** the joint add or the snapshot restore. | `error` | SPEC §10.1 |
 | `JointBroken`                    | Mutation attempted on a joint whose `broken` sticky bit is set (the threshold tripped earlier in this substep but the despawn pass has not yet drained the row). Surfaces from `set_joint_motor`, `set_joint_limits`, and friends. Detected by §3.8 invariant 4. | Caller checks `is_joint_broken(jid)` before mutating, or removes the broken joint and adds a fresh one. Physics **refuses** the mutation; the broken joint stays broken. | `info` | SPEC §10.1 |
 | `BudgetExceeded`                 | `add_joint` past `PhysicsConfig::max_constraints` (§3.5 invariant 4). Surfaces from `JointIdAllocator::allocate`. Also surfaces during hot-reload restore if the snapshot's joint count exceeds the new world's `max_constraints` (§8.2.2). | Caller raises budget on fresh world; physics refuses. | `error` | SPEC §10.1 |
@@ -2001,7 +2013,7 @@ the per-primitive triggers and routes.
 | Arm                              | Trigger (in this cluster)                                                                              | Recovery        | Severity (default) | SPEC ref      |
 |----------------------------------|---------------------------------------------------------------------------------------------------------|-----------------|--------------------|---------------|
 | `SnapshotJointIdUnresolved`      | Snapshot's `joint_ids[i]` does not resolve to a live ECS entity in the surviving world (the joint entity was despawned outside physics's despawn pass, e.g. by an editor undo crossing the swap). Detected during §8.2.2 step 4.B. **Pending SPEC §10.1 amendment** — the bodies-cluster analog `SnapshotBodyIdUnresolved` exists; the joint analog must be added to the §5 enum + SPEC §10.1 in the same implementation plan that introduces `physics/include/glibre/physics/error.hpp`. The §8.3 row above flags the same dependency. | Operator captures snapshot from a clean world or accepts fresh world. Physics refuses the resume. | `error` (CI Hard) / `warn` (shipping SoftWarn) | (pending SPEC §10.1 amendment; tracked in §12) |
-| `JointEndpointInvalid` (restore-time variant) | Snapshot row's `body_a` / `body_b` does not resolve to a live `BodyId` after the bodies-shapes resume body completed (the body was lost across the swap; e.g. snapshot referenced a body whose `RigidBody` component was removed before drain captured the snapshot). Detected during §8.2.2 step 4.B. | Same as fresh-spawn `JointEndpointInvalid`; the operator restores from a snapshot whose joint endpoints all resolve. | `error` | SPEC §10.1 |
+| `JointDanglingEndpoint` (restore-time variant) | Snapshot row's `body_a` / `body_b` does not resolve to a live `BodyId` after the bodies-shapes resume body completed. At snapshot-capture time the endpoint was resolved (`endpoint_was_resolved = true`); the body was lost across the swap (timing-race despawn). Per Alt C, `was_resolved && !in_use` → `JointDanglingEndpoint` (`warn`), not `JointEndpointInvalid` (`error`; that arm requires the handle was never resolved). Detected during §8.2.2 step 4.B. | Operator restores from a snapshot whose joint endpoints all resolve; or accepts the fresh world. Physics refuses the resume. | `warn` | SPEC §10.1 |
 
 ### 10.5 Routed arms (cluster does not detect)
 
@@ -2072,7 +2084,7 @@ on byte-equal inputs (PHILOSOPHY §7). Specifically: the
 `BudgetExceeded` threshold compares against
 `PhysicsConfig::max_constraints` which is bit-exact across hosts
 (SPEC §6.4 R4); the `JointEndpointInvalid` detection is a
-`BodyIdAllocator::is_live` query with deterministic state; the
+`BodyIdAllocator::in_use` query with deterministic state; the
 quaternion unit-norm check uses `<cmath>::fabs` which is portable;
 `JointKindUnsupported` is a `u8` enum compare. The §11 acceptance
 test `physics/joints: error_arms_byte_equal_across_runs` asserts
@@ -2096,7 +2108,7 @@ Lives under `tests/physics/joints/`.
 | `physics/joints: add_joint_refuses_dead_endpoint`                                | `add_joint` with `body_a` from a body that was once live but has since been despawned → `JointDanglingEndpoint` (`warn`). Distinct from the garbage-handle case: the `BodyId` was once valid in this world. Per Alt C (`reviews/decisions/physics-error-arm-joint-body-reconciliation.md`). | §3.2 inv 3, §10.1 | #437 |
 | `physics/joints: add_joint_refuses_self_loop`                                    | `add_joint` with `body_a == body_b` → `JointEndpointInvalid` (`error`). Programming bug; not a timing race.                                    | §3.2 inv 5, §10.1 | #437 |
 | `physics/joints: add_joint_refuses_cross_world_endpoint`                         | `add_joint` with `body_a` from world A used against world B → `JointEndpointInvalid` (`error`). The per-world allocator does not recognise the id (never-live in this world — authored-garbage case). | §3.2 inv 3, §10.1 | #437 |
-| `physics/joints: add_joint_refuses_zero_init_endpoint`                           | `add_joint` with `body_a = BodyId{}` (zero-init / null sentinel) → `JointEndpointInvalid` (`error`). Authored-garbage case; `was_ever_live` is false. | §3.2 inv 3, §10.1 | #437 |
+| `physics/joints: add_joint_refuses_zero_init_endpoint`                           | `add_joint` with `body_a = BodyId{}` (zero-init / null sentinel) → `JointEndpointInvalid` (`error`). Authored-garbage case; `in_use()` returns false so `endpoint_a_was_resolved` is set false. | §3.2 inv 3, §10.1 | #437 |
 | `physics/joints: add_joint_refuses_non_unit_anchor_quaternion`                   | `add_joint` with `frame_a.rotation = Quat{0.5, 0, 0, 0.5}` (`|q| ≈ 0.707`) → `ConfigInvalid`.                                                  | §3.2 inv 4, §7.1.3 inv 4, §10.1 | (no story; CI invariant) |
 | `physics/joints: add_joint_refuses_motor_on_point`                               | `add_joint(Point, ..., motor.enabled = true)` → `ConfigInvalid` (Point joints reject motors per §3.4.1).                                       | §3.4.1, §3.6 inv 3 | (CI) |
 | `physics/joints: add_joint_refuses_motor_on_cone`                                | `add_joint(Cone, ..., motor.enabled = true)` → `ConfigInvalid` (Cone joints reject motors per §3.4.4).                                          | §3.4.4         | (CI) |
@@ -2169,12 +2181,18 @@ for fuzz-style coverage.
   snapshot / accumulator / middleman mechanics. Each has its own
   design spike under #791; this cluster only tests its own facade
   brokering.
-- **The bodies-cluster `BodyStillReferencedByJoint` arm** — that
-  test is owned by `bodies-shapes-design.md` §11. The joints
-  cluster's contribution is tested at the integration level via
-  `remove_body_blocked_by_live_joint`, but the unit-level arm
-  detection is the bodies cluster's responsibility (§3.5 +
-  §10.5 — two arms, two detection sites).
+- **The three Alt-C error arms at the unit level** — three arms,
+  three detection sites: `JointEndpointInvalid` (joints cluster,
+  `add_joint` call site — authored-garbage handle); `JointDanglingEndpoint`
+  (joints cluster, `add_joint` admission gate and snapshot-restore path —
+  timing-race despawn); `BodyStillReferencedByJoint` (bodies cluster,
+  `remove_body` call site — live joint blocking removal). The joints
+  cluster's contribution to the third arm is tested at the integration
+  level via `remove_body_blocked_by_live_joint`; its unit-level detection
+  is the bodies cluster's responsibility (`bodies-shapes-design.md` §10.5 +
+  §11). Per `reviews/decisions/physics-error-arm-joint-body-reconciliation.md`
+  Alt C — three operationally distinct arms with one canonical construction
+  site each.
 - **Multi-thread access** — single-thread sim in MVP (SPEC §6.6).
   When per-system parallelism lands, ThreadSanitizer + the access-set
   DAG cover the new surface.
@@ -2309,14 +2327,14 @@ PHILOSOPHY §3 + workflow rule, no `[OPEN]` is discharged silently.
   vs SwingTwist's 3 + up to 3 rows); the kind separation is kept.
   Tracked by §3.4.4 + §3.4.6.
 
-- **[OPEN]** Should `JointReverseIndex.by_body_` sized inline
-  capacity be raised from 4 to 8? Ragdoll bodies that participate
-  in multiple joints (a torso with 4 limb-joint endpoints + 1
-  neck-joint endpoint = 5 joints / body) overflow the inline 4 and
-  spill to heap. The cost is +8 B per cell (24 B → 32 B per
-  `fixed_vector<JointId, 8>`); at `max_bodies = 1024` that is +8 KiB
-  index footprint. Frozen at 4 until a §11 fixture measures the
-  spillover rate as load-bearing. Tracked by §5.3.
+- **[OPEN]** Should `JointReverseIndex.by_body_` initial `.reserve()` capacity
+  be raised from 4 to 8? Ragdoll bodies that participate in multiple joints
+  (a torso with 4 limb-joint endpoints + 1 neck-joint endpoint = 5 joints /
+  body) overflow the pre-reserved 4 and trigger a heap reallocation inside the
+  physics arena. The cost is +4 × 4 B extra reserve per cell (16 B → 32 B
+  per inner `std::pmr::vector<JointId>`); at `max_bodies = 1024` that is
+  +16 KiB additional arena reservation upfront. Frozen at 4 until a §11
+  fixture measures the spillover rate as load-bearing. Tracked by §5.3.
 
 Resolution of any `[OPEN]` lands the decision into
 `reviews/decisions/` (when cross-aggregate) or amends SPEC §3 / §4 /
