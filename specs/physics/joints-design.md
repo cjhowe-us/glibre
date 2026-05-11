@@ -223,7 +223,7 @@ records.
 | **R-4.3.2** optional `JointMotor` and `JointLimits` companion components                                                  | **Covered.** §3.6 `JointMotor` model + §3.7 `JointLimits` model. Both are POD ECS companion components on the joint entity; absence means passive / unbounded (§4.1.7 invariant 2). The kind-dispatcher reads the bits at create-time and forwards to the corresponding Jolt setter (`HingeConstraint::SetMotorState` etc.).                                                                                                                          |
 | **R-4.3.3** breakable joints with force / torque thresholds emitting `JointBroken` events                                  | **Covered.** §3.8 `JointBreakThreshold` model + §3.9 break-detection walk. The walk runs at substep exit (§3.9.1); on threshold trip the cluster emits `JointBrokenEvent` into the per-frame ECS event buffer and despawns the joint entity (§4.1.7 invariant 4, §4.2 invariant 8 — same-frame delivery). Story #435 closes on this row.                                                                                                          |
 | **R-4.3.9** warm-start cached impulses                                                                                     | **Covered (snapshot path) + Refused (ECS component).** Per-substep warm-start state is Jolt-internal (§3.2 collapse #1 collapses harmonius `WarmStartData` into Jolt's internal state). Cross-substep persistence happens via the `joint_normal_impulses` / `joint_friction_impulses` columns of `PhysicsSnapshot` (§7.1.4 schema tags 19–20); the cluster reads them at restore (§7.2 below) and forwards to Jolt's warm-start hook through the middleman. The harmonius `WarmStartData` ECS component is **refused** — same data, one carrier, on the snapshot.                                            |
-| Harmonius design — Joint = ECS entity (not a body component)                                                              | **Covered.** §3.2 `JointEndpoints` + §3.5 reverse index. SPEC §4.1.7 invariant 1 makes "the joint is an entity, not a list-on-a-body" load-bearing; the cluster's reverse `BodyId → eastl::vector<JointId>` index is the only allowed lookup path and is used exclusively by the bodies-shapes cluster's `remove_body` gate.                                                                                                                          |
+| Harmonius design — Joint = ECS entity (not a body component)                                                              | **Covered.** §3.2 `JointEndpoints` + §3.5 reverse index. SPEC §4.1.7 invariant 1 makes "the joint is an entity, not a list-on-a-body" load-bearing; the cluster's reverse `BodyId → std::pmr::vector<JointId>` index is the only allowed lookup path and is used exclusively by the bodies-shapes cluster's `remove_body` gate.                                                                                                                          |
 | Harmonius design — Joint anchor frames in each body's local space                                                         | **Covered.** §3.2 `JointEndpoints.frame_a` / `frame_b` (each a `JointFrame { Vec3 position, Quat rotation }`). Per §7.1.3 invariant 4 the anchor quaternions must be unit-normalised at decode; non-unit returns `physics::Error::ConfigInvalid` at admission.                                                                                                                                                                                       |
 | Harmonius design — `JointBroken` event carries breaking force and breaking torque magnitudes                              | **Covered.** §5 `JointBrokenEvent { joint, kind, applied_force, applied_torque }`. The cluster reads Jolt's accumulated normal / friction impulses on the constraint at the substep exit, divides by `fixed_dt` to yield force / torque, populates the event payload (§3.9.2). Same-frame delivery follows §4.2 invariant 8.                                                                                                                         |
 
@@ -705,7 +705,7 @@ never reads wall-clock time, host thread identity, or allocator
 address.
 
 The cluster also owns a **reverse index** `BodyId →
-eastl::vector<JointId>` keyed by the joint's two endpoints; it is
+std::pmr::vector<JointId>` keyed by the joint's two endpoints; it is
 the only consultation path for the bodies-shapes cluster's
 `remove_body` gate (§4.1.7 invariant 1, §10.1
 `BodyStillReferencedByJoint`).
@@ -716,7 +716,7 @@ namespace glibre::physics::detail {
 
 class JointIdAllocator {
 public:
-    [[nodiscard]] static Result<eastl::unique_ptr<JointIdAllocator>>
+    [[nodiscard]] static Result<std::unique_ptr<JointIdAllocator>>
         create(std::uint32_t max_constraints) noexcept;
 
     // Allocate a fresh JointId. Order is the order in which `allocate`
@@ -736,19 +736,19 @@ public:
     // surviving joint entity in JointId-ascending order so the
     // post-reload allocator state is byte-equal to pre-drain.
     [[nodiscard]] Result<void>
-        restore_from_snapshot(eastl::span<const SnapshotJoint>) noexcept;
+        restore_from_snapshot(std::span<const SnapshotJoint>) noexcept;
 
 private:
     JointIdAllocator() noexcept;
     std::uint32_t                       max_     = 0u;
     std::uint32_t                       next_id_ = 1u;     // 0 reserved as invalid sentinel
-    eastl::vector<std::uint32_t>        free_list_;        // sort-on-pop, same policy as BodyIdAllocator
-    eastl::vector<ecs::Entity>          id_to_entity_;     // index = JointId.raw() - 1
+    std::pmr::vector<std::uint32_t>     free_list_;        // sort-on-pop, same policy as BodyIdAllocator
+    std::pmr::vector<ecs::Entity>       id_to_entity_;     // index = JointId.raw() - 1
 };
 
 class JointReverseIndex {
 public:
-    [[nodiscard]] static eastl::unique_ptr<JointReverseIndex>
+    [[nodiscard]] static std::unique_ptr<JointReverseIndex>
         create(std::uint32_t max_bodies, std::uint32_t max_constraints) noexcept;
 
     // Called by joint.cpp at add_joint after JointIdAllocator::allocate
@@ -772,11 +772,13 @@ public:
 private:
     JointReverseIndex() noexcept;
     // Keyed by BodyId.raw(); each cell is a small inline-storage vector
-    // (eastl::fixed_vector<JointId, 4>) since most bodies hold 0–4 joints
-    // (ragdoll knee = 1 hinge; shoulder = 1 swing-twist; vehicle wheel
-    // = 1 hinge; chain segment = 2 distance). Spillover is allowed but
-    // rare.
-    eastl::vector<eastl::fixed_vector<JointId, 4>> by_body_;
+    // (glibre::inplace_vector<JointId, 4> — std::inplace_vector polyfill,
+    // core/include/glibre/compat/inplace_vector.hpp — P0843R14, C++26)
+    // since most bodies hold 0–4 joints (ragdoll knee = 1 hinge;
+    // shoulder = 1 swing-twist; vehicle wheel = 1 hinge; chain segment =
+    // 2 distance). Overflow-on-push_back → grows via the outer PMR vector;
+    // see reviews/decisions/eastl-removal.md §"eastl::fixed_vector".
+    std::pmr::vector<glibre::inplace_vector<JointId, 4>> by_body_;
 };
 
 }  // namespace glibre::physics::detail
@@ -1218,7 +1220,7 @@ read-mostly during the substep.
 | Per-archetype scratch                | `cached_target` (`f32`)                                | Read+written at every entry barrier (motor walk).                                                       |
 | Per-archetype scratch                | `accum_normal_impulse`, `accum_friction_impulse` (`f32 × 2`) | Written at every exit barrier from Jolt; read in the same walk for the threshold compare.        |
 | Per-archetype scratch                | `broken` (`bool`)                                      | Read at every exit barrier (skip-already-broken fast path); written at trip; read by post-walk despawn pass. |
-| `JointReverseIndex`                  | `by_body_[body_id].empty()`                            | Read by the bodies-shapes `remove_body` gate; one `eastl::fixed_vector::empty()` per remove.            |
+| `JointReverseIndex`                  | `by_body_[body_id].empty()`                            | Read by the bodies-shapes `remove_body` gate; one `inplace_vector::empty()` per remove.            |
 
 The `JointEndpoints` hot prefix (32 B) plus `JointMotor` /
 `JointBreakThreshold` (16 B / 8 B respectively) all fit comfortably
@@ -1251,11 +1253,16 @@ static_assert(sizeof(JointBreakThreshold)    <= 8,  "JointBreakThreshold is 2 ×
 static_assert(sizeof(JointBrokenEvent)       <= 16, "JointBrokenEvent fits one half cache line");
 ```
 
-The reverse index's per-cell `eastl::fixed_vector<JointId, 4>` is
-sized at 4 inline `u32`s (16 B inline storage + 8 B header = 24 B
-per cell); `max_bodies = 1024` → ~24 KiB index footprint. Spillover
-into the heap is permitted but rare under the MVP S1 fixture (~5–8
-joints total in the ragdoll fixture, never > 4 per body).
+The reverse index's per-cell `glibre::inplace_vector<JointId, 4>` (the
+`std::inplace_vector` P0843R14 polyfill from
+`core/include/glibre/compat/inplace_vector.hpp`) is sized at 4 inline
+`u32`s (16 B inline storage + 4 B size field = 20 B per cell, padded to
+24 B by alignment); `max_bodies = 1024` → ~24 KiB index footprint.
+Overflow beyond 4 elements promotes the cell value into the outer
+`std::pmr::vector` element; this is permitted but rare under the MVP S1
+fixture (~5–8 joints total in the ragdoll fixture, never > 4 per body).
+Per `reviews/decisions/eastl-removal.md` §"eastl::fixed_vector": use the
+polyfill until libc++ ships `std::inplace_vector` natively.
 
 ## 6. Concurrency
 
@@ -1324,7 +1331,7 @@ relaxed-atomic-pointer upgrade path (`physics-world-design.md` §6.4
 note 2) or a per-cell read-write split (deferred).
 
 The `JointIdAllocator::allocate` / `release` calls update two
-`eastl::vector`s non-atomically; safe because phase 3 substep
+`std::pmr::vector`s non-atomically; safe because phase 3 substep
 barriers serialise all access through the driver thread.
 
 ### 6.5 Determinism guarantees
@@ -1809,7 +1816,7 @@ bounded as follows; the numbers fit **inside** the existing rows.
 
 | Cluster slice                                              | Inside row                | Per substep | Per frame (2 substeps × 2 barriers) | Dominant operation                                                                                       |
 |------------------------------------------------------------|---------------------------|-------------|--------------------------------------|-----------------------------------------------------------------------------------------------------------|
-| `JointId`-ascending sort over scratch span (entry + exit)  | ECS↔Jolt mirror (0.30 ms) | < 0.005 ms  | < 0.020 ms                           | `eastl::sort` over ~8 `u32`; `O(n log n)` with `n ≤ 8`. Reuses the same per-substep arena pattern as the bodies sort. |
+| `JointId`-ascending sort over scratch span (entry + exit)  | ECS↔Jolt mirror (0.30 ms) | < 0.005 ms  | < 0.020 ms                           | `std::ranges::sort` over ~8 `u32`; `O(n log n)` with `n ≤ 8`. Reuses the same per-substep arena pattern as the bodies sort. Per `reviews/decisions/eastl-removal.md` R4 — range algorithms replace pre-C++20 iterator forms. |
 | Entry barrier — motor target push                          | ECS↔Jolt mirror (0.30 ms) | < 0.005 ms  | < 0.010 ms                           | Per-`JointMotor`-row enabled-bit + cache compare + middleman `set_motor_target` if dirty; few in S1 (~1–2 motors). |
 | Exit barrier — accumulated-impulse read                    | ECS↔Jolt mirror (0.30 ms) | < 0.005 ms  | < 0.010 ms                           | One middleman call per `JointBreakThreshold`-archetype row; 2 × `f32` read per call.                     |
 | Exit barrier — break-threshold compare                     | ECS↔Jolt mirror (0.30 ms) | < 0.001 ms  | < 0.005 ms                           | One `f32` divide + two `f32` compares per row; no Jolt traffic.                                           |
@@ -1850,19 +1857,24 @@ stamped with `ContextTag::physics` at the allocator-handle level
 (`perf-budget.md` Allocator Rule #1). The cluster makes only three
 distinct allocations:
 
-1. **`JointIdAllocator` itself** — one `eastl::make_unique` at
+1. **`JointIdAllocator` itself** — one `std::make_unique` at
    `PhysicsWorld::create` (broker through `physics-world` cluster).
-   ~24 B + the `id_to_entity_` vector's bytes.
-2. **`JointReverseIndex` itself** — one `eastl::make_unique` at the
+   ~24 B + the `id_to_entity_` vector's bytes. The `std::pmr::vector`
+   fields inside the allocator carry `&physics_mr_` (the
+   `glibre::PerContextAllocatorResource` for `ContextTag::physics`),
+   forwarded at construction per `reviews/decisions/eastl-removal.md`
+   §3 lifetime contract. See PHILOSOPHY.md §11 superseded notice.
+2. **`JointReverseIndex` itself** — one `std::make_unique` at the
    same broker. ~24 B + the `by_body_` vector at
-   `max_bodies × sizeof(fixed_vector<JointId, 4>)`.
+   `max_bodies × sizeof(glibre::inplace_vector<JointId, 4>)`. Same PMR
+   resource threading.
 3. **Per-`add_joint` Jolt `Constraint*`** — one allocation per joint
    that crosses the table. Tagged inside the middleman per SPEC §9.4
    rule 5 ("Jolt's allocator is wrapped"); counts against the 16 MiB
    constraint-pool sub-share.
 
 Reverse-index spillover (a cell whose live joint count exceeds 4)
-allocates a heap `eastl::vector<JointId>`; this is rare under the
+promotes the cell to a heap-grown `std::pmr::vector<JointId>` element; this is rare under the
 MVP S1 fixture (~5–8 joints total, never > 4 per body) but is a
 permitted allocation.
 
