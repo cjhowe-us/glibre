@@ -15,6 +15,8 @@
 
 #include "permutation_index.hpp"
 
+#include <cassert>
+
 #include <glibre/error.hpp>
 
 namespace glibre::shader::permutation {
@@ -54,6 +56,11 @@ glibre::Result<PermutationKey> permutation_index_decode(const PermutationIndex& 
     key.features = FeatureSet{static_cast<std::uint16_t>(feat_raw)};
     key.render_path = static_cast<RenderPath>(static_cast<std::uint8_t>(rp_raw));
     key.lod_tier = static_cast<LODTier>(static_cast<std::uint8_t>(lod_raw));
+    // Invariant: the mixed-radix decomposition of a valid index must always
+    // produce a well-formed key.  A failure here would indicate a stride
+    // constant mismatch — catch it at debug time rather than propagating
+    // silently into the permutation pipeline.
+    assert(key.is_well_formed());
     return key;
 }
 

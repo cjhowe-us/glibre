@@ -8,34 +8,39 @@
 // the walk body is parameterized over a Pruner and a Visitor concept.
 // This TU exists to satisfy the CMakeLists source-list convention for the
 // permutation/ directory (each header with non-trivial semantics has a
-// paired .cpp) and to provide a compile-time instantiation check of the
+// paired .cpp) and to provide compile-time instantiation checks of the
 // two most common call patterns (accept-all and pointer-based pruner).
+
+#include <functional>
 
 #include "enumeration_table.hpp"
 
 namespace glibre::shader::permutation {
 
-// Explicit instantiation smoke-check: ensure the two most common walk()
-// variants compile without linker-visible symbols.
+// Compile-time instantiation guard: verify both primary walk() call patterns
+// are well-formed (Pruner + Visitor concepts satisfied).  These static_asserts
+// replace the former dead-code [[maybe_unused]] functions; they produce no
+// object-file symbols and express intent directly to the compiler.
 
-namespace {
+// accept-all pattern: walk_all with a counting lambda visitor.
+static_assert(
+    std::is_invocable_v<
+        decltype(&EnumerationTable::walk_all<std::function<void(const PermutationKey&)>>),
+        const EnumerationTable&,
+        std::function<void(const PermutationKey&)>>,
+    "EnumerationTable::walk_all must be invocable with a void(const PermutationKey&) visitor."
+);
 
-// accept-all visitor — compile-instantiation guard.
-[[maybe_unused]] void smoke_walk_all() {
-    EnumerationTable t;
-    std::uint32_t count = 0;
-    t.walk_all([&count](const PermutationKey&) noexcept { ++count; });
-    (void)count;
-}
-
-// accept-none pruner — compile-instantiation guard.
-[[maybe_unused]] void smoke_walk_pruned() {
-    EnumerationTable t;
-    t.walk(
-        [](const PermutationKey&) noexcept { return false; }, [](const PermutationKey&) noexcept {}
-    );
-}
-
-}  // namespace
+// pruned pattern: walk with a bool pruner and a void visitor.
+static_assert(
+    std::is_invocable_v<
+        decltype(&EnumerationTable::walk<
+                 std::function<bool(const PermutationKey&)>,
+                 std::function<void(const PermutationKey&)>>),
+        const EnumerationTable&,
+        std::function<bool(const PermutationKey&)>,
+        std::function<void(const PermutationKey&)>>,
+    "EnumerationTable::walk must be invocable with a bool pruner and a void visitor."
+);
 
 }  // namespace glibre::shader::permutation

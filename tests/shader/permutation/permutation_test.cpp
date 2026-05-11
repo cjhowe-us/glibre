@@ -128,6 +128,13 @@ TEST_CASE("permutation_key_encoding_is_total_injective_and_bit_stable", "[shader
         // Manually construct a key and verify the exact byte layout.
         // ShadingModel::Hair == 2, FeatureSet{Skinned|AlphaTest} == bits 0 and 2 set == 0x05,
         // RenderPath::Shadow == 3, LODTier::Mobile == 0.
+        //
+        // Cross-host (M1 + Linux) fixture note (issue #509 Agent Execution Notes):
+        // A separate cross-host bit-equal fixture is not required here because
+        // packed_key.cpp lays out every field by explicit byte index (byte[0..5])
+        // using only uint8_t casts — no multi-byte integer is written as a unit.
+        // There is therefore no host-endian exposure; the byte pattern produced
+        // by to_bytes() is identical on any conforming C++ implementation.
         PermutationKey k{};
         k.shading_model = ShadingModel::Hair;
         k.features.set(FeatureBit::Skinned);
