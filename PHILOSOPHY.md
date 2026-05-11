@@ -67,16 +67,27 @@
     set. See `reviews/decisions/flatbuffers-vs-fory.md` for the
     full re-derivation.
 
-    **Flatbuffers buffer ownership across the dylib boundary.** Flatbuffers
-    buffers crossing the plugin ABI are passed as `std::span<const std::byte>`
-    over plugin-owned, plugin-allocated memory; the host **must not** call any
-    deallocator on those bytes. Mutating builders (`FlatBufferBuilder`) live
-    inside one dylib only and are never passed across the ABI seam. Plugins
-    that need to hand buffers to the host expose a `release()` C-ABI shim that
-    transfers ownership; the host treats released bytes as
-    `std::pmr::polymorphic_allocator<std::byte>`-owned by the host's
-    `PerContextAllocatorResource`. This preserves the original §11 invariant:
-    no third-party deallocator runs across the dylib boundary.
+    **Flatbuffers buffer ownership across the dylib boundary — two mutually
+    exclusive regimes apply; for any given buffer, exactly one is in effect
+    and the call site must document which.**
+
+    *Clause A — Borrow semantics (default read path).* Flatbuffers buffers
+    crossing the plugin ABI in the read path are passed as
+    `std::span<const std::byte>` over plugin-owned, plugin-allocated memory.
+    The host borrows; it **MUST NOT** call any deallocator on those bytes; the
+    plugin owns the lifetime until the host's borrow returns. Mutating
+    `FlatBufferBuilder` instances always live inside one dylib and are never
+    passed across the ABI seam.
+
+    *Clause B — Ownership transfer (explicit, opt-in).* Plugins that need to
+    hand a buffer's ownership to the host (e.g. for cross-frame retention)
+    allocate the buffer through the host's `PerContextAllocatorResource` from
+    the start — obtained via `PluginContext::allocator_resource()` — and expose
+    a C-ABI shim `glibre_plugin_release_<schema>(std::byte*) noexcept`. Because
+    the allocator is the host's PMR resource, the host's deallocator is the
+    host's own; the plugin **MUST NOT** touch those bytes after the shim
+    returns. This preserves the original §11 invariant: no third-party
+    deallocator runs across the dylib boundary.
 
 ## Anti-patterns we reject
 
