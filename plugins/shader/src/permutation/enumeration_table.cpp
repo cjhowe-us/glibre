@@ -32,8 +32,7 @@ namespace {
 [[maybe_unused]] void smoke_walk_pruned() {
     EnumerationTable t;
     t.walk(
-        [](const PermutationKey&) noexcept { return false; },
-        [](const PermutationKey&) noexcept {}
+        [](const PermutationKey&) noexcept { return false; }, [](const PermutationKey&) noexcept {}
     );
 }
 

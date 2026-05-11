@@ -31,8 +31,8 @@ namespace glibre::shader::permutation {
 inline constexpr std::uint32_t kFeatureSetCardinality = 1u << kFeatureBitCount;
 
 // Step sizes for the mixed-radix encoding in tuple-field order.
-inline constexpr std::uint32_t kLODStride     = 1u;
-inline constexpr std::uint32_t kRenderStride  = kLODTierCount * kLODStride;
+inline constexpr std::uint32_t kLODStride = 1u;
+inline constexpr std::uint32_t kRenderStride = kLODTierCount * kLODStride;
 inline constexpr std::uint32_t kFeatureStride = kRenderPathCount * kRenderStride;
 inline constexpr std::uint32_t kShadingStride = kFeatureSetCardinality * kFeatureStride;
 
@@ -43,7 +43,6 @@ PermutationIndex permutation_index_encode(const PermutationKey& key) noexcept;
 
 // Decode a dense ordinal back to the corresponding PermutationKey.
 // Returns Error::PermutationKeyOutOfRange when index.value >= kPermutationCrossProductCardinality.
-glibre::Result<PermutationKey>
-permutation_index_decode(const PermutationIndex& index) noexcept;
+glibre::Result<PermutationKey> permutation_index_decode(const PermutationIndex& index) noexcept;
 
 }  // namespace glibre::shader::permutation

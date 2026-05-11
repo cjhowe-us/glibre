@@ -8,7 +8,8 @@
 //
 // Named test cases (plan #509 Unit Test Plan + DoD):
 //   shader/permutation: permutation_key_encoding_is_total_injective_and_bit_stable
-//   shader/permutation: permutation_key_from_bytes_rejects_out_of_range_with_PermutationKeyMalformed
+//   shader/permutation:
+//   permutation_key_from_bytes_rejects_out_of_range_with_PermutationKeyMalformed
 //   shader/permutation: permutation_index_ordering_matches_tuple_field_ascending_order
 //   shader/permutation: permutation_index_round_trips_through_key_bijectively
 //   shader/permutation: enumeration_table_yields_full_cross_product_in_canonical_order
@@ -51,10 +52,7 @@ using namespace glibre::shader;
 //     expected key (not just structurally equivalent).
 // ---------------------------------------------------------------------------
 
-TEST_CASE(
-    "permutation_key_encoding_is_total_injective_and_bit_stable",
-    "[shader][permutation]"
-) {
+TEST_CASE("permutation_key_encoding_is_total_injective_and_bit_stable", "[shader][permutation]") {
     SECTION("default key encodes to all-zero prefix bytes") {
         PermutationKey k{};
         auto b = k.to_bytes();
@@ -80,11 +78,11 @@ TEST_CASE(
                     for (std::uint32_t lod = 0; lod < kLODTierCount; ++lod) {
                         PermutationKey orig{};
                         orig.shading_model = static_cast<ShadingModel>(sm);
-                        orig.features      = FeatureSet{static_cast<std::uint16_t>(feat)};
-                        orig.render_path   = static_cast<RenderPath>(rp);
-                        orig.lod_tier      = static_cast<LODTier>(lod);
+                        orig.features = FeatureSet{static_cast<std::uint16_t>(feat)};
+                        orig.render_path = static_cast<RenderPath>(rp);
+                        orig.lod_tier = static_cast<LODTier>(lod);
 
-                        auto bytes  = orig.to_bytes();
+                        auto bytes = orig.to_bytes();
                         auto result = PermutationKey::from_bytes(bytes);
                         REQUIRE(result.has_value());
                         CHECK(result.value() == orig);
@@ -109,9 +107,9 @@ TEST_CASE(
                     for (std::uint32_t lod = 0; lod < kLODTierCount; ++lod) {
                         PermutationKey k{};
                         k.shading_model = static_cast<ShadingModel>(sm);
-                        k.features      = FeatureSet{static_cast<std::uint16_t>(feat)};
-                        k.render_path   = static_cast<RenderPath>(rp);
-                        k.lod_tier      = static_cast<LODTier>(lod);
+                        k.features = FeatureSet{static_cast<std::uint16_t>(feat)};
+                        k.render_path = static_cast<RenderPath>(rp);
+                        k.lod_tier = static_cast<LODTier>(lod);
                         all_bytes.push_back(k.to_bytes());
                     }
                 }
@@ -120,8 +118,10 @@ TEST_CASE(
 
         std::sort(all_bytes.begin(), all_bytes.end());
         const auto unique_end = std::unique(all_bytes.begin(), all_bytes.end());
-        CHECK(std::distance(all_bytes.begin(), unique_end)
-            == static_cast<std::ptrdiff_t>(kPermutationCrossProductCardinality));
+        CHECK(
+            std::distance(all_bytes.begin(), unique_end) ==
+            static_cast<std::ptrdiff_t>(kPermutationCrossProductCardinality)
+        );
     }
 
     SECTION("bit-stable: known key produces known byte pattern") {
@@ -133,15 +133,15 @@ TEST_CASE(
         k.features.set(FeatureBit::Skinned);
         k.features.set(FeatureBit::AlphaTest);
         k.render_path = RenderPath::Shadow;
-        k.lod_tier    = LODTier::Mobile;
+        k.lod_tier = LODTier::Mobile;
 
         auto b = k.to_bytes();
-        CHECK(static_cast<std::uint8_t>(b[0]) == 2u);   // Hair
-        CHECK(static_cast<std::uint8_t>(b[1]) == 0x05u); // Skinned|AlphaTest
-        CHECK(static_cast<std::uint8_t>(b[2]) == 0u);    // feat high byte always 0
-        CHECK(static_cast<std::uint8_t>(b[3]) == 3u);    // Shadow
-        CHECK(static_cast<std::uint8_t>(b[4]) == 0u);    // Mobile
-        CHECK(static_cast<std::uint8_t>(b[5]) == 0u);    // reserved
+        CHECK(static_cast<std::uint8_t>(b[0]) == 2u);     // Hair
+        CHECK(static_cast<std::uint8_t>(b[1]) == 0x05u);  // Skinned|AlphaTest
+        CHECK(static_cast<std::uint8_t>(b[2]) == 0u);     // feat high byte always 0
+        CHECK(static_cast<std::uint8_t>(b[3]) == 3u);     // Shadow
+        CHECK(static_cast<std::uint8_t>(b[4]) == 0u);     // Mobile
+        CHECK(static_cast<std::uint8_t>(b[5]) == 0u);     // reserved
 
         // Round-trip back.
         auto rt = PermutationKey::from_bytes(b);
@@ -174,10 +174,10 @@ TEST_CASE(
 
     SECTION("FeatureSet reserved bits set (bit 6 is reserved)") {
         BA b{};
-        b[0] = std::byte{0u};           // ShadingModel::Standard
-        b[1] = std::byte{0x40u};        // bit 6 set — reserved
-        b[3] = std::byte{0u};           // RenderPath::Forward
-        b[4] = std::byte{2u};           // LODTier::Desktop
+        b[0] = std::byte{0u};     // ShadingModel::Standard
+        b[1] = std::byte{0x40u};  // bit 6 set — reserved
+        b[3] = std::byte{0u};     // RenderPath::Forward
+        b[4] = std::byte{2u};     // LODTier::Desktop
         auto r = PermutationKey::from_bytes(b);
         REQUIRE(!r.has_value());
         const auto* shader_err = std::get_if<glibre::shader::Error>(&r.error().code());
@@ -187,7 +187,7 @@ TEST_CASE(
 
     SECTION("FeatureSet high byte non-zero") {
         BA b{};
-        b[2] = std::byte{0x01u};        // feat_hi != 0 — reserved
+        b[2] = std::byte{0x01u};  // feat_hi != 0 — reserved
         auto r = PermutationKey::from_bytes(b);
         REQUIRE(!r.has_value());
         const auto* shader_err = std::get_if<glibre::shader::Error>(&r.error().code());
@@ -235,8 +235,7 @@ TEST_CASE(
 // ---------------------------------------------------------------------------
 
 TEST_CASE(
-    "permutation_index_ordering_matches_tuple_field_ascending_order",
-    "[shader][permutation]"
+    "permutation_index_ordering_matches_tuple_field_ascending_order", "[shader][permutation]"
 ) {
     SECTION("increasing ShadingModel increases index") {
         PermutationKey a{}, b{};
@@ -257,8 +256,8 @@ TEST_CASE(
     SECTION("increasing RenderPath increases index (same SM, feat, LOD)") {
         PermutationKey a{}, b{};
         a.lod_tier = b.lod_tier = LODTier::Desktop;
-        a.render_path = RenderPath::Forward;    // 0
-        b.render_path = RenderPath::Deferred;   // 1
+        a.render_path = RenderPath::Forward;   // 0
+        b.render_path = RenderPath::Deferred;  // 1
         CHECK(to_index(a).value < to_index(b).value);
     }
 
@@ -272,14 +271,14 @@ TEST_CASE(
     SECTION("ShadingModel dominates: higher SM beats lower feat/rp/lod") {
         PermutationKey a{}, b{};
         a.shading_model = ShadingModel::Standard;
-        a.features      = FeatureSet{static_cast<std::uint16_t>((1u << kFeatureBitCount) - 1u)};
-        a.render_path   = static_cast<RenderPath>(kRenderPathCount - 1);
-        a.lod_tier      = static_cast<LODTier>(kLODTierCount - 1);
+        a.features = FeatureSet{static_cast<std::uint16_t>((1u << kFeatureBitCount) - 1u)};
+        a.render_path = static_cast<RenderPath>(kRenderPathCount - 1);
+        a.lod_tier = static_cast<LODTier>(kLODTierCount - 1);
 
         b.shading_model = ShadingModel::Skin;  // one step up
-        b.features      = FeatureSet{0u};
-        b.render_path   = RenderPath::Forward;
-        b.lod_tier      = LODTier::Mobile;
+        b.features = FeatureSet{0u};
+        b.render_path = RenderPath::Forward;
+        b.lod_tier = LODTier::Mobile;
 
         CHECK(to_index(a).value < to_index(b).value);
     }
@@ -288,17 +287,17 @@ TEST_CASE(
         // The first key in tuple-field order should produce index 0.
         PermutationKey first{};
         first.shading_model = static_cast<ShadingModel>(0u);
-        first.features      = FeatureSet{0u};
-        first.render_path   = static_cast<RenderPath>(0u);
-        first.lod_tier      = static_cast<LODTier>(0u);
+        first.features = FeatureSet{0u};
+        first.render_path = static_cast<RenderPath>(0u);
+        first.lod_tier = static_cast<LODTier>(0u);
         CHECK(to_index(first).value == 0u);
 
         // The last key should produce index kPermutationCrossProductCardinality - 1.
         PermutationKey last{};
         last.shading_model = static_cast<ShadingModel>(kShadingModelCount - 1u);
-        last.features      = FeatureSet{static_cast<std::uint16_t>((1u << kFeatureBitCount) - 1u)};
-        last.render_path   = static_cast<RenderPath>(kRenderPathCount - 1u);
-        last.lod_tier      = static_cast<LODTier>(kLODTierCount - 1u);
+        last.features = FeatureSet{static_cast<std::uint16_t>((1u << kFeatureBitCount) - 1u)};
+        last.render_path = static_cast<RenderPath>(kRenderPathCount - 1u);
+        last.lod_tier = static_cast<LODTier>(kLODTierCount - 1u);
         CHECK(to_index(last).value == kPermutationCrossProductCardinality - 1u);
     }
 }
@@ -309,10 +308,7 @@ TEST_CASE(
 // Verifies the bijection property: to_index and from_index are inverses.
 // ---------------------------------------------------------------------------
 
-TEST_CASE(
-    "permutation_index_round_trips_through_key_bijectively",
-    "[shader][permutation]"
-) {
+TEST_CASE("permutation_index_round_trips_through_key_bijectively", "[shader][permutation]") {
     SECTION("every index in [0, kPermutationCrossProductCardinality) decodes and re-encodes") {
         for (std::uint32_t i = 0; i < kPermutationCrossProductCardinality; ++i) {
             auto key_result = from_index(PermutationIndex{i});
@@ -348,8 +344,7 @@ TEST_CASE(
 // ---------------------------------------------------------------------------
 
 TEST_CASE(
-    "enumeration_table_yields_full_cross_product_in_canonical_order",
-    "[shader][permutation]"
+    "enumeration_table_yields_full_cross_product_in_canonical_order", "[shader][permutation]"
 ) {
     permutation::EnumerationTable table;
 
@@ -383,8 +378,7 @@ TEST_CASE(
         );
 
         // Expected count: kShadingModelCount * 1 * kRenderPathCount * kLODTierCount.
-        const std::size_t expected_count =
-            kShadingModelCount * kRenderPathCount * kLODTierCount;
+        const std::size_t expected_count = kShadingModelCount * kRenderPathCount * kLODTierCount;
         CHECK(visited.size() == expected_count);
 
         // All visited keys must have no features.
@@ -405,13 +399,13 @@ TEST_CASE(
     SECTION("walk_all produces no duplicates") {
         std::vector<std::uint32_t> indices;
         indices.reserve(kPermutationCrossProductCardinality);
-        table.walk_all([&](const PermutationKey& k) {
-            indices.push_back(to_index(k).value);
-        });
+        table.walk_all([&](const PermutationKey& k) { indices.push_back(to_index(k).value); });
         std::sort(indices.begin(), indices.end());
         auto it = std::unique(indices.begin(), indices.end());
-        CHECK(std::distance(indices.begin(), it)
-            == static_cast<std::ptrdiff_t>(kPermutationCrossProductCardinality));
+        CHECK(
+            std::distance(indices.begin(), it) ==
+            static_cast<std::ptrdiff_t>(kPermutationCrossProductCardinality)
+        );
     }
 }
 
@@ -423,10 +417,7 @@ TEST_CASE(
 // enumerator is repositioned without a spec amendment.
 // ---------------------------------------------------------------------------
 
-TEST_CASE(
-    "feature_set_bit_positions_are_stable_across_revs",
-    "[shader][permutation]"
-) {
+TEST_CASE("feature_set_bit_positions_are_stable_across_revs", "[shader][permutation]") {
     // Bit positions per spec §2 / §5 public header.
     SECTION("Skinned is bit 0") {
         CHECK(static_cast<std::uint8_t>(FeatureBit::Skinned) == 0u);
@@ -470,13 +461,9 @@ TEST_CASE(
         CHECK(fs.bits() == 0x0020u);
     }
 
-    SECTION("kFeatureBitCount is 6") {
-        CHECK(kFeatureBitCount == 6u);
-    }
+    SECTION("kFeatureBitCount is 6") { CHECK(kFeatureBitCount == 6u); }
 
-    SECTION("kFeatureBitMask is 0x003F") {
-        CHECK(kFeatureBitMask == 0x003Fu);
-    }
+    SECTION("kFeatureBitMask is 0x003F") { CHECK(kFeatureBitMask == 0x003Fu); }
 
     SECTION("all features set produces correct mask") {
         FeatureSet fs{};

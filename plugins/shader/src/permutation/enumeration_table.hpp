@@ -48,10 +48,11 @@
 //       or from tests that do not add the PRIVATE include path for the
 //       permutation/ directory.
 
-#include "axes.hpp"
-#include "permutation_index.hpp"
 #include <concepts>
 #include <functional>
+
+#include "axes.hpp"
+#include "permutation_index.hpp"
 
 namespace glibre::shader::permutation {
 
@@ -59,15 +60,15 @@ namespace glibre::shader::permutation {
 // Pruning predicate concept — callable as bool(const PermutationKey&).
 // ---------------------------------------------------------------------------
 
-template <typename F>
-concept Pruner = std::invocable<F, const PermutationKey&>
-    && std::same_as<std::invoke_result_t<F, const PermutationKey&>, bool>;
+template<typename F>
+concept Pruner = std::invocable<F, const PermutationKey&> &&
+                 std::same_as<std::invoke_result_t<F, const PermutationKey&>, bool>;
 
 // ---------------------------------------------------------------------------
 // Visitor concept — callable as void(const PermutationKey&).
 // ---------------------------------------------------------------------------
 
-template <typename F>
+template<typename F>
 concept Visitor = std::invocable<F, const PermutationKey&>;
 
 // ---------------------------------------------------------------------------
@@ -91,24 +92,20 @@ public:
     //         for lod in [0, kLODTierCount):
     //           key = { sm, feat, rp, lod }
     //           if pruner(key): visitor(key)
-    template <Pruner P, Visitor V>
+    template<Pruner P, Visitor V>
     void walk(P&& pruner, V&& visitor) const noexcept(
-        noexcept(pruner(std::declval<const PermutationKey&>()))
-        && noexcept(visitor(std::declval<const PermutationKey&>()))
+        noexcept(pruner(std::declval<const PermutationKey&>())) &&
+        noexcept(visitor(std::declval<const PermutationKey&>()))
     ) {
         for (std::uint32_t sm = 0; sm < kShadingModelCount; ++sm) {
             for (std::uint32_t feat = 0; feat < kFeatureSetCardinality; ++feat) {
                 for (std::uint32_t rp = 0; rp < kRenderPathCount; ++rp) {
                     for (std::uint32_t lod = 0; lod < kLODTierCount; ++lod) {
                         PermutationKey k{};
-                        k.shading_model = static_cast<ShadingModel>(
-                            static_cast<std::uint8_t>(sm));
-                        k.features      = FeatureSet{
-                            static_cast<std::uint16_t>(feat)};
-                        k.render_path   = static_cast<RenderPath>(
-                            static_cast<std::uint8_t>(rp));
-                        k.lod_tier      = static_cast<LODTier>(
-                            static_cast<std::uint8_t>(lod));
+                        k.shading_model = static_cast<ShadingModel>(static_cast<std::uint8_t>(sm));
+                        k.features = FeatureSet{static_cast<std::uint16_t>(feat)};
+                        k.render_path = static_cast<RenderPath>(static_cast<std::uint8_t>(rp));
+                        k.lod_tier = static_cast<LODTier>(static_cast<std::uint8_t>(lod));
                         if (pruner(k)) {
                             visitor(k);
                         }
@@ -119,14 +116,10 @@ public:
     }
 
     // Convenience overload: walk without pruning (accept all).
-    template <Visitor V>
-    void walk_all(V&& visitor) const noexcept(
-        noexcept(visitor(std::declval<const PermutationKey&>()))
-    ) {
-        walk(
-            [](const PermutationKey&) noexcept { return true; },
-            std::forward<V>(visitor)
-        );
+    template<Visitor V>
+    void
+    walk_all(V&& visitor) const noexcept(noexcept(visitor(std::declval<const PermutationKey&>()))) {
+        walk([](const PermutationKey&) noexcept { return true; }, std::forward<V>(visitor));
     }
 };
 

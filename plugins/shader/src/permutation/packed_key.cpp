@@ -16,6 +16,7 @@
 // one or two bytes and is laid out by explicit index.
 
 #include "packed_key.hpp"
+
 #include <glibre/error.hpp>
 
 namespace glibre::shader::permutation {
@@ -40,9 +41,9 @@ packed_key_from_bytes(const PermutationKey::PackedBytes& bytes) noexcept {
     const auto sm_raw = static_cast<std::uint8_t>(bytes[0]);
     const auto feat_lo = static_cast<std::uint8_t>(bytes[1]);
     const auto feat_hi = static_cast<std::uint8_t>(bytes[2]);
-    const auto rp_raw  = static_cast<std::uint8_t>(bytes[3]);
+    const auto rp_raw = static_cast<std::uint8_t>(bytes[3]);
     const auto lod_raw = static_cast<std::uint8_t>(bytes[4]);
-    const auto rsv     = static_cast<std::uint8_t>(bytes[5]);
+    const auto rsv = static_cast<std::uint8_t>(bytes[5]);
 
     // Validate ShadingModel range.
     if (sm_raw >= static_cast<std::uint8_t>(kShadingModelCount)) {
@@ -91,8 +92,7 @@ PermutationKey::PackedBytes PermutationKey::to_bytes() const noexcept {
     return permutation::packed_key_to_bytes(*this);
 }
 
-glibre::Result<PermutationKey>
-PermutationKey::from_bytes(const PackedBytes& bytes) noexcept {
+glibre::Result<PermutationKey> PermutationKey::from_bytes(const PackedBytes& bytes) noexcept {
     return permutation::packed_key_from_bytes(bytes);
 }
 
@@ -102,10 +102,10 @@ bool PermutationKey::is_well_formed() const noexcept {
     const auto lod_raw = static_cast<std::uint8_t>(lod_tier);
     // FeatureSet high byte is conceptually 0 because kFeatureBitCount <= 8.
     // The accessor bits() returns a uint16; bits above kFeatureBitMask must be 0.
-    return sm_raw < static_cast<std::uint8_t>(kShadingModelCount)
-        && (features.bits() & ~kFeatureBitMask) == 0u
-        && rp_raw < static_cast<std::uint8_t>(kRenderPathCount)
-        && lod_raw < static_cast<std::uint8_t>(kLODTierCount);
+    return sm_raw < static_cast<std::uint8_t>(kShadingModelCount) &&
+           (features.bits() & ~kFeatureBitMask) == 0u &&
+           rp_raw < static_cast<std::uint8_t>(kRenderPathCount) &&
+           lod_raw < static_cast<std::uint8_t>(kLODTierCount);
 }
 
 bool permutation_key_byte_less(const PermutationKey& a, const PermutationKey& b) noexcept {
