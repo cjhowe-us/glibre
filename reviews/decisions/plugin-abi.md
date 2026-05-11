@@ -1,3 +1,5 @@
+> Updated 2026-05-11 to reflect Flatbuffers-substrate decision (reviews/decisions/flatbuffers-vs-fory.md).
+
 # Decision Record: Plugin ABI
 
 - Refs: spike #13 (decide-plugin-abi-hash), parent sub-epic on plugin
@@ -96,64 +98,94 @@ Reaffirmed from `fory-codegen.md` §"middleman dylib exposes":
 
 ## Plugin Manifest Schema
 
-Authored as `plugin.fory`; generated POD struct lives in
-`glibre::types::PluginManifest`. Fory-serialized blob shape:
+Authored as `plugin.fbs` (Flatbuffers IDL); generated accessor types
+live in `glibre::types::PluginManifest` (offset-table reader). The
+on-dylib blob is a Flatbuffers size-prefixed buffer with
+`file_identifier "PLMF"`. Per
+`reviews/decisions/flatbuffers-vs-fory.md` §Decision (Q1, Q4), no
+custom `EnvelopeHeader` wraps it; the size prefix + identifier
+*are* the envelope.
 
-```fory
-schema glibre.core.PluginManifest {
-  version 1
-  since   "0.1.0"
+```fbs
+// plugin.fbs — authoring shape for every plugin's manifest.
+namespace glibre.core;
 
-  field name              : string             tag 1 since 1
-  field version           : SemVer             tag 2 since 1
-  field abi_hash          : string             tag 3 since 1
-  field min_engine_version: SemVer             tag 4 since 1
-  field components        : list<ComponentDecl> tag 5 since 1
-  field systems           : list<SystemDecl>    tag 6 since 1
-  field passes            : list<PassDecl>      tag 7 since 1
-  field panels            : list<PanelDecl>     tag 8 since 1
-  field depends_on        : list<string>        tag 9 since 1
+file_identifier "PLMF";
+file_extension  "plmf";
+
+struct SemVer {
+  major: uint16;
+  minor: uint16;
+  patch: uint16;
 }
 
-schema glibre.core.SemVer {
-  version 1
-  field major : u16 tag 1 since 1
-  field minor : u16 tag 2 since 1
-  field patch : u16 tag 3 since 1
+enum StorageHint : uint8 {
+  Archetype  = 0,
+  Sparse     = 1,
+  Singleton  = 2,
 }
 
-schema glibre.core.ComponentDecl {
-  version 1
-  field fqn          : string  tag 1 since 1
-  field schema_hash  : string  tag 2 since 1   # blake3 of the .fory source
-  field storage_hint : u8      tag 3 since 1   # archetype/sparse/singleton
+table ComponentDecl {
+  fqn:          string;
+  schema_hash:  string;          // blake3 hex of the .bfbs slice
+  storage_hint: StorageHint;
 }
 
-schema glibre.core.SystemDecl {
-  version 1
-  field name      : string         tag 1 since 1
-  field phase     : u8             tag 2 since 1   # 1..=9 from frame-phases.md
-  field reads     : list<string>   tag 3 since 1
-  field writes    : list<string>   tag 4 since 1
-  field after     : list<string>   tag 5 since 1   # ordering edges within phase
-  field before    : list<string>   tag 6 since 1
+table SystemDecl {
+  name:   string;
+  phase:  uint8;                 // 1..=9 from frame-phases.md
+  reads:  [string];
+  writes: [string];
+  after:  [string];              // intra-phase ordering edges
+  before: [string];
 }
 
-schema glibre.core.PassDecl {
-  version 1
-  field name        : string  tag 1 since 1
-  field render_phase: u8      tag 2 since 1   # phase 6 or 7
-  field inputs      : list<string> tag 3 since 1
-  field outputs     : list<string> tag 4 since 1
+table PassDecl {
+  name:         string;
+  render_phase: uint8;           // phase 6 or 7
+  inputs:       [string];
+  outputs:      [string];
 }
 
-schema glibre.core.PanelDecl {
-  version 1
-  field id     : string  tag 1 since 1
-  field title  : string  tag 2 since 1
-  field area   : u8      tag 3 since 1   # docked area enum
+table PanelDecl {
+  id:    string;
+  title: string;
+  area:  uint8;                  // docked area enum
 }
+
+table PluginManifest {
+  schema_version:     uint32;    // per Q4: glibre version lives in-table
+  name:               string;
+  version:            SemVer;
+  abi_hash:           string;
+  min_engine_version: SemVer;
+  components:         [ComponentDecl];
+  systems:            [SystemDecl];
+  passes:             [PassDecl];
+  panels:             [PanelDecl];
+  depends_on:         [string];
+}
+
+root_type PluginManifest;
 ```
+
+Schema-evolution notes (per Q1 of the Flatbuffers ADR):
+
+- New fields are appended at the next free Flatbuffers field-id and
+  default to absent / zero. `flatc --conform plugin.fbs.prev` checks
+  every PR that touches this schema.
+- Renames go through the deprecate-and-add aliasing path: mark the
+  old field `(deprecated)`, add the new field at the next free
+  field-id, and let `glbr-sergeant` emit accessors that point
+  callers at the new name with `[[deprecated]]` forwarders for the
+  old.
+- Any change that is not append-or-deprecate-or-alias is a
+  layout-breaking change and bumps both `glibre_types_abi_hash` and
+  `glibre-types.dylib`'s SONAME.
+
+The manifest's `schema_hash` per `ComponentDecl` is the blake3 of
+the corresponding type's `.bfbs` slice in the middleman's sidecar
+schema bundle (not the `.fbs` source).
 
 Field-by-field semantics for `PluginManifest`:
 

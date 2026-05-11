@@ -1,3 +1,7 @@
+> **Status: SUPERSEDED — see `reviews/decisions/flatbuffers-vs-fory.md` (2026-05-11).**
+>
+> This ADR is preserved for historical context. The substrate has been swapped from Apache Fory to Flatbuffers; the rationale and decisions below no longer reflect the engine's choice. Do not implement against this document.
+
 # Decision: Apache Fory Codegen + Middleman Dylib
 
 - Refs: spike #12 (research-fory-codegen), parent sub-epic #5, epic #2

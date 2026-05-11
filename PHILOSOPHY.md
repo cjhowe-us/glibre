@@ -34,6 +34,8 @@
     become one primitive. Record the collapse in the spec.
 11. **libc++ standard library is canonical for runtime data structures**
     (see [reviews/decisions/eastl-removal.md](reviews/decisions/eastl-removal.md)).
+    > Amended 2026-05-11 per reviews/decisions/flatbuffers-vs-fory.md.
+
     Containers, strings, smart pointers, `optional`, `variant`, `tuple`,
     `pair`, and function objects come from `std::*` or `std::pmr::*`
     (polymorphic allocators), not external libraries. The per-context
@@ -46,9 +48,24 @@
     std::ranges::to<std::pmr::vector<T>>()`) replace hand-rolled iterator
     pairs and loops. C++23/26 stdlib features not yet shipped by libc++ on
     the locked toolchain are polyfilled under `core/include/glibre/compat/`
-    (one header per feature, deleted when libc++ catches up). Public plugin
-    ABI surfaces never expose `std::` or `std::pmr::` containers — they cross
-    the boundary as POD spans / handles only (see plugin-abi decision record).
+    (one header per feature, deleted when libc++ catches up).
+
+    **Plugin ABI surface rules.** Public plugin ABI surfaces never expose
+    `std::` or `std::pmr::` containers — they cross the boundary as POD
+    spans / handles or as **Flatbuffers-generated accessor types**
+    (offset tables, `flatbuffers::Offset<T>`, `FlatBufferBuilder`,
+    table-accessor pointers). The libc++ container prohibition stands
+    because `std::*` layout depends on libc++ version and ABI flags,
+    which we cannot pin across plugin builds. Flatbuffers-generated
+    types satisfy the same offset-stable-ABI invariant via a different
+    mechanism: the offset-table layout is part of the Flatbuffers
+    binary format specification, so it is host-invariant by
+    construction and stable across every plugin compiled against the
+    same `.fbs` source. The `glibre_types_abi_hash` gate
+    (`reviews/decisions/plugin-abi.md` §ABI Hash Function) enforces
+    that every loaded plugin was built against an identical schema
+    set. See `reviews/decisions/flatbuffers-vs-fory.md` for the
+    full re-derivation.
 
 ## Anti-patterns we reject
 
