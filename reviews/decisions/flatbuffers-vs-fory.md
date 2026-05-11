@@ -220,22 +220,25 @@ estimates per CLAUDE.md.
    Delete `migration-dispatcher-design.md`. Replace
    `data-error-design.md` to reflect retained-but-redocumented
    `EnvelopeTruncated` / `ReservedTagViolation` arms.
-4. **Issue churn.** Retitle and rebody the currently-OPEN Fory-referencing
-   issues to match the new design (Fory references → Flatbuffers,
-   `glibre-foryc` → `glbr-sergeant`, migration-specific issues
-   re-evaluated as obsolete). The OPEN issues at the time this ADR
-   merged that reference Fory/foryc are: `[368, 407, 460, 492, 517,
-   539, 605, 607, 619, 627, 632, 638, 640, 654, 687]`. Do **not**
-   touch closed issues (several in the #218–#232 range are already
-   closed with dod:verified or dod:failed and must not be destructively
-   re-edited). Note: an earlier bulk sweep already retitled and rewrote
-   bodies on the 58 currently-open Fory-referencing issues with a
-   per-issue comment citing this ADR; Step 4's remaining work is
-   targeted closure decisions for the candidates identified in Q1
-   (#368, #492, #539), not a wholesale retitle. Each closure must
-   follow the story-closure rule (E2E green + manual PASS for stories;
-   `closes #N` + dod-verify for plans/spikes) — not direct
-   `gh issue close`.
+4. **Issue churn.** Step 4 happens in two phases.
+
+   (a) **Bulk sweep — DONE 2026-05-11**: a single mechanical pass
+   retitled and rewrote the bodies of every then-open issue carrying
+   Fory/foryc tokens (~58 issues), each with a comment citing this ADR.
+   Do **not** touch closed issues (several in the #218–#232 range are
+   already closed with dod:verified or dod:failed and must not be
+   destructively re-edited).
+
+   (b) **Targeted disposition — pending**: per-issue close-vs-keep
+   decisions for the migration-related stories #368 / #492 / #539 and
+   any `dod:failed` reopens after this ADR merges. The full list of
+   OPEN candidates is recomputed at Step-4 execution time via
+   `gh issue list --state open --search "Fory OR foryc"` — it is NOT
+   pinned in this ADR because it drifts with every planning pass.
+   Disposition is the verifier's verdict on each follow-up PR that uses
+   `closes #N`, NOT a direct `gh issue close` from the ADR. Each
+   closure must follow the story-closure rule (E2E green + manual PASS
+   for stories; `closes #N` + dod-verify for plans/spikes).
 5. **vcpkg swap.** Replace `apache-fory` (overlay) with
    `flatbuffers` (first-party) in `vcpkg.json`; delete
    `vcpkg-overlay-ports/fory/`; refresh `vcpkg-configuration.json`.
