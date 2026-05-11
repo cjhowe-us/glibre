@@ -36,6 +36,9 @@ add_library(glibre-shader STATIC
     src/descriptor/descriptor_layout.cpp  # plan #1087 — DescriptorLayout::derive
     src/cache/blake3.cpp                  # plan #516 — BLAKE3 hasher (ShaderHash)
     src/cache/cas_store.cpp               # plan #516 — CAS filesystem store (§4.6, §7.5)
+    # plan #514 — slangc reflection record ingester (§4.4, §6.3)
+    src/reflection/slangc_reflection_record.cpp
+    src/reflection/blob_builder.cpp
 )
 
 # Public include path: plugins/shader/include (exposes glibre/shader/shader.hpp
@@ -51,6 +54,19 @@ target_include_directories(glibre-shader
         ${CMAKE_CURRENT_SOURCE_DIR}/src/source
         # Internal cache headers (blake3.hpp, cas_store.hpp) — plan #516.
         ${CMAKE_CURRENT_SOURCE_DIR}/src/cache
+        # Internal reflection headers (slangc_reflection_record.hpp,
+        # blob_builder.hpp) — plan #514.
+        # ARCHITECTURAL NOTE: this PRIVATE entry lets the in-tree reflection
+        # tests (tests/shader/reflection/) include blob_builder.hpp and
+        # slangc_reflection_record.hpp directly without promoting them to the
+        # public API surface.  It is intentionally PRIVATE so that no external
+        # consumer of glibre-shader can take a hard dependency on these headers
+        # through the CMake dependency graph.  If a future cross-plugin consumer
+        # needs reflection types it must do so via the public glibre/shader/shader.hpp
+        # surface.  The residual risk (a consumer adding this path manually and
+        # depending on it out-of-band) is a broader architectural concern tracked
+        # separately — see #1119.
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/reflection
 )
 
 target_link_libraries(glibre-shader
