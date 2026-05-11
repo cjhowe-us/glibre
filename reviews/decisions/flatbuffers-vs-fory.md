@@ -143,7 +143,17 @@ spans.** The downstream design points are resolved as follows.
   byte-equal across hosts; Flatbuffers `table` is offset-stable but
   not byte-equal (offsets to optional fields depend on which fields
   are present). For math primitives whose evolvability is not
-  needed, `struct` is the strictly stronger choice.
+  needed, `struct` is the strictly stronger choice. Per the
+  Flatbuffers internals specification
+  (`https://flatbuffers.dev/internals/`), a `struct` packs its fields
+  consecutively at explicit alignments with no vtable and no
+  field-id mapping; `flatc --cpp` emits a C++ class whose layout is
+  `reinterpret_cast`-compatible with the wire bytes (zero-copy read).
+  Byte-equal determinism therefore applies to BOTH the wire form and
+  the in-memory C++ object, which is the property §7 requires. This
+  argument holds specifically because we use `struct` for math
+  primitives; `table` types are wire-stable but not
+  in-memory-byte-equal.
 
 ## Consequences
 
@@ -187,7 +197,21 @@ spans.** The downstream design points are resolved as follows.
   Cook-time transforms are strictly better than runtime transforms
   for determinism (PHILOSOPHY §7) — they run once, produce a stable
   output corpus, and the runtime sees only the post-transform
-  payload.
+  payload. **SRP boundary**: cook-time semantic transforms run inside
+  the existing `glibre-cook` content pipeline — NOT `glbr-sergeant`,
+  which is codegen-only. `glbr-sergeant` owns build-time schema
+  validation, `.fbs` → `.bfbs` / `.hpp` emission, FQN-mangling, and
+  ABI-hash export; it runs once per build against the schema corpus.
+  `glibre-cook` owns content-time schema-driven transforms — e.g.
+  when a semantic change to a schema requires rebuilding content (unit
+  conversion, FK rebind, derived-field invalidation), the cook step
+  re-bakes affected assets against the new schema. Cook reads `.bfbs`
+  produced by sergeant and consumes Flatbuffers buffers; it never
+  invokes `flatc` itself. Transforms are checked-in source under
+  `tools/glibre-cook/transforms/<context>/<from-hash>_to_<to-hash>.cpp`
+  and run once at content cook time, producing a stable Flatbuffers
+  buffer that the runtime reads zero-copy. The SRP boundary in one
+  sentence: sergeant owns *schema*, cook owns *content*.
 
 ### Neutral
 
@@ -286,7 +310,7 @@ out at steps 5 and 6 respectively.
 | HIGH     | PRs #920 and #961 carry in-flight work that becomes wasted effort.                                                     | Both PRs were already `do-not-merge`-held pending this decision. The work was substrate-specific; switching substrate is the rational reason to discard it. Both close with reference to this ADR.            |
 | MED      | MVP `data` schedule slips while the swap lands.                                                                       | Steps 5–7 are linear and small (vcpkg swap + thin `flatc` wrapper). Steps 8–9 parallelize across seven contexts. Net delta is one to two weeks at worst, within the MVP buffer.                              |
 | MED      | Editor reflection regressions: `.bfbs` consumption differs from the hand-rolled descriptor blob.                       | `flatbuffers::reflection::Schema` is the upstream consumer for `.bfbs`; well-tested upstream. Editor reflection plan in `specs/editor/` adds Catch2 round-trips against a known `.bfbs` fixture.              |
-| MED      | Dropping per-version migration functions regresses semantic-change capability.                                         | Two alias mechanisms (field-rename, type-rename) cover the common cases. Cook-time tool path absorbs the rare hard cases and is strictly better for determinism. Documented in the `data` SPEC §7 amend.     |
+| MED      | Dropping per-version migration functions regresses semantic-change capability.                                         | Two alias mechanisms (field-rename, type-rename) cover the common cases. Cook-time tool path (`glibre-cook`, not `glbr-sergeant`) absorbs the rare hard cases and is strictly better for determinism. `glbr-sergeant` is codegen-only (schema → C++/bfbs); `glibre-cook` owns content-time transforms. Documented in the `data` SPEC §7 amend. |
 | MED      | Fory had hidden tag-skipping behavior we depended on without noticing.                                                 | Step 9's golden regen runs the full round-trip matrix; any silent behavior dependency surfaces as a golden diff. We re-derive the dependency intentionally or remove it.                                     |
 | LOW      | Multi-language tooling loss.                                                                                          | Flatbuffers supports more languages than Fory (~15 vs ~4). This risk inverts.                                                                                                                                |
 | LOW      | Some other internal module silently depends on Abseil through the Fory chain.                                          | Step 5's vcpkg lockfile diff surfaces any latent Abseil dependency. If anything inside glibre actually needed Abseil, we add it explicitly; otherwise the cascade drops.                                     |
