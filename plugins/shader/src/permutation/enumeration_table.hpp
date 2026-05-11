@@ -38,11 +38,11 @@
 // The caller-supplied Predicate must be callable as bool(const PermutationKey&).
 // The caller-supplied Visitor  must be callable as void(const PermutationKey&).
 //
-// Iteration order is canonical tuple-field ascending:
-//   outer → ShadingModel (0..kShadingModelCount-1)
-//   then  → FeatureSet   (0..kFeatureSetCardinality-1)
-//   then  → RenderPath   (0..kRenderPathCount-1)
-//   inner → LODTier      (0..kLODTierCount-1)
+// Iteration order is defined by the mixed-radix bijection in permutation_index.hpp
+// (§4.2 invariant 2 — single source of truth).  walk() iterates ordinals
+// [0, kPermutationCrossProductCardinality) and decodes each via
+// permutation_index_decode, so the iteration order is always the same as the
+// index order — no independent field loop is needed.
 //
 // NOTE: Do NOT include this header from outside the permutation/ directory
 //       or from tests that do not add the PRIVATE include path for the
@@ -85,32 +85,21 @@ public:
     //   1. Call pruner(K).  If false, skip K.
     //   2. Call visitor(K).
     //
-    // Iteration order:
-    //   for sm in [0, kShadingModelCount):
-    //     for feat in [0, kFeatureSetCardinality):
-    //       for rp in [0, kRenderPathCount):
-    //         for lod in [0, kLODTierCount):
-    //           key = { sm, feat, rp, lod }
-    //           if pruner(key): visitor(key)
+    // Iteration is driven by permutation_index_decode over
+    // [0, kPermutationCrossProductCardinality), keeping the index bijection
+    // (§4.2 invariant 2) as the single source of truth for field ordering.
+    // operator* on a valid Result<PermutationKey> is noexcept (std::expected).
     template<Pruner P, Visitor V>
     void walk(P&& pruner, V&& visitor) const noexcept(
         noexcept(pruner(std::declval<const PermutationKey&>())) &&
         noexcept(visitor(std::declval<const PermutationKey&>()))
     ) {
-        for (std::uint32_t sm = 0; sm < kShadingModelCount; ++sm) {
-            for (std::uint32_t feat = 0; feat < kFeatureSetCardinality; ++feat) {
-                for (std::uint32_t rp = 0; rp < kRenderPathCount; ++rp) {
-                    for (std::uint32_t lod = 0; lod < kLODTierCount; ++lod) {
-                        PermutationKey k{};
-                        k.shading_model = static_cast<ShadingModel>(static_cast<std::uint8_t>(sm));
-                        k.features = FeatureSet{static_cast<std::uint16_t>(feat)};
-                        k.render_path = static_cast<RenderPath>(static_cast<std::uint8_t>(rp));
-                        k.lod_tier = static_cast<LODTier>(static_cast<std::uint8_t>(lod));
-                        if (pruner(k)) {
-                            visitor(k);
-                        }
-                    }
-                }
+        for (PermutationIndex i{0}; i.value < kPermutationCrossProductCardinality; ++i.value) {
+            // permutation_index_decode is noexcept and always succeeds for
+            // i.value in [0, kPermutationCrossProductCardinality).
+            const PermutationKey k = *permutation_index_decode(i);
+            if (pruner(k)) {
+                visitor(k);
             }
         }
     }

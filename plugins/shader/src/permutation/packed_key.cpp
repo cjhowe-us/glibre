@@ -84,6 +84,9 @@ packed_key_from_bytes(const PermutationKey::PackedBytes& bytes) noexcept {
 // PermutationKey public member implementations (defined in shader.hpp).
 // These free-standing implementations wire the permutation:: helpers into
 // the public type.
+//
+// Note: PermutationKey::is_well_formed() lives in axes.cpp (no byte-layout
+// dependency — axis-validity belongs with axis cardinality, not the codec).
 // ---------------------------------------------------------------------------
 
 namespace glibre::shader {
@@ -94,18 +97,6 @@ PermutationKey::PackedBytes PermutationKey::to_bytes() const noexcept {
 
 glibre::Result<PermutationKey> PermutationKey::from_bytes(const PackedBytes& bytes) noexcept {
     return permutation::packed_key_from_bytes(bytes);
-}
-
-bool PermutationKey::is_well_formed() const noexcept {
-    const auto sm_raw = static_cast<std::uint8_t>(shading_model);
-    const auto rp_raw = static_cast<std::uint8_t>(render_path);
-    const auto lod_raw = static_cast<std::uint8_t>(lod_tier);
-    // FeatureSet high byte is conceptually 0 because kFeatureBitCount <= 8.
-    // The accessor bits() returns a uint16; bits above kFeatureBitMask must be 0.
-    return sm_raw < static_cast<std::uint8_t>(kShadingModelCount) &&
-           (features.bits() & ~kFeatureBitMask) == 0u &&
-           rp_raw < static_cast<std::uint8_t>(kRenderPathCount) &&
-           lod_raw < static_cast<std::uint8_t>(kLODTierCount);
 }
 
 bool permutation_key_byte_less(const PermutationKey& a, const PermutationKey& b) noexcept {

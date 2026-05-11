@@ -40,6 +40,7 @@ add_library(glibre-shader STATIC
     src/reflection/slangc_reflection_record.cpp
     src/reflection/blob_builder.cpp
     # plan #509 — PermutationKey codec + cross-product enumerator (§4.2)
+    src/permutation/axes.cpp           # is_well_formed() — axis-validity predicate
     src/permutation/packed_key.cpp
     src/permutation/permutation_index.cpp
     src/permutation/enumeration_table.cpp
