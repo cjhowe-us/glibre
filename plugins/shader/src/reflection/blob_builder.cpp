@@ -29,13 +29,12 @@
 //    tagger pass once the ConstantBuffer binding named "MaterialParameters"
 //    (or engine-conventional equivalent) is identified.  At ingest time we
 //    do not know which binding is the material block; that classification
-//    lives in the tagger pass (#515, already shipped).
+//    lives in the tagger pass (#515 — frequency tagging deferred).
 //
 // 7. rt_payload_bytes is forwarded verbatim.
 
 #include "blob_builder.hpp"
 
-#include <algorithm>
 #include <cstdint>
 #include <memory_resource>
 #include <string_view>
@@ -102,26 +101,31 @@ namespace {
 }
 
 // ---------------------------------------------------------------------------
-// Canonicalize name: lower-case the first character to normalize the common
-// slangc variation where some fields are TitleCase vs camelCase in different
-// slangc versions.  The name is otherwise preserved verbatim; the goal is
-// deterministic round-tripping (§4.4 invariant 2), not human readability.
-//
-// Canonicalization rule: trim leading and trailing ASCII whitespace, then
-// apply no further transformation.  slangc binding names are Slang identifiers
+// Canonicalize name: trim leading and trailing ASCII whitespace, then apply
+// no further transformation.  slangc binding names are Slang identifiers
 // (letters, digits, underscore only); whitespace trimming is defense-in-depth
-// for any JSON-encoder that pads strings.
+// for any JSON-encoder that pads strings.  The goal is deterministic
+// round-tripping (§4.4 invariant 2), not human readability.
 // ---------------------------------------------------------------------------
 
 [[nodiscard]] std::string_view canonical_name(std::string_view raw) noexcept {
-    // Trim leading whitespace.
+    // Trim leading whitespace (space, tab, CR, LF).
     std::size_t start = 0;
-    while (start < raw.size() && (raw[start] == ' ' || raw[start] == '\t'))
-        ++start;
+    while (start < raw.size()) {
+        const char c = raw[start];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+            ++start;
+        else
+            break;
+    }
     raw = raw.substr(start);
-    // Trim trailing whitespace.
-    while (!raw.empty() && (raw.back() == ' ' || raw.back() == '\t')) {
-        raw = raw.substr(0, raw.size() - 1);
+    // Trim trailing whitespace (space, tab, CR, LF).
+    while (!raw.empty()) {
+        const char c = raw.back();
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+            raw = raw.substr(0, raw.size() - 1);
+        else
+            break;
     }
     return raw;
 }

@@ -35,7 +35,6 @@
 
 #include <charconv>
 #include <cstdint>
-#include <cstring>
 #include <memory_resource>
 #include <string_view>
 
@@ -123,8 +122,10 @@ public:
         return false;  // unterminated string
     }
 
-    // parse_uint64 — scan a JSON integer (non-negative, no leading zeros
-    // except plain "0").  Returns false on non-integer or overflow.
+    // parse_uint64 — scan a JSON integer (non-negative).  Leading zeros are
+    // accepted and treated as decimal (slangc never emits them, but lenient
+    // parsing avoids spurious parse failures on hand-crafted test JSON).
+    // Returns false on non-integer or overflow.
     [[nodiscard]] bool parse_uint64(std::uint64_t& out) noexcept {
         skip_whitespace();
         if (cursor_ >= text_.size())
@@ -494,6 +495,15 @@ template<typename Visitor>
     });
     if (!ok)
         return false;
+    // b.kind == Unknown covers two distinct cases: (a) the "binding" subobject
+    // was absent entirely (parameter has no hardware binding descriptor, which
+    // is invalid for our schema), and (b) the "binding.kind" string was present
+    // but unrecognised.  Both are treated as a parse failure — the caller
+    // (parse_top_level via iter_array) will return false and the top-level
+    // ingest will surface ReflectionExtractionFailed.  The two cases are not
+    // distinguished here because the only caller action is identical rejection;
+    // if future diagnostics require distinguishing them, split into two error
+    // codes at that point.
     if (b.kind == RawBindingKind::Unknown)
         return false;
     rec.bindings.push_back(std::move(b));
