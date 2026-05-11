@@ -4,21 +4,22 @@
 
 The `data` context owns the **type and schema spine** that lets every plugin
 agree on the shape of persistent state without sharing headers. Concretely it
-owns: the `data/schemas/<ctx>/<Type>.fory` schema files (format and lint), the
-`glibre-foryc` host codegen tool, the generated `glibre-types.dylib`
+owns: the `data/schemas/<ctx>/<Type>.fbs` schema files (format and lint), the
+`glbr-sergeant` host codegen tool, the generated `glibre-types.dylib`
 middleman that every plugin links, the per-type schema registry
-(`(fqn, version, blake3-hash)`), the migration dispatcher (vN → vN+1 chain
-plus the loader-side hot-reload integration at the frame-8 barrier), and the
-single exported `glibre_types_abi_hash` value the plugin loader compares on
-load. Errors thrown from this layer are typed (`AbiHashMismatch`,
-`SchemaMigrationFailure`, `DeserializeError`, `ReservedTagViolation`,
-`SchemaRegistryConflict`) and live in the middleman.
+(`(fqn, version, blake3-hash)`), the schema alias table (type-rename and
+field-rename aliases for structural evolution), the loader-side hot-reload
+integration at the frame-8 barrier (`reconcile(...)`), and the single exported
+`glibre_types_abi_hash` value the plugin loader compares on load. Errors thrown
+from this layer are typed (`AbiHashMismatch`, `SchemaMigrationFailure`,
+`DeserializeError`, `ReservedTagViolation`, `SchemaRegistryConflict`) and live
+in the middleman.
 **It refuses to own** domain semantics or runtime behavior of any kind:
 no ECS storage or scheduling (that is `core`), no inventories or stat
 modifiers or effect ticking or quest graphs (those would be plugin-side
 domain contexts that *use* this spine; harmonius's `R-16.1`–`R-16.4`
 data-systems requirements are deliberately out of scope here), no transport
-or network framing (a future `net` context wraps Fory blobs but does not
+or network framing (a future `net` context wraps Flatbuffers blobs but does not
 live here), no on-disk asset I/O or file-format negotiation (`platform` /
 `content` own loaders; this context only defines the byte layout they read
 and write), no rendering, no editor authoring UX, no determinism policy
@@ -34,39 +35,39 @@ Terms used unchanged in code, schema files, status comments, and tests.
 
 | Term | Meaning |
 |------|---------|
-| Schema | A `data/schemas/<ctx>/<Type>.fory` file declaring one persistent type's fields, tags, version, and migrations. The authoring artifact. One file per persistent aggregate, owned by the originating bounded context. |
-| Schema Source Hash | Blake3 of the canonicalized bytes of a single `.fory` file. Recorded per-type in the registry. |
+| Schema | A `data/schemas/<ctx>/<Type>.fbs` file declaring one persistent type's fields, tags, version, and migrations. The authoring artifact. One file per persistent aggregate, owned by the originating bounded context. |
+| Schema Source Hash | Blake3 of the `.bfbs` binary schema bytes for a single type. Recorded per-type in the registry (Q7, ADR #1121). |
 | ABI Hash | `glibre_types_abi_hash()` — Blake3 over the LF-joined, FQN-sorted per-schema entries of `(fqn + ":" + version_le + ":" + schema_source_hash)`, embedded in `glibre-types.dylib`. Single scalar the plugin loader compares on load; mismatch → refuse load. See §4.4 inv. 1 and `reviews/decisions/plugin-abi.md` §"ABI Hash Function" rule 1. |
 | Tag | The immutable wire-level field identifier inside a schema. Once shipped, tag numbers are never reused; removed fields become `reserved` tags. Tag-sorted ascending defines generated struct field order. |
-| Reserved Tag | A previously used tag whose field was removed; codegen forbids reuse and `glibre-foryc` fails the build on a reserved-tag collision. |
-| Schema Version | Monotonically increasing integer on each schema. Bumped when fields are added/removed/renamed. Encoded in the Fory envelope of every payload. |
+| Reserved Tag | A previously used tag whose field was removed; codegen forbids reuse and `glbr-sergeant` fails the build on a reserved-tag collision. |
+| Schema Version | Monotonically increasing integer on each schema. Bumped when fields are added/removed/renamed. Encoded in the Flatbuffers envelope of every payload. |
 | Builtin | A name from the audited primitive set (`u8`/`u16`/`u32`/`u64`/`i8`/`i16`/`i32`/`i64`/`f32`/`f64`/`bool`/`string`/`bytes`/`vec3f`/`quatf`/`entity`/`list<T>`/`map<K,V>`/`option<T>`) that compiles to a fixed C++ type in `glibre/types/_builtins.hpp`. |
-| Generated Type | A `final`, vtable-free, declaration-order-independent C++ struct emitted by `glibre-foryc` for one schema. POD-like; trivially copyable when the field set permits; layout is tag-sorted. |
-| Middleman | `glibre-types.dylib` — the single shared library that holds every generated type, the registry, the migration dispatcher, and the ABI hash. Every plugin and the runtime / editor binaries link it; no plugin links Fory directly. |
-| Foryc | `glibre-foryc`, the host-only codegen tool. Wraps Apache Fory's C++ generator, enforces glibre's ABI rules (tag-sort, reserved-tag check, layout-additive assertion), emits `_registry.cpp` and `_abi_hash.cpp`. |
+| Generated Type | A `final`, vtable-free, declaration-order-independent C++ struct emitted by `glbr-sergeant` for one schema. POD-like; trivially copyable when the field set permits; layout is tag-sorted. |
+| Middleman | `glibre-types.dylib` — the single shared library that holds every generated type, the registry, the migration dispatcher, and the ABI hash. Every plugin and the runtime / editor binaries link it; no plugin links Flatbuffers directly. |
+| Sergeant | `glbr-sergeant`, the host-only codegen tool. Wraps Flatbuffers's C++ generator, enforces glibre's ABI rules (tag-sort, reserved-tag check, layout-additive assertion), emits `_registry.cpp` and `_abi_hash.cpp`. |
 | Schema Registry | The static table inside `glibre-types.dylib` mapping each `fqn` to `(version, schema_source_hash, serialize_fn, deserialize_fn, migrations)`. Populated at static-init time; no runtime mutation. |
 | Reflection Blob | The compact, codegen-emitted descriptor of a generated type's fields and tags, queryable in tools and editor builds via the registry. **Not** present-as-runtime-reflection in shipping builds; it is data the codegen wrote, not introspection. |
-| Migration | A pure free function `migrate_<Type>_v<N>_to_v<N+1>(const VN&, VNplus1&) -> std::expected<void, glibre::Error>`, written by the originating context and registered through a codegen-emitted macro. Deterministic; no I/O; no allocation outside the supplied arena. |
-| Migration Chain | The sequence of single-step migrations the dispatcher composes when an inbound payload's schema version is older than current. Missing chain → `SchemaMigrationFailure`. |
-| Envelope | The Fory-defined header `(fqn, version, …)` prepended to every payload; what the deserializer reads first to dispatch decode + migration. |
+| Structural Evolution | Forward-compatible schema change (append field, deprecate field, field-rename alias, type-rename alias) that Flatbuffers handles automatically via declared defaults and zero-copy reads. No per-step migration functions; `flatc --conform` verifies structural compatibility (Q1, ADR #1121). |
+| SchemaAliasTable | The in-process table holding type-rename aliases (old-FQN → new-FQN forward-map) and field-rename alias accessor records for all registered types. Populated at static-init via `glibre_types_register_fqn_alias`; read-only thereafter. Replaces MigrationChain (Q1). |
+| Envelope | A Flatbuffers size-prefixed buffer with a 4-byte `file_identifier` at offset 4 and `schema_version`/`flags` fields inside the root table (Q4, ADR #1121). The `EnvelopeHeader` struct is DELETED; framing is native Flatbuffers. |
 | Persistent Aggregate | A type whose instances cross either a save boundary, a hot-reload boundary, or a plugin-dylib boundary. Anything persistent has a schema; anything not persistent does not. |
 | FQN | Fully-qualified name of a generated type, e.g. `glibre.core.Transform`. The schema's primary identity in the registry and on the wire. |
-| Hot-Reload Barrier | The frame-8 boundary at which the loader drains the world, swaps plugin dylibs, runs deserialize-with-migration over the snapshot, and either resumes or rejects the swap (PHILOSOPHY §8). The data context owns the migration step inside this barrier. |
+| Hot-Reload Barrier | The frame-8 boundary at which the loader drains the world, swaps plugin dylibs, runs `reconcile(...)` to verify schema-set continuity and refresh the alias table, and either resumes or rejects the swap (PHILOSOPHY §8). Structural evolution (absent fields → Flatbuffers defaults) is automatic; no per-step migration dispatch occurs. |
 
 ## 3. Derived From
 
 Harmonius prior art is treated as research input only; every conclusion is
 re-derived against PHILOSOPHY (`/Users/cjhowe/Code/glibre/PHILOSOPHY.md`)
 and the engine-wide decision in
-`reviews/decisions/fory-codegen.md`. The harmonius `data-systems/` corpus
+`reviews/decisions/flatbuffers-codegen.md`. The harmonius `data-systems/` corpus
 is not requirements truth for the glibre `data` context — most of what it
 calls "data systems" is *domain* matter that the glibre `data` context
 explicitly **refuses** (see refusals below). What survives the re-derivation
 is the single cross-cutting concern that every harmonius data-system shares:
 *every persistent type wants a schema, a serializer, and a forward-migration
-story*. That concern collapses into glibre's Apache Fory codegen pipeline,
+story*. That concern collapses into glibre's Flatbuffers codegen pipeline,
 producing the `glibre-types.dylib` middleman and the ABI-hash gate
-(§1, §2; `reviews/decisions/fory-codegen.md`).
+(§1, §2; `reviews/decisions/flatbuffers-codegen.md`).
 
 ### 3.1 Files cited (input only)
 
@@ -114,10 +115,10 @@ every cited design doc:
   `directed-graphs.md` §"All types derive rkyv …"; `data-tables.md` row
   schemas; `containers-slots.md` definitions). Glibre collapses every one
   of those scattered serialization disciplines into **one** pipeline: the
-  Apache Fory codegen flow whose schema files live at
-  `data/schemas/<ctx>/<Type>.fory`, whose generated types compile into the
+  Flatbuffers codegen flow whose schema files live at
+  `data/schemas/<ctx>/<Type>.fbs`, whose generated types compile into the
   single `glibre-types.dylib` middleman, and whose hot-reload migrations
-  run at the frame-8 barrier (`reviews/decisions/fory-codegen.md` §Pipeline,
+  run at the frame-8 barrier (`reviews/decisions/flatbuffers-codegen.md` §Pipeline,
   §Migration Mechanic). The glibre rationale is PHILOSOPHY §6 (zero
   runtime reflection in shipping builds), §7 (deterministic byte-equal
   snapshots), §9 (ABI-hash refusal at plugin load), and §10 (one collapsed
@@ -125,7 +126,7 @@ every cited design doc:
 
 The Occam collapse, stated as a single sentence:
 > N domain-specific harmonius `rkyv` archive derivations → 1 glibre
-> Fory-codegen pipeline producing 1 middleman dylib gated by 1 ABI hash.
+> Flatbuffers-codegen pipeline producing 1 middleman dylib gated by 1 ABI hash.
 
 ### 3.3 What is explicitly refused (sent elsewhere)
 
@@ -160,7 +161,7 @@ the data spine, not part of the engine core), and their `R-16.x` IDs are
   topology *as persisted bytes* is a schema concern; graph *evaluation*
   is a domain plugin concern (quest, dialogue, talent, ability).
 - **Transport / network framing.** Out of scope; a future `net` context
-  may wrap Fory blobs, but no transport policy lives here (per §1).
+  may wrap Flatbuffers blobs, but no transport policy lives here (per §1).
 - **IO routing / file-format negotiation.** Out of scope; `platform` /
   `content` own loaders. The `data` context only defines the byte layout
   those loaders read and write (per §1).
@@ -183,13 +184,13 @@ runtime branch.
 
 ### 4.1 `Schema` (authoring aggregate)
 
-**Owns:** the in-memory representation of one `data/schemas/<ctx>/<Type>.fory`
+**Owns:** the in-memory representation of one `data/schemas/<ctx>/<Type>.fbs`
 file — its `FQN`, monotonically-increasing `SchemaVersion`, ordered set of
 `Tag`s (each with field name, builtin/generated type reference, `since`
 version, optional default), and the set of reserved `Tag`s. Equivalence
 class: one `Schema` per `(FQN, SchemaVersion)`.
 
-**Reason to change:** the `.fory` file format itself — adding a builtin,
+**Reason to change:** the `.fbs` file format itself — adding a builtin,
 introducing default-value syntax, or changing the canonicalization rule
 that feeds the source hash.
 
@@ -216,13 +217,13 @@ that feeds the source hash.
    `Schema Source Hash` — defined in §4.4 — making the hash a pure function
    of the schema's semantic content.
 
-### 4.2 `Foryc` (codegen-tool aggregate)
+### 4.2 `Sergeant` (codegen-tool aggregate)
 
-**Owns:** the host-only `glibre-foryc` executable: parsing `.fory` files
+**Owns:** the host-only `glbr-sergeant` executable: parsing `.fbs` files
 into `Schema` values, validating each `Schema` against the invariants in
 §4.1, emitting tag-sorted `Generated Type` headers/sources, the
 `_registry.cpp` and `_abi_hash.cpp` companions, and a stamp file the
-CMake graph depends on. `Foryc` is the only writer of generated middleman
+CMake graph depends on. `Sergeant` is the only writer of generated middleman
 sources.
 
 **Reason to change:** the codegen output format — generated struct shape,
@@ -232,22 +233,22 @@ language and the hash function are owned elsewhere (§4.1, §4.4).
 **Invariants:**
 
 1. Output is a pure function of the input schema set: identical input
-   bytes plus identical `glibre-foryc` binary produce identical generated
+   bytes plus identical `glbr-sergeant` binary produce identical generated
    sources, byte-equal across hosts (PHILOSOPHY §7).
 2. Every `Generated Type` is `final`, vtable-free, has `= default` ctors,
    contains only builtins or other generated types, and has its fields
-   ordered by ascending `Tag` (not declaration order). `Foryc` asserts
+   ordered by ascending `Tag` (not declaration order). `Sergeant` asserts
    `std::is_trivially_copyable_v<T>` whenever the field set permits and
    fails the build otherwise on schemas that claim that profile.
 3. Layout-additive rule: a new tag is permitted only if its sorted
    position appends past the offset of the prior version's last field;
    any other change forces a `SchemaVersion` bump and a registered
-   `Migration`. `Foryc` proves this property at codegen time and refuses
+   `Migration`. `Sergeant` proves this property at codegen time and refuses
    to emit on violation.
 4. Reserved-tag enforcement is machine-checked: comparing the in-tree
-   `Schema` against its prior committed version, `Foryc` errors on any
+   `Schema` against its prior committed version, `Sergeant` errors on any
    reuse of a number ever shipped.
-5. `Foryc` never opens the network, never reads paths outside the
+5. `Sergeant` never opens the network, never reads paths outside the
    declared schema root and the configured output directory, and
    allocates only inside an arena it owns. Determinism does not depend
    on filesystem iteration order — schema files are sorted by `FQN` before
@@ -258,7 +259,7 @@ language and the hash function are owned elsewhere (§4.1, §4.4).
 **Owns:** the single shared library that holds every `Generated Type`,
 the populated `SchemaRegistry`, the migration dispatcher, the embedded
 `AbiHash`, and the C-stable entry-point table. The middleman is the
-*only* ABI surface plugins link; no plugin links Apache Fory directly.
+*only* ABI surface plugins link; no plugin links Flatbuffers directly.
 
 **Reason to change:** the dylib's binary contract — exported symbol set,
 SONAME bumps, link-time inclusion of new generated TUs. Per-type
@@ -307,12 +308,19 @@ hash function, changing the canonicalization of the input vector.
    entries are separated by a single LF byte (`\n`); no trailing
    newline. `version_le` is the declared `version` integer as 4
    bytes little-endian; `schema_source_hash` is Blake3-256 of the
-   canonicalized `.fory` source. The outer blake3 result is a 32-byte
-   digest. Normative source: `reviews/decisions/plugin-abi.md`
-   §"ABI Hash Function" rule 1.
-2. `schema_source_hash(s) := blake3( canonicalize(s) )` where
-   `canonicalize` is the rule defined in §4.1 (sorted tags, normalized
-   whitespace, defaults in tag order).
+   **`.bfbs` binary schema bytes** for that type (Q7, ADR #1121 —
+   NOT the `.fbs` source text; the canonicalization module is deleted).
+   The outer blake3 result is a 32-byte digest. Normative source:
+   `reviews/decisions/plugin-abi.md` §"ABI Hash Function" rule 1.
+   Outer ABI hash construction (Blake3 over LF-joined, FQN-sorted
+   entries) is UNCHANGED.
+2. `schema_source_hash(s) := blake3( bfbs_bytes(s) )` where
+   `bfbs_bytes(s)` is the binary `.bfbs` output emitted by
+   `flatc --bfbs` for schema `s`. The `.bfbs` format is canonical by
+   construction — `flatc` produces deterministic output for identical
+   `.fbs` input (PHILOSOPHY §7). The hand-rolled canonicalization
+   module (§7.3) is DELETED; `.bfbs` bytes replace it as the hash
+   input (Q7, ADR #1121).
 3. The plugin loader compares its host's compiled-in `AbiHash` against
    each loaded plugin's compiled-in value byte-for-byte. Mismatch →
    `core::Error::PluginAbiHashMismatch` and refusal to load (PHILOSOPHY
@@ -329,9 +337,10 @@ hash function, changing the canonicalization of the input vector.
 
 **Owns:** the static, immutable table inside the middleman mapping each
 `FQN` to `(SchemaVersion, schema_source_hash, serialize_fn,
-deserialize_fn, MigrationChain, ReflectionBlob)`. Populated at static-init
+deserialize_fn, ReflectionBlob)`. Populated at static-init
 time by codegen-emitted register calls; no entries are added or removed
-at runtime.
+at runtime. FQN aliasing is held in the companion `SchemaAliasTable` (§4.7),
+not in this table.
 
 **Reason to change:** the per-entry record shape — adding a new
 codegen-emitted field, removing one, or changing how lookup is keyed.
@@ -355,137 +364,189 @@ codegen-emitted field, removing one, or changing how lookup is keyed.
 5. Every persistent type in the engine has exactly one registry entry;
    conversely, no entry exists without a corresponding `Schema` source
    file under `data/schemas/`. The CMake glob and the registry are
-   reconciled by `Foryc` at configure time.
+   reconciled by `Sergeant` at configure time.
 
-### 4.6 `Migration` (single-step aggregate)
+### 4.6 `SchemaEvolution` (structural evolution aggregate)
 
-**Owns:** one pure function
-`migrate_<Type>_v<N>_to_v<N+1>(const VN&, VNplus1&, Arena&) ->
-std::expected<void, glibre::Error>`, written by the originating context
-and registered through a codegen-emitted macro. One `Migration` per
-`(FQN, N → N+1)` pair.
+**Owns:** the structural evolution rules that allow a schema to grow
+without per-version migration functions. Evolution is enforced by
+`flatc --conform <old.fbs>` at build time and by two alias mechanisms
+at decode time.
 
-**Reason to change:** the body of the migration — semantic translation
-between two versions of one type. The dispatch protocol and the per-type
-function-table layout live in their own aggregates (§4.7, §4.5).
+**Q1 (ADR #1121): Per-version `migrate_T_vN_to_vN+1` functions are
+DROPPED.** Structural evolution only; semantic changes go to cook-time
+transforms under `glibre-cook`, not runtime migrations.
 
-**Invariants:**
+**Two alias mechanisms:**
 
-1. Determinism: identical inputs produce byte-equal outputs across hosts
-   and runs. No reads of wall clock, RNG state, environment, locale,
-   or filesystem.
-2. Allocation discipline: the migration may allocate only within the
-   supplied `Arena&`. No global heap calls, no STL containers that
-   default-construct allocators, no I/O of any kind.
-3. Totality: the function is total over every value of `VN` produced by
-   `deserialize_v<N>`. Returning `std::unexpected` is reserved for
-   *defective* payloads (e.g. a foreign-key tag pointing to a missing
-   sibling); domain-valid `VN` instances must always yield a `VNplus1`.
-4. Locality: the migration touches only fields of `VN` and `VNplus1`;
-   it does not consult the `SchemaRegistry`, does not call into other
-   contexts' code, and does not read or mutate global state.
-5. Single-step shape: there is no `vN → vN+2` migration. Multi-step
-   migrations are composed exclusively by `MigrationChain` (§4.7), so
-   the per-step contract stays minimal.
+1. **Field-rename aliases.** The old field is deprecated at its
+   original tag (annotated `deprecated` in the `.fbs` file); the new
+   field is added at the next free tag. `glbr-sergeant` emits both
+   accessors: the new name is canonical; the old name is a
+   `[[deprecated]]` thin forwarder aliasing the new accessor. No
+   data migration; the wire bytes are structurally compatible.
 
-### 4.7 `MigrationChain` (composition aggregate)
+2. **Type-rename aliases.** The `SchemaRegistry` holds a forward-map
+   of `old-FQN → new-FQN`. When the loader encounters an envelope
+   bearing the old FQN, it resolves transparently to the new FQN's
+   registry entry before dispatch. No wire change; the alias lives
+   entirely inside the registry's lookup table.
 
-**Owns:** the per-`FQN` sequence of `Migration`s the dispatcher composes
-when an inbound payload's `SchemaVersion` is less than the current
-version. Stored inside the registry entry as a contiguous function table
-indexed by `(N → N+1)`.
-
-**Reason to change:** the dispatch protocol — how partial chains are
-detected, how arena memory is recycled between steps, how chain failure
-is reported.
+**Reason to change:** the alias mechanisms themselves — adding a new
+category of structural evolution that `flatc --conform` cannot check,
+or changing how the SchemaRegistry forward-map is populated.
 
 **Invariants:**
 
-1. Coverage: for every `FQN` whose current version is `M`, the chain
-   contains exactly one `Migration` for each step `1→2, 2→3, …, M-1→M`.
-   Missing any step is a codegen-time build error; the partial chain
-   never ships.
-2. Application order: the dispatcher applies `Migration`s strictly in
-   ascending order with no parallelism and no skipping; `vN → vM`
-   composes through every intermediate.
-3. Single-pass semantics: a chain is applied at most once per inbound
-   payload. The output is yielded as `VM` directly to the caller; no
-   intermediate version escapes the dispatcher.
-4. Failure isolation: a single `Migration` returning `std::unexpected`
-   stops the chain immediately; the dispatcher returns
-   `data::Error::SchemaMigrationFailure` carrying the failing
-   `(FQN, N → N+1)` pair. No partial mutation is observable to the
-   caller (the destination value is not exposed on failure).
-5. Arena recycling: between steps the dispatcher resets the per-payload
-   arena to its initial high-water mark. Cross-step retention is
-   forbidden; each `Migration` writes into a fresh `VNplus1` and reads
-   only its `VN` source.
+1. `flatc --conform <old.fbs> <new.fbs>` passes for every pair of
+   consecutive schema versions shipped in the same build. A schema
+   change that fails `--conform` is not a structural evolution; it is
+   a semantic change that goes to cook-time (`glibre-cook`).
+2. Field-rename aliases preserve tag immutability (§4.1 inv. 3): the
+   old tag number is `deprecated`, not `reserved`. No tag is ever
+   reused; the deprecated tag slot remains forever in the tag space.
+3. Type-rename aliases are one-directional: `old-FQN → new-FQN`. The
+   registry never holds cycles; the loader resolves at most one hop.
+4. Cook-time transforms (owned by `glibre-cook`, NOT `glbr-sergeant`)
+   handle semantic changes: unit conversion, FK rebind, derived-field
+   invalidation. They run once at content cook time against `.bfbs`
+   produced by sergeant, producing a stable Flatbuffers buffer the
+   runtime reads zero-copy. `glbr-sergeant` owns schema validation and
+   `.fbs` → `.bfbs` / `.hpp` emission only; it never invokes
+   `glibre-cook`'s transform logic.
+5. A structural evolution that reduces field count (field removal via
+   `deprecated`) is the only "removal" the schema language permits.
+   Removing an entire type (FQN) from the registry is a semantic
+   change requiring a cook-time migration and a type-rename alias that
+   maps old-FQN to a tombstone entry.
+
+### 4.7 `SchemaAliasTable` (alias-resolution aggregate)
+
+**Owns:** the per-registry forward-maps that resolve deprecated names
+to their canonical successors without per-version migration functions.
+Two tables: (a) the FQN forward-map (type-rename aliases, §4.6 alias
+mechanism 2) and (b) the per-FQN deprecated-field accessor table
+(field-rename aliases, §4.6 alias mechanism 1).
+
+**Q1 (ADR #1121): replaces MigrationChain.** There is no per-step
+`MigrationFn` dispatch; version gaps are handled at decode time by
+Flatbuffers' built-in field-presence semantics (absent fields take the
+declared default), with the alias tables providing the name-compatibility
+layer on top.
+
+**Reason to change:** the alias-lookup protocol — how the FQN
+forward-map is built, how field-rename forwarders are emitted, how
+the loader resolves a deprecated FQN in a single hop.
+
+**Invariants:**
+
+1. The FQN forward-map is acyclic (no `A → B → A` chains). The loader
+   detects cycles at static-init and raises `data::Error::SchemaRegistryConflict`.
+2. Every entry in the FQN forward-map resolves to a live `SchemaRegistry`
+   entry in one hop. Multi-hop chains are flattened by `glbr-sergeant`
+   at codegen time.
+3. Field-rename alias accessors are emitted as `[[deprecated]]`
+   forwarders by `glbr-sergeant` into the generated header. They
+   compile to zero overhead (inline alias, same underlying tag read).
+4. The alias table is read-only after static-init: populated by
+   codegen-emitted calls during the middleman's static-init sequence,
+   never mutated at runtime.
+5. Structural evolution only: the alias table has no arena, no
+   `MigrationFn` pointers, and no chain composition. Any change
+   that cannot be expressed as append-or-deprecate-or-alias goes to
+   `glibre-cook` at cook time (§4.6 inv. 4).
 
 ### 4.8 `Envelope` (wire-form aggregate)
 
-**Owns:** the Fory-defined header `(FQN, SchemaVersion, payload_length,
-flags)` prepended to every persistent payload. Read first by every
-`deserialize_<fqn>` to dispatch decode and migration; written first by
-every `serialize_<fqn>`.
+**Q4 (ADR #1121):** The `EnvelopeHeader { fqn, version, payload_length, flags }`
+struct is DELETED as a separate wire envelope. Replaced by Flatbuffers
+native wire framing:
 
-**Reason to change:** the wire-level header layout — adding a flag bit,
-extending the version width, introducing a new envelope tag. Payload
-encoding lives inside the generated serializers.
+- **`file_identifier`** — 4-byte magic at offset 4 of every
+  size-prefixed buffer. Names the root table type (identifies the FQN
+  family). Set in the `.fbs` root declaration; `glbr-sergeant` enforces
+  one identifier per schema file.
+- **Size-prefix** — 4-byte little-endian buffer length at offset 0.
+  Flatbuffers' standard size-prefixed buffer layout; readers call
+  `flatbuffers::GetSizePrefixedRoot<T>()`.
+- **`schema_version: uint32`** — lives INSIDE the root table at
+  field-id 2. Carries the `SchemaVersion` without a separate header.
+- **`flags: uint32`** — lives INSIDE the root table at field-id 3.
+  Reserved for future use; current builds emit 0. New flags append at
+  higher field IDs without invalidating the wire format (structural
+  evolution per §4.6).
+
+**Owns:** the Flatbuffers native size-prefix + `file_identifier` framing
+for every persistent payload. Read by every `deserialize_<fqn>` to
+dispatch decode; written by every `serialize_<fqn>` via the
+`FlatBufferBuilder` size-prefix API.
+
+**Reason to change:** the wire-level framing conventions — changing which
+fields live inside the root table, adding a flag bit (appends at next
+free field-id), or adopting a different Flatbuffers framing convention.
 
 **Invariants:**
 
-1. Self-describing: the envelope is sufficient to identify the type and
-   version of any persistent byte sequence in the engine. No external
-   schema discovery is required at deserialize time.
-2. Fixed prefix: the envelope occupies a deterministic byte-count prefix
-   of the payload; the suffix is the Fory-encoded body of the
-   `Generated Type`. Readers may peek the envelope without consuming
-   the body.
-3. Byte order: little-endian for all integer fields. Fixed across all
-   hosts (PHILOSOPHY §7).
+1. Self-describing: the `file_identifier` magic (4 bytes) plus the
+   root table's `schema_version` field are sufficient to identify the
+   type and version of any persistent byte sequence in the engine.
+   No external schema discovery is required at deserialize time.
+2. Size-prefixed layout: every buffer is size-prefixed per the
+   Flatbuffers spec. Readers peek the 4-byte size, then validate the
+   remainder with `flatbuffers::Verifier`. Truncation before the
+   4-byte size yields `data::Error::EnvelopeTruncated`.
+3. Byte order: little-endian for all integer fields (Flatbuffers
+   invariant). Fixed across all hosts (PHILOSOPHY §7).
 4. Round-trip identity: for every `T` and every legal value `t : T`,
    `deserialize<T>(serialize<T>(t)) == t` byte-for-byte after
    re-serialization. Tested per-schema via Catch2 goldens under
    `tests/data/schemas/<ctx>/<Type>.cpp`.
-5. Version-driven dispatch: `deserialize` reads the envelope, looks up
-   the registry entry by `FQN`, compares `SchemaVersion` to the entry's
-   current version, and either decodes directly or runs the
-   `MigrationChain`. The envelope is the single source of dispatch
-   truth — no out-of-band hints.
+5. Version-driven dispatch: `deserialize` reads the `file_identifier`
+   (type identity), looks up the registry entry by FQN, reads
+   `schema_version` from the root table, compares to the entry's
+   current version, and either decodes directly (structural evolution:
+   absent fields take their declared defaults) or resolves via alias
+   tables (§4.7). The `file_identifier` + `schema_version` pair is
+   the single source of dispatch truth — no out-of-band hints.
 
 ### 4.9 `ReflectionBlob` (introspection aggregate)
 
-**Owns:** the compact, codegen-emitted descriptor of one `Generated
-Type`'s fields and tags — name strings, tag numbers, builtin or generated
-type references, `since` versions — embedded in the registry entry and
-queryable from tools and editor builds.
+**Q8 (ADR #1121):** `ReflectionBlob` is `std::span<const std::byte>`
+over the per-type `.bfbs` (binary Flatbuffers schema) slice emitted by
+`glbr-sergeant --bfbs`. The hand-rolled descriptor emitter is DELETED.
+Editor-mode consumers use `flatbuffers::reflection::Schema` from upstream
+to interpret the `.bfbs` bytes; no custom descriptor struct exists.
 
-**Reason to change:** the descriptor's record layout — what fields are
-described, how name strings are interned, how nested generated-type
-references are resolved.
+**Owns:** a `std::span<const std::byte>` borrow into the per-context
+`.bfbs` sidecar bytes (§6, §8 hot-reload contract, §10 Q10). The
+registry entry holds this span in editor / tools builds; the span is
+null-width in shipping builds (PHILOSOPHY §6).
+
+**Reason to change:** the `.bfbs` slice boundary — which bytes constitute
+one type's schema blob vs. the combined context schema.
 
 **Invariants:**
 
-1. Static-only: the blob is data the codegen wrote, not a runtime
-   reflection facility. Shipping builds may include it for editor /
-   tools support but never use it to dispatch behavior on the hot path
-   (PHILOSOPHY §6).
-2. Read-only: the blob is `constexpr` where the field set permits and
-   `const` otherwise; no API mutates it. Editor edits to a `.fory` file
-   regenerate the middleman; the live blob is never patched in place.
-3. Faithfulness: every active tag in the source `Schema` has exactly one
-   entry in its `ReflectionBlob`; reserved tags do not appear. The blob
-   is sorted by ascending tag, matching the generated struct's field
-   order.
-4. Self-contained: name strings live in a per-type interning table
-   inside the blob — the blob does not borrow strings from outside the
-   middleman, so editor introspection works without re-loading source
-   `.fory` files.
-5. Stripped optionality: a build flag (off by default in shipping
-   profiles, on for editor / tools) controls inclusion of the blob. When
-   stripped, the registry entry holds a null pointer in the
-   `ReflectionBlob` slot and editor-only callers handle the null
-   explicitly; the runtime hot path never queries the slot.
+1. Static-only: the blob is a read-only view into the `.bfbs` bytes
+   emitted by `glbr-sergeant` at build time, not a runtime reflection
+   facility. Shipping builds carry no `.bfbs` bytes; the span is
+   empty (PHILOSOPHY §6, §4.9 inv. 5 below).
+2. Read-only: the underlying bytes are `const`; no API mutates them.
+   Editor edits to a `.fbs` file re-run `glbr-sergeant`, which
+   regenerates the `.bfbs` sidecar; the live blob is never patched in place.
+3. Faithfulness: the `.bfbs` bytes are a faithful binary encoding of the
+   `.fbs` schema as parsed by `flatc --bfbs`. Every active field and
+   deprecated field in the source schema is represented; `flatbuffers::
+   reflection::Schema` exposes the full field set to editor consumers.
+4. Self-contained: the `.bfbs` sidecar for a context embeds all type
+   definitions reachable from the context's root schemas. Editor
+   introspection does not re-load `.fbs` source files; the sidecar
+   is the single artifact it reads.
+5. Stripped optionality: `.bfbs` sidecars are present only in editor /
+   tools builds (§6 internal architecture, §8 hot-reload contract,
+   Q10). In shipping builds the registry entry holds an empty span
+   and editor-only callers handle the empty span explicitly; the
+   runtime hot path never queries the slot.
 
 ### 4.10 Cross-aggregate invariants
 
@@ -495,8 +556,8 @@ context promises every consumer:
 1. **Persistence ⇔ Schema:** every type whose instances cross a save,
    hot-reload, or plugin-dylib boundary has exactly one `Schema` and
    exactly one `SchemaRegistry` entry; conversely, every registry
-   entry corresponds to a real `.fory` file in `data/schemas/`. The
-   biconditional is enforced at configure time by `Foryc` and at
+   entry corresponds to a real `.fbs` file in `data/schemas/`. The
+   biconditional is enforced at configure time by `Sergeant` and at
    build time by the registry's static-init pass (§4.5).
 2. **Monotonic versions:** a type's `SchemaVersion` is strictly
    monotonic across its history; older versions never reappear. A
@@ -508,30 +569,50 @@ context promises every consumer:
    middleman build. Mismatch triggers refusal with
    `core::Error::PluginAbiHashMismatch`; the previous-good plugin
    keeps running (`reviews/decisions/error-model.md`).
-4. **Single dylib boundary:** plugins do not link Apache Fory, do not
-   link `blake3`, and do not include any header the codegen wrote
-   except via `glibre-types.dylib`. The middleman is the only ABI
-   surface plugins link.
-5. **Total migration coverage:** for every `FQN` whose current version
-   is `M ≥ 2`, a `MigrationChain` of length `M-1` exists and every
-   step is total over its prior version (§4.6 inv. 3). Builds that
-   fail this fail at codegen, never at runtime.
+4. **Single dylib boundary:** plugins link `glibre-types.dylib` and
+   consume Flatbuffers-generated accessor types at the plugin ABI surface
+   (Q6, ADR #1121 — PHILOSOPHY §11 amended). Plugins do not link
+   `blake3` directly and do not include any hand-written header except
+   via `glibre-types.dylib`. Flatbuffers-generated types (`flatbuffers::
+   Offset<T>`, `FlatBufferBuilder`, table-accessor pointers) satisfy
+   the offset-stable-ABI invariant: offset-table layout is part of the
+   Flatbuffers binary format spec, host-invariant by construction.
+   `std::*` / `std::pmr::*` containers remain prohibited at the dylib
+   boundary (PHILOSOPHY §11 Clause A/B split).
+5. **Structural evolution coverage:** for every `FQN` whose current
+   version is `M ≥ 2`, all field additions since version 1 are
+   append-only and `flatc --conform` passes for every consecutive
+   version pair (§4.6 inv. 1). The SchemaAliasTable (§4.7) holds
+   forward-maps for any field or type renames. Builds that fail
+   `--conform` fail at codegen, never at runtime.
 6. **Determinism inheritance:** the spine adds no nondeterminism over
-   its inputs — `Foryc` is deterministic, `AbiHash` is deterministic,
-   `serialize`/`deserialize`/`MigrationChain` are deterministic,
-   `Envelope` is endian-pinned. Snapshots round-trip byte-equal across
-   hosts (PHILOSOPHY §7).
+   its inputs — `Sergeant` is deterministic, `AbiHash` is deterministic
+   (hashes `.bfbs` bytes, Q7), `serialize`/`deserialize` are
+   deterministic, `Envelope` framing is Flatbuffers-native (Q4).
+   Snapshots round-trip byte-equal across hosts (PHILOSOPHY §7).
 7. **No cross-aggregate mutation:** each aggregate is mutated only by
-   its owner. Domain plugins write `Migration` bodies but never edit
-   the registry, the dispatcher, the envelope, the abi-hash, or the
-   reflection blob. The data context owns plumbing; domain contexts
+   its owner. Domain plugins contribute field-rename or type-rename
+   aliases through codegen-emitted registrations but never edit the
+   registry, the alias table, the envelope framing, the abi-hash, or
+   the reflection blob. The data context owns plumbing; domain contexts
    own their type's bytes.
 
 ## 5. Public Interface
 
+**Q6 (ADR #1121 — PHILOSOPHY §11 amended):** The plugin ABI surface now
+carries Flatbuffers-generated accessor types (`flatbuffers::Offset<T>`,
+`FlatBufferBuilder`, table-accessor pointers) in addition to POD spans /
+handles. This is consistent with PHILOSOPHY §11's permissive clause: the
+underlying invariant is host-stable offset layout, which Flatbuffers
+satisfies via its binary format specification (not via C++ ABI flags).
+The `std::*` / `std::pmr::*` container prohibition at the dylib boundary
+is UNCHANGED (Clause A borrow semantics remain the default read path;
+Clause B opt-in ownership transfer applies for cross-frame retained
+buffers — see PHILOSOPHY §11 for the full two-clause split).
+
 The public interface of the `data` context is the surface exported by the
 `glibre-types.dylib` middleman (§4.3) plus the per-type generated headers
-emitted by `glibre-foryc` (§4.2). Every plugin and every host binary that
+emitted by `glbr-sergeant` (§4.2). Every plugin and every host binary that
 exchanges persistent bytes consumes only what is declared below; nothing
 in the data context is reachable except through the middleman.
 
@@ -556,25 +637,28 @@ not redefine them.
 // Real headers split into:
 //   include/glibre/types/identity.hpp      — SchemaId / SchemaVersion / hash
 //   include/glibre/types/error.hpp         — data::Error closed sum
-//   include/glibre/types/envelope.hpp      — EnvelopeHeader, Envelope<T>
-//   include/glibre/types/migration.hpp     — MigrationFn, MigrationEntry,
-//                                            register entry-point
+//   include/glibre/types/envelope.hpp      — Envelope<T> (FB size-prefix wrapper)
+//   include/glibre/types/alias_table.hpp   — SchemaAliasTable, FQN forward-map
 //   include/glibre/types/registry.hpp      — RegistryEntry, SchemaRegistry
 //   include/glibre/types/abi_hash.hpp      — glibre_types_abi_hash()
 //   include/glibre/types/plugin_manifest.hpp — PluginManifest + sub-types
-//   include/glibre/types/reflection.hpp    — ReflectionBlob (editor-only)
+//   include/glibre/types/reflection.hpp    — ReflectionBlob (editor-only, .bfbs span)
 //
 // The stub below is the union, with section banners matching the
 // per-file split. § references point at this spec.
+//
+// Q6 (PHILOSOPHY §11 amended): Flatbuffers-generated accessor types appear
+// at the plugin ABI surface. std::* / std::pmr::* containers remain
+// prohibited (Clause A borrow / Clause B opt-in ownership still apply).
 
 #pragma once
 
-#include <EASTL/array.h>
+#include <flatbuffers/flatbuffers.h>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
-#include <EASTL/span.h>
-#include <EASTL/string_view.h>
+#include <span>
+#include <string_view>
 
 // glibre::Error and glibre::Result<T> live in <glibre/error.hpp>; only
 // forward-declared here so this stub stays self-contained.
@@ -592,7 +676,7 @@ namespace glibre::types {
 // per-type interning table (§4.5 inv. 3); SchemaId itself is a borrow.
 // Per §4.1 inv. 1.
 struct SchemaId {
-    eastl::string_view fqn{};
+    std::string_view fqn{};
 
     constexpr bool operator==(const SchemaId&) const noexcept = default;
     constexpr auto operator<=>(const SchemaId&) const noexcept = default;
@@ -601,8 +685,9 @@ struct SchemaId {
 // Monotonically increasing, strictly positive version (§4.1 inv. 2).
 using SchemaVersion = std::uint32_t;
 
-// Blake3-256 of the canonicalized .fory bytes (§4.4 inv. 2).
-using SchemaSourceHash = eastl::array<std::byte, 32>;
+// Blake3-256 of the .bfbs binary schema bytes for a single type (§4.4 inv. 2,
+// Q7 ADR #1121). Input is the per-type .bfbs output from flatc --bfbs.
+using SchemaSourceHash = std::array<std::byte, 32>;
 
 // ---- error.hpp ----------------------------------------------------------
 
@@ -619,11 +704,11 @@ namespace data {
 // Wire-time location attached to DeserializeError / SchemaUnknown /
 // EnvelopeTruncated.
 // `offset` is the byte index within the inbound payload at which
-// decoding stopped, measured from the start of the EnvelopeHeader
+// decoding stopped, measured from the start of the size-prefixed buffer
 // (§4.8 inv. 2). Non-payload arms set this to a sentinel — see §10.2.
 struct WireSite {
-    SchemaId      schema{};       // the FQN the envelope claimed
-    SchemaVersion version{0};     // the version the envelope claimed
+    SchemaId      schema{};       // the FQN the file_identifier claimed
+    SchemaVersion version{0};     // the schema_version field value
     std::uint32_t offset{0};      // byte index where decode failed
 };
 
@@ -686,111 +771,71 @@ struct Error {
 
 // ---- reflection.hpp (editor / tools only) -------------------------------
 
-// Compact, codegen-emitted descriptor of one generated type's tags
-// (§4.9). Read-only; never used to dispatch behavior on the hot path
-// (PHILOSOPHY §6, §4.9 inv. 1). Stripped to nullptr in shipping builds
-// (§4.9 inv. 5).
-// See reflection-blob-design.md §4.2 for the canonical definition.
-// Types use eastl:: per PHILOSOPHY §11; std:: containers are not
-// permitted here.
-enum class ReflectionKind : std::uint8_t {
-    Bool = 1, I8, I16, I32, I64, U8, U16, U32, U64, F32, F64,
-    String, Bytes, Enum, Struct, List, Map, SchemaIdRef,
-};
-
-struct ReflectionField {
-    eastl::string_view name{};
-    std::uint16_t      tag{0};
-    ReflectionKind     kind{};           // primary kind
-    ReflectionKind     element_kind{};   // List element kind (or unused)
-    ReflectionKind     value_kind{};     // Map value kind (or unused)
-    eastl::string_view type_name{};      // FQN for Enum/Struct/SchemaIdRef
-    SchemaVersion      since{1};         // inv. 2: strictly positive
-    std::uint32_t      byte_offset{0};
-    std::uint32_t      byte_size{0};
-};
-
-struct ReflectionBlob {
-    SchemaId                              schema{};
-    SchemaVersion                         version{1};
-    eastl::span<const ReflectionField>    fields{};        // tag-sorted ascending
-    eastl::span<const std::uint16_t>      tag_to_index{};  // dense lookup index
-};
+// Q8 (ADR #1121): ReflectionBlob is std::span<const std::byte> over the
+// per-type .bfbs binary schema bytes emitted by glbr-sergeant --bfbs.
+// The hand-rolled ReflectionField / ReflectionKind descriptor structs are
+// DELETED. Editor consumers use flatbuffers::reflection::Schema from
+// upstream to interpret the bytes (§4.9).
+//
+// Stripped to empty span in shipping builds (§4.9 inv. 5, PHILOSOPHY §6).
+using ReflectionBlob = std::span<const std::byte>;  // .bfbs slice; empty in ship
 
 // ---- envelope.hpp -------------------------------------------------------
 
-// Fixed-width Fory envelope prefix. Self-describing, little-endian
-// (§4.8 inv. 1, 3); peekable without consuming the payload (§4.8 inv. 2).
-struct EnvelopeHeader {
-    SchemaId      schema{};
-    SchemaVersion version{0};
-    std::uint32_t payload_length{0};
-    std::uint32_t flags{0};            // reserved for future use
-};
-
+// Q4 (ADR #1121): EnvelopeHeader { fqn, version, payload_length, flags }
+// is DELETED as a separate wire envelope. Wire framing is now Flatbuffers
+// native size-prefix + file_identifier (§4.8). The fields migrate inside
+// the root table:
+//   schema_version : uint32 at field-id 2
+//   flags          : uint32 at field-id 3
+//
 // Typed wrappers around the per-FQN extern "C" trampolines emitted by
 // codegen (§4.3 inv. 4). Specializations live in each generated
 // <glibre/types/<ctx>/<Type>.hpp>; this primary template is left
 // undefined so misuse is a link-time error rather than a runtime one.
 template <class T>
 struct Envelope {
-    // Write envelope + payload into `dst`; returns bytes_written.
-    // Failure path is `data::ErrorTag::DeserializeError`-shaped only when
-    // `dst` is too small (size queryable via the registry).
+    // Build a size-prefixed Flatbuffers buffer from `value`.
+    // The file_identifier and schema_version field are set automatically
+    // by the generated serializer.
     static auto serialize(const T& value,
                           std::span<std::byte> dst) noexcept
         -> std::expected<std::size_t, data::Error>;
 
-    // Read envelope, dispatch by SchemaVersion, and run MigrationChain
-    // when the inbound version is older (§4.7). Newer-than-host ⇒
-    // data::ErrorTag::DeserializeError; chain failure ⇒
-    // data::ErrorTag::SchemaMigrationFailure.
+    // Read file_identifier, verify with flatbuffers::Verifier, dispatch
+    // by schema_version field (§4.8 inv. 5). Newer-than-current ⇒
+    // data::ErrorTag::DeserializeError; absent fields take declared
+    // defaults (structural evolution, §4.6).
     static auto deserialize(std::span<const std::byte> src) noexcept
         -> std::expected<T, data::Error>;
 };
 
-// ---- migration.hpp ------------------------------------------------------
+// ---- alias_table.hpp ----------------------------------------------------
 
-// Per-payload arena owned by the dispatcher (§4.6 inv. 2). Migration
-// bodies allocate only here; treated as opaque by user code.
-class Arena;
+// Q1 (ADR #1121): replaces migration.hpp. Per-registry alias tables
+// for field-rename and type-rename schema evolution (§4.7).
 
-// Single-step migration body, written by the originating context.
-// Pure, deterministic, total over deserialize_v<N> outputs (§4.6).
-template <class VN, class VNplus1>
-using MigrationFn =
-    auto (*)(const VN& src, VNplus1& dst, Arena& arena) noexcept
-        -> std::expected<void, ::glibre::Error>;
-
-// Type-erased migration record stored in the registry (§4.7).
-// Adjacent records form one FQN's MigrationChain, indexed by
-// from_version ascending.
-struct MigrationEntry {
-    SchemaVersion from_version{0};
-    SchemaVersion to_version{0};
-    // Erased trampoline; codegen casts back to the typed
-    // MigrationFn<VN, VNplus1> at registration time.
-    void (*invoke)(const void* src, void* dst, Arena& arena,
-                   ::glibre::Error* out_err) noexcept = nullptr;
+// Type-rename alias entry: maps a deprecated FQN to its successor.
+// Populated at static-init by glbr-sergeant-emitted registration calls.
+struct FqnAliasEntry {
+    std::string_view old_fqn{};  // deprecated FQN as it appears on the wire
+    std::string_view new_fqn{};  // canonical successor FQN in the live registry
 };
 
 // Plain-enum return so the C-ABI boundary stays free of std::expected.
-// The C++ wrapper macro lifts this into `Result<void>` for callers.
 namespace data {
 enum class RegisterStatus : std::uint16_t {
     Ok = 0,
     SchemaRegistryConflict =
         static_cast<std::uint16_t>(ErrorTag::SchemaRegistryConflict),
+    AliasCycle = 11,  // FQN forward-map would create a cycle (§4.7 inv. 1)
 };
 }  // namespace data
 
-// Codegen-emitted entry-point. The owning context calls this at
-// static-init (§4.3 inv. 5) via the
-// `GLIBRE_REGISTER_MIGRATION(<Type>, <N>, <N+1>, <fn>)` macro placed in
-// the generated `<Type>_migrations.hpp` companion header.
-extern "C" auto glibre_types_register_migration(
-    SchemaId       schema,
-    MigrationEntry entry) noexcept -> data::RegisterStatus;
+// Codegen-emitted entry-point for type-rename alias registration.
+// Called at static-init by glbr-sergeant-emitted code (§4.7 inv. 4).
+extern "C" auto glibre_types_register_fqn_alias(
+    FqnAliasEntry entry) noexcept -> data::RegisterStatus;
 
 // ---- registry.hpp -------------------------------------------------------
 
@@ -799,7 +844,7 @@ extern "C" auto glibre_types_register_migration(
 struct RegistryEntry {
     SchemaId         schema{};
     SchemaVersion    version{0};
-    SchemaSourceHash source_hash{};
+    SchemaSourceHash source_hash{};  // Blake3 of .bfbs bytes (Q7)
 
     // Type-erased serialize/deserialize trampolines; the typed
     // Envelope<T> specializations resolve to these at link time
@@ -810,8 +855,8 @@ struct RegistryEntry {
         std::span<const std::byte> src,
         void* out_value) noexcept = nullptr;
 
-    std::span<const MigrationEntry> migrations{};
-    const ReflectionBlob*           reflection{nullptr};  // null in ship
+    // Q8: ReflectionBlob is .bfbs bytes span (empty in shipping builds).
+    ReflectionBlob reflection{};  // empty span in ship, .bfbs slice in editor
 };
 
 class SchemaRegistry {
@@ -847,10 +892,10 @@ extern "C" auto glibre_types_abi_hash() noexcept -> const char*;
 
 // ---- plugin_manifest.hpp ------------------------------------------------
 
-// Wire-shape of `plugin.fory`; codegen-serialized into the plugin's
+// Wire-shape of `plugin.fbs`; codegen-serialized into the plugin's
 // .rodata, deserialized by the loader before invoking any plugin C++
 // code. Mirrors reviews/decisions/plugin-abi.md §"Plugin Manifest
-// Schema" verbatim. PluginManifest itself is a Fory-versioned schema
+// Schema" verbatim. PluginManifest itself is a Flatbuffers-versioned schema
 // owned by `glibre.core`; this struct is the C++ projection.
 
 struct SemVer {
@@ -875,15 +920,15 @@ struct SystemDecl {
 };
 
 struct PassDecl {
-    eastl::string_view                  name{};
+    std::string_view                  name{};
     std::uint8_t                      render_phase{0};   // 6 or 7
-    eastl::span<const eastl::string_view> inputs{};
-    eastl::span<const eastl::string_view> outputs{};
+    std::span<const std::string_view> inputs{};
+    std::span<const std::string_view> outputs{};
 };
 
 struct PanelDecl {
-    eastl::string_view id{};
-    eastl::string_view title{};
+    std::string_view id{};
+    std::string_view title{};
     std::uint8_t     area{0};
 };
 
@@ -911,22 +956,23 @@ only through the codegen-driven recomputation of
 (`reviews/decisions/plugin-abi.md` §"Loader Sequence" step 4) — that is
 the data context's only externally-visible side effect.
 
-### 5.2 Serialized schemas (Fory)
+### 5.2 Serialized schemas (Flatbuffers)
 
-Persistent types are authored as `data/schemas/<ctx>/<Type>.fory` files
-(§4.1; format defined in `reviews/decisions/fory-codegen.md` §"Schema
-File Format"). The schemas the data context itself owns — referenced by
-the C++ structs above — are:
+Persistent types are authored as `data/schemas/<ctx>/<Type>.fbs` files
+(§4.1; Flatbuffers IDL format per `reviews/decisions/flatbuffers-vs-fory.md`).
+The schemas the data context itself owns — referenced by the C++ structs
+above — are:
 
-- `data/schemas/core/PluginManifest.fory` — the `PluginManifest` /
+- `data/schemas/core/PluginManifest.fbs` — the `PluginManifest` /
   `SemVer` / `ComponentDecl` / `SystemDecl` / `PassDecl` / `PanelDecl`
   bundle declared in `reviews/decisions/plugin-abi.md` §"Plugin
-  Manifest Schema". Codegen emits the structs visible in §5 and the
-  per-plugin `manifest.cpp` blob.
+  Manifest Schema". `flatc --cpp` emits the Flatbuffers accessor types
+  visible in §5; `glbr-sergeant` emits the per-plugin `manifest.cpp`
+  blob (§6.5).
 
-(No standalone envelope schema file exists; the envelope is Fory-defined
-and shared across every type — its layout is fixed by `Envelope<T>` in
-§5 and §4.8.)
+(No standalone envelope schema file exists; the wire framing is
+Flatbuffers native size-prefix + `file_identifier` — see §4.8 / §7.2.4.
+The `schema_version` and `flags` fields live inside each root table.)
 
 Domain-owned schemas (`Transform`, `Mesh`, ...) live in their
 originating context's directory under `data/schemas/<ctx>/`; the data
@@ -940,14 +986,14 @@ maps to one §4 invariant:
 | Arm                       | Raised when                                                  | Origin                   |
 |---------------------------|--------------------------------------------------------------|--------------------------|
 | `AbiHashMismatch`         | plugin's compiled-in ABI hash ≠ host's                       | §4.4 inv. 3              |
-| `SchemaMigrationFailure`  | a `MigrationFn` returned `unexpected` or chain incomplete    | §4.7 inv. 1, 4           |
+| `SchemaMigrationFailure`  | schema-set continuity failure (FQN in outgoing missing from incoming); DEPRECATED for per-step MigrationFn use (Q1/Q5) | §8.2 step 1              |
 | `DeserializeError`        | malformed envelope or newer-than-host version                | §4.8 inv. 5              |
 | `ReservedTagViolation`    | codegen detects reuse of a previously-shipped tag            | §4.1 inv. 3, §4.2 inv. 4 |
 | `SchemaRegistryConflict`  | static-init insert collides on FQN                           | §4.5 inv. 1              |
 | `SchemaUnknown`           | envelope FQN absent from the live `SchemaRegistry`           | §4.8 inv. 5              |
-| `MigrationStepMissing`    | chain has no entry for the inbound payload's version         | §4.7 inv. 1              |
-| `MigrationCycle`          | back-edge detected in a `MigrationChain` (codegen/init)      | §4.2 inv. 1, §4.3 inv. 5 |
-| `EnvelopeTruncated`       | byte span ends before the full envelope header is read       | §4.8 inv. 1, 2           |
+| `MigrationStepMissing`    | inbound `schema_version` predates registered minimum (save file from old build); RETAINED per Q5 | §4.8 inv. 5 |
+| `MigrationCycle`          | alias registration would produce a cycle in the FQN forward-map (codegen/init); RETAINED per Q5 | §4.7 inv. 2  |
+| `EnvelopeTruncated`       | byte span too short for Flatbuffers size-prefix; KEEP per Q5  | §4.8 inv. 1, 2           |
 
 Plugin loader code wraps these into `core::Error` arms per
 `reviews/decisions/plugin-abi.md` §"Failure Modes → core::Error";
@@ -956,7 +1002,7 @@ domain code wraps into its own context's `Error` per
 
 Verification: the stub above compiles under
 `clang++ -std=c++23 -fsyntax-only -fno-exceptions` on the toolchain
-documented in `reviews/decisions/fory-codegen.md` §"Open Questions" #4
+documented in `reviews/decisions/flatbuffers-codegen.md` §"Open Questions" #4
 (libc++ as shipped with the macOS Xcode 15 / Homebrew-LLVM clang).
 
 ## 6. Internal Architecture
@@ -987,44 +1033,46 @@ The split is mechanical: each module owns one phase of the pipeline,
 each phase has one reason to change, and no module reaches across the
 seam to mutate another's outputs.
 
-#### 6.1.1 `tools/glibre-foryc/` — host codegen tool (build-time only)
+#### 6.1.1 `tools/sergeant/` — host codegen tool (build-time only)
 
 A standalone host executable, **not shipped at runtime**. Owns the
-`Foryc` aggregate (§4.2). Its sole job is to read every
-`data/schemas/<ctx>/<Type>.fory` source under the configured schema
-root, validate each parsed `Schema` against §4.1, and emit the
-generated C++ sources, the registry-population TU, the per-plugin
-manifest TU, and the embedded `AbiHash` constant.
+`Sergeant` aggregate (§4.2). It is a thin driver around `flatc`: it
+invokes `flatc --cpp` for C++ header emission, `flatc --bfbs` for binary
+schema emission, `flatc --conform` for structural-evolution checks, and
+adds glibre-specific concerns: sidecar `.bfbs` emission, ABI hash
+computation over `.bfbs` bytes (Q7), per-plugin `manifest.cpp`
+generation, field-rename / type-rename alias enforcement, and FQN
+forward-map maintenance.
+
+**Q10 (ADR #1121):** `.bfbs` sidecar files are emitted by `glbr-sergeant`
+next to the context dylib (NOT embedded in the middleman). They are
+loaded only in editor mode. Shipping builds carry no `.bfbs` bytes.
 
 Translation-unit shape (illustrative, not normative beyond the names
 the rest of the spec already uses):
 
 ```
-tools/glibre-foryc/
+tools/sergeant/
   src/
-    main.cpp                 # arg parsing, deterministic file walk
-    lexer.cpp                # .fory -> token stream (§6.2 step 1)
-    parser.cpp               # tokens -> Schema AST (§6.2 step 2)
-    validator.cpp            # Schema -> validated Schema (§6.2 step 3)
-    emitter/
-      header_emitter.cpp     # generates <ctx>/<Type>.hpp
-      body_emitter.cpp       # generates <ctx>/<Type>.cpp
-      registry_emitter.cpp   # generates _registry.cpp
-      reflection_emitter.cpp # generates per-type ReflectionBlob data
-      abi_hash_emitter.cpp   # generates _abi_hash.cpp
-      manifest_emitter.cpp   # generates per-plugin manifest.cpp
-    canonicalize.cpp         # parsed-form canonicalization (§7.3)
-    blake3_wrapper.cpp       # blake3 over canonicalized bytes
-  CMakeLists.txt             # links Apache Fory privately; host-only
-  tests/                     # Catch2 unit tests for lexer/parser/etc.
+    main.cpp                 # arg parsing, deterministic file walk;
+                             # flatc driver wrapper; --conform runner
+    alias_emitter.cpp        # field-rename / type-rename alias registration
+                             # code emitted into _alias_table.cpp
+    bfbs_hash.cpp            # blake3 over .bfbs bytes (Q7); ABI hash
+    abi_hash_emitter.cpp     # generates _abi_hash.cpp
+    manifest_emitter.cpp     # generates per-plugin manifest.cpp
+    fqn_map.cpp              # FQN forward-map (type-rename aliases)
+  CMakeLists.txt             # host-only; invokes flatc via find_program
+  tests/                     # Catch2 unit tests for alias_emitter, etc.
 ```
 
-`glibre-foryc` links Apache Fory and `blake3` privately; neither
-dependency leaks past this module's boundary. The tool is the only
-writer of files inside `data/codegen-output/` (§6.1.3) and the only
-reader of `.fory` source files. It performs no network I/O, opens no
-files outside the configured schema root and the configured output
-directory, and is bit-deterministic across hosts (§4.2 inv. 5).
+`glbr-sergeant` invokes `flatc` as a subprocess (found via `find_program`
+in CMake; installed by the Flatbuffers vcpkg port). It also links `blake3`
+privately for ABI hash computation. Neither dependency leaks past this
+module's boundary. The tool is the only writer of `.bfbs` sidecars and
+the only reader of `.fbs` source files. It performs no network I/O,
+opens no files outside the configured schema root and the configured
+output directory, and is bit-deterministic across hosts (§4.2 inv. 1).
 
 #### 6.1.2 `data/runtime/` — middleman runtime sources (in `glibre-types.dylib`)
 
@@ -1040,22 +1088,20 @@ data/runtime/
     glibre/types/
       identity.hpp
       error.hpp
-      envelope.hpp
-      migration.hpp
+      envelope.hpp           # Envelope<T> size-prefix wrapper (Q4)
+      alias_table.hpp        # SchemaAliasTable, FQN forward-map (Q1)
       registry.hpp
       abi_hash.hpp
       plugin_manifest.hpp
-      reflection.hpp
+      reflection.hpp         # ReflectionBlob = std::span<const std::byte> (Q8)
   src/
     schema_registry.cpp      # SchemaRegistry::instance, lookup,
                              # entries; static-init ordering (§4.3 inv. 5)
-    envelope.cpp             # EnvelopeHeader read/write; little-endian
-                             # pinning (§4.8 inv. 3); peek primitives
-    migration_dispatcher.cpp # MigrationDispatcher (§6.3); keyed by
-                             # (SchemaId, version-pair); arena reset
-    register_migration.cpp   # glibre_types_register_migration entry
-    arena.cpp                # per-payload Arena; reset to high-water
-                             # between chain steps (§4.7 inv. 5)
+    envelope.cpp             # FB size-prefix + file_identifier read/write;
+                             # Verifier call; peek schema_version (§4.8)
+    alias_table.cpp          # SchemaAliasTable; FQN forward-map lookup;
+                             # field-rename alias registration (§4.7)
+    register_fqn_alias.cpp   # glibre_types_register_fqn_alias entry
     abi_hash.cpp             # glibre_types_abi_hash() trampoline that
                              # returns the codegen-embedded constant
     plugin_manifest.cpp      # PluginManifest deserialize helpers
@@ -1063,45 +1109,49 @@ data/runtime/
     static_init_check.cpp    # Phase C invariant assertions (§4.3 inv. 5,
                              # §4.5, §4.7); constructor priority 65535
   CMakeLists.txt             # contributes to the glibre-types target
-  tests/                     # Catch2 unit tests for dispatcher,
-                             # registry, envelope, arena
+  tests/                     # Catch2 unit tests for alias_table,
+                             # registry, envelope
 ```
 
 `data/runtime/` is the only module that may keep mutable state in
 process memory, and even that state is restricted to (a) static-init
-populated read-only structures and (b) the per-payload `Arena` whose
-lifetime is bounded by a single `deserialize` call. There is no
-allocation outside an arena and no I/O of any kind.
+populated read-only structures. There is no per-payload arena (migrations
+are dropped, Q1); the only scratch allocation is the `FlatBufferBuilder`
+used by serialize, which is caller-owned. No I/O of any kind.
 
 #### 6.1.3 `data/codegen-output/` — generated artifacts (build dir, not in repo source tree)
 
-A **build-directory artifact** populated by `glibre-foryc` at
+A **build-directory artifact** populated by `glbr-sergeant` at
 configure / build time. Lives at
 `${CMAKE_BINARY_DIR}/generated/glibre-types/` and is **not committed
 to the repository**; the directory is regenerated from
-`data/schemas/**/*.fory` on every Ninja re-glob (per
-`reviews/decisions/fory-codegen.md` §"CMake Integration"). The data
+`data/schemas/**/*.fbs` on every Ninja re-glob (per
+`reviews/decisions/flatbuffers-codegen.md` §"CMake Integration"). The data
 context's `.gitignore` suppresses any accidental check-in.
 
 ```
 data/codegen-output/                 # (build dir; symbolic name only)
   include/glibre/types/<ctx>/
-    <Type>.hpp                       # one per .fory file; tag-sorted
-                                     # struct, declaration-order-
-                                     # independent (§4.2 inv. 2)
-    <Type>_migrations.hpp            # GLIBRE_REGISTER_MIGRATION
-                                     # macros; included by the owning
-                                     # context's TU (§5 §migration.hpp)
+    <Type>.hpp                       # flatc --cpp output; one per .fbs;
+                                     # field-rename alias [[deprecated]]
+                                     # forwarders appended by sergeant
+    <Type>_alias.hpp                 # GLIBRE_REGISTER_FQN_ALIAS macros
+                                     # for type-rename aliases (Q1, §4.7)
   src/<ctx>/
     <Type>.cpp                       # serialize/deserialize bodies;
                                      # extern "C" trampolines per
                                      # §4.3 inv. 4
   src/_registry.cpp                  # static-init RegistryEntry
                                      # inserts; FQN-sorted (§4.5)
+  src/_alias_table.cpp               # static-init FqnAliasEntry inserts
+                                     # (Q1, §4.7; type-rename aliases)
   src/_abi_hash.cpp                  # const char* literal returned by
                                      # glibre_types_abi_hash() (§6.4)
   src/_manifest_<plugin>.cpp         # one TU per discovered
-                                     # plugins/*/plugin.fory (§6.5)
+                                     # plugins/*/plugin.fbs (§6.5)
+  bfbs/<ctx>.bfbs                    # Q10: sidecar .bfbs per context,
+                                     # emitted next to context dylib;
+                                     # editor-only; not in shipping build
   .stamp                             # CMake dependency stamp file
 ```
 
@@ -1118,143 +1168,100 @@ change and depends only on the modules upstream of it (§6.1.1 →
 
 ### 6.2 Codegen pipeline
 
-`glibre-foryc` runs a four-stage pipeline over the schema set; the
+`glbr-sergeant` runs a five-stage pipeline over the schema set; the
 stages are sequential, each stage's output is the input to the next,
 and the pipeline is a pure function of the schema set plus the tool
-binary itself (§4.2 inv. 1).
+binary and the `flatc` version it invokes (§4.2 inv. 1).
 
-**Stage 1 — Lex.** Each `.fory` source under the schema root is
-opened, UTF-8 / NFC-normalized (§7.1 storage shape), and lexed into
-a token stream against the grammar in §7.1. Lexer errors raise
-`ReservedTagViolation` (the codegen front-end's generic syntactic-
-error arm — see §10) with a file:line:col anchor. The lexer is
-streaming and allocates only inside the tool's arena.
+**Stage 1 — Conform check.** For every `.fbs` schema whose committed
+prior version exists in the build tree, sergeant runs
+`flatc --conform <prior.fbs> <new.fbs>`. Any schema change that fails
+`--conform` is a semantic change, not a structural evolution; sergeant
+exits non-zero and the build fails before emitting any output (§4.6 inv. 1).
 
-**Stage 2 — Parse.** The token stream is parsed into an in-memory
-`Schema` AST node — the §4.1 aggregate's authoring-time
-representation. Parser errors raise `ReservedTagViolation` with the
-same anchor shape. The parser produces one `Schema` value per file;
-no cross-file information is consulted at this stage.
+**Stage 2 — C++ header emission.** Sergeant invokes `flatc --cpp`
+(with `--cpp-fp scoped` for scoped enums) over the full `.fbs` set.
+For each schema file, `flatc` writes `<Type>.hpp` into the codegen
+output directory. Sergeant then appends field-rename alias forwarders
+(annotated `[[deprecated]]`) for any field deprecations found in the
+`.fbs` source (§4.6 alias mechanism 1; §4.7).
 
-**Stage 3 — Validate.** Each `Schema` is checked against the §4.1
-invariants individually (FQN well-formedness, monotonic version,
-unique tag numbers, reserved-tag immutability, `since ≤ version`,
-default-on-non-`option` rule) and then against cross-schema
-invariants (no two `Schema`s share an `FQN`, every `TypeRef` to
-another generated type resolves to a `Schema` in the current set,
-no cycles in the type graph, no reuse of any tag number ever shipped
-in a prior committed version of the same `FQN`). Layout-additive
-checking (§4.2 inv. 3) compares each `Schema` against the prior
-committed version's parsed form: a new tag is permitted only if its
-sorted position appends past the prior version's last field's
-offset. Failures raise the §4 invariant's matching `data::Error` arm
-(`ReservedTagViolation`, `SchemaRegistryConflict`, etc., per §10);
-the build fails before any source is emitted.
+**Stage 3 — `.bfbs` emission.** Sergeant invokes `flatc --bfbs`
+over the full `.fbs` set, writing per-context `<ctx>.bfbs` sidecar
+files (Q10, ADR #1121). These sidecars are placed next to the context
+dylib in the build output (not embedded in the middleman). Shipping
+CMake profiles exclude the sidecars from the install target; editor
+profiles include them (PHILOSOPHY §6).
 
-**Stage 4 — Emit.** From the validated `Schema` set the emitter
-writes the four artifact families:
+**Stage 4 — ABI hash computation.** For each schema `s`, sergeant
+computes `blake3(bfbs_bytes(s))` — the per-type `SchemaSourceHash`
+(Q7, §4.4 inv. 2). The outer ABI hash is then
+`blake3(join("\n", sort_by_fqn({fqn||":"+version_le||":"+source_hash : s ∈ schemas})))`
+per §4.4 inv. 1. The result is hex-encoded and emitted into
+`data/codegen-output/src/_abi_hash.cpp` as a `constexpr` literal (§6.4).
 
-1. **Headers and bodies.** One header
-   `data/codegen-output/include/glibre/types/<ctx>/<Type>.hpp` and
-   one body `data/codegen-output/src/<ctx>/<Type>.cpp` per `.fory`
-   file. The header declares the `final` POD-like struct with
-   tag-sorted fields and the `Envelope<T>` specialization
-   declarations (§5 §envelope.hpp); the body emits the
-   `serialize`/`deserialize` trampolines (per §4.3 inv. 4) and
-   their `extern "C"` exports.
-2. **Reflection blob.** Per-type `ReflectionField` arrays are emitted
-   into the generated body (§4.9), inlined as `constexpr` data when
-   the field set permits and `const` static arrays otherwise. A
-   build flag (off by default in shipping profiles, on for
-   editor / tools) controls whether the blob is wired into the
-   `RegistryEntry::reflection` slot or left null (§4.9 inv. 5).
-3. **Registry TU.** A single `data/codegen-output/src/_registry.cpp`
-   collects every per-type `RegistryEntry` into the static-init
-   table the runtime exposes via `SchemaRegistry::instance()`
-   (§4.5). Entries are emitted in `FQN` byte-sort order so the
-   binary search in §4.5 inv. 3 is constant-time over a contiguous
-   array — the same ordering `AbiHash` consumes (§4.4 inv. 1, §6.4).
-4. **ABI-hash TU.** A single `data/codegen-output/src/_abi_hash.cpp`
-   embeds the 64-character lowercase hex `AbiHash` string as a
-   `constexpr` literal and provides the body of
-   `glibre_types_abi_hash()` (§6.4).
-5. **Manifest TUs.** One
-   `data/codegen-output/src/_manifest_<plugin>.cpp` per discovered
-   `plugins/<plugin>/plugin.fory`, embedding the Fory-serialized
-   `PluginManifest` blob into the plugin's `.rodata` (§6.5).
+**Stage 5 — Registry and alias TUs.** From the validated schema set
+sergeant writes:
+
+1. **Registry TU.** `data/codegen-output/src/_registry.cpp` collects
+   every per-type `RegistryEntry` into the static-init table
+   (`SchemaRegistry::instance()`, §4.5). Entries are emitted in `FQN`
+   byte-sort order (§4.5 inv. 3, §4.4 inv. 1).
+2. **Alias table TU.** `data/codegen-output/src/_alias_table.cpp`
+   emits `glibre_types_register_fqn_alias` calls for every type-rename
+   alias found across the schema set (§4.7 inv. 4).
+3. **Manifest TUs.** One `data/codegen-output/src/_manifest_<plugin>.cpp`
+   per discovered `plugins/<plugin>/plugin.fbs`, embedding the
+   Flatbuffers-serialized `PluginManifest` blob into the plugin's
+   `.rodata` (§6.5).
 
 Emission is deterministic: file iteration is `FQN`-sorted, every
 generated symbol is namespaced, generated newlines are LF, and the
 emitter never reads back its own outputs. Two independent runs of
-`glibre-foryc` over the same schema set on different hosts produce
+`glbr-sergeant` over the same schema set on different hosts produce
 byte-equal sources (§4.2 inv. 1, PHILOSOPHY §7).
 
 The pipeline's input and output sides are pinned by §7 (the schema
 file format) and §5 (the public C++ surface) respectively; this
-section specifies only the four phases that connect them and the
+section specifies only the five phases that connect them and the
 ordering rules each phase must obey.
 
-### 6.3 `MigrationDispatcher` (runtime composition)
+### 6.3 `AliasResolver` (runtime alias lookup)
 
-Lives in `data/runtime/src/migration_dispatcher.cpp`. Owns
-composition of the `MigrationChain` aggregate (§4.7) at deserialize
-time. The dispatcher is the single runtime consumer of the
-codegen-emitted migration tables; no other call site invokes
-`MigrationFn`s directly.
+Lives in `data/runtime/src/alias_table.cpp`. Owns the runtime side
+of the `SchemaAliasTable` aggregate (§4.7): looking up deprecated FQNs
+in the FQN forward-map, and exposing the field-rename alias accessor
+registration API.
 
-**Key.** Lookup is keyed by `(SchemaId, version-pair)` where
-`version-pair` is `(from_version, to_version)` and `to_version ==
-from_version + 1`. No multi-step keys exist — the dispatcher
-composes `vN → vM` exclusively by iterating single-step entries
-(§4.6 inv. 5; §4.7 inv. 2). Hash table or sorted side-array is an
-implementation detail; the spec requires only constant-time amortized
-lookup and `FQN`-then-`from_version` deterministic iteration order
-when the chain is walked.
+**Q1 (ADR #1121): replaces MigrationDispatcher.** There is no per-step
+migration dispatch; the only runtime resolution is name aliasing.
 
-**Storage.** The per-`FQN` migration entries live as a contiguous
-`eastl::span<const MigrationEntry>` inside the registry entry for that
-type (§4.5; §5 §registry.hpp). Codegen emits them in
-`from_version`-ascending order so the dispatcher can index by
-`from_version - 1` without sorting at runtime.
+**FQN forward-map lookup.** On `Envelope<T>::deserialize(src)`:
 
-**Invocation contract.** On `Envelope<T>::deserialize(src)`:
+1. Read the Flatbuffers size-prefix (4 bytes) and `file_identifier`
+   (4-byte magic at offset 4) — §4.8 inv. 1, 2. Truncation before
+   byte 8 → `data::Error::EnvelopeTruncated`.
+2. Resolve the `file_identifier` to an FQN string via the
+   `file_identifier → FQN` table baked into the generated header.
+   If the FQN is not in the live registry, check the FQN forward-map
+   (§4.7 inv. 2); if the forward-map resolves in one hop, use the
+   canonical FQN. Unresolvable → `data::Error::SchemaUnknown`.
+3. Look up `RegistryEntry` by the (possibly-resolved) FQN (§4.5 inv. 3).
+4. Read `schema_version` from the root table (field-id 2). If
+   `schema_version > entry.version` (newer-than-host) →
+   `data::Error::DeserializeError` (§4.8 inv. 5).
+5. Invoke `entry.deserialize(src, &out)`. Absent fields take their
+   declared Flatbuffers defaults (structural evolution; §4.6 inv. 1).
 
-1. Read `EnvelopeHeader` (§4.8 inv. 1, 2).
-2. Look up `RegistryEntry` by `header.schema` (§4.5 inv. 3); unknown
-   `FQN` → `data::Error::DeserializeError`.
-3. Compare `header.version` against `entry.version`:
-   * Equal → invoke `entry.deserialize(src, &out)` directly, return
-     the value.
-   * `header.version > entry.version` (newer-than-host) →
-     `data::Error::DeserializeError` (§4.8 inv. 5).
-   * `header.version < entry.version` → walk the migration chain.
-4. Migration walk. For `n = header.version; n < entry.version; ++n`
-   the dispatcher:
-   * Indexes `entry.migrations[n - 1]` (the `(n → n+1)` entry).
-   * Allocates a fresh `VNplus1` inside the per-payload `Arena`.
-   * Resets the arena to its post-deserialize high-water mark
-     between steps (§4.7 inv. 5).
-   * Invokes the type-erased trampoline; on `unexpected` returns
-     `data::Error::SchemaMigrationFailure` carrying the failing
-     `(FQN, n → n+1)` pair (§4.7 inv. 4).
-5. The final `entry.version`-shaped value is moved into the
-   caller-owned `out_value`; intermediates never escape the
-   dispatcher (§4.7 inv. 3).
-
-**Purity.** Every step the dispatcher calls is a pure function
-(§4.6 inv. 1, 4). The dispatcher itself reads only the registry it
-holds by `const&`, never mutates the registry, never publishes a
-mutating reference (§4.5 inv. 4), and allocates only inside the
-caller-supplied arena.
+**Purity.** The resolver reads only the alias table and the registry
+it holds by `const&`, never mutates either, and allocates nothing.
 
 **Hot-reload integration.** At the frame-8 barrier the loader passes
-the pre-swap snapshot through this same code path against the
-post-swap registry; success yields a migrated component row, failure
-yields `core::Error::SchemaMigrationFailed` and reverts the swap
-(§8; `reviews/decisions/hot-reload-protocol.md` §"Step 3 —
-Migrate"; `reviews/decisions/plugin-abi.md` §"Loader Sequence" step
-11). The dispatcher itself is unaware of the hot-reload phase — the
-code path is identical to a cold deserialize.
+the pre-swap snapshot through the same deserialize path against the
+post-swap registry. Because there are no migration steps, the only
+data-layer work is alias resolution + Flatbuffers zero-copy read.
+Structural evolution (absent fields → defaults) is handled by `flatc`-
+generated accessors; no arena, no chain, no dispatcher (§8; §8.4).
 
 ### 6.4 ABI-hash construction and export
 
@@ -1263,14 +1270,16 @@ runtime: the value is *computed* at codegen time and *exported* at
 runtime as a stable C symbol the plugin loader compares.
 
 **Computation (codegen-time).**
-`glibre-foryc`'s `abi_hash_emitter` consumes the validated `Schema`
-set produced by stage 3 of §6.2 and produces the
+`glbr-sergeant`'s `bfbs_hash` module (§6.1.1) consumes the `.bfbs`
+sidecar bytes produced in §6.2 stage 3 and produces the
 `_abi_hash.cpp` translation unit by:
 
-1. For each `Schema s`, compute
-   `schema_source_hash(s) = blake3(canonicalize(s))` where
-   `canonicalize` is the parsed-form canonicalization defined in
-   §7.3 (§4.4 inv. 2). The output is a 32-byte digest.
+1. For each schema `s`, compute
+   `schema_source_hash(s) = blake3(bfbs_bytes(s))` where
+   `bfbs_bytes(s)` is the per-type `.bfbs` output of `flatc --bfbs`
+   for schema `s` (Q7, §4.4 inv. 2). The canonicalization module
+   (§7.3) is DELETED; `.bfbs` is canonical by construction. The
+   output is a 32-byte digest.
 2. Form a per-schema entry string: `fqn_utf8(s) || ":" || version_le(s)
    || ":" || schema_source_hash(s)` where `version_le` is the declared
    version as 4 bytes little-endian and `schema_source_hash` is the
@@ -1279,11 +1288,8 @@ set produced by stage 3 of §6.2 and produces the
 3. Join the sorted entry strings with a single LF byte (`\n`) between
    each adjacent pair; no trailing newline. This is the normative rule
    from §4.4 inv. 1 and `reviews/decisions/plugin-abi.md` §"ABI Hash
-   Function" rule 1. (An earlier draft of this section said "no
-   separators"; that was erroneous — the entry strings are
-   variable-length because FQN is unbounded, making LF separation
-   necessary for unambiguous decoding. The invariant in §4.4 and
-   plugin-abi.md is authoritative.)
+   Function" rule 1. (Outer ABI hash construction is UNCHANGED from
+   the prior design; only the per-type hash input changed, Q7.)
 4. Compute `blake3(joined_string)` — the resulting 32-byte digest is
    the canonical `AbiHash`.
 5. Hex-encode the digest (lowercase, 64 characters) and embed it as
@@ -1314,13 +1320,13 @@ the digest, the canonicalization rule, or the construction inputs.
 
 ### 6.5 Plugin-manifest emission (cross-cut with `core`)
 
-The data context owns the Fory-serialized layout of `PluginManifest`
+The data context owns the Flatbuffers-serialized layout of `PluginManifest`
 (§5 §plugin_manifest.hpp; `reviews/decisions/plugin-abi.md`
 §"Plugin Manifest Schema") but does not own the loader that consumes
-it. `glibre-foryc` extends its file walk to also process
-`plugins/<plugin>/plugin.fory` files, emitting one
+it. `glbr-sergeant` extends its file walk to also process
+`plugins/<plugin>/plugin.fbs` files, emitting one
 `data/codegen-output/src/_manifest_<plugin>.cpp` per discovered
-manifest source. Each emitted TU embeds the Fory-serialized
+manifest source. Each emitted TU embeds the Flatbuffers-serialized
 `PluginManifest` blob into a `.rodata`-resident `std::byte` array,
 defines the plugin-side `glibre_plugin_manifest` /
 `glibre_plugin_manifest_size` exports against that array, and
@@ -1333,33 +1339,45 @@ the bytes the loader reads.
 ### 6.6 Build-graph composition
 
 The CMake graph that wires the three modules together is pinned by
-`reviews/decisions/fory-codegen.md` §"CMake Integration"; this
+`reviews/decisions/flatbuffers-codegen.md` §"CMake Integration"; this
 section names the targets, not their internals.
 
 ```
-glibre-foryc            (host executable, tools/glibre-foryc/)
+glbr-sergeant            (host executable, tools/sergeant/;
+                           thin flatc driver + bfbs_hash + alias_emitter)
+   │
+   ├── flatc (vcpkg-installed host tool; invoked as subprocess)
    │
    ▼
 glibre-types-codegen    (custom target; depends on schema glob +
-   │                     glibre-foryc; outputs to
+   │                     glbr-sergeant + flatc; outputs to
    │                     data/codegen-output/.stamp)
+   │
+   ├── data/codegen-output/bfbs/<ctx>.bfbs   (Q10 sidecar; editor-only)
+   │
    ▼
 glibre-types            (SHARED library; sources = data/runtime/src/
                          + data/codegen-output/src/; depends on
                          glibre-types-codegen)
 ```
 
-`glibre-foryc` builds first and is host-only. Schema globs use
-`CONFIGURE_DEPENDS` so a touched `.fory` re-triggers regeneration
+`glbr-sergeant` builds first and is host-only. Schema globs use
+`CONFIGURE_DEPENDS` so a touched `.fbs` re-triggers regeneration
 without a CMake rerun. The middleman dylib's link line consumes both
 hand-written runtime sources and codegen-emitted sources as one unit;
 the static-init ordering rule (§4.3 inv. 5) is preserved by the
 emitter writing builtin-registration TUs lexicographically before
 generated-type TUs.
 
-No plugin links `glibre-foryc`; no plugin links `Apache Fory`
-directly; every plugin links exactly one `glibre-types.dylib`
-(§4.10 inv. 4).
+`.bfbs` sidecars (Q10) are installed next to the context dylib in
+editor / tools CMake install targets only. The shipping install target
+excludes them (CMake `COMPONENT editor` separation). The middleman
+dylib does NOT embed `.bfbs` bytes; they are filesystem-adjacent in
+editor builds and absent in shipping builds (PHILOSOPHY §6).
+
+No plugin links `glbr-sergeant`; every plugin links exactly one
+`glibre-types.dylib` and may consume Flatbuffers-generated accessor
+types at its ABI surface (Q6, §4.10 inv. 4).
 
 ### 6.7 Section closure
 
@@ -1377,21 +1395,21 @@ or symbol that the rest of the spec already references.
 The `data` context owns the persistence spine itself; it does not own
 domain payloads. What the spine itself persists is a **meta-schema
 layer** — the byte-level representation of `Schema` (§4.1), the
-`SchemaRegistry` table (§4.5), the per-`FQN` `MigrationChain` records
+`SchemaRegistry` table (§4.5), the per-`FQN` `SchemaAliasTable` records
 (§4.7), and the construction inputs to `AbiHash` (§4.4). Those
 meta-schemas are the only schemas this section enumerates; every
 other persistent type (a `Transform`, a `PluginManifest`, a `Mesh`)
 is owned by the originating context's `specs/<ctx>/SPEC.md` §7.
 
-### 7.1 The `.fory` schema-file format
+### 7.1 The `.fbs` schema-file format
 
-A `.fory` file is the authoring artifact that defines exactly one
+A `.fbs` file is the authoring artifact that defines exactly one
 `Schema` (§4.1). The file format is the load-bearing input to
-`Foryc` (§4.2) and, transitively, to every byte the spine emits.
-This subsection pins its bytes; `glibre-foryc` is the only writer
+`Sergeant` (§4.2) and, transitively, to every byte the spine emits.
+This subsection pins its bytes; `glbr-sergeant` is the only writer
 (via test fixtures) and the only reader.
 
-**Storage shape.** `.fory` files are UTF-8 text with LF line
+**Storage shape.** `.fbs` files are UTF-8 text with LF line
 endings, NFC-normalized, no BOM. The canonicalization rule that
 feeds `schema_source_hash` (§4.4 inv. 2) operates on the *parsed*
 form — see §7.3 — so trailing whitespace and reorder of optional
@@ -1401,7 +1419,7 @@ authored grammar, not the canonical form.
 **Header.** Every file opens with a single `schema` declaration
 naming the `FQN` and braces:
 
-```fory
+```flatbuffers
 schema glibre.core.Transform {
   version 3
   since   "0.1.0"
@@ -1413,7 +1431,7 @@ The opening token `schema` is the file's magic; a file whose first
 non-whitespace, non-comment token is not `schema` is rejected with
 `ReservedTagViolation` (re-used here as the codegen-front-end's
 generic syntactic-error arm — see §10) before any further parsing.
-There is no separate magic number because `.fory` is text; the
+There is no separate magic number because `.fbs` is text; the
 file *extension* and the leading `schema` keyword together form the
 identifier. Binary headers live on the wire (`Envelope`, §4.8 / §7.5),
 not in source files.
@@ -1421,7 +1439,7 @@ not in source files.
 **Field declarations.** Inside the braces, an ordered sequence of
 clauses describes the schema. Field clauses use the form:
 
-```fory
+```flatbuffers
 field <name> : <type> tag <N> since <V>
 field <name> : <type> tag <N> since <V> default <expr>
 field <name> : <type> tag <N> since <V> reserved
@@ -1436,33 +1454,49 @@ Header      := VersionLine SinceLine?
 VersionLine := "version" UINT
 SinceLine   := "since" STRING                  # advisory SemVer
 Clause      := FieldClause | ReservedClause
-              | MigrationClause | CommentClause
+              | AliasClause | CommentClause
 FieldClause := "field" Ident ":" TypeRef
               "tag" UINT "since" UINT
               ("default" DefaultExpr)?
+              ("deprecated" "alias" Ident)?    # Q1 field-rename alias
 ReservedClause := "reserved" "tag" UINT
                   ("removed_in" UINT)?
                   ("comment" STRING)?
-MigrationClause := "migration" "v" UINT "_to_v" UINT
-                   "{" "provider" STRING "}"
+AliasClause := "type_alias" FQN               # Q1 type-rename alias:
+                                              # maps old FQN to this type
 TypeRef     := Builtin | FQN | "list" "<" TypeRef ">"
               | "map" "<" Builtin "," TypeRef ">"
               | "option" "<" TypeRef ">"
-Builtin     := "u8" | "u16" | "u32" | "u64"
-              | "i8" | "i16" | "i32" | "i64"
-              | "f32" | "f64" | "bool"
+Builtin     := "uint8" | "uint16" | "uint32" | "uint64"
+              | "int8"  | "int16"  | "int32"  | "int64"
+              | "float32" | "float64" | "bool"
               | "string" | "bytes"
-              | "vec3f" | "quatf" | "entity"
+              | "vec3f" | "quatf"              # Q9: map to FB struct
+              | "entity"
 DefaultExpr := Number | "true" | "false"
               | StringLit | "{" DefaultExpr ("," DefaultExpr)* "}"
               | "none"
 CommentClause := "#" rest-of-line
 ```
 
+**Q9 (ADR #1121) — `vec3f` / `quatf` are Flatbuffers `struct` (fixed
+layout, byte-equal deterministic).** These PHILOSOPHY §7 math primitives
+have stable layouts that are industry-invariant; evolvability is not
+needed. A Flatbuffers `struct` packs fields consecutively at explicit
+alignments with no vtable and no field-id mapping; `flatc --cpp` emits
+a C++ class whose layout is `reinterpret_cast`-compatible with the wire
+bytes (zero-copy read). See `https://flatbuffers.dev/internals/` for the
+normative layout rules. Byte-equal determinism applies to both the wire
+form and the in-memory C++ object — the property PHILOSOPHY §7 requires.
+Other primitives keep their semantics but are spelled in Flatbuffers IDL:
+`uint8` / `uint16` / `uint32` / `uint64` / `int8` / `int16` / `int32` /
+`int64` / `float32` / `float64` (note the spelling change from the
+prior `u8`/`u16`/`i8`/`i16`/`f32`/`f64` shorthand).
+
 Names follow §4.1 inv. 1: lowercased dotted-context path with a
 PascalCase leaf for `FQN`; `[a-z][a-z0-9_]*` for field `Ident`s.
 
-**Field-set rules** (each enforced at `Foryc` parse time):
+**Field-set rules** (each enforced at `Sergeant` parse time):
 
 1. Every active `tag` integer is unique across the file. The same
    number space covers active and reserved tags (§4.1 inv. 3).
@@ -1472,8 +1506,8 @@ PascalCase leaf for `FQN`; `[a-z][a-z0-9_]*` for field `Ident`s.
    greater than `1` must carry a `default` clause. Codegen-time
    error otherwise.
 4. Every `TypeRef` resolves either to a `Builtin` (audited in
-   `glibre/types/_builtins.hpp`) or to another `FQN` whose `.fory`
-   file is present in the same `Foryc` invocation; cross-schema
+   `glibre/types/_builtins.hpp`) or to another `FQN` whose `.fbs`
+   file is present in the same `Sergeant` invocation; cross-schema
    cycles are detected and rejected (§4.1 inv. 4).
 5. `default` expressions are typed against their `TypeRef`:
    numeric literals must fit the integer/float width; `{a, b, c}`
@@ -1482,79 +1516,90 @@ PascalCase leaf for `FQN`; `[a-z][a-z0-9_]*` for field `Ident`s.
    is a build-time constant — no function calls, no other-field
    references.
 
-**Reserved clauses.** A removed field becomes a `reserved tag`
-line. The optional `removed_in <V>` records the schema version at
-which the field disappeared; the optional `comment` is a free-form
-string for human readers. The `removed_in` field is parsed and
-written into the canonical form so `Foryc` can produce stable
-diagnostics, but it has no effect on `schema_source_hash` (the
-hash is computed over the parsed form including `removed_in`,
-matching invariant §4.1 inv. 6 — the canonicalization is a pure
-function of the schema's declared content).
+**Reserved clauses.** A deprecated field (field removed from use via
+`deprecated` in Flatbuffers IDL) also appears as a `reserved tag`
+line in glibre's `.fbs` dialect to make the tag reservation explicit.
+The optional `removed_in <V>` records the schema version at which the
+field was deprecated; the optional `comment` is a free-form string for
+human readers. Tag reservation is enforced by `glbr-sergeant`; the
+`deprecated` annotation is also present in the raw `.fbs` file for
+`flatc --conform` to recognize.
 
-**Migration clauses.** An optional `migration vN_to_vN+1 { provider
-"<symbol>" }` clause names the originating context's free-function
-symbol for that step (§4.6). There is exactly one clause per
-`(N → N+1)` pair the file declares, and the union of clauses
-covers `1→2, 2→3, …, version-1→version` (§4.7 inv. 1). Codegen
-emits the dispatcher hookup; the body lives in the owning
-context's translation unit.
+**Field-rename alias clauses (Q1).** An optional `deprecated alias
+<new_name>` clause on a deprecated field declaration instructs
+`glbr-sergeant` to emit a `[[deprecated]]` accessor forwarding to the
+new field name in the generated C++ header (§4.6 alias mechanism 1).
+
+**Type-rename alias clauses (Q1).** An optional `type_alias <old_fqn>`
+clause in a schema's header declares that this type is the canonical
+successor of `<old_fqn>`. Sergeant emits a `glibre_types_register_fqn_alias`
+call for the pair (§4.7 inv. 2; §5 alias_table.hpp).
+
+**Migration clauses: REMOVED (Q1, ADR #1121).** Per-version
+`migrate_T_vN_to_vN+1` migration clauses are not present in glibre
+`.fbs` files. Structural evolution only; semantic changes go to
+cook-time transforms under `glibre-cook` (§4.6 inv. 4).
 
 **Comments.** `#` introduces a line comment; comments are stripped
-before canonicalization. There are no block comments.
+before `schema_source_hash` computation. There are no block comments.
 
 #### 7.1.1 Worked example (domain payload)
 
-```fory
+```flatbuffers
 schema glibre.core.Transform {
   version 3
   since   "0.1.0"
 
-  field translation : vec3f  tag 1 since 1
-  field rotation    : quatf  tag 2 since 1
-  field scale       : vec3f  tag 3 since 1   default { 1.0, 1.0, 1.0 }
-  field flags       : u32    tag 4 since 2   default 0
-  field parent      : entity tag 5 since 3   default none
+  field translation : vec3f   tag 1 since 1
+  field rotation    : quatf   tag 2 since 1
+  field scale       : vec3f   tag 3 since 1   default { 1.0, 1.0, 1.0 }
+  field flags       : uint32  tag 4 since 2   default 0
+  field parent      : entity  tag 5 since 3   default none
   reserved tag 6  removed_in 3  comment "old `lod_bias`"
-
-  migration v1_to_v2 { provider "glibre::core::migrate_Transform_v1_to_v2" }
-  migration v2_to_v3 { provider "glibre::core::migrate_Transform_v2_to_v3" }
+  # No migration clauses — structural evolution only (Q1, ADR #1121).
+  # fields added at tag 4 (since 2) and tag 5 (since 3) fill in with
+  # declared defaults on older payloads (flatc --bfbs / flatc --conform).
+  # vec3f and quatf map to Flatbuffers struct (Q9, ADR #1121).
 }
 ```
 
-This is the same shape used in `reviews/decisions/fory-codegen.md`
-§"Schema File Format", lifted to spec-precision and with reserved
-+ migration clauses spelled out.
+This is the same shape used in `reviews/decisions/flatbuffers-vs-fory.md`
+§Implementation plan step 2, lifted to spec-precision. No migration
+clauses (Q1); `uint32` spelling per Flatbuffers IDL (Q9). `vec3f` and
+`quatf` compile to Flatbuffers `struct` definitions in the generated
+Flatbuffers schema (canonical layout, zero-copy, byte-equal, PHILOSOPHY §7).
 
 ### 7.2 Meta-schemas owned by `data`
 
 The `data` context's own persistent records — the rows of the
 `SchemaRegistry`, the dispatcher's per-`FQN` migration tables, and
-the inputs to `AbiHash` — are themselves authored as `.fory`
+the inputs to `AbiHash` — are themselves authored as `.fbs`
 schemas, but they are **bootstrap meta-schemas**: they describe
 the spine and so cannot use the spine's runtime migration to
 evolve. Their evolution rule is documented in §7.6.
 
 Files owned by `data`:
 
-- `data/schemas/meta/SchemaSourceRecord.fory` — one row per
+- `data/schemas/meta/SchemaSourceRecord.fbs` — one row per
   registered `FQN`: the schema source hash, version, source path,
   and migration-chain length. Persisted as the byte form of one
   `RegistryEntry` (§4.5) minus the runtime function pointers.
-- `data/schemas/meta/MigrationTableRecord.fory` — one row per
+- `data/schemas/meta/MigrationTableRecord.fbs` — one row per
   registered `(FQN, N → N+1)`: the provider symbol name, the
   source schema FQN, the from/to versions, and a content hash of
   the migration's input/output type pair.
-- `data/schemas/meta/AbiHashManifest.fory` — the
-  `(blake3_hex, count, [SchemaSourceRecord*])` triple `Foryc`
+- `data/schemas/meta/AbiHashManifest.fbs` — the
+  `(blake3_hex, count, [SchemaSourceRecord*])` triple `Sergeant`
   emits as the input log to `AbiHash`. This is the build-time
   artifact that lets reviewers reproduce the hash from sources.
 
-The `EnvelopeHeader` (§4.8) is *not* one of these files: per §5.2,
-the envelope is Fory-defined — its bytes are produced by Fory's
-own header encoder rather than by a glibre-authored schema.
-§7.2.4 below describes the byte shape the spine pins on top of
-that Fory-defined header, but no `.fory` source file exists for it.
+The Flatbuffers native wire framing (§4.8, §7.2.4 — size-prefix +
+`file_identifier` + `schema_version`/`flags` fields in the root table)
+is *not* one of these meta-schema files: it is defined by the
+Flatbuffers binary format specification, not by a glibre-authored
+`.fbs` schema. The `EnvelopeHeader` struct (prior Fory approach) is
+DELETED (Q4, ADR #1121); no `.fbs` source file exists for the wire
+framing.
 
 These files compile to POD records under `glibre::types::data::*`
 (emitted into `glibre-types.dylib`), the same way every other
@@ -1565,7 +1610,7 @@ file format.
 
 #### 7.2.1 `SchemaSourceRecord`
 
-```fory
+```flatbuffers
 schema glibre.data.SchemaSourceRecord {
   version 1
   since   "0.1.0"
@@ -1583,7 +1628,7 @@ schema glibre.data.SchemaSourceRecord {
   schema form per §7.3); shorter or longer sequences are
   `DeserializeError`.
 - `source_path` is the workspace-relative path of the originating
-  `.fory` file, sorted by canonical Unicode code-point order
+  `.fbs` file, sorted by canonical Unicode code-point order
   before `AbiHash` ingests the table (§4.4 inv. 1).
 - `migration_count` matches `version - 1` exactly (§4.7 inv. 1);
   any other value is a `SchemaRegistryConflict` at static-init.
@@ -1592,7 +1637,7 @@ schema glibre.data.SchemaSourceRecord {
 
 #### 7.2.2 `MigrationTableRecord`
 
-```fory
+```flatbuffers
 schema glibre.data.MigrationTableRecord {
   version 1
   since   "0.1.0"
@@ -1611,7 +1656,7 @@ schema glibre.data.MigrationTableRecord {
 - `source_hash_from`/`source_hash_to` are the Blake3-256 hashes of
   the two endpoint schemas. They make the migration's input/output
   contract content-addressable: a migration is defined relative to
-  fixed schema-versions of its endpoint types and `Foryc` rejects
+  fixed schema-versions of its endpoint types and `Sergeant` rejects
   re-binding a provider symbol against a different `(from, to)`
   pair (§4.7 inv. 1, §4.6 inv. 4).
 - `provider_name` is the fully-qualified C++ symbol name codegen
@@ -1621,13 +1666,13 @@ schema glibre.data.MigrationTableRecord {
 
 #### 7.2.3 `AbiHashManifest`
 
-```fory
+```flatbuffers
 schema glibre.data.AbiHashManifest {
   version 1
   since   "0.1.0"
 
   field abi_hash_hex  : string                     tag 1 since 1
-  field foryc_version : SemVer                     tag 2 since 1
+  field sergeant_version : SemVer                     tag 2 since 1
   field entries       : list<SchemaSourceRecord>   tag 3 since 1
 }
 ```
@@ -1638,9 +1683,9 @@ schema glibre.data.AbiHashManifest {
   the 32-byte digest is then hex-encoded to produce the 64-char string
   stored in this field. Entry strings use the same LF separator and
   no trailing newline as §4.4 inv. 1 specifies.
-- `foryc_version` is the `glibre-foryc` SemVer that produced this
+- `sergeant_version` is the `glbr-sergeant` SemVer that produced this
   manifest. It exists for diagnostic reproducibility — two builds
-  with byte-identical entries but different `foryc_version` must
+  with byte-identical entries but different `sergeant_version` must
   still produce the same `abi_hash_hex`, so the field is **not**
   an input to the digest (§4.4 inv. 4).
 - `entries` is sorted by `fqn` ascending (lexicographic byte order)
@@ -1650,231 +1695,218 @@ schema glibre.data.AbiHashManifest {
 - `SemVer` here is the `glibre.core.SemVer` schema declared in
   `reviews/decisions/plugin-abi.md` §"Plugin Manifest Schema".
 
-#### 7.2.4 `EnvelopeHeader` (Fory-defined; byte-shape note)
+#### 7.2.4 Flatbuffers native wire framing (Q4 — replaces EnvelopeHeader)
 
-The wire-form prefix every persistent payload carries (§4.8) is
-emitted by Fory's own header encoder, not by a glibre-authored
-`.fory` schema. The spine pins its observable byte shape here so
-the per-version goldens in §7.5 and the dispatcher logic in §4.8
-inv. 5 have a single source of truth:
+**Q4 (ADR #1121):** The `EnvelopeHeader` struct is DELETED. The wire
+framing is now Flatbuffers native:
 
 ```text
-EnvelopeHeader (logical layout, Fory-encoded):
-  fqn            : string   # FQN of the payload's Generated Type
-  schema_version : u32      # SchemaVersion encoded little-endian
-  payload_length : u32      # body byte count, little-endian
-  flags          : u32      # reserved; current builds emit 0
+Flatbuffers size-prefixed buffer layout (§4.8, Q4):
+  [0..3]   : uint32 LE — buffer byte count (size-prefix)
+  [4..7]   : 4-byte file_identifier — type tag (ASCII magic)
+  [8..]    : Flatbuffers root table payload
+               field-id 2: schema_version : uint32 (LE)
+               field-id 3: flags          : uint32 (LE, reserved; emit 0)
+               ...         type-specific fields
 ```
 
-- This is the same logical record that surfaces as
-  `glibre::types::EnvelopeHeader` in §5; the C++ projection is the
-  authoritative API, the listing above is the read-only byte
-  shape.
-- `flags` is reserved-by-name. Adding a flag bit forces a
-  Fory-defined header version bump that the spine treats as a
-  meta-schema change subject to §7.6's bootstrap rule (release-time
-  migration via `glibre-foryc`, not in-process `MigrationChain`).
-- The header is *not* listed in `AbiHashManifest.entries`; it
-  rides Fory's own version handling. Changes to its layout still
-  force a `glibre-foryc` release and therefore a rebuilt
-  middleman with a new `AbiHash` value, but via meta-schema
-  release notes rather than the per-schema source-hash path.
+- The `file_identifier` (4-byte magic at offset 4) names the type
+  family. It is declared in the `.fbs` root table and baked into the
+  Flatbuffers-generated C++ at codegen time.
+- `schema_version` (field-id 2) carries the `SchemaVersion` INSIDE
+  the root table; no separate header prefix.
+- `flags` (field-id 3) is reserved-by-name. Adding a flag bit is a
+  field append (structural evolution, Q1 / §4.6) — no bootstrap-rule
+  change required unless the bit alters the wire layout semantics.
+- No `EnvelopeHeader` C++ struct exists; `glibre::types::Envelope<T>`
+  exposes `serialize`/`deserialize` only (§5 envelope.hpp).
+- Per-version goldens (§7.5) now compare size-prefixed Flatbuffers
+  buffers; `flatbuffers::Verifier` validates each golden on load.
+- This framing is NOT listed in `AbiHashManifest.entries`; changes to
+  it force a `glbr-sergeant` release and a new `AbiHash` value via
+  the meta-schema bootstrap rule (§7.6), not the per-schema source-hash
+  path — same rule as before, now operating on `.bfbs` bytes (Q7).
 
-### 7.3 The schema-source canonicalization rule
+### 7.3 Schema-source hash input (Q7 — `.bfbs` replaces canonicalization)
 
-The `schema_source_hash` of a `.fory` file is `blake3(canonical(s))`
-where `canonical` is the deterministic byte serialization defined
-below. Identical schemas in source must produce byte-identical
-canonical forms regardless of authoring whitespace, comment
-placement, or clause order.
+**Q7 (ADR #1121): The hand-rolled schema-source canonicalization rule is
+DELETED.** The `schema_source_hash` of a schema `s` is now:
 
-The canonical form is a single UTF-8 byte sequence built by
-emitting the *parsed* schema in the following fixed shape:
-
-```text
-schema <fqn>\n
-version <V>\n
-since "<semver>"\n                # if present; else absent
-[for each active field, sorted by ascending tag:]
-  field <name> : <type-canonical> tag <N> since <V>[ default <expr-canonical>]\n
-[for each reserved tag, sorted by ascending tag:]
-  reserved tag <N>[ removed_in <V>][ comment "<...>"]\n
-[for each migration, sorted by ascending from-version:]
-  migration v<N>_to_v<N+1> { provider "<symbol>" }\n
-\n
+```
+schema_source_hash(s) := blake3( bfbs_bytes(s) )
 ```
 
-Rules feeding the byte form:
+where `bfbs_bytes(s)` is the binary Flatbuffers schema (`--bfbs` output)
+emitted by `flatc` for schema `s`. The `.bfbs` format is canonical by
+construction: `flatc` produces deterministic binary output for identical
+`.fbs` input across all supported hosts (PHILOSOPHY §7). No separate
+canonicalization pass is required; no `canonicalize.cpp` module exists in
+`glbr-sergeant`.
 
-1. **Sort by tag** for active fields and reserved entries (§4.1
-   inv. 3). Sort by `from_version` for migration clauses
-   (§4.7 inv. 1).
-2. **Single-space separators** — no double spaces, no tabs.
-3. **LF line endings** — never CR or CRLF.
-4. **Type canonicalization** — `list`/`map`/`option` use no
-   internal whitespace: `option<u32>`, not `option< u32 >`.
-   Generic-type generic argument's canonicalization is recursive.
-5. **Default-expression canonicalization** — integer literals
-   normalize to base-10, no leading zeros, no underscores; float
-   literals normalize to round-trippable shortest form
-   (`std::to_chars` `chars_format::shortest`); composite defaults
-   `{...}` use `, ` (comma-space) separators.
-6. **String escaping** — `"` and `\` only; control characters
-   reject at parse time (canonical form never sees them).
-7. **No comments** — `#` lines are stripped entirely; their
-   positions and contents are not part of identity.
-8. **Trailing single empty line** — every canonical form ends
-   with `\n\n`. This makes concatenation in §4.4 unambiguous.
+The outer ABI hash construction (Blake3 over LF-joined, FQN-sorted
+`(fqn || ":" || version_le || ":" || schema_source_hash)` entries) is
+**UNCHANGED** from the prior design (§4.4 inv. 1). Only the per-type
+hash input changed: `.bfbs` bytes replace `.fbs` source bytes.
 
-The hash is `blake3(canonical_bytes)`; the result is a 32-byte
-digest stored as the `source_hash` of `SchemaSourceRecord`
-(§7.2.1) and as input to `AbiHash` (§4.4 inv. 1).
+The hash result is a 32-byte digest stored as the `source_hash` field of
+`SchemaSourceRecord` (§7.2.1) and as the per-type input to `AbiHash`
+(§4.4 inv. 1, inv. 2).
 
-### 7.4 Migration rules (engine-wide)
+### 7.4 Structural evolution rules (Q1 — replaces Migration rules)
 
-Migrations are owned per-type by the originating context (§4.6),
-but the rules they obey are owned here:
+**Q1 (ADR #1121): Per-version migration functions are DROPPED.**
+Structural evolution only; semantic changes go to `glibre-cook` at
+cook time. The rules below govern what counts as a structural evolution
+and what requires a cook-time semantic transform.
 
-1. **Stepwise only.** A migration is `vN → vN+1`. There is no
-   `vN → vN+2`. The dispatcher composes chains (§4.7); writers
-   never short-circuit. (`Foryc` rejects a `migration v1_to_v3`
-   clause as a `SchemaMigrationFailure`-shaped codegen error.)
-2. **Pure and deterministic.** The provider function must satisfy
-   §4.6 inv. 1–4: no clock, no RNG, no global state, no I/O,
-   no allocation outside the supplied `Arena&`.
-3. **Total over its prior-version domain.** For every `VN`
-   produced by `deserialize_v<N>`, the provider yields a `VNplus1`.
-   `std::unexpected` is reserved for *defective* payloads — e.g.
-   a foreign-key tag pointing to an absent sibling — never for a
-   missing default that the schema authors should have declared.
-4. **Compositional.** Hot-reload migration runs every step in
-   ascending order against a single per-payload arena reset
-   between steps (§4.7 inv. 5); cross-step retention is forbidden.
-5. **Complete coverage.** For every `FQN` whose current version
-   is `M`, exactly `M-1` migration providers exist; the build
-   fails at codegen otherwise (§4.7 inv. 1). The data context
-   never ships a partial chain.
-6. **Adding a field is not always a migration.** Per §4.2 inv. 3,
-   appending a new tag past the prior version's last offset is
-   ABI-additive: codegen synthesizes the default at deserialize
-   time and the schema bumps without authoring a provider. A
-   new tag whose sorted position is not append-past-end forces a
-   migration. Authors do not choose which case applies; `Foryc`
-   does.
-7. **Tag reuse is forbidden — forever.** Reserved tags (§4.1
-   inv. 3) carry forward across versions; `Foryc` errors with
-   `ReservedTagViolation` on any reuse. There is no migration
-   shape for rebinding a tag to a new field.
+1. **Append-only field additions are structural.** Adding a new field
+   at the next free tag is structural evolution: `flatc --conform` passes,
+   absent fields in older payloads take their declared Flatbuffers default,
+   and the schema version bumps without authoring any migration provider.
+   `Sergeant` enforces this via `--conform` check (§6.2 stage 1).
+
+2. **Field deprecation (field removal) is structural.** Marking a field
+   `deprecated` in the `.fbs` file is a structural change: the tag slot
+   is retained in the type-space (`reserved` in glibre dialect), the field
+   disappears from the generated accessor API (replaced by a
+   `[[deprecated]]` thin forwarder if a field-rename alias is declared,
+   else simply inaccessible). Older payloads still carry the bytes; the
+   generated accessor silently ignores them. `flatc --conform` accepts
+   deprecations.
+
+3. **Field-rename aliases are structural.** A `deprecated alias <new>`
+   clause emits a `[[deprecated]]` forwarder in the generated header.
+   No wire change; structural by construction.
+
+4. **Type-rename aliases are structural.** A `type_alias <old_fqn>`
+   clause registers the forward-map entry in the SchemaAliasTable. No
+   wire change; the loader resolves in one hop (§4.7 inv. 2).
+
+5. **Any other change is semantic and goes to `glibre-cook`.** Field
+   meaning changes, unit conversion, FK rebind, and derived-field
+   invalidation are cook-time transforms. `glibre-cook` reads `.bfbs`
+   produced by sergeant and consumes Flatbuffers buffers; it never
+   invokes `flatc` itself. Transforms are checked-in source under
+   `tools/glibre-cook/transforms/<context>/<from-hash>_to_<to-hash>.cpp`
+   and run once at content cook time.
+
+6. **Tag reuse is forbidden — forever.** Reserved tags (§4.1 inv. 3)
+   carry forward across versions; `Sergeant` errors with
+   `ReservedTagViolation` on any reuse. There is no structural evolution
+   shape for rebinding a tag to a different field type.
 
 ### 7.5 Wire format and round-trip identity
 
-Every persistent payload is the byte concatenation of the
-`EnvelopeHeader` (§7.2.4) followed by the Fory-encoded body of
-the `Generated Type`. The envelope is a fixed self-describing
-prefix (§4.8 inv. 1, 2), little-endian (§4.8 inv. 3), and is the
-sole source of dispatch truth at deserialize time (§4.8 inv. 5).
+**Q4 (ADR #1121):** Every persistent payload is a Flatbuffers
+size-prefixed buffer (§7.2.4, §4.8). The `file_identifier` (4-byte
+magic at buffer offset 4) plus the `schema_version` field inside the
+root table are the sole source of dispatch truth at deserialize time
+(§4.8 inv. 5). The `EnvelopeHeader` prefix is DELETED.
 
 Round-trip identity (§4.8 inv. 4) is tested per-schema via
 Catch2 goldens at `tests/data/schemas/<ctx>/<Type>.cpp`:
 
 1. Construct an instance `t` from a deterministic constructor
    recipe.
-2. `bytes := Envelope<T>::serialize(t)`.
-3. Assert `bytes` byte-equal a checked-in `golden.fory.bin`
-   (or regenerate under `--update-goldens`).
+2. `bytes := Envelope<T>::serialize(t)` — produces a Flatbuffers
+   size-prefixed buffer.
+3. Assert `bytes` byte-equal a checked-in `golden.bin`
+   (or regenerate under `--update-goldens`). Validate with
+   `flatbuffers::Verifier` before comparing.
 4. `t' := Envelope<T>::deserialize(bytes).value()`.
-5. Assert `t' == t` (POD-equality, tag-sorted comparison).
+5. Assert `t' == t` (zero-copy read; accessor-level field comparison).
 6. Assert `Envelope<T>::serialize(t') == bytes`.
 
 Per-version goldens are kept under
-`tests/data/schemas/<ctx>/<Type>/v<N>.fory.bin` so older payloads
-exercise the migration path:
+`tests/data/schemas/<ctx>/<Type>/v<N>.bin` so older payloads
+exercise the structural evolution path (Q1):
 
 1. Read the `vN` golden bytes.
-2. `t := Envelope<T>::deserialize(bytes).value()` — runs the
-   dispatcher, applying every step `vN → vN+1, … → vM`.
-3. Assert `t` matches the version-`M` golden.
+2. `t := Envelope<T>::deserialize(bytes).value()` — absent fields
+   since version `N` take their declared Flatbuffers defaults
+   (no migration dispatch; structural evolution only).
+3. Assert `t` matches the version-`M` golden (accessor-level).
 4. Assert `Envelope<T>::serialize(t)` byte-equals the version-`M`
    serialized golden.
 
-The `MigrationChain` is exercised as an integration test against
-the registry rather than per-step: the data context guarantees
-*chain-level* round-trip, which is the property loader and
-hot-reload code consume.
+Structural evolution (append-only field additions with defaults) is
+exercised at the alias-table layer (§4.7) rather than a migration
+dispatcher; the data context guarantees *round-trip* identity, which
+is the property loader and hot-reload code consume.
 
 ### 7.6 Bootstrap rule for meta-schemas
 
 The meta-schemas in §7.2 (`SchemaSourceRecord`,
-`MigrationTableRecord`, `AbiHashManifest`, `EnvelopeHeader`)
-describe the spine itself and so **cannot** evolve through the
-in-process `MigrationChain` they describe — that would require
-the spine to be running before its own description is parsable.
-The bootstrap rule decouples them from the runtime migration
+`MigrationTableRecord`, `AbiHashManifest`, and the native
+Flatbuffers wire framing in §7.2.4) describe the spine itself
+and so **cannot** evolve through the in-process structural-evolution
+path they describe. The bootstrap rule decouples them from the runtime
 path:
 
 1. **Out-of-band versioning.** Each meta-schema carries the
-   normal `version` integer in its `.fory` header, but the
-   `version` is bumped *only* in lockstep with a `glibre-foryc`
+   normal `version` integer in its `.fbs` header, but the
+   `version` is bumped *only* in lockstep with a `glbr-sergeant`
    release. The release notes call out the bump and the manual
-   migration steps tools and existing build artifacts must
-   take.
-2. **No registered migration providers.** Meta-schemas declare
-   no `migration` clauses. `Foryc` recognises files under
-   `data/schemas/meta/` and lifts the §7.4 rule #5 coverage
-   requirement for those files only — partial chains are
-   acceptable because the chain never runs at runtime.
-3. **Single live version per build.** A given `glibre-foryc`
+   rebuild steps tools and existing build artifacts must take.
+2. **No structural evolution at runtime.** Meta-schemas under
+   `data/schemas/meta/` are processed normally by `glbr-sergeant`
+   (including `--conform` checks), but older meta-schema payloads
+   are not consumed at runtime — they are regenerated from source
+   by the new `glbr-sergeant`. There is no `--conform` regression
+   requirement for meta-schemas between releases; only between the
+   current and prior build in the same release.
+3. **Single live version per build.** A given `glbr-sergeant`
    release emits exactly one version of each meta-schema. The
    middleman dylib produced by that release reads and writes
-   only that version of each meta-schema. There is no
-   `EnvelopeHeader v1` reader inside a build that emits
-   `EnvelopeHeader v2`.
-4. **Cross-build artefacts are reproduced, not migrated.**
-   `AbiHashManifest` files, intermediate `.foryc-stamp` blobs,
-   and the meta-schema binary descriptors embedded in
-   `glibre-types.dylib` are *artefacts of the build*, not
-   user-data. When a meta-schema bumps, the artefacts are
-   regenerated from authoring sources by the new `glibre-foryc`;
-   no migration pass is run.
-5. **Manual migration steps live in `glibre-foryc` release
-   notes.** When an `EnvelopeHeader` flag bit is added, the
+   only that version. There is no v1-schema reader inside a build
+   that emits v2-schema payloads.
+4. **Cross-build artefacts are reproduced, not evolved.**
+   `AbiHashManifest` files, intermediate `.sergeant-stamp` blobs,
+   and the `.bfbs` sidecars embedded in the build tree are
+   *artefacts of the build*, not user-data. When a meta-schema
+   bumps, the artefacts are regenerated from authoring sources by
+   the new `glbr-sergeant`; no cook-time transform or structural
+   evolution pass is run.
+5. **Manual steps live in `glbr-sergeant` release notes.** When
+   the native wire framing (§7.2.4) gains a new flag field, the
    release notes spell out (a) the wire-format diff, (b) any
    on-disk artefact rebuild needed, (c) any tooling step
    downstream consumers must take. The data context owns these
-   notes alongside the `glibre-foryc` source repository; the
-   spec does not enumerate per-release steps.
-6. **Hash invariants hold.** Even though meta-schemas do not
-   migrate, they *do* contribute to `AbiHash` exactly like any
-   other schema (§4.4 inv. 1). A meta-schema bump therefore
-   forces an `AbiHash` change, which forces every plugin
-   consuming the spine to rebuild — the same gate that catches
-   any other schema-shape drift (`reviews/decisions/plugin-abi.md`
+   notes alongside the `glbr-sergeant` source repository.
+6. **Hash invariants hold.** Meta-schemas contribute to `AbiHash`
+   exactly like any other schema (§4.4 inv. 1), via `.bfbs` bytes
+   (Q7). A meta-schema bump forces an `AbiHash` change, which
+   forces every plugin to rebuild — the same gate that catches any
+   other schema-shape drift (`reviews/decisions/plugin-abi.md`
    §"Versioning Rules"). The bootstrap rule lifts only the
-   *runtime-migration* obligation, not the ABI-gating one.
+   *runtime structural-evolution* obligation, not the ABI-gating one.
 
-The collapse: domain schemas migrate at runtime via the spine;
-the spine itself migrates at *release time* via `glibre-foryc`.
-Two surfaces, one ABI gate.
+The collapse: domain schemas evolve structurally at runtime via
+append-with-defaults and alias tables; the spine itself evolves at
+*release time* via `glbr-sergeant`. Two surfaces, one ABI gate.
 
 ### 7.7 Cross-context obligations
 
 Every other context's `specs/<ctx>/SPEC.md` §7 enumerates the
 domain schemas the context owns under
-`data/schemas/<ctx>/<Type>.fory`. Those sections inherit this
+`data/schemas/<ctx>/<Type>.fbs`. Those sections inherit this
 section's rules:
 
-1. The grammar in §7.1 is the only legal `.fory` syntax.
-2. Migration providers obey §7.4.
+1. The grammar in §7.1 is the only legal `.fbs` syntax.
+2. Structural evolution rules obey §7.4 (Q1 — no migration providers).
+   Semantic changes go to `glibre-cook` cook-time transforms; the
+   `data` context does not gate those transforms.
 3. Round-trip goldens follow the harness in §7.5; per-version
-   goldens are mandatory whenever the schema's version exceeds 1.
+   goldens are mandatory whenever the schema's version exceeds 1,
+   to exercise the structural evolution path (absent fields → defaults).
 4. The `data` context does **not** own those schemas — adding a
    new domain schema requires no edit to this section. What `data`
    owns is the meta-schema layer in §7.2 and the rules above.
 
 The biconditional in §4.10 inv. 1 is the load-bearing connector:
-every `.fory` file under `data/schemas/<ctx>/` corresponds to one
+every `.fbs` file under `data/schemas/<ctx>/` corresponds to one
 registry entry, and every registry entry corresponds to one
-`.fory` file — verified at configure time by `Foryc` (§4.5 inv. 5).
+`.fbs` file — verified at configure time by `Sergeant` (§4.5 inv. 5).
 
 ## 8. Hot-Reload Contract
 
@@ -1884,7 +1916,7 @@ four-step **drain → swap → migrate → resume** protocol
 (`reviews/decisions/hot-reload-protocol.md` §"Protocol Sequence"); the
 data context owns step 3 (**migrate**) and the gate values steps 2 and
 4 consult (`AbiHash`, `SchemaRegistry`). This section pins the contract
-between those owners: what bytes survive, what `migrate(...)` must do,
+between those owners: what bytes survive, what `reconcile(...)` must do,
 which refusals are typed at this layer, and how observers are notified
 without ever seeing a half-swapped registry.
 
@@ -1901,23 +1933,22 @@ hot-reload-protocol survival rule (`reviews/decisions/hot-reload-protocol.md`
 §"State Survival Rules") to yield one mechanical predicate the data
 context promises to preserve:
 
-> **Data survives the swap if and only if its type has a `.fory`
+> **Data survives the swap if and only if its type has a `.fbs`
 > schema registered in the live `SchemaRegistry`.**
 
 This biconditional is the same one the loader checks; the data context
 guarantees the *forward* direction (registered ⇒ preserved by either
-identity or migration) and the codegen guarantees the *reverse*
+identity or structural evolution) and the codegen guarantees the *reverse*
 direction (no schema ⇒ no registry entry ⇒ not persistent ⇒ not
 preserved). Concretely, the spine preserves:
 
 1. **Generated-type byte storage.** Every ECS component, world
    singleton, asset payload, or plugin-private record whose C++ type
-   is a `Generated Type` (§4.2) survives. Storage rows are migrated
-   in place when the new plugin's `SchemaVersion` for the type
-   exceeds the version recorded in the storage's per-row header
-   (`reviews/decisions/hot-reload-protocol.md` §"Step 3 — Migrate"
-   step 3); rows whose stored version equals the current version
-   are passed through unchanged.
+   is a `Generated Type` (§4.2) survives. When the new plugin's
+   `SchemaVersion` for the type exceeds the stored version, Flatbuffers
+   zero-copy reads handle absent fields via declared defaults (structural
+   evolution, Q1); no in-place per-row dispatch is required. Rows whose
+   stored version equals the current version are passed through unchanged.
 2. **The `SchemaRegistry` itself.** In Mode A the live registry is
    not mutated — Q's manifest re-references existing entries by
    FQN, and the loader's step 2.4 appends only entries Q introduces
@@ -1930,102 +1961,91 @@ preserved). Concretely, the spine preserves:
    plugin). Mode B is the only reload that publishes a new
    `AbiHash`, and it does so by replacing the middleman as a unit
    (§8.3).
-4. **Per-payload arena state — *not* preserved.** The dispatcher's
-   `Arena` (§4.6) is per-payload and reset between steps; nothing
-   in the arena survives the migrate phase, let alone the swap.
-   This is restated here only because step 3.4 of the loader
-   protocol resets it on failure — see §8.4.
+4. **`.bfbs` sidecar bytes — editor-only, not preserved across reloads
+   (Q10).** `.bfbs` sidecar files are filesystem-adjacent to the
+   context dylib; on hot-reload the loader re-reads the new sidecar
+   from disk (editor mode only). The `.bfbs` bytes are not carried in
+   process memory between reloads; the `ReflectionBlob` span (§4.9) is
+   re-sliced from the new sidecar after each successful swap.
+   Shipping builds carry no `.bfbs` bytes at all.
 
 State that does **not** survive (consistent with
 `reviews/decisions/hot-reload-protocol.md` §"State Survival Rules"
 "Re-derived"):
 
-- Plugin-private types without a `.fory` schema. By §4.10 inv. 1
-  these have no registry entry and the spine has no migration
+- Plugin-private types without a `.fbs` schema. By §4.10 inv. 1
+  these have no registry entry and the spine has no structural-evolution
   story for them.
-- The `MigrationChain` function-pointer table for plugin-emitted
-  types whose plugin is being swapped out — the table's entries
-  point into the *outgoing* plugin's `.text` segment and are
-  invalidated by `dlclose`. The new plugin's static-init
-  re-registers replacements through
-  `glibre_types_register_migration` before the loader proceeds
-  past step 4.1 (§4.5 inv. 4 still holds: the registry is
-  read-only after static-init *of the live middleman build*).
-- Editor-only `ReflectionBlob` interning tables for types whose
-  schemas dropped between Q and P. Tools handle the null pointer
-  per §4.9 inv. 5.
+- Field-rename alias forwarders for plugin-emitted types whose plugin
+  is being swapped out — the forwarders point into the *outgoing*
+  plugin's generated headers. The new plugin's codegen emits updated
+  alias registrations at static-init via `glibre_types_register_fqn_alias`
+  before the loader proceeds past step 4.1 (§4.5 inv. 4 still holds:
+  the registry is read-only after static-init *of the live middleman build*).
+- Editor-only `ReflectionBlob` `.bfbs` spans for types whose schemas
+  dropped between Q and P (Q10). Tools re-read the new sidecar; an
+  empty span for a dropped type is the expected state.
 
-### 8.2 The `migrate(...)` responsibility
+### 8.2 The `reconcile(...)` responsibility
 
-Every plugin reload routes through one entry point in the data
-context:
+**Q1 (ADR #1121): The `migrate(...)` function is renamed and simplified
+to `reconcile(...)`.** There are no per-step `MigrationFn` dispatches;
+the only data-layer work at hot-reload is schema-set continuity
+verification and alias-table refresh.
 
 ```cpp
 namespace glibre::types::data {
 
 // Called by the loader at hot-reload-protocol step 3, once per
-// outgoing-plugin / incoming-plugin pair. Drives MigrationDispatcher
-// across the version gap and validates schema-set continuity.
-[[nodiscard]] auto migrate(
+// outgoing-plugin / incoming-plugin pair. Validates schema-set
+// continuity and refreshes the alias table (Q1).
+// Structural evolution (absent fields → defaults) is handled
+// automatically by Flatbuffers-generated accessors; no per-row
+// dispatch is required.
+[[nodiscard]] auto reconcile(
     const SchemaRegistry& outgoing,    // pre-swap registry view
     const SchemaRegistry& incoming,    // post-swap registry view
-    World&                world,        // borrowed; storage walk only
-    Arena&                arena         // per-payload, reset between rows
-) noexcept -> std::expected<MigrationReport, Error>;
+    World&                world        // borrowed; storage walk only
+) noexcept -> std::expected<ReconcileReport, Error>;
 
 }  // namespace glibre::types::data
 ```
 
-**Responsibility.** `migrate(...)` performs *exactly* the data
+**Responsibility.** `reconcile(...)` performs *exactly* the data
 context's part of the loader's step 3:
 
 1. **Schema-set continuity check.** For every `FQN` registered in
    `outgoing` and referenced by any surviving storage row in
-   `world`, `migrate` asserts the same `FQN` is registered in
-   `incoming`. A missing `FQN` is a major-version change, not a
-   hot-reload (`reviews/decisions/hot-reload-protocol.md` §"Step 2 —
-   Swap" step 2.2); `migrate` returns `unexpected(Error::
-   SchemaMigrationFailure)` carrying the dropped `FQN` in the
-   detail payload.
-2. **Per-row dispatch.** For each surviving storage row whose stored
-   `SchemaVersion` is less than `incoming.lookup(fqn)->version`,
-   `migrate` invokes the `MigrationDispatcher` (§4.7,
-   `reviews/decisions/hot-reload-protocol.md` §"Step 3 — Migrate"):
-   the dispatcher composes the per-step `MigrationFn`s into the
-   chain `(stored_version → current_version)`, allocating into
-   `arena` and resetting it between rows.
-3. **Per-row in-place commit.** On chain success, the new bytes
-   overwrite the row in place; on chain failure, the arena is
-   reset and the row is left in its *outgoing* state (the loader's
-   rollback path then un-swaps the vtable per
-   `reviews/decisions/hot-reload-protocol.md` §"Failure & Rollback").
-   At most one row is half-overwritten at any instant, and the
-   loader's exclusive lock on phase 8 hides that intermediate from
-   every observer.
-4. **Validation, not interpretation.** `migrate` does not decide
-   *which* migration to run; it dispatches by `(FQN, from, to)`
-   tuples that the registry already records. It does not run any
-   plugin-private code beyond the `MigrationFn` bodies registered
-   through `glibre_types_register_migration`. It never reads
-   `World` outside the storage row currently being migrated, never
-   touches the file system, and never allocates outside `arena`.
-5. **Report-out.** On success `MigrationReport` contains the count
-   and the sorted span of `FQN`s actually migrated (i.e. those
-   whose stored version differed from the current); the loader
-   forwards the span into the `HotReloadCompleted` event published
-   at protocol step 4.3.
+   `world`, `reconcile` asserts the same `FQN` is registered in
+   `incoming` (directly or via a type-rename alias in §4.7).
+   A missing `FQN` is a major-version change; `reconcile` returns
+   `unexpected(Error::SchemaMigrationFailure)` carrying the dropped
+   `FQN` in the detail payload (the arm is retained per Q5, §10).
+2. **Alias-table refresh.** For any type-rename alias in `incoming`
+   that was absent in `outgoing`, `reconcile` registers the new
+   alias entry in the live `SchemaAliasTable` (§4.7). This is the
+   only write to the alias table that happens at hot-reload; the
+   registry itself is append-only (§4.5 inv. 4).
+3. **No per-row dispatch.** Flatbuffers' zero-copy read handles
+   absent fields via declared defaults (structural evolution, §4.6).
+   There is no arena, no per-step chain, no in-place overwrite;
+   each storage row is readable by the incoming accessor immediately.
+4. **Validation, not transformation.** `reconcile` does not run any
+   plugin-private code, never reads `World` outside the FQN
+   continuity check, never touches the filesystem, and allocates nothing.
+5. **Report-out.** On success `ReconcileReport` contains the count
+   of FQNs resolved via alias and the sorted span of FQNs whose
+   `schema_version` changed between `outgoing` and `incoming`
+   (i.e. those with a new structural append). The loader forwards
+   the span into the `HotReloadCompleted` event at protocol step 4.3.
 
-**Out of scope — `migrate(...)` does not.** The function does *not*
+**Out of scope — `reconcile(...)` does not.** The function does *not*
 dlopen, dlsym, swap vtables, mutate the system schedule, log
-structured warnings, or publish observer events. Each of those is
-the loader's responsibility per
-`reviews/decisions/hot-reload-protocol.md` and
-`reviews/decisions/plugin-abi.md`. The data context refuses to host
-any of them (§1; §4.10 inv. 7).
+structured warnings, or publish observer events (§1; §4.10 inv. 7).
 
-**Idempotence.** Re-invoking `migrate(...)` against an `outgoing`
+**Idempotence.** Re-invoking `reconcile(...)` against an `outgoing`
 whose registry already matches `incoming` is a no-op that returns
-`MigrationReport{count = 0, migrated = {}}`. This makes step-3
+`ReconcileReport{count = 0, changed = {}}`. This makes step-3
 retries safe in the loader's rollback path.
 
 ### 8.3 Self-reload of `glibre-types.dylib`
@@ -2048,23 +2068,24 @@ condition refuses the reload and leaves `P-types` live:
    compiled against the old hash defeats the reload; the loader
    returns `core::Error::PluginAbiHashMismatch` carrying the
    offending plugin's name.
-2. **Migration-chain coverage is complete.** For every `FQN` in
+2. **Schema-set continuity is verified.** For every `FQN` in
    `P_types.SchemaRegistry` whose `SchemaVersion` differs from the
-   `FQN`'s version in `Q_types.SchemaRegistry`, the chain
-   `(P_version → Q_version)` is fully present in
-   `Q_types.SchemaRegistry`. Missing any step refuses with
+   `FQN`'s version in `Q_types.SchemaRegistry`, the new version must
+   be structurally compatible (i.e. `flatc --conform` passes for the
+   old vs. new schema pair). Missing a FQN entirely refuses with
    `Error::SchemaMigrationFailure` (`reviews/decisions/hot-reload-protocol.md`
-   §"Refusal Cases" #2). Coverage is checked *before* any byte is
-   migrated, against the meta-schemas in §7.2 — the loader reads
-   `Q-types`'s `AbiHashManifest` and walks every entry.
+   §"Refusal Cases" #2; the arm is retained per Q5, §10). Continuity
+   is checked via `Q-types`'s `AbiHashManifest` before any reader
+   is swapped.
 3. **Meta-schema bootstrap rule holds.** Per §7.6, a
    `glibre-types.dylib` reload that bumps any of the meta-schemas
    (`SchemaSourceRecord`, `MigrationTableRecord`,
-   `AbiHashManifest`, `EnvelopeHeader`) requires release-time
-   migration via `glibre-foryc`, not in-process `MigrationChain`.
-   A self-reload that crosses such a bump is refused by
+   `AbiHashManifest`, or the native wire framing §7.2.4)
+   requires release-time tooling via `glbr-sergeant`, not
+   in-process structural evolution. A self-reload that crosses such
+   a bump is refused by
    construction; the operator either rebuilds the world from
-   sources via the new `glibre-foryc` (acceptable) or restarts the
+   sources via the new `glbr-sergeant` (acceptable) or restarts the
    process against the new middleman (acceptable). In-process
    self-reload is *only* permitted when the new build's
    meta-schemas are byte-identical to the live build's.
@@ -2092,42 +2113,36 @@ data context types and raises exactly two of them:
 | Loader symptom                                      | Data-typed cause                          | Detection point                              |
 |-----------------------------------------------------|-------------------------------------------|----------------------------------------------|
 | `Q.glibre_types_abi_hash() != host.abi_hash()`      | `Error::AbiHashMismatch` (§5.3)           | step 2.1 (Mode A); §8.3 gate 1 (Mode B)      |
-| `MigrationChain` missing or `MigrationFn` returned `unexpected` | `Error::SchemaMigrationFailure` (§5.3) | step 3.1 / 3.2; §8.3 gate 2                  |
+| Schema-set continuity check: FQN in `outgoing` missing from `incoming` (not resolvable via alias) | `Error::SchemaMigrationFailure` (§5.3, Q5 retained) | `reconcile(...)` step 1 (§8.2); §8.3 gate 2 |
 | `Q.glibre_plugin_register` returned `unexpected`    | (not data — `core::Error::PluginInitFailed`) | step 4.1                                  |
 
 The third case is included for completeness only; its detection and
 typing live in `core` per `reviews/decisions/plugin-abi.md`
-§"Failure Modes → core::Error". The data context contributes to it
-solely through `MigrationReport`-carried context attached to the
-plugin's failed `register` (the new plugin may consult the report
-to know which migrations ran, but the data context does not type
-its failure mode).
+§"Failure Modes → core::Error". The data context contributes no
+`ReconcileReport` context to it — `reconcile(...)` returns only
+when schema-set continuity is already confirmed.
 
 **Schema-set continuity refusals** (§8.2 step 1) raise
-`Error::SchemaMigrationFailure` rather than a new arm. The data
-context takes the §10 closed sum at face value: a missing schema
-in `incoming` is a defective migration *story* (the plugin author
-failed to write the migration that drops or relocates the type),
-and the loader surfaces it identically to a mid-chain failure.
-This collapses two failure modes into one error arm and one
-typed `core::Error::SchemaMigrationFailed` wrapping (per
-`reviews/decisions/plugin-abi.md` §"Failure Modes" row 11).
+`Error::SchemaMigrationFailure` (retained per Q5, §10). The data
+context takes the §10 closed sum at face value: a missing FQN in
+`incoming` is a structural evolution gap that the plugin author must
+resolve by adding a type-rename alias (§7.4 rule 4). The arm is
+retained so existing `core::Error::SchemaMigrationFailed` wrappers
+and operator tooling continue to function without change.
 
-**Per-row rollback discipline.** Every refusal that fires inside
-`migrate(...)` leaves the world byte-identical to its pre-`migrate`
-state — at most one row's worth of arena bytes is in flight at any
-instant, and a single failing row's arena is reset before the
-function returns. The loader's outer rollback (un-swap vtable,
-re-register P) then proceeds without any bytes-in-flight from the
-data layer (`reviews/decisions/hot-reload-protocol.md` §"Failure &
-Rollback" — failure at step 3).
+**Rollback safety.** `reconcile(...)` is validation-only: it never
+mutates storage rows, never writes arena bytes, never runs
+plugin-private code. A refusal inside `reconcile(...)` leaves the
+world byte-identical to its pre-`reconcile` state — there is no
+partial mutation to roll back. The loader's outer rollback
+(un-swap vtable, re-register P) proceeds immediately.
 
 **Logging.** Refusals are logged exactly once at `warn` by the
 loader (`reviews/decisions/hot-reload-protocol.md` §"Refusal
 Cases"); the data context emits no log of its own. The structured
-fields the loader records include the `MigrationReport`'s partial
-contents so operators can see how far the chain progressed before
-the refusing step.
+fields the loader records include the `ReconcileReport`'s alias
+count and changed-FQN span so operators can see what continuity
+check blocked the swap.
 
 ### 8.5 Observer notification — `SchemaRegistry` change
 
@@ -2143,11 +2158,12 @@ struct SchemaRegistryChange {
     enum class Kind : std::uint8_t {
         EntriesAppended = 0,    // Mode A: new FQNs added by Q
         VersionsBumped  = 1,    // Mode A: SchemaVersion of an existing FQN moved up
-        RegistryReplaced = 2,   // Mode B: full SchemaRegistry instance() swap
+        AliasesAdded    = 2,    // Mode A: new type-rename aliases registered by Q (Q1)
+        RegistryReplaced = 3,   // Mode B: full SchemaRegistry instance() swap
     };
     Kind                              kind{Kind::EntriesAppended};
-    eastl::span<const SchemaId>         affected_fqns{};   // sorted ascending
-    eastl::span<const MigrationReport>  reports{};         // one per migrated FQN
+    std::span<const SchemaId>         affected_fqns{};   // sorted ascending
+    std::span<const SchemaId>         aliased_fqns{};    // FQNs resolved via new aliases (Q1)
 };
 
 // Subscribers observe a fully-swapped, fully-migrated registry.
@@ -2162,10 +2178,10 @@ struct SchemaRegistryChange {
 }  // namespace glibre::types::data
 ```
 
-**Atomicity.** The event is delivered after `migrate(...)` succeeds
+**Atomicity.** The event is delivered after `reconcile(...)` succeeds
 and after the loader's own step 4.2 caches are rebuilt — i.e. the
 subscriber sees the post-swap world exactly the way it will tick
-in frame N+1. Subscribers never observe a half-migrated registry
+in frame N+1. Subscribers never observe a half-reconciled registry
 (§4.5 inv. 4 + §8.1 inv. 2 combined: Mode A's registry is
 append-only mid-phase-8, Mode B's swap is wholesale).
 
@@ -2188,8 +2204,9 @@ it.
 Hot-reload is testable in-process per
 `reviews/decisions/hot-reload-protocol.md` §"Test Hooks". The data
 context exports the schema-side counterpart to the loader's
-`enqueue_hot_reload`: a deterministic fixture that bumps a single
-schema's `SchemaVersion` and registers a paired migration without
+`enqueue_hot_reload`: a deterministic fixture that builds a synthetic
+`SchemaRegistry` whose entry for one FQN has a bumped `SchemaVersion`
+and, optionally, a paired type-rename or field-rename alias — without
 touching the filesystem.
 
 ```cpp
@@ -2197,33 +2214,40 @@ touching the filesystem.
 namespace glibre::types::data::test {
 
 // Builds a fresh SchemaRegistry instance whose entry for `fqn` is
-// upgraded by exactly one version, with the supplied migration
-// function wired into the chain. The returned registry is suitable
+// upgraded by exactly one version. The returned registry is suitable
 // for passing to the loader's enqueue_hot_reload as the post-swap
 // view; existing entries for other FQNs are copied identically.
 //
-// Pure, allocation-free past the supplied arena. The bumped version
-// is recorded in a deterministic SchemaSourceHash derived solely
-// from the (fqn, new_version, migration_provider_name) triple, so
+// Pure, allocation-free. The bumped version is recorded in a
+// deterministic SchemaSourceHash derived solely from the
+// (fqn, new_version) pair's synthetic .bfbs bytes (Q7), so
 // repeated calls with the same arguments produce byte-identical
 // registries (PHILOSOPHY §7).
 auto bump_schema_version(
     const SchemaRegistry& base,
     SchemaId              fqn,
-    MigrationEntry        new_step,         // from_version = base.version, to_version = base.version + 1
-    Arena&                arena
+    SchemaVersion         new_version      // = base.version(fqn) + 1
 ) noexcept -> std::expected<const SchemaRegistry*, Error>;
 
-// Forces the next migrate() call against `fqn` at `(N → N+1)` to
-// return Error::SchemaMigrationFailure. Used to exercise the full
+// Registers a synthetic type-rename alias in a copy of `base`.
+// Used to test that reconcile(...) accepts an incoming registry
+// that carries the alias, and that SchemaRegistryChange::Kind::AliasesAdded
+// fires (Q1). Idempotent.
+auto add_fqn_alias(
+    const SchemaRegistry& base,
+    SchemaId              old_fqn,
+    SchemaId              new_fqn
+) noexcept -> std::expected<const SchemaRegistry*, Error>;
+
+// Forces the next reconcile() call's continuity check to treat
+// `fqn` as missing from the incoming registry, returning
+// Error::SchemaMigrationFailure. Used to exercise the full
 // rollback path in the loader's failure tests
 // (reviews/decisions/hot-reload-protocol.md §"Test Hooks" CI
 // scenario 4). Idempotent; clearing requires
-// `clear_force_migration_failure(fqn)`.
-void force_migration_failure(SchemaId fqn,
-                             SchemaVersion from,
-                             SchemaVersion to) noexcept;
-void clear_force_migration_failure(SchemaId fqn) noexcept;
+// `clear_force_continuity_failure(fqn)`.
+void force_continuity_failure(SchemaId fqn) noexcept;
+void clear_force_continuity_failure(SchemaId fqn) noexcept;
 
 }  // namespace glibre::types::data::test
 #endif
@@ -2231,29 +2255,27 @@ void clear_force_migration_failure(SchemaId fqn) noexcept;
 
 **Determinism.** `bump_schema_version` is a pure function of its
 inputs; the synthesized `SchemaSourceHash` is reproducible across
-runs and hosts. The fixture never allocates outside the supplied
-arena and never writes to disk. Tests under
+runs and hosts. The fixture never allocates outside the system
+allocator (test-only context) and never writes to disk. Tests under
 `tests/data/schemas/hot_reload/` exercise:
 
-1. Happy-path bump: stored `vN` payloads migrate to `vN+1`,
-   `SchemaRegistryChange::Kind::VersionsBumped` fires once with
-   the bumped FQN, post-bump `Envelope<T>::deserialize` byte-equals
-   a checked-in golden.
-2. Missing-step refusal: a `MigrationEntry` whose `from_version`
-   is two steps behind raises `Error::SchemaMigrationFailure`
-   without touching a single storage row (§8.4 per-row rollback
-   discipline).
-3. Forced-failure rollback: `force_migration_failure` injected
-   mid-chain leaves storage byte-identical to its pre-`migrate`
-   state and the registry pointer-identical to `outgoing`.
+1. Happy-path structural bump: a `vN` payload deserialized with the
+   `vN+1` accessor reads absent fields as their Flatbuffers defaults;
+   `SchemaRegistryChange::Kind::VersionsBumped` fires once with the
+   bumped FQN; `Envelope<T>::deserialize` byte-equals a checked-in golden.
+2. Continuity-gap refusal: `force_continuity_failure` forces
+   `reconcile(...)` to return `Error::SchemaMigrationFailure`
+   without touching any storage row (§8.4 rollback safety).
+3. Type-rename alias: `add_fqn_alias` builds an incoming registry
+   carrying a type-rename alias; `reconcile(...)` succeeds;
+   `SchemaRegistryChange::Kind::AliasesAdded` fires with the aliased FQN.
 4. Append-only continuity: a bump that adds a new FQN (rather
    than upgrading an existing one) fires
-   `SchemaRegistryChange::Kind::EntriesAppended` and the migrate
-   pass is a no-op (`MigrationReport::count == 0`).
+   `SchemaRegistryChange::Kind::EntriesAppended` and
+   `reconcile(...)` reports zero alias resolutions.
 
 These fixtures back the §11 acceptance criteria and are the only
-allowed entry into the spine's mutation-time machinery from test
-code.
+allowed entry into the spine's hot-reload machinery from test code.
 
 ### 8.7 Cross-context obligations
 
@@ -2261,26 +2283,26 @@ Every other context's `specs/<ctx>/SPEC.md` §8 specifies *its*
 plugin-side hot-reload obligations against the contract above.
 Those sections inherit:
 
-1. **Migration providers obey §7.4** — pure, deterministic, total
-   over their input domain. The data context's `migrate(...)`
-   calls them through the dispatcher; it does not validate their
-   bodies.
+1. **Structural evolution obeys §7.4 (Q1)** — field additions,
+   field-rename aliases, and type-rename aliases are registered via
+   codegen at static-init. There are no `MigrationFn` bodies to
+   author; semantic transforms go to `glibre-cook`.
 2. **`SchemaRegistryChange` subscribers may not allocate** during
    the synchronous notification window. The editor and tools
    subscribe a pre-allocated handler; runtime contexts that need
    notification must pre-arrange their cache structure at
    `glibre_plugin_register` time.
 3. **No context but `data` mutates the registry.** Plugins
-   contribute entries through codegen (statically) and migrations
-   through `glibre_types_register_migration` (at static-init);
+   contribute entries through codegen (statically) and aliases
+   through `glibre_types_register_fqn_alias` (at static-init);
    nothing else writes (§4.10 inv. 7).
 4. **Self-reload of `glibre-types.dylib` is opt-in.** Contexts
    may not assume Mode B is enabled; the default in MVP is
    process restart (§8.3, PHILOSOPHY §8).
 
-The collapse: domain plugins write `MigrationFn` bodies and
-subscribe to registry changes; the data context owns one entry
-point (`migrate(...)`), one observer event (`SchemaRegistryChange`),
+The collapse: domain plugins register alias entries via codegen
+and subscribe to registry changes; the data context owns one entry
+point (`reconcile(...)`), one observer event (`SchemaRegistryChange`),
 two refusal arms (`AbiHashMismatch`, `SchemaMigrationFailure`),
 and one deterministic test fixture (`bump_schema_version`).
 Everything else lives in the loader (`core`) or in the
@@ -2298,17 +2320,17 @@ required by the decision record.
 
 | Quantity            | Budget    | Source / phase ownership                                                    |
 |---------------------|-----------|-----------------------------------------------------------------------------|
-| CPU sim (per frame) | 0.20 ms   | persistence spine; per-frame work is migration handoff + handle bookkeeping |
+| CPU sim (per frame) | 0.20 ms   | persistence spine; per-frame work is reconcile handoff + handle bookkeeping |
 | CPU submit          | 0.00 ms   | data does not record GPU work                                                |
 | GPU                 | n/a       | data owns no Metal heaps or encoders                                         |
 | Heap ceiling        | 32 MiB    | resident middleman tables + active migration scratch                         |
 | Phase ownership     | none      | participates inside phase 8 (hot-reload barrier) on reload frames only       |
 
-The 0.20 ms sim cell is reserved so a schema-migration that lands on a
+The 0.20 ms sim cell is reserved so a `reconcile(...)` call that lands on a
 hot-reload frame (Scenario S2 from `perf-budget.md`) does not blow out
 the budget; steady-state cost in S1 is near zero. `data` records no
-CPU-submit, no GPU, and owns no phase outright — the migration step it
-performs is invoked by `core` from inside phase 8 and accounted under
+CPU-submit, no GPU, and owns no phase outright — the `reconcile(...)` step
+is invoked by `core` from inside phase 8 and accounted under
 `data`'s tag via `glibre::PerContextAllocator`.
 
 ### 9.2 Per-aggregate budget
@@ -2321,18 +2343,17 @@ a heap sub-ceiling, and the invocation site. Sub-ceilings sum to the
 | Aggregate             | CPU cost                                                                | Heap sub-ceiling | Invocation site                                              |
 |-----------------------|-------------------------------------------------------------------------|------------------|--------------------------------------------------------------|
 | `Schema`              | 0 (host-only authoring; not in runtime)                                 | 0                | not loaded in shipping build                                 |
-| `Foryc`               | 0 (host build-tool, not in runtime budget)                              | 0                | build graph only; no runtime presence                        |
+| `Sergeant`               | 0 (host build-tool, not in runtime budget)                              | 0                | build graph only; no runtime presence                        |
 | `Middleman` (dylib)   | 0 per frame (link-time presence; init at process start)                 | 0 sub-ceiling    | static-init populates `SchemaRegistry`; no per-frame work    |
 | `AbiHash`             | 0 (`O(1)` static string return; called once at plugin load)             | 0                | plugin-loader handshake; not on the hot path                 |
 | `SchemaRegistry`      | ~10 ns per lookup (read-only static `flat_map` over `(fqn, version)`)   | 8 MiB            | called from `Envelope` deserialize; bounded by call count    |
-| `Migration` (single)  | invoked at hot-reload only; 0 on the hot path                           | counted in `MigrationDispatcher` 4 MiB                       | one call per migrated payload during phase 8                 |
-| `MigrationChain`      | composition only; cost folds into `MigrationDispatcher`                 | counted in `MigrationDispatcher` 4 MiB                       | composed once at registry init; replayed per dispatch        |
+| `SchemaAliasTable`    | ~10 ns per FQN lookup (one-hop forward-map; read-only after static-init) | counted in `SchemaRegistry` 8 MiB                            | `reconcile(...)` alias-table refresh; `Envelope` deserialize FQN resolve |
 | `Envelope`            | per-call cost varies by schema; sample-scene fixture target 0.1 ms total per frame | 16 MiB scratch | every serialize / deserialize call site                      |
 | `ReflectionBlob`      | 0 in shipping build (editor / tools only)                               | 4 MiB (tools build); 0 (shipping)                            | inspector and dump tools                                     |
-| `MigrationDispatcher` | invoked at hot-reload only; 0 on hot path                               | 4 MiB            | phase 8 hot-reload barrier (`core` calls into `data`)        |
+| `AliasResolver`       | invoked at hot-reload only; 0 on hot path                               | 4 MiB            | phase 8 hot-reload barrier — `reconcile(...)` called by `core` |
 
-Heap sub-ceilings sum: 8 (`SchemaRegistry`) + 16 (`Envelope` scratch) +
-4 (`MigrationDispatcher`) + 4 (`ReflectionBlob`, tools build only) =
+Heap sub-ceilings sum: 8 (`SchemaRegistry` + `SchemaAliasTable`) + 16 (`Envelope` scratch) +
+4 (`AliasResolver`) + 4 (`ReflectionBlob`, tools build only) =
 32 MiB. The shipping build does not carry the `ReflectionBlob`
 sub-ceiling; the 4 MiB it would occupy is reserved as `data`-context
 slack within the 32 MiB row and is not counted against any other
@@ -2345,18 +2366,20 @@ Under the `S1` fixture defined in `reviews/decisions/perf-budget.md`
 `Envelope` aggregate is the only `data` aggregate with measurable
 per-frame cost. Steady-state S1 frames perform zero `Envelope`
 serialize / deserialize operations on the hot path: persistent state
-moves through `core`'s ECS storage, not through Fory wire form. The
+moves through `core`'s ECS storage, not through Flatbuffers wire form. The
 per-frame Envelope budget is therefore reserved for incidental
 serializations (e.g. snapshot capture for the editor's time-rewind
 scrubber, save-on-checkpoint events) and capped at **0.1 ms total per
 frame** across all call sites. Steady-state: ~0 ms; budget: 0.1 ms.
 
-The remaining 0.10 ms of the 0.20 ms cell absorbs the migration
-handoff cost on a reload frame (S2): a single plugin's component
-storage migrates through `MigrationDispatcher` inside phase 8, and
+The remaining 0.10 ms of the 0.20 ms cell absorbs the `reconcile(...)`
+handoff cost on a reload frame (S2): a single plugin's schema-set
+continuity check and alias-table refresh runs inside phase 8, and
 `data`'s portion of that 0.40 ms phase-8 budget is the
-deserialize-with-migration over the world snapshot. This is one frame
-per reload, not per frame.
+`reconcile(...)` pass over the registered schemas. Structural evolution
+(absent fields → Flatbuffers defaults) is handled automatically by
+zero-copy reads, so there is no per-row dispatch cost. This is one
+frame per reload, not per frame.
 
 ### 9.4 CI gate — round-trip benchmarks
 
@@ -2373,11 +2396,14 @@ benchmarks:
    set of `(fqn, version)` pairs from `SchemaRegistry`, asserting per-
    lookup `<= 10 ns` over a 100k-iteration window. Verifies the
    `SchemaRegistry` per-call invariant.
-3. **`migration_dispatch_v_minus_1.bench.cpp`** — deserializes a
-   one-version-old payload through `MigrationDispatcher` for every
-   registered single-step migration in the build, asserting per-call
-   `<= 50 us`. Establishes a dispatch-cost ceiling so a future schema
-   change does not silently grow phase-8 cost beyond its 0.40 ms slot.
+3. **`reconcile_continuity.bench.cpp`** — runs `reconcile(...)` for
+   every registered schema against a synthetic incoming registry that
+   bumps every FQN by one version, asserting total `<= 0.10 ms` over
+   a 1000-iteration window. Establishes a continuity-check cost
+   ceiling so a future schema growth does not silently blow phase-8
+   past its 0.40 ms slot. Replaces `migration_dispatch_v_minus_1.bench.cpp`
+   (Q1, ADR #1121 — no per-step dispatch; structural evolution is
+   automatic).
 4. **Heap ceiling.** A diagnostic build with
    `GLIBRE_ALLOC_STRICT=1` exercises the same fixtures and asserts
    that resident bytes under the `data` `ContextTag` never exceed 32
@@ -2401,11 +2427,13 @@ the engine-wide rules:
 2. `Envelope`'s 16 MiB scratch is a per-frame transient arena drained
    at phase 9; allocations leaking past the drain are an
    `OutOfBudget` "leak" arm per the engine allocator rules.
-3. `MigrationDispatcher`'s 4 MiB is a phase-8-only arena, allocated
-   from the migration arena owned by `core` (16 MiB ceiling inside
+3. `AliasResolver`'s 4 MiB is a phase-8-only working set for the
+   `reconcile(...)` call (alias-table diff + FQN continuity scan),
+   allocated from the allocator owned by `core` (16 MiB ceiling inside
    `core`'s 64 MiB row); `data`'s 4 MiB sub-ceiling counts against
-   `data`'s tag, not `core`'s.
-4. `Foryc` is a host build tool. Its memory consumption is not in the
+   `data`'s tag, not `core`'s. No arena is allocated — `reconcile(...)`
+   is validation-only and makes no copies of storage rows.
+4. `Sergeant` is a host build tool. Its memory consumption is not in the
    runtime budget; it is governed by build-graph CI runner limits
    (separate concern).
 5. The `AbiHash` export returns a pointer to a `constexpr` string
@@ -2422,7 +2450,7 @@ once that is full, an amendment to this section and to the engine
 decision record is required before extending into headroom. The 4 MiB
 of heap that the shipping build does not spend on `ReflectionBlob` is
 not slack to be silently consumed; it is reserved against future
-growth of `Envelope` scratch. A lazy-migration cache is not part of
+growth of `Envelope` scratch. A lazy alias-resolution cache is not part of
 the MVP — per PHILOSOPHY's "two concrete users" rule, that abstraction
 is deferred until two callers demand it; introducing one will require
 a fresh sub-epic that re-amends this section and `perf-budget.md`.
@@ -2461,8 +2489,8 @@ namespace glibre::types::data {
 // Wire-time location attached to DeserializeError / SchemaUnknown /
 // EnvelopeTruncated.
 // `offset` is the byte index *within the inbound payload* at which
-// decoding stopped, measured from the start of the EnvelopeHeader
-// (§4.8 inv. 2). Non-payload arms set this to a sentinel — see §10.2.
+// decoding stopped, measured from the start of the Flatbuffers
+// size-prefix (§4.8 inv. 2). Non-payload arms set this to a sentinel — see §10.2.
 struct WireSite {
     SchemaId      schema{};       // the FQN the envelope claimed
     SchemaVersion version{0};     // the version the envelope claimed
@@ -2471,14 +2499,22 @@ struct WireSite {
 
 enum class ErrorTag : std::uint16_t {
     AbiHashMismatch          = 1,
-    SchemaMigrationFailure   = 2,
+    SchemaMigrationFailure   = 2,  // Q5 (ADR #1121): DEPRECATED for runtime migration use.
+                                   // Per-step MigrationFn dispatch is dropped (Q1). This
+                                   // arm is RETAINED for schema-set continuity refusals
+                                   // (§8.2 step 1: FQN in outgoing missing from incoming)
+                                   // and §8.3 gate 2. Final disposition deferred per
+                                   // round-2 carry on #1122. DO NOT remove the arm.
     DeserializeError         = 3,
-    ReservedTagViolation     = 4,
+    ReservedTagViolation     = 4,  // Q5 (ADR #1121): KEEP — defense-in-depth at codegen.
     SchemaRegistryConflict   = 5,
     SchemaUnknown            = 6,
-    MigrationStepMissing     = 7,
+    MigrationStepMissing     = 7,  // Q5: semantically deprecated (no chain to have gaps
+                                   // in), but RETAINED so existing core::Error wrappers
+                                   // don't break. Fires if a save file carries a
+                                   // schema_version that predates the registered schema.
     MigrationCycle           = 8,
-    EnvelopeTruncated        = 9,
+    EnvelopeTruncated        = 9,  // Q5 (ADR #1121): KEEP — physical truncation detection.
     SourceHashMismatch       = 10,  // §3.8 of schema-registry-design.md: same FQN +
                                     // same version, byte-different SchemaSourceHash.
                                     // Distinct from AbiHashMismatch (arm 1), which
@@ -2487,7 +2523,7 @@ enum class ErrorTag : std::uint16_t {
 };
 
 // Closed sum. Plain-aggregate layout so the C-ABI trampolines in §5
-// can return it without dragging eastl::variant across the boundary.
+// can return it without dragging std::variant across the boundary.
 struct Error {
     ErrorTag tag{};
 
@@ -2542,7 +2578,7 @@ Recovery vocabulary — terms used in the table column:
   surfaces `core::Error::PluginInitFailed`
   (`reviews/decisions/plugin-abi.md` §"Loader Sequence" step 9). The
   rest of the engine continues.
-- **abort build** — codegen-time only. `glibre-foryc` writes no
+- **abort build** — codegen-time only. `glbr-sergeant` writes no
   output, exits non-zero, and CMake fails the configure / build step.
   No runtime path can observe this arm.
 - **refuse decode** — `Envelope<T>::deserialize` returns
@@ -2566,15 +2602,15 @@ error-model rule), **info** (codegen / tools diagnostic).
 | Arm | Trigger | Detection point | Payload fields | Recovery | Severity | core::Error mapping |
 |-----|---------|-----------------|----------------|----------|----------|---------------------|
 | `AbiHashMismatch` | A loaded plugin's compiled-in `glibre_plugin_abi_hash` byte-string differs from the host's `glibre_types_abi_hash()` (§4.4 inv. 3). | `core` plugin loader, step 4 (`reviews/decisions/plugin-abi.md` §"Loader Sequence"). | `host_hash`, `plugin_hash`. | refuse load — `dlclose` the candidate, log at `warn`, leave previous-good plugin live. | warn | `core::Error::PluginAbiHashMismatch`. The data arm carries the two hex strings; the core arm wraps it via `ErrorContext::detail`. |
-| `SchemaMigrationFailure` | A `MigrationFn` body returned `std::unexpected`, OR the schema-set continuity check at §8.2 step 1 found an `FQN` registered in `outgoing` but missing from `incoming`, OR the meta-schema bootstrap rule (§8.3 gate 3) refused a Mode-B middleman swap. | `Envelope<T>::deserialize` chain step (§4.7 inv. 4); `migrate(...)` step 1 / 2 (§8.2); §8.3 gate 2. | `step_schema`, `step_from`, `step_to`. | At deserialize time: refuse decode. At hot-reload: refuse load — per-row rollback (§8.4) leaves the world byte-identical, the loader un-swaps the vtable. | error (deserialize) / warn (hot-reload). | `core::Error::SchemaMigrationFailed` (`reviews/decisions/plugin-abi.md` §"Failure Modes" row 11). The data arm carries the `(FQN, from, to)` triple; the core arm wraps. |
-| `DeserializeError` | Inbound payload's `SchemaVersion` exceeds the live registry's current version for the same `FQN` (§4.10 inv. 2 — newer-than-host), OR the payload bytes failed Fory's per-tag decode for any reason other than truncation (e.g. tag-type mismatch, builtin range-check failure, nested-type decode refusal). | `Envelope<T>::deserialize` body (§4.8 inv. 5); generated `glibre_types_deserialize_<fqn>` trampoline (§4.3 inv. 2). | `at.schema`, `at.version`, `at.offset`. | refuse decode — caller decides drop / default / escalate. The arena is reset; no partial value escapes. | error | `core::Error` has no dedicated arm; callers that wish to surface to the engine-wide variant pass the `data::Error` through unchanged (a `data::Error` is a leaf variant arm of `glibre::Error` per error-model.md §"Type Sketch"). |
-| `ReservedTagViolation` | A `.fory` source file under `data/schemas/` reuses a tag number that the prior committed version of the same `FQN` retired into the `reserved` set (§4.1 inv. 3). Codegen-time only; runtime cannot observe. | `glibre-foryc` reserved-tag enforcement (§4.2 inv. 4). | `step_schema` (the offending FQN), `reserved_tag` (the reused tag number). | abort build — no output written; CMake configure / build fails. | info (codegen diagnostic; promoted to build error by the host tool's exit code). | None — codegen-time arm; never crosses into the runtime engine. Listed in the closed sum so codegen surfaces a typed enumerator alongside its message rather than a free-form string. |
+| `SchemaMigrationFailure` | The schema-set continuity check at `reconcile(...)` §8.2 step 1 found an `FQN` registered in `outgoing` but missing from `incoming` (not resolvable via type-rename alias), OR the meta-schema bootstrap rule (§8.3 gate 2) refused a Mode-B middleman swap. Per-step `MigrationFn` dispatch is DROPPED (Q1); this arm is RETAINED for continuity refusals only (Q5, §10.1). | `reconcile(...)` step 1 (§8.2); §8.3 gate 2. | `step_schema`, `step_from`, `step_to`. | At hot-reload: refuse load — `reconcile(...)` is validation-only; no storage rows are mutated; the loader un-swaps the vtable. | warn (hot-reload). | `core::Error::SchemaMigrationFailed` (`reviews/decisions/plugin-abi.md` §"Failure Modes" row 11). The data arm carries the `(FQN, from, to)` triple; the core arm wraps. |
+| `DeserializeError` | Inbound payload's `SchemaVersion` exceeds the live registry's current version for the same `FQN` (§4.10 inv. 2 — newer-than-host), OR the payload bytes failed Flatbuffers's per-tag decode for any reason other than truncation (e.g. tag-type mismatch, builtin range-check failure, nested-type decode refusal). | `Envelope<T>::deserialize` body (§4.8 inv. 5); generated `glibre_types_deserialize_<fqn>` trampoline (§4.3 inv. 2). | `at.schema`, `at.version`, `at.offset`. | refuse decode — caller decides drop / default / escalate. No partial value escapes. | error | `core::Error` has no dedicated arm; callers that wish to surface to the engine-wide variant pass the `data::Error` through unchanged (a `data::Error` is a leaf variant arm of `glibre::Error` per error-model.md §"Type Sketch"). |
+| `ReservedTagViolation` | A `.fbs` source file under `data/schemas/` reuses a tag number that the prior committed version of the same `FQN` retired into the `reserved` set (§4.1 inv. 3). Codegen-time only; runtime cannot observe. | `glbr-sergeant` reserved-tag enforcement (§4.2 inv. 4). | `step_schema` (the offending FQN), `reserved_tag` (the reused tag number). | abort build — no output written; CMake configure / build fails. | info (codegen diagnostic; promoted to build error by the host tool's exit code). | None — codegen-time arm; never crosses into the runtime engine. Listed in the closed sum so codegen surfaces a typed enumerator alongside its message rather than a free-form string. |
 | `SchemaRegistryConflict` | Two registry entries share an `FQN` (§4.5 inv. 1). At codegen time this is impossible (§4.10 inv. 1 biconditional); at static-init this fires when two distinct middleman builds load into one process (§4.3 inv. 1). | Middleman static-init (§4.3 inv. 5); also reachable from §8.3 Mode-B reload if the new `Q-types` registry duplicates an `FQN` introduced by an outgoing plugin. | `step_schema` (the duplicated FQN). | process abort at static-init (§4.3 inv. 1 makes a two-middleman process undefined; the spine refuses to run). At Mode-B hot-reload: refuse load — un-swap the candidate registry, leave `P-types` live. | fatal (static-init) / warn (Mode-B). | `core::Error` has no dedicated arm; the loader at Mode-B wraps via `core::Error::HotReloadRefused`. The static-init path is a fatal log + `std::abort`. |
-| `SchemaUnknown` | An inbound payload's envelope `FQN` is not present in the live `SchemaRegistry`. Fires when a save file or world snapshot contains a type the current build does not register, OR when a plugin attempts to deserialize bytes for a `Generated Type` whose schema dropped between Q and P (§8.1 "State that does not survive"). | `Envelope<T>::deserialize` envelope-read step (§4.8 inv. 5); `migrate(...)` schema-set continuity check (§8.2 step 1) — the schema-set continuity arm raises `SchemaMigrationFailure` instead per §8.4, so `SchemaUnknown` only fires at the *deserialize* path, not the *migrate* path. | `at.schema`, `at.version`, `at.offset = 0` (the failure is at the envelope header, not inside the payload). | refuse decode — caller decides drop / default / escalate. Save-file loaders typically translate to a "skip unknown record" warning; per-frame deserializers escalate. | error | `core::Error` has no dedicated arm; the engine-wide variant carries the `data::Error` through. (Distinct from `SchemaMigrationFailure`: that arm fires only when the FQN *is* known and the chain refused; this arm fires when the FQN is not known at all.) |
-| `MigrationStepMissing` | A `MigrationChain` for a known `FQN` lacks an entry whose `from_version` matches the inbound payload's recorded version. Detected at deserialize (an inbound `vN` payload with no `vN → vN+1` step in the chain) and at the §8.3 gate-2 coverage check (Mode-B middleman reload precondition). | `MigrationChain::dispatch` (§4.7 inv. 1); §8.3 gate 2. | `step_schema`, `step_from` (the inbound version), `step_to` (the live version — i.e. the version the chain failed to *reach*). | refuse decode (deserialize path) / refuse load (Mode-B reload). The §4.7 inv. 1 codegen check makes this arm impossible *for in-build types*; it fires only when the inbound bytes carry a version older than the lowest registered chain entry — i.e. a save file or snapshot from a build that has since dropped early-version migrations. | error (deserialize) / warn (hot-reload). | Wrapped by `core::Error::SchemaMigrationFailed` when surfaced through the loader (`reviews/decisions/plugin-abi.md` §"Failure Modes" row 11). The data arm distinguishes "missing step" from "step returned unexpected" so operators can tell a coverage gap from a buggy migration body; both wrap into the same `core::Error` arm because the loader's response is identical. |
-| `MigrationCycle` | The composed `MigrationChain` for an `FQN` contains a back-edge — i.e. a step `(N → M)` where `M ≤ N`. §4.7 inv. 2 mandates strictly ascending application; a cycle would violate it. Detected at codegen time (when `Foryc` builds the chain and asserts strict-ascending) and at static-init time (when `glibre_types_register_migration` wires entries into the per-FQN table). | `Foryc` chain construction (§4.2 inv. 1, deterministic ordering); middleman static-init (§4.3 inv. 5). | `step_schema`, `step_from`, `step_to` — the back-edge that violated ascending order. | abort build (codegen path) / process abort (static-init path — a registered cycle means the build is corrupt and the spine refuses to run, mirroring `SchemaRegistryConflict`). | info (codegen) / fatal (static-init). | None — codegen / static-init arm; never crosses into normal runtime. The static-init fatal path is logged + `std::abort`. |
-| `EnvelopeTruncated` | The inbound byte span ended before the full envelope header was read (`src.size() < sizeof(EnvelopeHeader)` after Fory's variable-width fields), OR the envelope's `payload_length` claimed more bytes than the remaining span carries. (Distinct from `DeserializeError`: that arm covers structurally-complete-but-semantically-invalid payloads; this arm covers physically-incomplete byte runs.) | `Envelope<T>::deserialize` envelope-read step (§4.8 inv. 1, 2). | `at.schema` (default-constructed if the FQN field itself was truncated), `at.version` (likewise), `at.offset` (the byte count of the payload that *was* read before truncation was detected). | refuse decode — caller drops / re-requests. World untouched. | error | `core::Error` has no dedicated arm; passed through. Save-file readers surface this as a "truncated record" diagnostic and continue past the next valid envelope; per-frame deserializers (rare, see §9 budget) escalate. |
-| `SourceHashMismatch` | An existing `(FQN, version)` pair appears in a candidate plugin with a byte-different `SchemaSourceHash` — i.e. the schema source bytes changed without a version bump. Distinct from `AbiHashMismatch` (arm 1), which fires on a global `glibre_types_abi_hash` mismatch; this arm fires when only one FQN's source bytes drifted. Defined in `specs/data/schema-registry-design.md` §3.8. | Mode-A barrier diff at phase-8 step 2 (`schema-registry-design.md` §8.1 row "source-hash drift"). | `step_schema` (the drifted FQN), `host_hash` (live registry's hex-encoded `SchemaSourceHash`), `plugin_hash` (incoming candidate's hex-encoded `SchemaSourceHash`). `step_from == step_to == 0` (no version change). | refuse load — `rollback_batch` (§8.4 of schema-registry-design.md); log at `warn`; leave previous-good plugin live. The operator must version-bump the schema and write a migration rather than recompile against the new middleman (the remediation differs from arm 1). | warn | `core::Error::PluginAbiHashMismatch`. Both arm 1 and arm 10 wrap into the same `core::Error` arm because the loader's response is identical (refuse, log warn, leave live); the `data::Error` distinction gives operators the per-FQN detail they need to diagnose the root cause. |
+| `SchemaUnknown` | An inbound payload's envelope `FQN` is not present in the live `SchemaRegistry` and is not resolvable via the `SchemaAliasTable`. Fires when a save file or world snapshot contains a type the current build does not register, OR when a plugin attempts to deserialize bytes for a `Generated Type` whose schema dropped between Q and P (§8.1 "State that does not survive"). | `Envelope<T>::deserialize` envelope-read step (§4.8 inv. 5); `reconcile(...)` schema-set continuity check (§8.2 step 1) — the continuity arm raises `SchemaMigrationFailure` instead per §8.4, so `SchemaUnknown` only fires at the *deserialize* path, not the *reconcile* path. | `at.schema`, `at.version`, `at.offset = 0` (the failure is at the Flatbuffers size-prefix / file_identifier, not inside the payload). | refuse decode — caller decides drop / default / escalate. Save-file loaders typically translate to a "skip unknown record" warning; per-frame deserializers escalate. | error | `core::Error` has no dedicated arm; the engine-wide variant carries the `data::Error` through. (Distinct from `SchemaMigrationFailure`: that arm fires only when the FQN *is* known and the continuity check refused; this arm fires when the FQN is not known at all.) |
+| `MigrationStepMissing` | A save file or snapshot carries a `schema_version` field inside the root table that is older than the minimum version the current build's `SchemaAliasTable` can resolve. No `MigrationChain` dispatch exists (Q1: chain is DROPPED); the arm fires exclusively at the deserialize path when the inbound version predates all registered schemas for the FQN. RETAINED for ABI continuity per Q5 (existing `core::Error` wrappers). | `Envelope<T>::deserialize` (§4.8 inv. 5) — fires when `schema_version` field is older than the type's registered minimum. | `step_schema`, `step_from` (the inbound version), `step_to` (the registered version). | refuse decode — caller decides drop / re-cook via `glibre-cook`. | error | Wrapped by `core::Error::SchemaMigrationFailed` when surfaced through the loader (`reviews/decisions/plugin-abi.md` §"Failure Modes" row 11). RETAINED per Q5 so existing `core::Error` wrappers and operator tooling continue to function. |
+| `MigrationCycle` | Detected at static-init time when a `glibre_types_register_fqn_alias` call would produce a cycle in the type-rename forward-map (§4.7 inv. 2 — one-hop max, acyclic). RETAINED for ABI continuity per Q5. | `glibre_types_register_fqn_alias` call at static-init (§4.7 inv. 2). | `step_schema`, `step_from = 0`, `step_to = 0` — the alias pair that would close a cycle. | process abort — a registered cycle means the alias table is corrupt; mirroring `SchemaRegistryConflict`. | fatal (static-init). | None — static-init arm; never crosses into normal runtime. The static-init fatal path is logged + `std::abort`. |
+| `EnvelopeTruncated` | The inbound byte span is shorter than the Flatbuffers size-prefix (4 bytes), OR `flatbuffers::Verifier` rejects the buffer as physically incomplete. (Distinct from `DeserializeError`: that arm covers structurally-complete-but-semantically-invalid payloads; this arm covers physically-incomplete byte runs.) (Q5: KEEP — physical truncation detection.) | `Envelope<T>::deserialize` envelope-read step (§4.8 inv. 1, 2) via `flatbuffers::Verifier`. | `at.schema` (default-constructed if truncation occurs before the `file_identifier` is readable), `at.version` (likewise), `at.offset` (the byte count that *was* readable before truncation). | refuse decode — caller drops / re-requests. World untouched. | error | `core::Error` has no dedicated arm; passed through. Save-file readers surface this as a "truncated record" diagnostic and continue past the next valid size-prefix; per-frame deserializers escalate. |
+| `SourceHashMismatch` | An existing `(FQN, version)` pair appears in a candidate plugin with a byte-different `SchemaSourceHash` (i.e. the `.bfbs` bytes for that type changed without a version bump — Q7). Distinct from `AbiHashMismatch` (arm 1), which fires on a global `glibre_types_abi_hash` mismatch; this arm fires when only one FQN's `.bfbs` bytes drifted. | Mode-A barrier diff at phase-8 step 2. | `step_schema` (the drifted FQN), `host_hash` (live registry's hex-encoded `SchemaSourceHash`), `plugin_hash` (incoming candidate's hex-encoded `SchemaSourceHash`). `step_from == step_to == 0` (no version change). | refuse load — log at `warn`; leave previous-good plugin live. The operator must version-bump the schema and add a structural evolution entry (§7.4) rather than recompile only (the remediation differs from arm 1). | warn | `core::Error::PluginAbiHashMismatch`. Both arm 1 and arm 10 wrap into the same `core::Error` arm because the loader's response is identical (refuse, log warn, leave live); the `data::Error` distinction gives operators the per-FQN detail they need to diagnose the root cause. |
 
 ### 10.3 Composition with `core::Error`
 
@@ -2589,8 +2625,8 @@ the loader's call sites:
 | `data::Error` arm | When `core` raises it | `core::Error` wrapping |
 |-------------------|-----------------------|------------------------|
 | `AbiHashMismatch` | Phase-8 plugin load step 4. | `PluginAbiHashMismatch` (`plugin-abi.md` §"Failure Modes" row 4). |
-| `SchemaMigrationFailure` | Phase-8 plugin load step 11; Mode-B middleman swap (§8.3). | `SchemaMigrationFailed` (`plugin-abi.md` §"Failure Modes" row 11). |
-| `MigrationStepMissing` | Phase-8 step 11 (chain coverage gap discovered during migrate); §8.3 gate 2. | `SchemaMigrationFailed` — same wrap as `SchemaMigrationFailure`; the loader's response (refuse, log, leave previous-good live) is identical for both arms. |
+| `SchemaMigrationFailure` | Phase-8 `reconcile(...)` step 1 (FQN missing from incoming); §8.3 gate 2 (Mode-B continuity). | `SchemaMigrationFailed` (`plugin-abi.md` §"Failure Modes" row 11). |
+| `MigrationStepMissing` | `Envelope<T>::deserialize` — inbound `schema_version` older than registered minimum (save file from older build). RETAINED per Q5. | `SchemaMigrationFailed` — same wrap as `SchemaMigrationFailure`; the loader's response (refuse, log, leave previous-good live) is identical for both arms. |
 | `SchemaRegistryConflict` | Mode-B reload only; the static-init path is fatal and never reaches the loader. | `HotReloadRefused` carrying the `data::Error` in `ErrorContext::detail`. |
 | `MigrationCycle` | Never — cycles are codegen-time or static-init time exclusively. | None. |
 | `SourceHashMismatch` | Phase-8 barrier diff step 2 (Mode-A only); `schema-registry-design.md` §8.1. | `PluginAbiHashMismatch` — same wrapping as arm 1 (`AbiHashMismatch`); the loader's response (refuse load, log warn, leave previous-good live) is identical. The `data::Error` arm carries the per-FQN detail; the `core::Error` arm provides a uniform hot-reload-refusal surface to callers above `core`. |
@@ -2598,26 +2634,27 @@ the loader's call sites:
 
 Two arms collapse onto one `core::Error::SchemaMigrationFailed`
 (`SchemaMigrationFailure` and `MigrationStepMissing`) per the
-hot-reload protocol's choice to treat coverage gaps and step refusals
-identically (§8.4 schema-set continuity rule). The data layer keeps
-the distinction because operators reading logs benefit from knowing
-*why* the chain refused; the loader does not, because its response is
-identical either way. This is the §"Composition Rules" #2 rule
-applied honestly: cross-context translation is local, explicit, and
-unit-tested at the loader's call site.
+hot-reload protocol's choice to treat schema-set continuity gaps and
+version-too-old payloads identically from the loader's perspective.
+The data layer keeps the distinction because operators reading logs
+benefit from knowing *why* the refusal fired; the loader does not,
+because its response is identical either way. This is the
+§"Composition Rules" #2 rule applied honestly: cross-context
+translation is local, explicit, and unit-tested at the loader's
+call site.
 
 ### 10.4 Logging discipline
 
 Per `reviews/decisions/error-model.md` §"Logging / Telemetry" #1
 every constructed `data::Error` is logged exactly once at the
 boundary that *handles* it — never at the boundary that *raises* it.
-The data context never logs from inside `Envelope<T>::deserialize`,
-`MigrationChain::dispatch`, or `migrate(...)`. The handler — which
+The data context never logs from inside `Envelope<T>::deserialize`
+or `reconcile(...)`. The handler — which
 is either:
 
 - the `core` plugin loader (for arms 1, 2, 5, 7, 10), or
 - the calling context's deserialize site (for arms 3, 6, 9), or
-- `glibre-foryc` itself (for arms 4, 8 codegen path), or
+- `glbr-sergeant` itself (for arm 4 codegen path), or
 - the middleman's static-init (for arms 5, 8 static-init path)
 
 — is responsible for the single `glibre::log_error(err, level)` call.
@@ -2647,14 +2684,14 @@ the §11 acceptance criteria.
 | Arm | Fixture |
 |-----|---------|
 | `AbiHashMismatch` | Two middleman builds with one schema bytewise different; the test loads a plugin built against build A into a host running build B and asserts `host_hash != plugin_hash`. |
-| `SchemaMigrationFailure` | The `force_migration_failure` test hook from §8.6; the failing migration's `(fqn, from, to)` populate the payload. |
+| `SchemaMigrationFailure` | The `force_continuity_failure` test hook from §8.6; asserts that `reconcile(...)` returns this arm with `step_schema` = the forcibly-missing FQN. |
 | `DeserializeError` | A hand-rolled byte buffer with a tag-type mismatch in a known schema; assertion on `at.offset` matches the byte index of the offending tag. |
-| `ReservedTagViolation` | A `.fory` source under `tests/data/schemas/golden/reserved_tag_reuse/` that reuses a previously-committed tag number; assertion on `Foryc`'s exit code and the `reserved_tag` payload field in the codegen-emitted diagnostic. |
+| `ReservedTagViolation` | A `.fbs` source under `tests/data/schemas/golden/reserved_tag_reuse/` that reuses a previously-committed tag number; assertion on `Sergeant`'s exit code and the `reserved_tag` payload field in the codegen-emitted diagnostic. |
 | `SchemaRegistryConflict` | A test-only middleman build that registers two schemas under the same FQN; assertion on `step_schema` and on the `std::abort` path via a death-test. |
 | `SchemaUnknown` | An envelope whose `FQN` is `glibre.test.NeverRegistered`; assertion on `at.schema == "glibre.test.NeverRegistered"`. |
-| `MigrationStepMissing` | A registry whose chain for an FQN at version 4 starts at step `(2 → 3)`; deserialize a `v1` payload and assert `step_from == 1`, `step_to == 2`. |
-| `MigrationCycle` | A test-only `Foryc` invocation against a synthetic chain `[(1→2), (2→1)]`; assertion on the codegen exit code and the `(step_from = 2, step_to = 1)` payload. |
-| `EnvelopeTruncated` | An `eastl::span<const std::byte>` smaller than `sizeof(EnvelopeHeader)`; assertion on `at.offset == src.size()`. |
+| `MigrationStepMissing` | A hand-rolled save-file buffer whose `schema_version` field in the root table is older than the registered minimum for the FQN; assert `step_from` == inbound version, `step_to` == registered version. RETAINED arm per Q5. |
+| `MigrationCycle` | A test-only static-init sequence that registers two `glibre_types_register_fqn_alias` calls that would form a cycle (`A → B`, `B → A`); assertion on the process-abort death-test and the `step_schema` payload (the alias pair that closes the cycle). |
+| `EnvelopeTruncated` | A `std::span<const std::byte>` shorter than 4 bytes (below Flatbuffers size-prefix minimum); assertion on `at.offset == src.size()`. (Q5: KEEP.) |
 | `SourceHashMismatch` | A barrier diff against a candidate middleman carrying the same `(FQN, version)` as the live registry but with a byte-different `SchemaSourceHash` (simulate by patching one byte of the source-hash literal in a test-only `_registry.cpp`); assertions: (a) the loader returns `core::Error::PluginAbiHashMismatch`, (b) the `data::Error` detail has `tag == SourceHashMismatch`, `step_schema == drifted_fqn`, `host_hash != plugin_hash`, `step_from == step_to == 0`. Location: `tests/data/errors/schema_registry_arms_test.cpp` (aligns with §11.4 of `schema-registry-design.md`). |
 
 Each fixture asserts both (a) the correct arm fires and (b) the
@@ -2668,16 +2705,16 @@ GitHub `type:user-story` issues this spec closes (drafted under spike
 #63; each carries a Catch2 test name plus the story-required E2E
 `.glibre-trace`):
 
-- #362 — data/schema: author persistent type via `.fory` schema file (§4.1, §4.2, §7.1) — pts:3
-- #363 — data/foryc: enforce tag-sort layout-additive rule (§4.2 inv #3) — pts:3
-- #364 — data/foryc: deterministic, host-stable codegen (§4.2 inv #1, #5) — pts:2
+- #362 — data/schema: author persistent type via `.fbs` schema file (§4.1, §4.2, §7.1) — pts:3
+- #363 — data/sergeant: enforce tag-sort layout-additive rule (§4.2 inv #3) — pts:3
+- #364 — data/sergeant: deterministic, host-stable codegen (§4.2 inv #1, #5) — pts:2
 - #365 — data/abi-hash: plugin loader refuses dylibs whose ABI hash mismatches (§4.4 inv #3, §4.10 inv #3) — pts:3
 - #366 — data/abi-hash: `glibre_types_abi_hash` reproducible from sources (§4.4 inv #1, #2, #4) — pts:2
 - #367 — data/envelope: serialize/deserialize round-trip byte-equal across hosts (§4.8 inv #4, §4.10 inv #6) — pts:3
-- #368 — data/migration: `MigrationChain` dispatches single-step migrations in ascending order (§4.6, §4.7) — pts:5
-- #369 — data/migration: per-schema round-trip golden harness (§4.6 inv #1, #3; §9.4) — pts:3
-- #370 — data/manifest: plugins ship Fory-serialized `PluginManifest` in `.rodata` (§5 plugin_manifest.hpp; §6.5) — pts:5
-- #371 — data/hot-reload: `migrate(...)` walks world snapshot at frame-8 (§8.2) — pts:5
+- #368 — data/alias-table: `SchemaAliasTable` resolves type-rename and field-rename aliases in one hop (§4.7) — pts:5
+- #369 — data/alias-table: per-schema structural evolution golden harness (§7.5; §9.4) — pts:3
+- #370 — data/manifest: plugins ship Flatbuffers-serialized `PluginManifest` in `.rodata` (§5 plugin_manifest.hpp; §6.5) — pts:5
+- #371 — data/hot-reload: `reconcile(...)` verifies schema-set continuity and refreshes alias table at frame-8 (§8.2) — pts:5
 - #372 — data/hot-reload: phase-8 budget within 0.20 ms / 4 MiB on S1 (§9.1, §9.2, §9.5) — pts:3
 - #373 — data/reflection: `ReflectionBlob` present in editor, stripped from shipping (§4.9; PHILOSOPHY §6) — pts:3
 - #374 — data/registry: `SchemaRegistry` refuses duplicate FQN, `O(log N)` lookup (§4.5 inv #1, #3; §9.4) — pts:2
@@ -2690,7 +2727,7 @@ Each must have a Catch2 test by name.
 
 None. All MVP-blocking questions are resolved in §1–§11 of this spec
 or in the decision records cited there
-(`reviews/decisions/{fory-codegen,plugin-abi,perf-budget,hot-reload-protocol,frame-phases,error-model}.md`).
+(`reviews/decisions/{flatbuffers-codegen,plugin-abi,perf-budget,hot-reload-protocol,frame-phases,error-model}.md`).
 Forward-looking, post-MVP design questions (e.g. a `data`-side
 lazy-migration cache) are deferred per PHILOSOPHY's
 "two concrete users" rule and will be reopened only via a fresh
