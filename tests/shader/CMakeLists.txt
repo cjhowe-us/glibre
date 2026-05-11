@@ -12,7 +12,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     return()
 endif()
 
-add_subdirectory(source)     # plan #508  — ShaderSource unit tests
-add_subdirectory(descriptor) # plan #1087 — DescriptorLayout::derive unit tests
-add_subdirectory(cache)      # plan #516  — BLAKE3 ShaderHash + CAS store unit tests
-add_subdirectory(reflection) # plan #514  — slangc reflection record ingester unit tests
+add_subdirectory(source)      # plan #508  — ShaderSource unit tests
+add_subdirectory(descriptor)  # plan #1087 — DescriptorLayout::derive unit tests
+add_subdirectory(cache)       # plan #516  — BLAKE3 ShaderHash + CAS store unit tests
+add_subdirectory(reflection)  # plan #514  — slangc reflection record ingester unit tests
+add_subdirectory(permutation) # plan #509  — PermutationKey codec + cross-product enumerator
