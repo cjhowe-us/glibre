@@ -12,6 +12,7 @@ You will receive an issue-specific dispatch prompt. Treat it as authoritative fo
 
 ## Hard project rules
 
+- **Isolated worktree, always.** Never `git checkout` a new branch in the main worktree (`/Users/cjhowe/Code/glibre`). Before any edit, create an isolated worktree under `.claude/worktrees/agent-<short-id>/` (e.g. `git -C /Users/cjhowe/Code/glibre worktree add -b <branch> .claude/worktrees/agent-$(date +%s)-design origin/main`) and `cd` into it. All `git`, `gh`, `Edit`, `Write`, and `Bash` calls run inside that worktree. The status comment's `worktree:` field MUST be the absolute path to that directory, never `/Users/cjhowe/Code/glibre`. The main worktree's HEAD must remain on `main` for the entire session — assume the user is reading files there in their IDE.
 - Read these unless already cited in the dispatch prompt: `PHILOSOPHY.md`, `AGENTS.md`, `.github/SETUP.md`, `specs/_TEMPLATE.md`, every `reviews/decisions/*.md` referenced in the parent epic body.
 - Re-derive every conclusion from glibre primitives. Harmonius is **input only** — never copy a conclusion without re-justifying it against SOLID/SRP and the cohesion-AND-completeness principle in `PHILOSOPHY.md`.
 - Pull the smallest reasonable boundary. Reject internal cross-domain abstractions that would have only one user.
