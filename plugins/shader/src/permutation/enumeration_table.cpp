@@ -11,9 +11,9 @@
 // paired .cpp) and to provide compile-time instantiation checks of the
 // two most common call patterns (accept-all and pointer-based pruner).
 
-#include <functional>
-
 #include "enumeration_table.hpp"
+
+#include <functional>
 
 namespace glibre::shader::permutation {
 
