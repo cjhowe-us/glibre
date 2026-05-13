@@ -133,47 +133,43 @@ def check_workflow_passed(arg: object) -> tuple[bool, str]:
 
 
 def check_unit_test_named(arg: object) -> tuple[bool, str]:
-    """Return (True, label) when a Catch2 TEST_CASE or SCENARIO with the exact
-    name *arg* exists under tests/.
+    """Return (True, label) when a Rust test function with the exact name *arg*
+    exists anywhere in the workspace.
 
-    Implementation notes:
-    - Uses Python ``re`` with ``\\s*`` to match across newlines.  Python's
-      ``\\s`` matches ``\\n`` natively (unlike POSIX-extended grep, which does
-      not span lines).  No ``re.DOTALL`` flag is needed: the pattern contains
-      no ``.`` metacharacter.  clang-format (ColumnLimit: 100) wraps long
-      TEST_CASE invocations onto two lines, e.g.::
-
-          TEST_CASE(
-              "core/type_registry: lookup_unregistered_yields_TypeUnregistered",
-              "[core][type_registry]"
-          ) {
-
-      grep -E does not span newlines under POSIX-extended regex, causing
-      spurious dod:failed results for tests that exist and run green.
-    - Restricts the file scan to .cpp / .hpp so pytest files that
-      contain 'TEST_CASE' in docstrings or fixture content are not scanned.
-    - Skips symlinks inside the rglob walk — Python 3.12 follows directory
-      symlinks by default; skipping them prevents infinite loops on circular
-      or deeply nested test-tree symlinks.
+    The expected name format is a Rust test fn identifier (snake_case). The
+    scan looks for ``#[test]`` (or ``#[tokio::test]`` etc.) immediately
+    preceding ``fn <name>(``. Coding is currently locked, so this check is
+    a no-op until Rust source lands; the function still resolves cleanly
+    so DoD verifier runs do not crash on plan issues that pre-declare
+    `unit_test_named:` checks.
     """
     name = str(arg)
     label = f"unit_test_named: {name}"
     pattern = re.compile(
-        r'(?:TEST_CASE|SCENARIO)\s*\(\s*"' + re.escape(name) + r'"',
+        r'#\[[A-Za-z_:]*test[A-Za-z_:()]*\]\s*(?:async\s+)?fn\s+'
+        + re.escape(name) + r'\s*\(',
     )
-    tests_root = Path("tests")
-    extensions = {".cpp", ".hpp"}
-    for src_file in tests_root.rglob("*"):
-        if src_file.is_symlink():
+    roots = [Path("."), Path("crates"), Path("tests")]
+    extensions = {".rs"}
+    seen: set[Path] = set()
+    for root in roots:
+        if not root.exists():
             continue
-        if src_file.suffix not in extensions:
-            continue
-        try:
-            text = src_file.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if pattern.search(text):
-            return True, label
+        for src_file in root.rglob("*"):
+            if src_file.is_symlink():
+                continue
+            if src_file.suffix not in extensions:
+                continue
+            real = src_file.resolve()
+            if real in seen:
+                continue
+            seen.add(real)
+            try:
+                text = src_file.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if pattern.search(text):
+                return True, label
     return False, label
 
 

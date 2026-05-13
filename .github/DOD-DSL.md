@@ -37,7 +37,7 @@ Each list entry is an object with a single key. Supported keys:
 | `file_contains`         | `{ path, regex }`                 | File exists AND a POSIX-extended regex matches at least one line.                                                          |
 | `glob_nonempty`         | glob (string)                     | At least one path matches the glob (uses `git ls-files` so it sees only tracked files).                                    |
 | `workflow_passed`       | workflow filename or display name | The most recent run of that workflow on the `main` branch concluded `success`.                                             |
-| `unit_test_named`       | Catch2 test name (string)         | A `TEST_CASE` (or `SCENARIO`) with that exact name appears under `tests/`.                                                 |
+| `unit_test_named`       | Rust test fn name (snake_case)    | A `#[test]` (or `#[tokio::test]` etc.) fn with that exact identifier appears anywhere in the workspace.                    |
 | `issue_comment_matches` | POSIX-ext regex (string)          | At least one comment on this issue (excluding bots flagged with `[bot]`) matches the regex.                                |
 
 All paths are relative to the repository root. All regexes are matched
@@ -50,7 +50,7 @@ with `grep -E`. All checks run in O(repo); none invoke a project build.
 - Spikes whose deliverable is a doc MUST include a `file_exists` for
   that doc, and SHOULD include a `file_contains` checking the spec
   template's section-1 heading.
-- Plans MUST include either a `unit_test_named` for each Catch2 test
+- Plans MUST include either a `unit_test_named` for each Rust test fn
   named in their unit-test plan, OR a `workflow_passed: ci.yml` (the
   latter is acceptable when the plan's tests live in an existing
   test-suite the CI already runs).

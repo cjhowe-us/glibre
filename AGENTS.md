@@ -24,7 +24,7 @@ Aggregators carry **no estimate**; leaves carry estimates that roll up.
    2. Manual test must be executed; PASS recorded as an issue comment.
    3. Story may not be closed until both (1) and (2) hold.
 5. **Plan** (`type:plan`) — leaf implementation unit.
-   **Tests required: unit tests (Catch2).** Has estimate. Closed by
+   **Tests required: unit tests (cargo `#[test]` / integration).** Has estimate. Closed by
    one or more granular Conventional Commit PRs.
 6. **Spike** (`type:spike`) — time-boxed research / design. Output =
    doc, decision record, or prototype branch. No tests required.
@@ -132,6 +132,6 @@ Implementation begins **only after Pass 3 closes**.
 - CI gates (workflows under `.github/workflows/`):
   - dependency check — PR blocked if its linked issue has open
     GitHub-native blockers.
-  - spec check — every acceptance criterion maps to a Catch2 test.
+  - spec check — every acceptance criterion maps to a cargo test name.
   - roll-up — aggregator estimates recomputed from leaf descendants
     and posted as comments.

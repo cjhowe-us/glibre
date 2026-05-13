@@ -9,216 +9,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
-    runs-on: macos-26
-    steps:
-      - uses: actions/checkout@v4
-      - name: clang-format
-        run: |
-          brew install clang-format
-          files=$(git ls-files '*.cpp' '*.hpp' '*.h' '*.cc')
-          if [ -z "$files" ]; then
-            echo "No C/C++ sources to lint."
-            exit 0
-          fi
-          clang-format --dry-run --Werror $files
-
-  build:
-    runs-on: macos-26
-    needs: lint
-    env:
-      VCPKG_ROOT: ${{ github.workspace }}/vendor/vcpkg
-      # GitHub Actions cache backend for vcpkg binary cache.
-      # See https://learn.microsoft.com/en-us/vcpkg/users/binarycaching#gha
-      VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      # Required by VCPKG_BINARY_SOURCES=x-gha — exposes
-      # ACTIONS_CACHE_URL / ACTIONS_RUNTIME_TOKEN to vcpkg.
-      - name: Export GitHub Actions cache env for vcpkg
-        uses: actions/github-script@v7
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-      - uses: lukka/get-cmake@latest
-      - name: Install brew tools (LLVM ≥ 21, xcodegen)
-        run: brew install llvm xcodegen
-      - name: Setup ccache
-        uses: hendrikmuhs/ccache-action@v1.2
-        with:
-          key: ccache-${{ runner.os }}-${{ runner.arch }}-macos-debug
-          max-size: 1G
-      - name: Bootstrap vcpkg
-        run: ./vendor/vcpkg/bootstrap-vcpkg.sh -disableMetrics
-      - name: vcpkg install test deps (fory_overlay_port_resolves)
-        # Install fory + catch2 + eastl + spdlog + blake3 in classic mode so the
-        # cmake configure step finds all required packages for all test targets.
-        # Classic mode is used because manifest mode would attempt to resolve all
-        # vcpkg.json deps including ports not yet authored (metal-cpp, etc.).
-        # eastl added by plan #219 (glibre-foryc uses eastl::vector/string in
-        # tools/foryc/ and the allocator shim is now in core/).
-        # spdlog added by plan #236 (core/ now depends on spdlog logging).
-        # blake3 added by plan #516 (BLAKE3 ShaderHash + CAS store).
-        run: |
-          ./vendor/vcpkg/vcpkg install \
-            fory:arm64-osx \
-            catch2:arm64-osx \
-            eastl:arm64-osx \
-            spdlog:arm64-osx \
-            blake3:arm64-osx \
-            --classic \
-            --overlay-ports=vcpkg-overlay-ports
-      - name: Configure
-        run: |
-          cmake --preset macos-debug \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DVCPKG_INSTALLED_DIR="${{ github.workspace }}/vendor/vcpkg/installed"
-          # VCPKG_INSTALLED_DIR overrides the manifest-mode default which would
-          # point to ${CMAKE_BINARY_DIR}/vcpkg_installed (empty when
-          # VCPKG_MANIFEST_INSTALL=OFF).  The classic-mode `vcpkg install`
-          # step above places packages in vendor/vcpkg/installed/, so we
-          # redirect find_package() there.  See vcpkg.cmake line 421 for the
-          # elseif(VCPKG_MANIFEST_MODE) branch that causes the mismatch.
-      - name: Build
-        run: cmake --build --preset macos-debug
-      - name: Test
-        run: ctest --preset macos-debug
-      - name: Upload perf artifacts
-        # Upload any l1d_miss.json files produced by the perf alarm plan (#938)
-        # that consumes the PmcSampler helper from plan #944.  The directory
-        # tests/core/world/perf/_artifacts/ is created by the alarm test TU
-        # when it completes a measurement pass; if no file was produced (e.g.
-        # on a CI run that did not invoke the alarm) the step is a no-op via
-        # if-no-files-found: ignore.
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: perf-artifacts
-          path: tests/core/world/perf/_artifacts/l1d_miss.json
-          if-no-files-found: ignore
-
-  spec-check:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - name: Verify acceptance ↔ test mapping
-        run: 'true  # TODO: enable once tooling lands'
-
-  e2e-core:
-    # TEMPORARILY DISABLED — re-enable once `glibre-trace` CLI lands.
-    # See specs/e2e/SPEC.md §6.5 + sdlc.md §5 for the closure-gate contract.
-    # Original `if: always()` preserved below; flip `if: false` → `if: always()`
-    # to restore the correct-red behavior.
-    runs-on: macos-14
-    needs: build
-    if: false
-    steps:
-      - uses: actions/checkout@v4
-      - name: Enumerate e2e/core traces
-        id: list
-        run: |
-          set -euo pipefail
-          traces=$(git ls-files 'tests/e2e/core/*.glibre-trace' || true)
-          if [ -z "$traces" ]; then
-            echo "ERROR: no .glibre-trace files found under tests/e2e/core/ — at least one trace must be present" >&2
-            exit 1
-          fi
-          {
-            echo 'traces<<EOF'
-            echo "$traces"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-      - name: Replay e2e/core traces
-        run: |
-          set -euo pipefail
-          # `glibre-trace` is the §6.5 CLI; until tools/cli/glibre-trace
-          # lands the runner is absent and this step exits non-zero —
-          # which IS the contract (specs/e2e/SPEC.md §5 / sdlc.md §5).
-          if ! command -v glibre-trace >/dev/null 2>&1; then
-            echo "glibre-trace runner not yet built — see specs/e2e/SPEC.md §6.5" >&2
-            echo "trace stories pending implementation:" >&2
-            printf '%s\n' "${{ steps.list.outputs.traces }}" >&2
-            exit 1
-          fi
-          while IFS= read -r trace; do
-            [ -n "$trace" ] || continue
-            echo "::group::replay $trace"
-            glibre-trace replay --trace "$trace" --layer inproc
-            echo "::endgroup::"
-          done <<< "${{ steps.list.outputs.traces }}"
-
-  python-tests:
-    # Runs the pytest suite under tests/infra/ — currently covers the
-    # verify_dod.py multi-line TEST_CASE fix (plan #1035).
-    # ubuntu-latest matches the dod-verify.yml production runner; pure Python
-    # tests have no macOS-specific behavior so there is no reason to use macOS.
+  markdown-lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install Python dependencies
-        run: pip install pyyaml pytest
-      - name: Run infra pytest suite
-        env:
-          # Provide sentinel values so verify_dod module-level env reads
-          # do not abort import during collection.
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          ISSUE_NUMBER: "0"
-          ISSUE_BODY: ""
-        run: pytest tests/infra -v
+      - name: Install rumdl
+        run: pip install rumdl
+      - name: rumdl check
+        run: rumdl check .
 
-  dep-check:
+  cargo-check:
+    # Workspace is currently empty (members = []) per /go coding lockout.
+    # cargo metadata succeeds and is the gate against accidental drift.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Verify task issue dependencies closed
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: 'true  # TODO: enable once tooling lands'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: cargo metadata
+        run: cargo metadata --format-version 1 > /dev/null
+      - name: cargo check (workspace)
+        run: cargo check --workspace --all-targets || test "$(cargo metadata --format-version 1 | jq '.workspace_members | length')" = "0"
 
-  e2e-shader:
-    # TEMPORARILY DISABLED — re-enable once `glibre-trace` CLI lands.
-    # Mirrors e2e-core gating; flip `if: false` → `if: always()` to restore.
-    runs-on: macos-14
-    needs: build
-    if: false
+  spec-check:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Enumerate e2e/shader traces
-        id: list
+      - name: Verify SPEC.md scaffolds present for every context
         run: |
           set -euo pipefail
-          traces=$(git ls-files 'tests/e2e/shader/*.glibre-trace' || true)
-          if [ -z "$traces" ]; then
-            echo "ERROR: no .glibre-trace files found under tests/e2e/shader/ — at least one trace must be present" >&2
-            exit 1
-          fi
-          {
-            echo 'traces<<EOF'
-            echo "$traces"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-      - name: Replay e2e/shader traces
-        run: |
-          set -euo pipefail
-          # `glibre-trace` is the §6.5 CLI; until tools/cli/glibre-trace
-          # lands the runner is absent and this step exits non-zero —
-          # which IS the contract (specs/e2e/SPEC.md §5 / sdlc.md §5).
-          if ! command -v glibre-trace >/dev/null 2>&1; then
-            echo "glibre-trace runner not yet built — see specs/e2e/SPEC.md §6.5" >&2
-            echo "trace stories pending implementation:" >&2
-            printf '%s\n' "${{ steps.list.outputs.traces }}" >&2
-            exit 1
-          fi
-          while IFS= read -r trace; do
-            [ -n "$trace" ] || continue
-            echo "::group::replay $trace"
-            glibre-trace replay --trace "$trace" --layer inproc
-            echo "::endgroup::"
-          done <<< "${{ steps.list.outputs.traces }}"
+          missing=0
+          for ctx in core-runtime platform rendering physics audio input geometry animation ai vfx ui networking data-systems simulation content-pipeline game-framework tools integration; do
+            if [ ! -f "specs/$ctx/SPEC.md" ]; then
+              echo "missing specs/$ctx/SPEC.md" >&2
+              missing=1
+            fi
+          done
+          exit $missing

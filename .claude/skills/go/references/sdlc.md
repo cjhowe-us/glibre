@@ -43,7 +43,7 @@ shape can be designed without further re-derivation.
 ## 2. Breakdown
 
 **Input:** Filled §1–§3 of a spec; the engine-wide decision records
-under `reviews/decisions/`.
+under `specs/decisions/`.
 
 **Issue types:** `[SPIKE] draft-<ctx>-user-stories`.
 
@@ -87,9 +87,9 @@ records.
    boundary. No runtime reflection.
 3. For persistence schemas (§7): coordinate with the `data` context.
    Cite the Apache Fory codegen pipeline from
-   `reviews/decisions/fory-codegen.md`. Provide migration rules.
+   `specs/decisions/fory-codegen.md`. Provide migration rules.
 4. For hot-reload contract (§8): cite the protocol from
-   `reviews/decisions/hot-reload-protocol.md` (when it lands; until
+   `specs/decisions/hot-reload-protocol.md` (when it lands; until
    then, use the sketch in the plan). State what survives swap, what
    `migrate(...)` does, and which refusal cases apply.
 5. For internal architecture (§6): non-binding sketch. One short
@@ -100,7 +100,7 @@ records.
    context emits.
 
 **Deliverable:** Spec sections filled, committed via PR. Decision
-records under `reviews/decisions/` for cross-cutting items.
+records under `specs/decisions/` for cross-cutting items.
 
 **Closure rule:** PR merged. Issue stays open until merged.
 
@@ -350,13 +350,14 @@ blocker is reasoning depth, not artifact production. Examples:
   hypotheses before coding fix.
 - During **iteration**: a recurring open question → thinker before
   the next `close-*-open-questions` spike.
-- During **review** (round 2/3): an ambiguous design call surfaced
-  by a comment → impl-respond delegates to thinker for the
-  reasoning, then writes the response.
+- During **review** (any round): an ambiguous design call surfaced
+  by a comment → author bucket invokes /think for reasoning, then
+  writes the response.
 
 Output is a structured analysis (≥ 5 ranked hypotheses + refutation
 + recommended next dispatch). Thinker never writes code or opens
-PRs. Manually summoned from chat or as a nested child.
+PRs. Dispatched via the `/think` skill from chat or any subagent;
+mandatory at session start for go-design and go-planning.
 
 ### Chore (`go-chore`)
 
@@ -369,5 +370,5 @@ Low-effort mechanical worker. Fires for:
   thinking on the formatting).
 
 Chore PRs go through the single-round review carve-out (one
-`go-review` round, optional one `go-impl-respond` round, then
+`go-review` round, optional one `go-coding (MODE:respond)` round, then
 auto-merge) — see /go SKILL.md Step 5.

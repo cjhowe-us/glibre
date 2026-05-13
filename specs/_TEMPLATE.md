@@ -1,65 +1,27 @@
-# <Context> Spec
+# <Context Name>
 
-> Template for `specs/<context>/SPEC.md`. Copy and fill.
+> Scaffolded by harmonius pivot 2026-05-13. All §1–§12 bodies pending re-derivation.
 
-## 1. Purpose
+## §1 Purpose
 
-One paragraph. What this context owns. What it refuses to own.
+## §2 Ubiquitous Language
 
-## 2. Ubiquitous Language
+## §3 Bounded Context Boundary
 
-Terms used unchanged in code.
+## §4 Aggregates
 
-| Term | Meaning |
-|------|---------|
-|      |         |
+## §5 Public Interface
 
-## 3. Derived From
+## §6 Persistence
 
-Harmonius requirement IDs / file paths cited as research input. Note any
-collapse decisions (multiple harmonius concepts → one glibre primitive).
+## §7 Frame Phase Participation
 
-## 4. Aggregates & Invariants
+## §8 Hot-Reload Contract
 
-- Aggregate / entity / value object.
-- Invariants that must hold at every public API boundary.
+## §9 Error Model
 
-## 5. Public Interface
+## §10 Performance Budget
 
-```cpp
-// header-only stub goes here
-```
+## §11 User Stories
 
-Event types, serialized schemas (Fory), error types.
-
-## 6. Internal Architecture
-
-Non-binding sketch for implementers.
-
-## 7. Persistence & Schemas
-
-Fory schemas. Migration rules.
-
-## 8. Hot-Reload Contract
-
-What survives swap, what `migrate(...)` must do, what triggers refusal.
-
-## 9. Performance Budget
-
-Cycles / frame, memory ceiling, allocation rules.
-
-## 10. Failure Modes & Error Model
-
-Typed errors. Recovery.
-
-## 11. Acceptance Criteria
-
-GitHub `type:user-story` issues this spec closes:
-
-- #TBD — `<title>`
-
-Each must have a Catch2 test by name.
-
-## 12. Open Questions
-
-- Owner / resolution gate.
+## §12 Open Questions

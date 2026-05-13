@@ -1,25 +1,24 @@
 # Specs
 
-Bounded-context specs. Each MVP context owns one `<context>/SPEC.md`.
+Bounded-context design lives here. Each `<context>/SPEC.md` follows
+`_TEMPLATE.md` §1–§12. Additional design files (`design-N.md`,
+`integration-N.md`) live alongside.
 
-## Template sections
+Layout mirrors harmonius 15-subsystem decomposition (re-derived, not
+ported):
 
-1. Purpose
-2. Ubiquitous Language
-3. Derived From (harmonius refs + collapse decisions)
-4. Aggregates & Invariants
-5. Public Interface
-6. Internal Architecture (non-binding)
-7. Persistence & Schemas
-8. Hot-Reload Contract
-9. Performance Budget
-10. Failure Modes & Error Model
-11. Acceptance Criteria (links to `type:user-story` GitHub issues)
-12. Open Questions
+- **Foundation**: `core-runtime/`, `platform/`
+- **Mid-level**: `rendering/`, `physics/`, `geometry/`, `ui/`, `input/`
+- **Domain**: `ai/`, `animation/`, `audio/`, `networking/`, `vfx/`
+- **Data systems**: `data-systems/` (graphs, tables, attributes,
+  containers)
+- **Simulation**: `simulation/` (grids, awareness, timelines, event
+  logs)
+- **Application**: `game-framework/`, `tools/`, `content-pipeline/`
+- **Cross-cutting**: `integration/` (pair-wise contracts)
 
-A spec is **done** when:
+## Storage rule
 
-- Acceptance criteria are mechanically testable.
-- Public interface compiles as a header-only stub.
-- Two peer contexts have reviewed seams.
-- All MVP user-story issues for the context are linked.
+Designs live in this directory. Plans (task breakdowns, leaves,
+spikes, stories) live in GitHub Issues. Any change that invalidates a
+design here must update the affected files in the same PR.

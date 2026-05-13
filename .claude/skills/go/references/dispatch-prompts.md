@@ -6,13 +6,13 @@ the `{{ }}` placeholders before dispatching.
 Every prompt embeds these invariants:
 
 - Read `PHILOSOPHY.md`, `AGENTS.md`, `.github/DOD-DSL.md`, the
-  relevant `reviews/decisions/*.md`, and the parent issue bodies.
+  relevant `specs/decisions/*.md`, and the parent issue bodies.
 - One leaf per session. If scope grows, split via comment + new
   issues.
 - Branch from `main`. Conventional Commit subject. Open a PR with
   `gh pr create` and STOP — do NOT enable auto-merge. The parent /go
   skill runs three sequential rounds of review (`go-review` +
-  `go-impl-respond`) against your PR and flips auto-merge on after
+  `go-coding (MODE:respond)`) against your PR and flips auto-merge on after
   round 3 converges.
 - **PR body MUST include `Closes #{{ISSUE_NUMBER}}`** so merging
   triggers the `dod-verify` workflow.
@@ -52,7 +52,7 @@ INVARIANTS:
 - Conventional Commit PR title.
 - **Open PR with `gh pr create` and STOP.** Do NOT call
   `gh pr merge --auto --squash`. The parent /go skill runs three
-  sequential rounds of review (`go-review` + `go-impl-respond`) and
+  sequential rounds of review (`go-review` + `go-coding (MODE:respond)`) and
   flips auto-merge on after round 3 converges.
 - **PR body MUST contain `Closes #{{ISSUE_NUMBER}}`** so merging fires
   `dod-verify`. Closure happens when PR merges AND the verifier posts
@@ -172,8 +172,8 @@ DO NOT touch other sections.
 EXTRA READS:
 - /Users/cjhowe/Code/glibre/{{SPEC_PATH}} (sections §1, §2, §3 must
   already be filled — if not, comment status:blocked and stop)
-- /Users/cjhowe/Code/glibre/reviews/decisions/error-model.md
-- /Users/cjhowe/Code/glibre/reviews/decisions/frame-phases.md
+- /Users/cjhowe/Code/glibre/specs/decisions/error-model.md
+- /Users/cjhowe/Code/glibre/specs/decisions/frame-phases.md
 
 GOAL: fill §4 (Aggregates & Invariants) of {{SPEC_PATH}}.
 
@@ -195,9 +195,9 @@ PROCESS:
 
 EXTRA READS:
 - /Users/cjhowe/Code/glibre/{{SPEC_PATH}}
-- /Users/cjhowe/Code/glibre/reviews/decisions/error-model.md
-- /Users/cjhowe/Code/glibre/reviews/decisions/plugin-abi.md
-- /Users/cjhowe/Code/glibre/reviews/decisions/fory-codegen.md
+- /Users/cjhowe/Code/glibre/specs/decisions/error-model.md
+- /Users/cjhowe/Code/glibre/specs/decisions/plugin-abi.md
+- /Users/cjhowe/Code/glibre/specs/decisions/fory-codegen.md
 
 GOAL: fill §5 (Public Interface) of {{SPEC_PATH}} with a header-only
 C++ stub that compiles.
@@ -224,7 +224,7 @@ run clang -fsyntax-only with -std=c++23).
 EXTRA READS:
 - /Users/cjhowe/Code/glibre/specs/data/SPEC.md (parent persistence
   spine — read what's filled)
-- /Users/cjhowe/Code/glibre/reviews/decisions/fory-codegen.md
+- /Users/cjhowe/Code/glibre/specs/decisions/fory-codegen.md
 - /Users/cjhowe/Code/glibre/{{SPEC_PATH}}
 
 GOAL: fill §7 (Persistence & Schemas) of {{SPEC_PATH}}.
@@ -249,9 +249,9 @@ decisions are not yet committed, post status:blocked and stop.
 {{COMMON_HEADER}}
 
 EXTRA READS:
-- /Users/cjhowe/Code/glibre/reviews/decisions/hot-reload-protocol.md
+- /Users/cjhowe/Code/glibre/specs/decisions/hot-reload-protocol.md
   (when present)
-- /Users/cjhowe/Code/glibre/reviews/decisions/frame-phases.md
+- /Users/cjhowe/Code/glibre/specs/decisions/frame-phases.md
 - /Users/cjhowe/Code/glibre/{{SPEC_PATH}}
 
 GOAL: fill §8 (Hot-Reload Contract) of {{SPEC_PATH}}.
@@ -275,7 +275,7 @@ PROCESS:
 GOAL: fill §{{N}} of {{SPEC_PATH}} per the template (§6 / §9 / §10).
 
 For perf-budget (§9): cite global allocation from
-`reviews/decisions/perf-budget.md`. Declare CPU/GPU/heap cells.
+`specs/decisions/perf-budget.md`. Declare CPU/GPU/heap cells.
 
 For failure-modes (§10): enumerate `core::Error` variants emitted
 from this context's public surfaces.
@@ -342,7 +342,7 @@ PROCESS:
 EXTRA READS:
 - /Users/cjhowe/Code/glibre/{{SPEC_PATH}} (must be FULLY filled — if
   any section is still template stub, post status:blocked and stop)
-- All `reviews/decisions/*.md`
+- All `specs/decisions/*.md`
 
 GOAL: open `[PLAN]` issues that cover the implementation of
 {{SPEC_PATH}}.
@@ -368,7 +368,7 @@ PROCESS:
 EXTRA READS:
 - The plan issue body (Scope, Unit Test Plan, Stories Satisfied)
 - /Users/cjhowe/Code/glibre/{{SPEC_PATH}}
-- /Users/cjhowe/Code/glibre/reviews/decisions/*.md
+- /Users/cjhowe/Code/glibre/specs/decisions/*.md
 
 GOAL: implement the slice declared in the plan's Scope; add the
 named Catch2 unit tests; merge.
@@ -512,8 +512,8 @@ EXTRA READS:
 - For each ctx in TOUCHED_CONTEXTS:
     /Users/cjhowe/Code/glibre/specs/<ctx>/SPEC.md
     /Users/cjhowe/Code/glibre/specs/<ctx>/*.md (sibling design docs)
-- /Users/cjhowe/Code/glibre/reviews/decisions/*.md cited in the diff
-- All prior rounds' review comments + impl-respond replies, via
+- /Users/cjhowe/Code/glibre/specs/decisions/*.md cited in the diff
+- All prior rounds' review comments + author-respond replies, via
     gh api repos/cjhowe-us/glibre/pulls/{{PR_NUMBER}}/reviews
     gh api repos/cjhowe-us/glibre/pulls/{{PR_NUMBER}}/comments
 
@@ -541,9 +541,9 @@ close the PR. Reviewing only.
 
 ---
 
-## Implementation Response — go-impl-respond
+## Implementation Response — go-coding (MODE:respond)
 
-Dispatch this prompt to `subagent_type: go-impl-respond` once per
+Dispatch this prompt to `subagent_type: go-coding (MODE:respond)` once per
 round (rounds 1, 2, 3) per PR, immediately after that round's
 go-review completes. Substitutes:
 
@@ -566,7 +566,7 @@ EXTRA READS:
 - gh pr diff {{PR_NUMBER}}
 - For each ctx in TOUCHED_CONTEXTS:
     /Users/cjhowe/Code/glibre/specs/<ctx>/SPEC.md
-- All prior rounds' impl-respond replies (so you don't undo a prior
+- All prior rounds' author-respond replies (so you don't undo a prior
   round's PUSHBACK).
 
 GOAL: For each review comment from this round, ADDRESS / PUSHBACK /
@@ -589,7 +589,7 @@ OUTPUT:
 - One reply per review comment with the schema specified in the
   agent body. No silent skips on HIGH.
 - Status comment on the original referenced issue with the
-  AGENTS.md schema, agent:go-impl-respond, notes including counts
+  AGENTS.md schema, agent:go-coding (MODE:respond), notes including counts
   of ADDRESSED / PUSHBACK / DEFER / NOOP and the follow-up PR
   number if any.
 - For DEFER: at least one new `[SPIKE] iterate-...` issue per
@@ -687,7 +687,7 @@ REQUIRED READS:
 - /Users/cjhowe/Code/glibre/PHILOSOPHY.md
 - /Users/cjhowe/Code/glibre/AGENTS.md
 - /Users/cjhowe/Code/glibre/specs/<relevant ctx>/SPEC.md
-- All `reviews/decisions/*.md` cited by the targets above
+- All `specs/decisions/*.md` cited by the targets above
 - For bugs: failing tests, recent commits to suspect modules
   (`git log -p --since=...`), CI logs of the failing run.
 - For blockers: every prior comment / spike / decision that
@@ -745,7 +745,7 @@ PROCESS:
 
 ESCALATION: If you find the chore as briefed actually requires
 design judgement, breaks an invariant cited in
-`reviews/decisions/*.md`, touches a public interface, or scope
+`specs/decisions/*.md`, touches a public interface, or scope
 grows beyond one PR — STOP, post `status:blocked` redirecting to
 `go-coding` (or `go-design` / `go-planning`), and stop.
 
