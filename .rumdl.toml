@@ -1,15 +1,9 @@
 # rumdl configuration file
 
 [global]
-exclude = [
-  ".git",
-  ".github",
-  "**/CLAUDE.md",
-  "**/templates/*.md",
-  "specs/_TEMPLATE.md",
-  "target",
-]
+exclude = [".git", "target"]
 flavor = "gfm"
+output-format = "grouped"
 
 [MD033]
 allowed-elements = ["br"]
@@ -23,3 +17,6 @@ reflow = true
 reflow-mode = "normalize"
 strict = false
 tables = false
+
+[MD041]
+front-matter-title = "name"

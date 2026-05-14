@@ -5,13 +5,15 @@ Conventional Commit subject required:
 Keep PR scope narrow — one task issue may have many PRs.
 -->
 
+# Pull Request
+
 ## Summary
 
-Closes / Refs: #<issue>
+Closes / Refs: `#<issue>`
 
 ## Stories Covered
 
-- GS-* via #<user-story-issue>
+- GS-* via `#<user-story-issue>`
 
 ## Test Plan
 

@@ -6,9 +6,12 @@ version: 1.0.0
 
 # /review-respond
 
-Drive review-and-respond cycles on one artifact until convergence. No fixed round count. The loop iterates **as many rounds as the artifact needs**, and exits only when the reviewer issues `APPROVE` (with CI green for code-pr) or when the author escalates to an iterate spike.
+Drive review-and-respond cycles on one artifact until convergence. No fixed round count. The loop
+iterates **as many rounds as the artifact needs**, and exits only when the reviewer issues `APPROVE`
+(with CI green for code-pr) or when the author escalates to an iterate spike.
 
-This skill replaces `/review-loop`. The loop is now **artifact-generic**: it works on code PRs, design PRs, plan issues, and doc PRs.
+This skill replaces `/review-loop`. The loop is now **artifact-generic**: it works on code PRs,
+design PRs, plan issues, and doc PRs.
 
 ## Inputs
 
@@ -19,11 +22,14 @@ This skill replaces `/review-loop`. The loop is now **artifact-generic**: it wor
 | `AUTHOR_AGENT` | required | One of `product`, `design`, `plan`, `code`, `chore` — the role that originally produced the artifact |
 | `ISSUE_NUMBER` | optional | The leaf issue the artifact closes; used for escalation |
 
-`AUTHOR_AGENT` is **the same role that originally produced the artifact**. Design PRs re-dispatch `design`; planning PRs / plan issues re-dispatch `plan`; code PRs re-dispatch `code` with `stage:respond`; chore PRs re-dispatch `chore`; doc PRs re-dispatch the role that owns the touched docs (`product` / `design` / `plan`). Every author owns its own review-response loop.
+`AUTHOR_AGENT` is **the same role that originally produced the artifact**. Design PRs re-dispatch
+`design`; planning PRs / plan issues re-dispatch `plan`; code PRs re-dispatch `code` with
+`stage:respond`; chore PRs re-dispatch `chore`; doc PRs re-dispatch the role that owns the touched
+docs (`product` / `design` / `plan`). Every author owns its own review-response loop.
 
 ## Loop body
 
-```
+```text
 round = 0
 while true:
     round += 1
@@ -94,7 +100,7 @@ while true:
 
 ### Reviewer prompt (round N)
 
-```
+```text
 Repo: /Users/cjhowe/Code/glibre
 ARTIFACT_TYPE: {ARTIFACT_TYPE}
 TARGET: {TARGET}
@@ -111,9 +117,12 @@ Review the latest state of {TARGET} against:
 
 Pick the lens for ARTIFACT_TYPE (see review agent body):
 - code-pr: coverage + correctness; SOLID/SRP/seam quality; spec alignment; CI green
-- design-pr: re-derivation rigor; aggregate boundary justification; SOLID citation per choice; ADR completeness; design-invalidation handled
-- plan-issue: template conformance; DoD populated with concrete assertions; Gherkin/test-list testable; estimate sanity; dependency graph
-- doc-pr: internal consistency; cross-doc links valid; no plan-content drift into repo; no design-content drift into issues
+- design-pr: re-derivation rigor; aggregate boundary justification; SOLID citation
+  per choice; ADR completeness; design-invalidation handled
+- plan-issue: template conformance; DoD populated with concrete assertions;
+  Gherkin/test-list testable; estimate sanity; dependency graph
+- doc-pr: internal consistency; cross-doc links valid; no plan-content drift into
+  repo; no design-content drift into issues
 
 Post inline review comments where applicable. Post a top-level verdict
 with one of: APPROVE / REQUEST_CHANGES / COMMENT.
@@ -128,7 +137,7 @@ rounds and is still present, recommend escalation to an
 
 ### Author respond prompt (round N)
 
-```
+```text
 Repo: /Users/cjhowe/Code/glibre
 ARTIFACT_TYPE: {ARTIFACT_TYPE}
 TARGET: {TARGET}
@@ -164,15 +173,19 @@ findings, ADDRESSED or DEFER only — silent skips forbidden.
 
 ## Concurrency
 
-Each `/review-respond` invocation runs as one foreground subagent loop in the caller's thread. Caller-decides parallelism — the caller may invoke multiple `/review-respond` instances in a single tool-call message for parallel artifact review. `/review-respond` itself stays single-artifact.
+Each `/review-respond` invocation runs as one foreground subagent loop in the caller's thread.
+Caller-decides parallelism — the caller may invoke multiple `/review-respond` instances in a single
+tool-call message for parallel artifact review. `/review-respond` itself stays single-artifact.
 
-Rounds within a single artifact are strictly sequential — reviewer and author must each finish before the next round starts.
+Rounds within a single artifact are strictly sequential — reviewer and author must each finish
+before the next round starts.
 
 ## How `/work` invokes this skill
 
-After `/work` returns from a successful agent dispatch that opened a PR (or authored a plan-issue), `/work` hands off to `/review-respond`:
+After `/work` returns from a successful agent dispatch that opened a PR (or authored a plan-issue),
+`/work` hands off to `/review-respond`:
 
-```
+```text
 Skill({
   skill: "review-respond",
   args: '{ "ARTIFACT_TYPE": "<code-pr|design-pr|plan-issue|doc-pr>",
@@ -184,6 +197,9 @@ Skill({
 
 ## Notes
 
-- CI gate (`feedback_go_review_rejects_red_ci` memory): APPROVE on red/pending CI is rejected for `code-pr` and treated as REQUEST_CHANGES.
-- The PR's author-respond agent must push commits, not open a new PR — except for the merged-original case handled by `code` in `stage:respond` (opens a single follow-up PR).
-- Plan-issue rounds run entirely against the issue body and its `## Definition of Done` block — no PR involved.
+- CI gate (`feedback_go_review_rejects_red_ci` memory): APPROVE on red/pending CI is rejected for
+  `code-pr` and treated as REQUEST_CHANGES.
+- The PR's author-respond agent must push commits, not open a new PR — except for the
+  merged-original case handled by `code` in `stage:respond` (opens a single follow-up PR).
+- Plan-issue rounds run entirely against the issue body and its `## Definition of Done` block — no
+  PR involved.

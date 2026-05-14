@@ -6,7 +6,11 @@ version: 1.0.0
 
 # /work
 
-Execute one unblocked leaf issue in a foreground subagent. **Caller-decides parallelism.** The skill itself dispatches exactly one leaf in one foreground subagent and returns when it completes. The caller (chat or another orchestrating skill) decides whether to invoke `/work` again — sequentially for context isolation, or in parallel by sending multiple `/work` invocations in a single tool-call message.
+Execute one unblocked leaf issue in a foreground subagent. **Caller-decides parallelism.** The skill
+itself dispatches exactly one leaf in one foreground subagent and returns when it completes. The
+caller (chat or another orchestrating skill) decides whether to invoke `/work` again — sequentially
+for context isolation, or in parallel by sending multiple `/work` invocations in a single tool-call
+message.
 
 ## Inputs
 
@@ -28,10 +32,15 @@ Execute one unblocked leaf issue in a foreground subagent. **Caller-decides para
 
 Hard rules:
 
-1. Plans never land in the repo. Every plan / story / spike / epic / sub-epic / initiative body lives in a GitHub issue.
-2. Designs never land in issues. Spike issues describe *what to design*; the design itself lives in `specs/`.
-3. **Design invalidation is mandatory.** Every PR (design, planning, code, chore) must check whether the change invalidates existing design under `specs/`. If yes, the same PR updates the affected files. If scope blocks that, open `[SPIKE] iterate-<area>` first.
-4. Every design PR body cites `Closes #N` / `Refs #M`; every issue closure cites the merged design PR.
+1. Plans never land in the repo. Every plan / story / spike / epic / sub-epic / initiative body
+   lives in a GitHub issue.
+2. Designs never land in issues. Spike issues describe *what to design*; the design itself lives in
+   `specs/`.
+3. **Design invalidation is mandatory.** Every PR (design, planning, code, chore) must check whether
+   the change invalidates existing design under `specs/`. If yes, the same PR updates the affected
+   files. If scope blocks that, open `[SPIKE] iterate-<area>` first.
+4. Every design PR body cites `Closes #N` / `Refs #M`; every issue closure cites the merged design
+   PR.
 
 ## Step 1 — Pick the leaf
 
@@ -73,7 +82,8 @@ query($endCursor: String) {
   | sort -n | head -1 | cut -f2-
 ```
 
-If zero candidates: `git pull --ff-only`, scan for `dod:failed` reopens, return "no unblocked leaves" — caller decides whether to wait or stop.
+If zero candidates: `git pull --ff-only`, scan for `dod:failed` reopens, return "no unblocked
+leaves" — caller decides whether to wait or stop.
 
 ## Step 2 — Match leaf to role
 
@@ -97,7 +107,7 @@ If `STAGE_OVERRIDE` is set, use it regardless of pattern.
 
 ## Step 3 — Dispatch one foreground subagent
 
-```
+```text
 Agent({
   description: "<short title — issue # + role>",
   subagent_type: "<role from Step 2>",
@@ -112,12 +122,13 @@ The dispatch prompt MUST include:
 2. Required reads (role-specific; see each role's agent file).
 3. Storage contract reminder.
 4. Status-comment schema (`agent:<role>` per `CLAUDE.md`).
-5. PR-only rule: agent opens PR with `gh pr create` and STOPS — `/review-respond` enables auto-merge after `APPROVE`.
+5. PR-only rule: agent opens PR with `gh pr create` and STOPS — `/review-respond` enables auto-merge
+   after `APPROVE`.
 6. **Foreground dispatch is blocking.** The caller waits.
 
 ### Dispatch prompt skeleton
 
-```
+```text
 You are the <ROLE> executor for GitHub issue #<N> in repo cjhowe-us/glibre — <TITLE>.
 
 REQUIRED READS:
@@ -132,11 +143,14 @@ INVARIANTS:
 - One leaf, one session. Never block. If scope grows, split via redirect comment + new issues, exit.
 - Branch from main: <verb>/<scope>-<slug> (per .github/SETUP.md).
 - Conventional Commit PR title.
-- Open PR with `gh pr create` and STOP. Do NOT call `gh pr merge --auto --squash`. /review-respond drives review→author cycles.
+- Open PR with `gh pr create` and STOP. Do NOT call `gh pr merge --auto --squash`.
+  /review-respond drives review→author cycles.
 - PR body MUST contain `Closes #<N>` so dod-verify fires on merge.
-- Definition of Done block on the issue per .github/DOD-DSL.md. Author or refresh in this PR via `gh issue edit`. Every assertion must be satisfied by the merged diff.
+- Definition of Done block on the issue per .github/DOD-DSL.md. Author or refresh
+  in this PR via `gh issue edit`. Every assertion must be satisfied by the merged diff.
 - Issue stays OPEN. Closure happens via PR merge + Closes #N + dod-verify green.
-- Status comment schema (post via `gh issue comment <N> --body "$(cat <<EOF ... EOF)"` so $BRANCH / $WT expand):
+- Status comment schema (post via `gh issue comment <N> --body "$(cat <<EOF ... EOF)"`
+  so $BRANCH / $WT expand):
     agent:<role>
     status:<started|progress|done>
     issue:#<N>
@@ -162,10 +176,14 @@ All work, commits, and `gh pr create` happen from $WT. Main worktree stays on ma
 Per-role `<EXTRA_READS>`:
 
 - `product` — `/Users/cjhowe/Code/harmonius/docs/requirements/<ctx>/`, peer specs in the same domain
-- `design` — `/Users/cjhowe/Code/glibre/specs/<ctx>/SPEC.md`, every `specs/decisions/*.md` cited by parent epic, `/Users/cjhowe/Code/harmonius/docs/design/<ctx>/` (research input only — re-derive)
-- `plan` — `/Users/cjhowe/Code/glibre/specs/<ctx>/SPEC.md` (must be filled), `.github/ISSUE_TEMPLATE/user-story.yml` and `plan.yml`
-- `code` — plan-issue body (Scope / Unit Test Plan / Stories Satisfied), `specs/<ctx>/SPEC.md`, `specs/decisions/constraints.md`
-- `test` — story issue body (Manual Test Script, Gherkin, persona), green-CI check recipe (see `test.md`)
+- `design` — `/Users/cjhowe/Code/glibre/specs/<ctx>/SPEC.md`, every `specs/decisions/*.md` cited by
+  parent epic, `/Users/cjhowe/Code/harmonius/docs/design/<ctx>/` (research input only — re-derive)
+- `plan` — `/Users/cjhowe/Code/glibre/specs/<ctx>/SPEC.md` (must be filled),
+  `.github/ISSUE_TEMPLATE/user-story.yml` and `plan.yml`
+- `code` — plan-issue body (Scope / Unit Test Plan / Stories Satisfied), `specs/<ctx>/SPEC.md`,
+  `specs/decisions/constraints.md`
+- `test` — story issue body (Manual Test Script, Gherkin, persona), green-CI check recipe (see
+  `test.md`)
 - `review` — dispatched only via `/review-respond`; see that skill
 - `chore` — only the file the chore touches; `CLAUDE.md` for repo-policy chores
 
@@ -180,7 +198,7 @@ The foreground subagent returns. Verify:
 
 Then hand the PR to `/review-respond`:
 
-```
+```text
 Skill({
   skill: "review-respond",
   args: '{ "ARTIFACT_TYPE": "<code-pr|design-pr|plan-issue|doc-pr>",
@@ -190,7 +208,8 @@ Skill({
 })
 ```
 
-Return to the caller. The caller decides whether to invoke `/work` again (sequentially or in parallel) or stop.
+Return to the caller. The caller decides whether to invoke `/work` again (sequentially or in
+parallel) or stop.
 
 ## Step 4b — DoD-gated closure
 
@@ -198,13 +217,15 @@ After the closing PR merges into `main`:
 
 1. The `dod-verify` workflow fires on `issues:closed`. Manual trigger: `/verify-dod` comment.
 2. On `dod:verified`, the leaf is done.
-3. On `dod:failed`, the next `/work` invocation routes the reopened leaf through `plan` first to revise plan / DoD / scope before any further pass.
+3. On `dod:failed`, the next `/work` invocation routes the reopened leaf through `plan` first to
+   revise plan / DoD / scope before any further pass.
 
 `/work` MUST NOT close a leaf via `gh issue close` directly.
 
 ## Step 4c — Stage transition
 
-A closed leaf typically unlocks the next stage. On every `dod:verified` closure, the caller may inspect the parent and open next-stage children if missing:
+A closed leaf typically unlocks the next stage. On every `dod:verified` closure, the caller may
+inspect the parent and open next-stage children if missing:
 
 | Closed leaf pattern | Next-stage child(ren) | Role |
 |---|---|---|
@@ -219,10 +240,13 @@ A closed leaf typically unlocks the next stage. On every `dod:verified` closure,
 
 ## Invariants
 
-- **One leaf, one foreground subagent.** `/work` itself is single-leaf; parallelism is the caller's choice.
+- **One leaf, one foreground subagent.** `/work` itself is single-leaf; parallelism is the caller's
+  choice.
 - **No on-disk state.** Status, progress, decisions: GitHub issue comments.
 - **PRs only on `main`.** Every change goes via PR with Conventional Commit subject.
-- **One leaf, one session.** A leaf must complete in a single session. If not, split + redirect + exit.
+- **One leaf, one session.** A leaf must complete in a single session. If not, split + redirect +
+  exit.
 - **Aggregators carry no estimate.** Story points only on `type:user-story` and `type:plan`.
 - **Issues stay open until deliverables merge into `main`.**
-- **Definition of Done is authoritative.** Every leaf carries a machine-checkable `## Definition of Done` block. Closure is the verifier's verdict.
+- **Definition of Done is authoritative.** Every leaf carries a machine-checkable
+  `## Definition of Done` block. Closure is the verifier's verdict.

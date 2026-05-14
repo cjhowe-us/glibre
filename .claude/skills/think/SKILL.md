@@ -6,7 +6,9 @@ version: 1.0.0
 
 # /think
 
-`/think` is a **meta-modifier**. It does NOT spawn a separate thinker agent. Instead, it elevates the **next reasoning turn** (the caller's own turn, or the next agent dispatch the caller will make) to:
+`/think` is a **meta-modifier**. It does NOT spawn a separate thinker agent. Instead, it elevates
+the **next reasoning turn** (the caller's own turn, or the next agent dispatch the caller will make)
+to:
 
 - `model: opus`
 - `effort: xhigh`
@@ -41,15 +43,18 @@ Use it liberally — opus xhigh thinking saves more downstream cost than it spen
 
 When `/think` is invoked:
 
-1. The **next agent dispatch** the caller makes runs at `model:opus`, `effort:xhigh`, extended-thinking on.
-2. The dispatched agent (or the caller itself, if reasoning inline) follows the **output schema** below.
-3. The modifier applies for ONE turn. The caller resumes its normal model/effort after the turn returns.
+1. The **next agent dispatch** the caller makes runs at `model:opus`, `effort:xhigh`,
+   extended-thinking on.
+2. The dispatched agent (or the caller itself, if reasoning inline) follows the **output schema**
+   below.
+3. The modifier applies for ONE turn. The caller resumes its normal model/effort after the turn
+   returns.
 
 ### Dispatch shape (for caller reference)
 
 If the caller plans to dispatch a subagent for the boosted turn:
 
-```
+```text
 Agent({
   description: "/think — <one-line question>",
   subagent_type: "<caller's role or a peer role suited to the question>",
@@ -83,7 +88,8 @@ Agent({
 })
 ```
 
-If the caller is reasoning inline (no subagent), the caller follows the same output contract on its own turn at opus xhigh.
+If the caller is reasoning inline (no subagent), the caller follows the same output contract on its
+own turn at opus xhigh.
 
 ### Output schema (the contract the boosted turn follows)
 
@@ -95,8 +101,7 @@ If the caller is reasoning inline (no subagent), the caller follows the same out
 1. **<H1 — strongest>** — <one paragraph: claim + evidence>
 2. **<H2>** — …
 3. **<H3>** — …
-…
-≥ 5 hypotheses, ranked by evidence weight. State the rank order explicitly.
+… ≥ 5 hypotheses, ranked by evidence weight. State the rank order explicitly.
 
 ## Strongest evidence
 
@@ -105,8 +110,8 @@ If the caller is reasoning inline (no subagent), the caller follows the same out
 
 ## Refutation attempt
 
-For H1, narrate the strongest argument *against* it that you could
-construct, and why it failed (or, if it succeeded, why H2 now leads).
+For H1, narrate the strongest argument *against* it that you could construct, and why it failed (or,
+if it succeeded, why H2 now leads).
 
 ## Recommended next dispatch
 
@@ -117,7 +122,8 @@ construct, and why it failed (or, if it succeeded, why H2 now leads).
 End with the CLAUDE.md status-comment block (`agent:<role> status:done …`).
 ```
 
-If ≥ 5 hypotheses cannot be ranked (search space genuinely smaller), state the cap explicitly and explain why.
+If ≥ 5 hypotheses cannot be ranked (search space genuinely smaller), state the cap explicitly and
+explain why.
 
 ## Cost rationale
 
@@ -125,16 +131,24 @@ Thinking is cheap relative to:
 
 - A round of `review` + `code` respond-pass on a wrong code push
 - A merged PR that invalidates a spec because the implementation guessed wrong
-- An `[SPIKE] iterate-*` born from review escalation that `/think` could have prevented in one upstream call
+- An `[SPIKE] iterate-*` born from review escalation that `/think` could have prevented in one
+  upstream call
 
-Default to invoking `/think` when a decision has any of: contested spec text, hard root-cause unknown, pushback-vs-address ambiguity, scope-vs-design tension. Skip `/think` only for self-evident decisions.
+Default to invoking `/think` when a decision has any of: contested spec text, hard root-cause
+unknown, pushback-vs-address ambiguity, scope-vs-design tension. Skip `/think` only for self-evident
+decisions.
 
 ## Nesting
 
-`/think` is invokable from inside any role agent. The modifier does not consume any top-level slot budget — caller controls parallelism, not the modifier. Multiple parents may invoke `/think` in parallel.
+`/think` is invokable from inside any role agent. The modifier does not consume any top-level slot
+budget — caller controls parallelism, not the modifier. Multiple parents may invoke `/think` in
+parallel.
 
-The boosted turn itself does not spawn children (read-only, single-track). That is the invariant that makes its cost predictable.
+The boosted turn itself does not spawn children (read-only, single-track). That is the invariant
+that makes its cost predictable.
 
 ## Exit
 
-The boosted turn returns its structured output to the caller (in chat) or posts it to `COMMENT_TARGET` (when set). The caller acts on the recommended next dispatch — `/think` does not trigger downstream agents itself.
+The boosted turn returns its structured output to the caller (in chat) or posts it to
+`COMMENT_TARGET` (when set). The caller acts on the recommended next dispatch — `/think` does not
+trigger downstream agents itself.
