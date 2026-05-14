@@ -62,8 +62,7 @@ the harmonius design substrate (re-derived, not ported).
 
 - **Plans** (task breakdowns, leaf issues, stories, spikes,
   aggregators) live in **GitHub Issues only**. No plan markdown
-  bodies in the repo. `plans/*.md` are index pointers to issues, not
-  plan content.
+  bodies in the repo.
 - **Designs** (specs, ADRs, integration contracts, decision records,
   diagrams) live in **the repository** under `specs/` and
   `specs/decisions/`.
@@ -95,8 +94,6 @@ Serialization: `rkyv` only. Networking: QUIC unified
   re-enables.
 - `specs/<context>/SPEC.md` — bounded-context specs (15 contexts).
 - `specs/decisions/*.md` — ADRs.
-- `reviews/iter-N/` — review-iteration artifacts.
-- `plans/{mvp,post-mvp,long-term}.md` — GitHub-issue index pointers.
 
 ## Harmonius
 
