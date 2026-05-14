@@ -24,14 +24,21 @@ the harmonius design substrate (re-derived, not ported).
 - **Story closure**: E2E test must be green in CI before any manual
   testing. Story closes only after manual test PASS recorded as a
   comment. Stories drive the test suite — never close prematurely.
-- **Plan execution via parallel nested subagents**: ≤2 concurrent
-  top-level executors; children may also be parallel.
+- **Plan execution via foreground role subagents**: invoke `/work` to
+  pick one unblocked leaf at a time. Caller-decides parallelism —
+  invoke `/work` multiple times in a single tool-call message for
+  parallel leaves; each `/work` itself stays single-leaf.
+- **Seven role agents**: `product`, `design`, `plan`, `code`, `test`,
+  `review`, `chore`. `code` flattens implementation + review-response
+  via `stage:implement` / `stage:respond`. `review` is dispatched only
+  by `/review-respond`.
 - **Progress tracked in GitHub issue comments (English)**. No on-disk
   progress logs. Tracking issues are the source of truth.
-- **Review/respond runs until resolved** via the `/review-loop` skill.
-  No fixed pass count. Author agent re-dispatches on its own PR until
-  reviewer verdict is `APPROVE` or the loop escalates to an
-  `[SPIKE] iterate-*` issue.
+- **Review/respond runs until resolved** via the `/review-respond`
+  skill. No fixed pass count. Author agent re-dispatches on its own
+  artifact (code PR / design PR / plan issue / doc PR) until reviewer
+  verdict is `APPROVE` or the loop escalates to an `[SPIKE] iterate-*`
+  issue.
 - **No time estimates.** Story points only (Fibonacci 1/2/3/5/8). > 8
   → split. Story points roll up from leaves; aggregators (initiative
   / epic / sub-epic) and spikes never carry `pts:*`.
@@ -45,9 +52,11 @@ the harmonius design substrate (re-derived, not ported).
   `feat(scope):`, `fix(scope):`, `test(scope):`, `refactor(scope):`,
   `perf(scope):`, `chore(scope):`, `docs(scope):`, `build(scope):`,
   `ci(scope):`. Granular PRs; one task issue may have many.
-- **/go is locked to design / planning / review.** No coding
-  dispatches until the lockout is lifted in
-  `.claude/skills/go/SKILL.md`.
+- **`/think` is a meta-modifier.** Invoke before any reasoning-bound
+  decision (hard root cause, refutation pass, ambiguous spec point,
+  scope-split judgement). Boosts the next reasoning turn to
+  `model:opus`, `effort:xhigh`, extended-thinking on, with the
+  ranked-hypothesis output contract.
 
 ## Storage of artifacts
 
