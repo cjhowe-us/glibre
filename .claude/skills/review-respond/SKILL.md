@@ -106,7 +106,7 @@ Review the latest state of {TARGET} against:
 - the relevant SPEC.md / ADR(s) in the diff or referenced files
 - PHILOSOPHY.md (storage contract: plans→issues, designs→repo;
   design-invalidation rule)
-- AGENTS.md
+- CLAUDE.md
 - specs/decisions/constraints.md
 
 Pick the lens for ARTIFACT_TYPE (see review agent body):

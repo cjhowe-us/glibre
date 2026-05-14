@@ -28,7 +28,7 @@ Execute one unblocked leaf issue in a foreground subagent. **Caller-decides para
 
 Hard rules:
 
-1. Plans never land in the repo. `plans/{mvp,post-mvp,long-term}.md` are issue-index pointers, not plan content.
+1. Plans never land in the repo. Every plan / story / spike / epic / sub-epic / initiative body lives in a GitHub issue.
 2. Designs never land in issues. Spike issues describe *what to design*; the design itself lives in `specs/`.
 3. **Design invalidation is mandatory.** Every PR (design, planning, code, chore) must check whether the change invalidates existing design under `specs/`. If yes, the same PR updates the affected files. If scope blocks that, open `[SPIKE] iterate-<area>` first.
 4. Every design PR body cites `Closes #N` / `Refs #M`; every issue closure cites the merged design PR.
@@ -111,7 +111,7 @@ The dispatch prompt MUST include:
 1. Issue number and title.
 2. Required reads (role-specific; see each role's agent file).
 3. Storage contract reminder.
-4. Status-comment schema (`agent:<role>` per `AGENTS.md`).
+4. Status-comment schema (`agent:<role>` per `CLAUDE.md`).
 5. PR-only rule: agent opens PR with `gh pr create` and STOPS — `/review-respond` enables auto-merge after `APPROVE`.
 6. **Foreground dispatch is blocking.** The caller waits.
 
@@ -122,7 +122,7 @@ You are the <ROLE> executor for GitHub issue #<N> in repo cjhowe-us/glibre — <
 
 REQUIRED READS:
 - /Users/cjhowe/Code/glibre/PHILOSOPHY.md
-- /Users/cjhowe/Code/glibre/AGENTS.md
+- /Users/cjhowe/Code/glibre/CLAUDE.md
 - /Users/cjhowe/Code/glibre/.github/SETUP.md
 - /Users/cjhowe/Code/glibre/.github/DOD-DSL.md
 - /Users/cjhowe/Code/glibre/specs/_TEMPLATE.md
@@ -167,7 +167,7 @@ Per-role `<EXTRA_READS>`:
 - `code` — plan-issue body (Scope / Unit Test Plan / Stories Satisfied), `specs/<ctx>/SPEC.md`, `specs/decisions/constraints.md`
 - `test` — story issue body (Manual Test Script, Gherkin, persona), green-CI check recipe (see `test.md`)
 - `review` — dispatched only via `/review-respond`; see that skill
-- `chore` — only the file the chore touches; `AGENTS.md` for repo-policy chores
+- `chore` — only the file the chore touches; `CLAUDE.md` for repo-policy chores
 
 ## Step 4 — On completion
 

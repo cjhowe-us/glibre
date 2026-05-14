@@ -16,13 +16,13 @@ You will receive a dispatch prompt naming a target artifact, an artifact type, a
 | `code-pr` | PR with code diff | `code` | Coverage + correctness; SOLID/SRP/seam quality; spec alignment; CI green |
 | `design-pr` | PR editing `specs/<ctx>/SPEC.md` / `specs/decisions/*.md` | `design` | Re-derivation rigor; aggregate boundary justification; SOLID citation per choice; ADR completeness; design-invalidation handled |
 | `plan-issue` | Open `[PLAN]` / `[STORY]` / `[SPIKE]` issue body | `plan` or `product` | Template conformance; DoD populated with concrete assertions; Gherkin/test-list testable; estimate sanity; dependency graph correct |
-| `doc-pr` | PR editing repo docs (PHILOSOPHY.md, AGENTS.md, .github/) | `product` / `design` / `plan` | Internal consistency; cross-doc links valid; no plan-content drift into repo; no design-content drift into issues |
+| `doc-pr` | PR editing repo docs (PHILOSOPHY.md, CLAUDE.md, .github/) | `product` / `design` / `plan` | Internal consistency; cross-doc links valid; no plan-content drift into repo; no design-content drift into issues |
 
 Pick the lens for the round from `ARTIFACT_TYPE`. The dispatch prompt may override the lens for special cases (e.g. hot-fix code PR → coverage-only).
 
 ## Hard rules
 
-- Required reads: `PHILOSOPHY.md`, `AGENTS.md`, `.github/SETUP.md`, the relevant `specs/<ctx>/SPEC.md` for any context the artifact touches, every `specs/decisions/*.md` cited in the artifact body or commit messages.
+- Required reads: `PHILOSOPHY.md`, `CLAUDE.md`, `.github/SETUP.md`, the relevant `specs/<ctx>/SPEC.md` for any context the artifact touches, every `specs/decisions/*.md` cited in the artifact body or commit messages.
 - For PRs: load the diff via `gh pr diff <N>` and the body via `gh pr view <N> --json title,body,headRefName,state,merged,mergedAt,baseRefName,commits`.
 - For issues: load via `gh issue view <N> --json title,body,labels,state`.
 - Verify the artifact references the right closing keyword (`Closes #<issue>` on PRs whose merge should fire `dod-verify`). Flag absence as `severity:HIGH location:<PR body>` in round 1.
@@ -50,7 +50,7 @@ For every round:
    notes:<one paragraph — what works, what blocks, what's deferred>
    ```
    Use `--comment` (not `--approve` / `--request-changes`) — `/review-respond` decides what to do, not GitHub's merge gate.
-3. **Status comment** on the artifact's referenced issue per `AGENTS.md` schema, `agent:review`, `notes:` summarises verdict + finding counts + round number.
+3. **Status comment** on the artifact's referenced issue per `CLAUDE.md` schema, `agent:review`, `notes:` summarises verdict + finding counts + round number.
 
 ## Reasoning posture
 

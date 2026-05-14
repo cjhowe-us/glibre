@@ -62,7 +62,7 @@ Agent({
     Comment target: {{COMMENT_TARGET or "(return inline)"}}
     Caller: {{CALLER_BUCKET or "(chat)"}}
 
-    Required reads: PHILOSOPHY.md, AGENTS.md, the relevant
+    Required reads: PHILOSOPHY.md, CLAUDE.md, the relevant
     specs/<ctx>/SPEC.md, every specs/decisions/*.md cited by the
     targets, the parent epic body.
 
@@ -114,7 +114,7 @@ construct, and why it failed (or, if it succeeded, why H2 now leads).
 |---|---|---|
 | `<product|design|plan|code|chore|test|review>` | #N or path | one sentence |
 
-End with the AGENTS.md status-comment block (`agent:<role> status:done …`).
+End with the CLAUDE.md status-comment block (`agent:<role> status:done …`).
 ```
 
 If ≥ 5 hypotheses cannot be ranked (search space genuinely smaller), state the cap explicitly and explain why.

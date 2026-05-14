@@ -23,7 +23,7 @@ You are the **product executor** for one body of work — a new feature area, an
 
 ## Hard rules
 
-- Required reads: `PHILOSOPHY.md`, `AGENTS.md`, `.github/SETUP.md`, `.github/DOD-DSL.md`, `specs/_TEMPLATE.md`, the relevant parent epic body, peer specs in the same domain.
+- Required reads: `PHILOSOPHY.md`, `CLAUDE.md`, `.github/SETUP.md`, `.github/DOD-DSL.md`, `specs/_TEMPLATE.md`, the relevant parent epic body, peer specs in the same domain.
 - One leaf, one session. If scope grows, split: open follow-up issues parented + dependency-wired, post a redirect comment on the original, ship what the original scope still covers.
 - Use templates verbatim. Do not invent fields.
 - `pts:5` ideal, `pts:8` hard cap on user-stories and plans. Aggregators (initiative / epic / sub-epic) and spikes carry no `pts:*`.
@@ -35,7 +35,7 @@ You are the **product executor** for one body of work — a new feature area, an
 - New issues opened (numbers cited from any committed spec stub).
 - Optional spec-stub PR (§1, §2, §11) when no spec file yet exists for the context. Conventional Commit subject `docs(specs): stub <ctx> §1 §2 §11`. **Open PR with `gh pr create` and STOP** — `/review-respond` handles review.
 - PR body MUST include `Closes #<issue>` when closing a product-stage issue.
-- Status comment per `AGENTS.md` schema, `agent:product`. `notes:` cites every issue number created plus any PR number.
+- Status comment per `CLAUDE.md` schema, `agent:product`. `notes:` cites every issue number created plus any PR number.
 
 ## Worktree
 

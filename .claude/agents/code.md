@@ -47,7 +47,7 @@ If the dispatch prompt is missing `stage:`, default to `implement`.
   git -C /Users/cjhowe/Code/glibre worktree add "$WT" pr-<N>
   cd "$WT"
   ```
-- Required reads: `PHILOSOPHY.md`, `AGENTS.md`, the plan-issue body (Scope / Unit Test Plan / Stories Satisfied), the relevant `specs/<ctx>/SPEC.md`, every `specs/decisions/*.md` cited in the plan.
+- Required reads: `PHILOSOPHY.md`, `CLAUDE.md`, the plan-issue body (Scope / Unit Test Plan / Stories Satisfied), the relevant `specs/<ctx>/SPEC.md`, every `specs/decisions/*.md` cited in the plan.
 - **Do not widen scope. Never block.** If a planned test cannot be added without touching surfaces outside the plan's Scope, split: open a follow-up `[PLAN]` for the out-of-scope surface (parented + `blocked_by`-wired so this plan depends on it), drop the test from this PR, redirect, ship what scope still covers.
 - **Do not block on CI.** Push commits, open the PR, exit. Do NOT poll `gh pr checks` in a sleep loop. The caller triages red-CI PRs on the next tick.
 - Branch: `feat/<scope>-<slug>` / `fix/<scope>-<slug>` / `chore/<scope>-<slug>`, branched from current `origin/main`.
@@ -60,7 +60,7 @@ If the dispatch prompt is missing `stage:`, default to `implement`.
 - One PR (open, no auto-merge) with code, named Rust test fns passing, optional doc updates. Any spec/ADR edited in the same PR to honor the design-invalidation rule.
 - PR body MUST include `Closes #<issue>` so `dod-verify` fires on merge.
 - **Definition of Done block.** Read `.github/DOD-DSL.md`. Each named test in the plan's Unit Test Plan SHOULD appear as a `unit_test_named:` entry, plus `pr_merged_closes_self: true`, plus `workflow_passed: ci.yml`.
-- Final status comment per `AGENTS.md` schema, `agent:code`, `stage:implement`, `notes:` cites the PR number.
+- Final status comment per `CLAUDE.md` schema, `agent:code`, `stage:implement`, `notes:` cites the PR number.
 
 ## Outputs (stage:respond)
 
@@ -99,7 +99,7 @@ HIGH findings: choose 1 or 3 — silent skipping forbidden. If a finding asks yo
 
 - All code changes pushed (open PR) or in the new follow-up PR (merged PR).
 - One reply per review comment from this round. No silent skips on HIGH.
-- Status comment per `AGENTS.md` schema, `agent:code`, `stage:respond`, `notes:` summarises counts of ADDRESSED / PUSHBACK / DEFER / NOOP plus any follow-up PR number.
+- Status comment per `CLAUDE.md` schema, `agent:code`, `stage:respond`, `notes:` summarises counts of ADDRESSED / PUSHBACK / DEFER / NOOP plus any follow-up PR number.
 - For DEFER findings: at least one new `[SPIKE] iterate-...` issue per distinct concern.
 
 ## Reasoning posture

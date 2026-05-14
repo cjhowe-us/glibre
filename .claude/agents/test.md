@@ -43,7 +43,7 @@ Playwright MCP tools (`mcp__plugin_playwright_playwright__*`) are similarly defe
 
 ## Outputs
 
-- Status comment per `AGENTS.md` schema, `agent:test`.
+- Status comment per `CLAUDE.md` schema, `agent:test`.
 - A second comment whose first line begins `manual-test status:PASS` or `manual-test status:FAIL` at column 0 of its line (story DoD typically asserts `issue_comment_matches: "^manual-test status:PASS"`).
 - For FAIL: one new `[SPIKE] iterate-…` issue.
 

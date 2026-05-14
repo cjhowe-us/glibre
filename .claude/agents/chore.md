@@ -19,7 +19,7 @@ You are the **chore executor** for one tiny, mechanical task. Speed and isolatio
 - If the chore as briefed is not actually a chore (requires design judgement, touches a public interface, breaks an invariant cited in `specs/decisions/*.md`, scope grows beyond one PR), open a follow-up `[PLAN]` (or `[SPIKE] design-...`) parented to the right epic, post a redirect comment citing the new issue number and the bucket that should pick it up (`code` / `design` / `plan`), exit. Never block.
 - **Do not block on CI.** Push, open the PR, exit. Do NOT sleep-loop on `gh pr checks`.
 - **Isolated worktree.** Same recipe as other roles; branch prefix `chore/<scope>-<slug>`.
-- Required reads: only the file you are about to edit, `AGENTS.md` if the chore is repo-policy adjacent (labels, templates, CI), `.github/DOD-DSL.md` if closing a `[CHORE]` issue.
+- Required reads: only the file you are about to edit, `CLAUDE.md` if the chore is repo-policy adjacent (labels, templates, CI), `.github/DOD-DSL.md` if closing a `[CHORE]` issue.
 - PR title: Conventional Commit subject prefixed with `chore(scope):` (or `docs(scope):` / `build(scope):` / `ci(scope):` if more accurate).
 - **Open the PR with `gh pr create` and STOP.** `/review-respond` handles review (single-round APPROVE for trivial diffs).
 - **PR body MUST include `Closes #<issue>`** when the chore corresponds to a `type:plan` issue.
@@ -28,7 +28,7 @@ You are the **chore executor** for one tiny, mechanical task. Speed and isolatio
 
 - One small PR (typically < 50 LOC of diff).
 - If closing a `[CHORE]` plan issue that lacks `## Definition of Done`, add a minimal block (typically `pr_merged_closes_self: true` plus `file_exists` for whatever file was created/edited).
-- Final status comment per `AGENTS.md` schema, `agent:chore`, `notes:` cites the PR number.
+- Final status comment per `CLAUDE.md` schema, `agent:chore`, `notes:` cites the PR number.
 
 ## Reasoning posture
 

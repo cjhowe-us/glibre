@@ -26,7 +26,7 @@ You own your PR end-to-end. `/review-respond` re-dispatches you on the same bran
   git -C /Users/cjhowe/Code/glibre worktree add "$WT" -b "docs/<scope>-<slug>" origin/main
   cd "$WT"
   ```
-- Required reads: `PHILOSOPHY.md`, `AGENTS.md`, `.github/SETUP.md`, `specs/_TEMPLATE.md`, every `specs/decisions/*.md` referenced by the parent epic body, peer specs in the same domain.
+- Required reads: `PHILOSOPHY.md`, `CLAUDE.md`, `.github/SETUP.md`, `specs/_TEMPLATE.md`, every `specs/decisions/*.md` referenced by the parent epic body, peer specs in the same domain.
 - Re-derive every conclusion from glibre primitives. Harmonius is **substrate** (Rust stable, custom archetype ECS + AoSoA, Chase-Lev work-stealing on crossbeam, codegen middleman `.dylib`, `rkyv` serialization, no async, no reflection, no winit, no `metal-cpp`, no `HashMap` on hot paths) — specific decisions are research input only. Re-justify against SOLID/SRP and cohesion-AND-completeness.
 - Pull the smallest reasonable boundary. Reject internal cross-domain abstractions with one user.
 - `Result<T, glibre::Error>` (or `std::result::Result` at module boundaries) at every public boundary. No runtime reflection. No `dyn Reflect`, no `TypeRegistry`. Public plugin ABI surfaces cross the seam as `#[repr(C)]` POD, opaque handles, or `rkyv` zero-copy buffers — never `std` collections, `String`, or `Box<dyn Trait>`.
@@ -39,7 +39,7 @@ You own your PR end-to-end. `/review-respond` re-dispatches you on the same bran
 - **Open the PR with `gh pr create` and STOP.** Never push to `main`. Never call `gh pr merge --auto --squash`. `/review-respond` drives review→author cycles until `APPROVE`, then enables auto-merge.
 - **PR body MUST include `Closes #<issue>`** so the `dod-verify` workflow fires on merge.
 - **Definition of Done block** on the issue per `.github/DOD-DSL.md`. Author or refresh in this PR via `gh issue edit`. Every assertion must be satisfied by your PR's diff once merged.
-- Final status comment per `AGENTS.md` schema, `agent:design`, `notes:` cites the PR number.
+- Final status comment per `CLAUDE.md` schema, `agent:design`, `notes:` cites the PR number.
 
 ## Reasoning posture
 
