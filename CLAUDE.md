@@ -1,5 +1,8 @@
 # Claude Code Instructions
 
+Only build for the macOS and iOS platforms to start, but be aware that a near-future goal is to add
+support for Windows, Android and Linux.
+
 ## Philosophy
 
 1. **Domain driven development**. Model the software around the business domain, not around
