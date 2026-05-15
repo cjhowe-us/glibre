@@ -1,15 +1,14 @@
-using System;
 using SharpMetal.Foundation;
 using SharpMetal.Metal;
 using SharpMetal.QuartzCore;
 
-namespace Editor.Rendering;
+namespace Glibre.Rendering;
 
 /// <summary>
 /// Renders a single RGB-interpolated triangle into a <see cref="CAMetalLayer"/>.
-/// Owns the Metal device, command queue, and pipeline state for the demo.
+/// Owns the Metal command queue and pipeline state for the demo.
 /// </summary>
-internal sealed class TriangleRenderer : IDisposable
+public sealed class TriangleRenderer : IDisposable
 {
     private const string ShaderSource = """
         #include <metal_stdlib>
@@ -34,7 +33,6 @@ internal sealed class TriangleRenderer : IDisposable
         }
     """;
 
-    private readonly MTLDevice _device;
     private readonly MTLCommandQueue _queue;
     private readonly MTLRenderPipelineState _pipeline;
     private readonly CAMetalLayer _layer;
@@ -42,7 +40,6 @@ internal sealed class TriangleRenderer : IDisposable
 
     public TriangleRenderer(MTLDevice device, CAMetalLayer layer)
     {
-        _device = device;
         _layer = layer;
         _queue = device.NewCommandQueue();
 
@@ -99,8 +96,7 @@ internal sealed class TriangleRenderer : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        // Metal objects are reference-counted by the runtime; explicit Dispose on
-        // SharpMetal structs just decrements the refcount. We let GC + autorelease
-        // pools handle cleanup for this demo.
+        // Metal objects are reference-counted by the runtime; SharpMetal structs
+        // wrap native handles, and GC + autorelease pools handle cleanup.
     }
 }

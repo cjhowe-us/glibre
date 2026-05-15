@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 using Avalonia.Controls;
 using Avalonia.Platform;
 using Avalonia.Threading;
-using Editor.Rendering;
+using Glibre.Rendering;
 using SharpMetal.Metal;
 using SharpMetal.ObjectiveCCore;
 using SharpMetal.QuartzCore;
@@ -11,11 +11,16 @@ using SharpMetal.QuartzCore;
 namespace Editor.Views;
 
 /// <summary>
-/// Avalonia host that mounts a native <c>NSView</c> backed by a <see cref="CAMetalLayer"/>
-/// and drives a <see cref="TriangleRenderer"/> via a UI-thread timer. macOS only;
-/// renders nothing on other platforms.
+/// Avalonia host that mounts a native <c>NSView</c> backed by a
+/// <see cref="CAMetalLayer"/> and drives the shared
+/// <see cref="TriangleRenderer"/> directly from the UI thread. SDL is not
+/// involved here — embedding an SDL window inside an Avalonia window on macOS
+/// causes SDL to reparent the contentView and effectively take over the host
+/// window, so the editor uses the shared renderer against its own layer
+/// instead. The standalone <c>Runtime</c> uses the same renderer behind an
+/// SDL window.
 /// </summary>
-public sealed class MetalView : NativeControlHost
+public sealed class ViewportView : NativeControlHost
 {
     [StructLayout(LayoutKind.Sequential)]
     private struct CGSize { public double Width; public double Height; }

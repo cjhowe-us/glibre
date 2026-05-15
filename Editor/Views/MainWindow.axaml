@@ -16,11 +16,11 @@
 
     <Grid RowDefinitions="Auto,*">
         <TextBlock Grid.Row="0"
-                   Text="Metal Triangle"
+                   Text="Runtime Viewport"
                    FontSize="16"
                    Margin="12,8"
                    HorizontalAlignment="Center"/>
-        <views:MetalView Grid.Row="1"/>
+        <views:ViewportView Grid.Row="1"/>
     </Grid>
 
 </Window>
