@@ -19,3 +19,5 @@ jobs:
         run: dotnet restore glibre.slnx
       - name: Build
         run: dotnet build glibre.slnx --no-restore -c Release
+      - name: Test
+        run: dotnet test glibre.slnx --no-build -c Release

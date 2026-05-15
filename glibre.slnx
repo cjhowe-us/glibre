@@ -1,5 +1,8 @@
 <Solution>
+  <Project Path="Editor.Tests/Editor.Tests.csproj" />
   <Project Path="Editor/Editor.csproj" />
+  <Project Path="Library.Tests/Library.Tests.csproj" />
   <Project Path="Library/Library.csproj" />
+  <Project Path="Runtime.Tests/Runtime.Tests.csproj" />
   <Project Path="Runtime/Runtime.csproj" />
 </Solution>
