@@ -1,0 +1,79 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!-- Colors. Approximate sRGB conversions of the design's oklch tokens. -->
+  <Color x:Key="BgColor">#15171C</Color>
+  <Color x:Key="Bg1Color">#22262D</Color>
+  <Color x:Key="Bg2Color">#2E323A</Color>
+  <Color x:Key="Bg3Color">#3D4250</Color>
+  <Color x:Key="PanelColor">#181B20</Color>
+  <Color x:Key="PanelHiColor">#262A31</Color>
+  <Color x:Key="PanelSolidColor">#1B1E24</Color>
+  <Color x:Key="ViewportColor">#0F1116</Color>
+  <Color x:Key="GridColor">#383C45</Color>
+
+  <Color x:Key="FgColor">#F1F2F4</Color>
+  <Color x:Key="Fg1Color">#C8CBD0</Color>
+  <Color x:Key="Fg2Color">#94989F</Color>
+  <Color x:Key="Fg3Color">#686C74</Color>
+
+  <Color x:Key="AccentColor">#5BA4E8</Color>
+  <Color x:Key="AccentHiColor">#7AB8EE</Color>
+  <Color x:Key="AccentDimColor">#3D7AB8</Color>
+
+  <Color x:Key="OkColor">#52CFA0</Color>
+  <Color x:Key="WarnColor">#E8C262</Color>
+  <Color x:Key="ErrColor">#E26A56</Color>
+  <Color x:Key="InfoColor">#7FB7D7</Color>
+  <Color x:Key="VioletColor">#B98EE3</Color>
+
+  <!-- Brushes -->
+  <SolidColorBrush x:Key="Bg" Color="{StaticResource BgColor}" />
+  <SolidColorBrush x:Key="Bg1" Color="{StaticResource Bg1Color}" />
+  <SolidColorBrush x:Key="Bg2" Color="{StaticResource Bg2Color}" />
+  <SolidColorBrush x:Key="Bg3" Color="{StaticResource Bg3Color}" />
+  <SolidColorBrush x:Key="Panel" Color="{StaticResource PanelColor}" />
+  <SolidColorBrush x:Key="PanelHi" Color="{StaticResource PanelHiColor}" />
+  <SolidColorBrush x:Key="PanelSolid" Color="{StaticResource PanelSolidColor}" />
+  <SolidColorBrush x:Key="Viewport" Color="{StaticResource ViewportColor}" />
+  <SolidColorBrush x:Key="Grid" Color="{StaticResource GridColor}" />
+
+  <SolidColorBrush x:Key="Fg" Color="{StaticResource FgColor}" />
+  <SolidColorBrush x:Key="Fg1" Color="{StaticResource Fg1Color}" />
+  <SolidColorBrush x:Key="Fg2" Color="{StaticResource Fg2Color}" />
+  <SolidColorBrush x:Key="Fg3" Color="{StaticResource Fg3Color}" />
+
+  <SolidColorBrush x:Key="Accent" Color="{StaticResource AccentColor}" />
+  <SolidColorBrush x:Key="AccentHi" Color="{StaticResource AccentHiColor}" />
+  <SolidColorBrush x:Key="AccentDim" Color="{StaticResource AccentDimColor}" />
+  <SolidColorBrush x:Key="AccentBg" Color="{StaticResource AccentColor}" Opacity="0.15" />
+
+  <SolidColorBrush x:Key="Ok" Color="{StaticResource OkColor}" />
+  <SolidColorBrush x:Key="Warn" Color="{StaticResource WarnColor}" />
+  <SolidColorBrush x:Key="Err" Color="{StaticResource ErrColor}" />
+  <SolidColorBrush x:Key="Info" Color="{StaticResource InfoColor}" />
+  <SolidColorBrush x:Key="Violet" Color="{StaticResource VioletColor}" />
+
+  <!-- Hairlines -->
+  <SolidColorBrush x:Key="Line" Color="#FFFFFF" Opacity="0.10" />
+  <SolidColorBrush x:Key="LineSoft" Color="#FFFFFF" Opacity="0.05" />
+  <SolidColorBrush x:Key="RowHover" Color="#FFFFFF" Opacity="0.05" />
+  <SolidColorBrush x:Key="RowSel" Color="{StaticResource AccentColor}" Opacity="0.18" />
+
+  <!-- Radii -->
+  <CornerRadius x:Key="RSm">4</CornerRadius>
+  <CornerRadius x:Key="RMd">6</CornerRadius>
+  <CornerRadius x:Key="RLg">10</CornerRadius>
+  <CornerRadius x:Key="RXl">14</CornerRadius>
+
+  <!-- Typography -->
+  <FontFamily x:Key="UiFont">avares://Avalonia.Fonts.Inter/Assets/Fonts#Inter,$Default</FontFamily>
+  <FontFamily x:Key="MonoFont">Menlo,Consolas,Cascadia Code,monospace</FontFamily>
+
+  <x:Double x:Key="FontXs">10</x:Double>
+  <x:Double x:Key="FontSm">11</x:Double>
+  <x:Double x:Key="FontMd">12</x:Double>
+  <x:Double x:Key="FontBase">13</x:Double>
+  <x:Double x:Key="FontLg">14</x:Double>
+
+</ResourceDictionary>

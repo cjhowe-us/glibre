@@ -2,5 +2,7 @@
 
 public partial class MainWindowViewModel : ViewModelBase
 {
-    public string Greeting { get; } = "Welcome to Avalonia!";
+    public string AppName { get; } = "glibre";
+    public string ProjectName { get; } = "Untitled";
+    public string WindowTitle => $"{AppName} — {ProjectName}";
 }
