@@ -1,0 +1,14 @@
+name: Lint and check formatting
+on:
+  pull_request:
+  push:
+
+jobs:
+  check-markdown:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install rumdl
+        run: brew install rumdl
+      - name: rumdl check
+        run: rumdl check .
