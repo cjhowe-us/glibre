@@ -11,7 +11,7 @@ allowed-elements = ["br"]
 [MD013]
 code-blocks = true
 headings = true
-line-length = 100
+line-length = 120
 paragraphs = true
 reflow = true
 reflow-mode = "normalize"
