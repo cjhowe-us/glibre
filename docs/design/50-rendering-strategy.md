@@ -8,11 +8,10 @@ Cites the thesis in [`00-vision.md`](00-vision.md), the contexts in
 [`40-runtime-architecture.md`](40-runtime-architecture.md), and the content pipeline in
 [`60-content-pipeline.md`](60-content-pipeline.md).
 
-This pillar pins the rendering posture: the abstraction shape that sits above the three native
-interop seams committed in `20`, the shader pipeline shape, the 2D-and-3D unification stance, the
-scalability tier model, and the relationship between the renderer the player sees and the renderer
-the maker previews in the editor. No GPU-API names beyond the platform-API-tier, no render-pass
-enumerations, no specific feature lists.
+This pillar pins the rendering posture: the renderer that runs on the single Vulkan seam committed
+in `20`, the shader pipeline shape, the 2D-and-3D unification stance, the scalability tier model,
+and the relationship between the renderer the player sees and the renderer the maker previews in the
+editor. No render-pass enumerations and no specific feature lists.
 
 ## How to read this pillar
 
@@ -21,52 +20,51 @@ modes are named per Murphy. Capability inventories (which post-processing effect
 models, which material features) are tactical and live in a downstream design owned by the Rendering
 context.
 
-## The portable layer is above the seams, not below them
+## The renderer is the Vulkan renderer
 
 **Committed.**
 
-Glibre's renderer is a portable layer that sits *above* the three native interop seams committed in
-[`20-platform-strategy.md`](20-platform-strategy.md). It does not translate draws into a synthetic
-API and then have each backend adapt; it lets each platform's native graphics API speak its own
-idiom while presenting a coherent rendering model at the layer above.
+Glibre's renderer speaks Vulkan, and only Vulkan — directly, on every supported platform (per the
+single graphics seam committed in [`20-platform-strategy.md`](20-platform-strategy.md)). There is no
+per-platform graphics-API abstraction, no synthetic API the renderer translates into something
+native, and no portable layer over multiple backends. The engine's rendering code is the Vulkan
+code.
 
-**Why.** A portable layer *below* the seams (the "abstract over the three native seams with one API"
-model) costs a translation tax on every frame on every platform and forces every platform to support
-the union of the abstraction's features. A portable layer *above* the seams keeps the per-platform
-code idiomatic to that platform's API and isolates the abstraction to the parts that genuinely need
-to be portable — material authoring, render-graph composition, asset format. This honors the
-three-seam decision in `20` rather than fighting it.
+**Why.** A portable layer over multiple graphics APIs costs a translation tax on every frame and
+forces every backend to support the union of the abstraction's features. With one graphics API the
+layer is gone: the renderer is its own portable model, expressed in Vulkan terms. The per-platform
+variation that remains (window and surface creation; Vulkan-on-Metal on Apple via MoltenVK) lives
+entirely beneath the renderer — in SDL3 and MoltenVK — not inside it. The renderer never branches on
+platform.
 
-**Failure mode absorbed.** Platform-native graphics features (the things a single platform can do
-well that the others cannot) do not require a generic abstraction to be retrofitted before the
-engine can use them. The portable layer is not the bottleneck for using a platform.
+**Failure mode absorbed.** A renderer feature ships once on Vulkan and runs everywhere. There is no
+slowest-backend bottleneck holding the engine to the pace of three independent implementations.
 
-## One shader language at authoring time, per-platform artifacts at runtime
+## GLSL authoring, SPIR-V everywhere
 
 **Committed.**
 
-Material and shader authoring at the contributor tier is in a single shader language (per
-[`20-platform-strategy.md`](20-platform-strategy.md)'s "one shader language for all platforms"
-stance). The shader pipeline compiles that source into per-platform shader artifacts at build time,
-through the content pipeline (per [`60-content-pipeline.md`](60-content-pipeline.md)). The runtime
-ships those artifacts and does not invoke a shader compiler.
+Shader and material authoring at the contributor tier is in GLSL (per
+[`20-platform-strategy.md`](20-platform-strategy.md)'s shader-pipeline stance). The shader pipeline
+compiles GLSL to SPIR-V at build time, through the content pipeline (per
+[`60-content-pipeline.md`](60-content-pipeline.md)). The runtime loads SPIR-V directly on every
+platform; there is no per-platform shader translation step.
 
-**Why.** This is the only way to honor the no-code vision in [`00-vision.md`](00-vision.md) for the
-rendering surface: the maker authors materials visually and never sees a shader language, while the
-engine takes responsibility for producing the right artifact for each platform. The build-time bake
-also keeps the shipped runtime free of toolchain dependencies (per
-[`20-platform-strategy.md`](20-platform-strategy.md)).
+**Why.** Because Vulkan is the only graphics API the engine reaches (per the previous section),
+SPIR-V is the only shader artifact the runtime needs — on Windows, Linux, Android, macOS, or iOS.
+The build-time bake keeps the shipped runtime free of toolchain dependencies (per
+[`20-platform-strategy.md`](20-platform-strategy.md)) and honors the no-code vision in
+[`00-vision.md`](00-vision.md): the maker authors materials visually and never sees GLSL.
 
 **Deferred.** Whether the editor *itself* needs a runtime shader compiler for live shader editing
 inside Authoring (per [`20-platform-strategy.md`](20-platform-strategy.md)'s observation that this
 is the only candidate use case) is a maker-experience trade-off owned by the Authoring downstream
-design and will be tracked in `90-risks-and-open-questions.md` when that file is established.
+design and is tracked in [`90-risks-and-open-questions.md`](90-risks-and-open-questions.md).
 
-**Failure mode absorbed.** Adding a new platform target adds compiler-target work in the shader
-pipeline; it does not multiply the maker's shader-authoring surface. The chosen shader language is
-an external project with its own release cadence; a version-churn exposure (a breaking change in
-that language) is an engine-level concern not borne by the maker, and is named again in the risks
-section below.
+**Failure mode absorbed.** Adding a new platform target adds no shader-pipeline work: SPIR-V is the
+artifact everywhere. The GLSL→SPIR-V toolchain is an external project with its own release cadence;
+a version-churn exposure (a breaking change in GLSL semantics or in the SPIR-V producer) is an
+engine-level concern not borne by the maker, and is named again in the risks section below.
 
 ## Materials are authored, shaders are baked
 
@@ -159,12 +157,12 @@ just a discipline.
 **Failure mode absorbed.** A bug in the renderer that shows up in a shipped game also shows up in
 the editor; the maker hits it during authoring, not after release.
 
-## Render artifacts are per-target, baked, and reproducible
+## Render artifacts are baked and reproducible
 
 **Committed.**
 
-Render artifacts — compiled shaders, per-platform pipeline configurations, baked render data — are
-produced by the content pipeline per the reproducibility commitment in
+Render artifacts — SPIR-V shader modules, pipeline configurations, baked render data — are produced
+by the content pipeline per the reproducibility commitment in
 [`60-content-pipeline.md`](60-content-pipeline.md) and reach Rendering through S-5. The runtime
 loads them; it does not synthesize them at startup.
 
@@ -172,30 +170,31 @@ loads them; it does not synthesize them at startup.
 the target, and produces nondeterministic results across hardware. Baking at build time pays the
 cost once, in a controlled environment, with the reproducibility contract of `60`.
 
-**Anticipated.** A shader artifact compiled for one platform's API is not portable to another; the
-per-target bake (per `60`) is what makes "authored once, ships everywhere" true for shaders.
+**Anticipated.** SPIR-V shader bytecode is portable across every platform the engine ships to;
+pipeline state objects may still vary by device feature level and are constructed at runtime from
+the SPIR-V plus the device's reported capabilities. Driver-side pipeline caches (Vulkan
+`VkPipelineCache`) are a per-device optimization, not part of the build-time artifact.
 
 **Failure mode absorbed.** The player does not wait on a first-launch shader compile; the maker does
 not see different shader behavior across CI and developer builds because of compiler nondeterminism.
 
-## The render-graph composition is portable
+## The render-graph composition is a single authored shape
 
 **Committed.**
 
 How a frame is composed — the ordering of passes, the resource lifetimes, the read/write
-declarations between passes — is portable. The per-platform native API executes that composition;
-the composition itself is one authored shape.
+declarations between passes — is one authored shape. Vulkan executes that composition; there is no
+per-platform composition variant.
 
 **Why.** The composition is where the renderer's design budget concentrates: it is the part of
 rendering most likely to be revised as scopes commit (new lighting models, new post-processing
-features). Keeping the composition portable means revisions land in one place, not three.
+features). Keeping the composition unified means revisions land in one place.
 
 **Anticipated.** The composition's exact form — declarative graph, command-list builder, or some
 hybrid — is tactical and owned by Rendering's downstream design.
 
-**Failure mode absorbed.** A renderer change does not require three platform-specific edits to take
-effect; the platform-specific code is the *execution* of the composition, not the composition
-itself.
+**Failure mode absorbed.** A renderer change lands in one place; there is no parallel
+platform-specific composition to keep in step.
 
 ## Rendering is credible and modern, not the differentiator
 
@@ -223,18 +222,19 @@ point that a real maker cannot ship a credible-looking game.
 - **The render-graph form** (declarative vs imperative, immediate vs deferred). Tactical.
 - **The exact tier definitions.** Strategy commits to the tier model; the contents are
   tactical.
-- **Specific GPU-API features used per seam.** Owned by Platform.
-- **The shader-language feature set the maker sees.** Owned by Composition's material
-  node library and the shader language's own version policy.
+- **Specific Vulkan extensions and feature levels relied on.** Owned by Platform; the
+  renderer commits to Vulkan as the API, not to a specific feature set.
+- **The GLSL feature set the maker sees.** Owned by Composition's material node library
+  and the GLSL/SPIR-V toolchain's own version policy.
 - **Editor overlay specifics** (gizmo style, selection visualization, debug
   visualizers). Tactical and owned by the editor downstream design.
 
 ## Risks deferred to `90`
 
-- **Three idiomatic backends multiplies maintenance.** The portable-layer-above-the-seams
-  stance is the right trade for the engine's vision but means every renderer feature
-  must ship on all three seams before it counts as shipped. The cost is named in `20`
-  and inherited here.
+- **MoltenVK feature lag on Apple.** Vulkan on macOS and iOS goes through MoltenVK; its
+  feature coverage and version cadence lag upstream Vulkan in places. The renderer
+  inherits that lag as an Apple-platform constraint. The cost is named in `20` and
+  carried here.
 - **Tier-vs-feature tension.** A maker who wants a single feature from a higher tier
   without paying the rest of that tier's cost is a known wish; granting it would break
   the tier model. Holding the line is a discipline concern.
@@ -242,9 +242,9 @@ point that a real maker cannot ship a credible-looking game.
   the editor/runtime process split (per `40`), but a *renderer-internal* drift — features
   active in one build configuration and not another — is a discipline concern that the
   structural boundary does not catch.
-- **Shader-language version churn.** The chosen shader language is an external project
-  with its own release cadence; a version change is an engine-level concern, not a
-  maker-level one, but its handling is named here so it cannot surprise a later slice.
+- **GLSL/SPIR-V toolchain version churn.** The GLSL→SPIR-V toolchain is an external
+  project with its own release cadence; a version change is an engine-level concern, not
+  a maker-level one, but its handling is named here so it cannot surprise a later slice.
 - **First-launch shader compile in some forms of distribution.** Even with build-time
   bakes, some platforms may require on-device prewarm passes (driver-specific shader
   caches). The maker-facing surface for this is a downstream concern; the renderer's

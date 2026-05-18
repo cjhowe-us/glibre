@@ -189,7 +189,7 @@ authored once and compiled per platform.
 
 **Responsibilities.**
 
-- The portable rendering layer above the three native-API seams of
+- The Vulkan renderer that runs on the single graphics seam of
   [`20-platform-strategy.md`](20-platform-strategy.md).
 - Materials, shaders, lighting, post-processing, 2D / 3D / vector rendering.
 - The shader pipeline: authoring surface, per-platform compilation, and runtime artifact
@@ -211,7 +211,7 @@ authored once and compiled per platform.
 **Out of scope.**
 
 - The simulation that produces the state being rendered — Simulation owns that.
-- The native interop seams (Windows / Apple / Vulkan) — Platform owns those.
+- The Vulkan seam through SDL3 — Platform owns it.
 - The on-disk format of render artifacts — Content owns delivery.
 
 ## Content
@@ -284,13 +284,13 @@ concerns where every other context would otherwise have its own per-OS shim.
 
 **Responsibilities.**
 
-- Native windowing (editor: cross-platform UI toolkit; runtime: the cross-platform
-  windowing layer, per [`20-platform-strategy.md`](20-platform-strategy.md)).
+- Native windowing through SDL3 for both editor and runtime, per
+  [`20-platform-strategy.md`](20-platform-strategy.md).
 - OS input acquisition (translating OS events into engine-level input events;
   *interpretation* belongs to Runtime).
 - Filesystem, threading, time, processes.
-- The three native rendering interop seams (Windows / Apple / Vulkan) — owned at the
-  substrate boundary, consumed by Rendering.
+- The Vulkan rendering seam, reached through SDL3 — owned at the substrate boundary,
+  consumed by Rendering.
 - The execution-model boundary between editor host and runtime host: ensuring no
   dependency that requires capabilities the runtime cannot support leaks across the
   boundary. (The execution-model decision itself is owned by
@@ -300,8 +300,9 @@ concerns where every other context would otherwise have its own per-OS shim.
 
 - **Host** — the OS-level process the engine is running in (editor host vs runtime
   host).
-- **Interop seam** — a one-of-three native boundary (Windows, Apple, Vulkan) at which
-  glibre crosses from managed to native code.
+- **Interop seam** — the Vulkan boundary at which glibre crosses from managed to native
+  code, mediated by SDL3 for windowing and surface creation and by MoltenVK on Apple
+  platforms.
 
 **Out of scope.**
 

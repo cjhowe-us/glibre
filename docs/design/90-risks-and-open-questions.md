@@ -25,21 +25,15 @@ the contexts that will eventually own them.
 
 ## Substrate and platform
 
-### Three-seam native interop maintenance
+### MoltenVK as Apple's Vulkan implementation
 
 Pillars: [`20`](20-platform-strategy.md), [`50`](50-rendering-strategy.md),
 [`15`](15-context-map.md) (S-8). **Blast radius:** engine-wide.
 
-Three idiomatic backends — Windows, Apple, Linux/Android — mean every renderer feature must ship on
-three stacks before it counts as shipped. The seam choice is intentional (`20` accepts the cost);
-the *consequence* is that engine-wide rendering velocity is bounded by the slowest seam.
-
-### Windows-native interop seam single point of failure
-
-Pillars: [`20`](20-platform-strategy.md). **Blast radius:** engine-wide.
-
-The Windows native interop seam is owned by a single Windows-native mechanism. If that mechanism
-stagnates or loses upstream maintenance, the engine has no backup path on Windows.
+MoltenVK is the engine's only path to the Apple GPU. Its feature coverage and version cadence lag
+upstream Vulkan in places (extension support, validation-layer parity, MSL translation quirks); a
+feature the engine adopts on native Vulkan may need a workaround or wait on Apple platforms. The
+single-seam architecture pays for itself everywhere else; this is where the cost lands.
 
 ### Console targets are stretch and stay stretch
 
@@ -69,15 +63,16 @@ mechanism that catches violations at build time is not chosen.
 
 ## Viewport and runtime architecture
 
-### Per-platform viewport handshake spikes
+### Editor viewport swapchain coordination
 
 Pillars: [`20`](20-platform-strategy.md), [`40`](40-runtime-architecture.md),
-[`50`](50-rendering-strategy.md). **Blast radius:** slice-blocker (one per committed authoring
-platform).
+[`50`](50-rendering-strategy.md). **Blast radius:** slice-blocker.
 
-Embedding a native rendering surface inside an editor window has a per-platform handshake on each of
-the three committed authoring platforms (Apple, Windows, Linux). Each is its own spike; any one of
-them not landing blocks editor viewport for that platform.
+The editor and the runtime are distinct OS processes (per `40`) that need to coordinate over a
+single SDL3-managed Vulkan swapchain so the editor can display the runtime's frame inside its own
+window. SDL3 absorbs the per-OS surface-embedding mechanics; the residual risk is the editor↔runtime
+coordination — surface handle transfer, present synchronization, focus and capture transitions,
+resize ordering — which is a single problem rather than three but still non-trivial.
 
 ### Hot-reload edge cases per channel
 
@@ -135,14 +130,15 @@ The shared-renderer commitment is structurally enforced by the editor/runtime pr
 active in one build configuration and not another — is a discipline concern the structural boundary
 does not catch.
 
-### Shader-language version churn
+### GLSL/SPIR-V toolchain version churn
 
 Pillars: [`20`](20-platform-strategy.md), [`50`](50-rendering-strategy.md),
 [`60`](60-content-pipeline.md). **Blast radius:** engine-wide.
 
-The chosen shader language is an external project with its own release cadence. A version change is
-an engine-level concern, not a maker-level one, but its handling is named here so it cannot surprise
-a later slice.
+The GLSL→SPIR-V toolchain (glslang and the SPIRV-Tools/SPIRV-Cross family) is an external project
+set with its own release cadence. A version change in GLSL semantics, in the SPIR-V producer, or in
+the validator is an engine-level concern, not a maker-level one, but its handling is named here so
+it cannot surprise a later slice.
 
 ### First-launch shader prewarm on some distribution channels
 
@@ -185,20 +181,20 @@ enforcement strategy is open.
 Pillars: [`20`](20-platform-strategy.md), [`60`](60-content-pipeline.md). **Blast radius:**
 engine-wide.
 
-The shader and graph toolchains depend on out-of-process compilers that the editor invokes during
-authoring. If either compiler is missing, mis-installed, or crashes, authoring is blocked even
-though the maker's machine is otherwise functional. This is a local-authoring failure mode distinct
-from the CI variant below and from a runtime outage (the shipped runtime never invokes the
-compiler).
+The GLSL→SPIR-V compiler (glslangValidator or equivalent) and the graph toolchain are out-of-process
+compilers that the editor invokes during authoring. If either is missing, mis-installed, or crashes,
+authoring is blocked even though the maker's machine is otherwise functional. This is a
+local-authoring failure mode distinct from the CI variant below and from a runtime outage (the
+shipped runtime never invokes the compiler).
 
 ### CI/no-display bake
 
 Pillars: [`20`](20-platform-strategy.md), [`60`](60-content-pipeline.md). **Blast radius:**
 engine-wide.
 
-Shader and graph compilation under sandboxed CI environments (no display server, no GPU, locked-down
-sandboxes) can fail the build. The pipeline's posture on headless CI is the authoritative place to
-resolve this; the resolution is open.
+GLSL→SPIR-V and graph compilation under sandboxed CI environments (no display server, no GPU,
+locked-down sandboxes) can fail the build. The pipeline's posture on headless CI is the
+authoritative place to resolve this; the resolution is open.
 
 ### Importer extension surface
 
@@ -368,8 +364,8 @@ quarantine-on-first-run) is a downstream UX and security concern.
 Pillars: [`20`](20-platform-strategy.md), [`50`](50-rendering-strategy.md). **Blast radius:**
 slice-blocker for any scope that promises live shader authoring in the editor.
 
-Whether the editor needs a runtime shader compiler for live shader editing is a maker-experience
-trade-off; the runtime never needs one.
+Whether the editor needs an in-process GLSL→SPIR-V compiler for live shader editing is a
+maker-experience trade-off; the shipped runtime never needs one.
 
 ## Integration shape
 

@@ -10,7 +10,7 @@ file-tree dictates. Tactics live elsewhere; this set captures *what* and *why*.
 | [`00-vision.md`](00-vision.md) | Thesis, audience, refusals, non-goals. |
 | [`10-bounded-contexts.md`](10-bounded-contexts.md) | Nine bounded contexts, responsibilities, ubiquitous language. |
 | [`15-context-map.md`](15-context-map.md) | Fifteen named seams between contexts and their integration patterns. |
-| [`20-platform-strategy.md`](20-platform-strategy.md) | Supported platforms, substrate stances, three-seam native interop. |
+| [`20-platform-strategy.md`](20-platform-strategy.md) | Supported platforms, substrate stances, the single Vulkan-via-SDL3 graphics seam. |
 | [`30-authoring-and-no-code.md`](30-authoring-and-no-code.md) | What no-code means daily, Composition as substrate, fragments, AI-assist posture. |
 | [`40-runtime-architecture.md`](40-runtime-architecture.md) | Editor/runtime as distinct processes, viewport hosting, tick/frame decoupling, hot-reload. |
 | [`50-rendering-strategy.md`](50-rendering-strategy.md) | Portable layer above the seams, shader pipeline, 2D/3D unification, tier-based scalability. |
@@ -33,9 +33,9 @@ between them and the DDD integration pattern governing each. Every later pillar 
 seams committed in these two files.
 
 **Strand B — what substrate the engine is built on.** Read `20` (platform strategy) before any of
-the architectural pillars. `20` pins the .NET substrate, the three-seam native rendering interop,
-the shader pipeline at the platform-API tier, the logic-graph AOT toolchain stance, and the
-editor-JIT / iOS-AOT execution model.
+the architectural pillars. `20` pins the .NET substrate, SDL3 as the windowing-and-input layer
+everywhere, Vulkan as the single graphics seam (via MoltenVK on Apple), the GLSL→SPIR-V shader
+pipeline, the logic-graph AOT toolchain stance, and the editor-JIT / iOS-AOT execution model.
 
 The two strands meet at the architectural pillars. Read them in dependency order:
 
@@ -45,9 +45,9 @@ The two strands meet at the architectural pillars. Read them in dependency order
   graphs compile (never interpret), live preview as default, maker ergonomics dominate.
 - `60` (content pipeline) — source/baked split, Asset DB identity, bake at build time,
   hot-reload at edit time.
-- `50` (rendering strategy) — portable layer above the three seams, shaders baked
-  per-target, 2D/3D unified, tier-based scalability, editor and runtime share one
-  renderer.
+- `50` (rendering strategy) — the Vulkan renderer on the single graphics seam, GLSL
+  authored / SPIR-V everywhere, 2D/3D unified, tier-based scalability, editor and runtime
+  share one renderer.
 - `70` (accessibility & localization) — a11y/l10n as properties of primitives,
   authoring-time linting for the incomplete-primitive rule, string identity, semantic
   tree, Platform delivers / A11y shapes.

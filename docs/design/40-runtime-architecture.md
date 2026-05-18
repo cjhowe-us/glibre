@@ -71,18 +71,20 @@ The maker reopens the editor and the project is where they left it.
 
 **Committed.**
 
-The editor hosts the running runtime's rendering output in an embedded surface, by platform-specific
-arrangement. The exact mechanics — surface handle, present synchronization, OS-level focus and
-capture — are per-platform and owned by Platform; the runtime renders, the editor displays.
+The editor hosts the running runtime's rendering output in an embedded surface, mediated by SDL3 +
+Vulkan. The exact mechanics — surface handle, present synchronization, OS-level focus and capture —
+are owned by Platform; the runtime renders, the editor displays.
 
 **Why.** The vision commits to live preview at fidelity matching the shipped runtime (per
 [`00-vision.md`](00-vision.md)). The cheapest way to honor that is to *use the shipped renderer*
 during authoring rather than maintaining a second one. The viewport is the seam; the renderer behind
 it is the same renderer the player will see.
 
-**Anticipated.** Three per-platform handshakes — the Apple native rendering surface, the Windows
-swapchain handoff, and the Linux native surface — are non-trivial and are each their own spike.
-There is no Android handshake here: Android is a runtime-only target (per
+**Anticipated.** The viewport handshake is a single SDL3-mediated mechanism across the committed
+authoring platforms (macOS, Windows, Linux): SDL3 owns window creation and the Vulkan surface, and
+the editor and runtime processes coordinate over the swapchain as a single concern. Per-OS quirks in
+window embedding live below SDL3, not in three independent engine spikes. There is no Android
+handshake here: Android is a runtime-only target (per
 [`20-platform-strategy.md`](20-platform-strategy.md)) and the editor does not run there.
 
 **Anticipated (separate decision).** The architecture commits to
@@ -216,7 +218,7 @@ viewport, release focus back to the editor); the request is acted on by Platform
 side. Authoring never manipulates the OS focus state directly, and Platform does not initiate
 transfers on its own.
 
-**Why.** The runtime windowing layer and the editor toolkit are deliberately separate (per
+**Why.** The editor and the runtime each own an SDL3 window in their own process (per
 [`20-platform-strategy.md`](20-platform-strategy.md)). They cannot both consume OS events
 simultaneously without producing double-delivery, which would be a Murphy nightmare for hotkeys,
 gamepad input, and modifier keys.
@@ -243,9 +245,10 @@ Maker confusion about "why does this hotkey do nothing" reduces to "where is foc
 
 ## Risks deferred to `90`
 
-- **Viewport handshake.** One per-platform spike for each of the three committed authoring
-  platforms (macOS, Windows, Linux). Each carries independent risk; any one of them
-  blocking is a slice blocker.
+- **Viewport handshake.** A single SDL3-mediated swapchain handshake between the editor
+  and runtime processes on each committed authoring platform (macOS, Windows, Linux).
+  SDL3 absorbs the per-OS surface-embedding quirks; the residual risk is in the
+  editor↔runtime swapchain coordination, not in per-platform plumbing.
 - **Hot-reload edge cases.** State migration, in-flight callbacks, long-lived references
   to swapped-out artifacts — none have a single right answer; each channel needs its
   own design.

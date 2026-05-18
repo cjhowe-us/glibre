@@ -154,7 +154,7 @@ them as given.
 downstream.
 
 **What flows.** Native windowing primitives, OS input events, filesystem access, threading
-primitives, time, processes, the three rendering interop seams.
+primitives, time, processes, the Vulkan rendering seam via SDL3.
 
 **Failure mode absorbed.** No upstream context dictates platform shape; the platform seam is taken
 as given and downstream contexts adapt. This is the only major place where glibre is a conformist
@@ -297,9 +297,10 @@ surface, version it, and stop it from accreting responsibilities that belong to 
   the model needs to stay legible as the number of contexts grows.
 - **S-8 conformism vs portability.** Conformist coupling with Platform is the right
   trade for now, but it means OS-level platform changes can propagate into multiple
-  downstream contexts. Per
-  [`20-platform-strategy.md`](20-platform-strategy.md), the three-seam interop is
-  intentional; the context map carries the same cost in a different form.
+  downstream contexts. The substrate stance in
+  [`20-platform-strategy.md`](20-platform-strategy.md) collapses graphics to a single
+  Vulkan seam through SDL3, which narrows the surface that can shift; the context map
+  carries that narrower cost.
 - **S-10 obligates every producing context.** Treating A11y & L10n as the host of the
   semantic-metadata contract puts compliance pressure on every producing context. The
   vision commits to first-class accessibility, so the cost is justified, but it is the
