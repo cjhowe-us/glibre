@@ -7,13 +7,13 @@ public class ViewController
 : UIViewController
 #endif
 {
-    private readonly TriangleRenderer TriangleRenderer = new();
+    private readonly TriangleRenderer _triangleRenderer = new();
 
     public override void LoadView()
     {
         base.LoadView();
 
-        View = TriangleRenderer.View;
+        View = _triangleRenderer.View;
     }
 
 }

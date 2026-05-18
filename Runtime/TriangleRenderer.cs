@@ -41,19 +41,19 @@ public sealed class TriangleRenderer : MTKViewDelegate
     }, MTLDevice.SystemDefault);
     private IMTLDevice? Device => View.Device;
 
-    private readonly IMTL4CommandQueue? Queue;
-    private readonly IMTL4CommandAllocator? CommandAlloc;
-    private readonly IMTL4CommandBuffer? CommandBuffer;
-    private readonly IMTL4CommandBuffer[] CommandBuffers = [];
-    private readonly IMTLRenderPipelineState? Pipeline;
+    private readonly IMTL4CommandQueue? _queue;
+    private readonly IMTL4CommandAllocator? _commandAlloc;
+    private readonly IMTL4CommandBuffer? _commandBuffer;
+    private readonly IMTL4CommandBuffer[] _commandBuffers = [];
+    private readonly IMTLRenderPipelineState? _pipeline;
 
     public TriangleRenderer()
     {
         View.Delegate = this;
-        Queue = Device?.CreateMTL4CommandQueue();
-        CommandAlloc = Device?.CreateCommandAllocator();
-        CommandBuffer = Device?.CreateCommandBuffer();
-        CommandBuffers = CommandBuffer == null ? [] : [CommandBuffer];
+        _queue = Device?.CreateMTL4CommandQueue();
+        _commandAlloc = Device?.CreateCommandAllocator();
+        _commandBuffer = Device?.CreateCommandBuffer();
+        _commandBuffers = _commandBuffer == null ? [] : [_commandBuffer];
 
         if (Device != null)
         {
@@ -72,7 +72,7 @@ public sealed class TriangleRenderer : MTKViewDelegate
             var colorAttachment = pipelineDesc.ColorAttachments[0];
             colorAttachment.PixelFormat = View.ColorPixelFormat;
 
-            Pipeline = Device?.CreateRenderPipelineState(pipelineDesc, out error)
+            _pipeline = Device?.CreateRenderPipelineState(pipelineDesc, out error)
                 ?? throw new InvalidOperationException(
                     $"Metal pipeline build failed: {error.LocalizedDescription}");
         }
@@ -90,25 +90,25 @@ public sealed class TriangleRenderer : MTKViewDelegate
         color0.StoreAction = MTLStoreAction.Store;
         color0.ClearColor = new MTLClearColor { Red = 0.08, Green = 0.08, Blue = 0.10, Alpha = 1.0 };
 
-        if (CommandAlloc == null || CommandBuffer == null || Queue == null || Pipeline == null)
+        if (_commandAlloc == null || _commandBuffer == null || _queue == null || _pipeline == null)
         {
             return;
         }
 
-        CommandBuffer.BeginCommandBuffer(CommandAlloc);
+        _commandBuffer.BeginCommandBuffer(_commandAlloc);
 
-        var encoder = CommandBuffer.CreateRenderCommandEncoder(passDesc);
-        encoder?.SetRenderPipelineState(Pipeline);
+        var encoder = _commandBuffer.CreateRenderCommandEncoder(passDesc);
+        encoder?.SetRenderPipelineState(_pipeline);
         encoder?.DrawPrimitives(MTLPrimitiveType.Triangle, 0, 3);
         encoder?.EndEncoding();
 
-        CommandBuffer.EndCommandBuffer();
+        _commandBuffer.EndCommandBuffer();
 
-        Queue.Commit([CommandBuffer]);
+        _queue.Commit([_commandBuffer]);
 
         drawable.Present();
 
-        CommandAlloc.Reset();
+        _commandAlloc.Reset();
 
     }
 
