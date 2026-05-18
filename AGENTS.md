@@ -33,8 +33,9 @@ testing requires a macOS host with MoltenVK.
 ### Environment notes
 
 - .NET 10.0 SDK (preview) is required. Installed via `dotnet-install.sh --channel 10.0`.
-- `rumdl` is installed via `pip install rumdl` (binary wheel, no Rust/cargo needed).
+- Rust stable toolchain is required. Managed via `rustup`.
+- `rumdl` is installed via `cargo install rumdl`.
 - Mesa Vulkan drivers (`mesa-vulkan-drivers`) provide the Lavapipe software Vulkan ICD for
   headless Vulkan enumeration, but rendering is blocked by the Metal-only surface path.
-- The `DOTNET_ROOT` and dotnet/rumdl binaries are on PATH via `/usr/local/share/dotnet` and
-  `~/.local/bin` respectively.
+- The `DOTNET_ROOT` is `/usr/local/share/dotnet`. Cargo binaries live in `/usr/local/cargo/bin`
+  (both on PATH).
