@@ -239,6 +239,18 @@ public sealed unsafe class TriangleRenderer : IDisposable
 
     private void CreateSurface()
     {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            CreateMetalSurface();
+        }
+        else
+        {
+            CreateSdlVulkanSurface();
+        }
+    }
+
+    private void CreateMetalSurface()
+    {
         // SDL_Vulkan_CreateSurface is not reliable when SDL and Vortice each dlopen
         // their own copy of the Vulkan loader. Take the CAMetalLayer from SDL and
         // create the surface through Vortice's own vkCreateMetalSurfaceEXT instead.
@@ -257,6 +269,18 @@ public sealed unsafe class TriangleRenderer : IDisposable
 
         var info = new VkMetalSurfaceCreateInfoEXT { pLayer = layer };
         _instanceApi.vkCreateMetalSurfaceEXT(&info, out _surface).CheckResult();
+    }
+
+    private void CreateSdlVulkanSurface()
+    {
+        VkSurfaceKHR_T* sdlSurface;
+        if (!SDL_Vulkan_CreateSurface(
+                _window, (VkInstance_T*)_instance.Handle, null, &sdlSurface))
+        {
+            throw new InvalidOperationException(
+                $"SDL_Vulkan_CreateSurface failed: {SDL_GetErrorString()}");
+        }
+        _surface = new VkSurfaceKHR((ulong)(nint)sdlSurface);
     }
 
     private void PickPhysicalDevice()

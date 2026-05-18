@@ -17,25 +17,28 @@ triangle demo. No editor or test projects exist yet.
 
 CI workflows (`.github/workflows/build.yml` and `lint.yml`) mirror these commands.
 
-### Runtime limitations on Linux cloud VMs
+### Running the Runtime on Linux cloud VMs
 
-The Runtime project creates a Vulkan surface via `SDL_Metal_CreateView` / `vkCreateMetalSurfaceEXT`,
-which is macOS-only. On Linux, the app will build and start (SDL3 init + Vulkan instance creation
-succeed), but will fail at surface creation with:
+The Runtime renders via Vulkan using the Lavapipe (Mesa) software rasterizer. To run:
 
+```bash
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+mkdir -p $XDG_RUNTIME_DIR
+export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
+dotnet run --project Runtime -c Release
 ```
-SDL_Metal_CreateView failed: That operation is not supported
-```
 
-This is expected — the codebase targets macOS/iOS first (see `CLAUDE.md`). Full graphical runtime
-testing requires a macOS host with MoltenVK.
+`VK_ICD_FILENAMES` forces the Lavapipe software ICD (no GPU required).
+`XDG_RUNTIME_DIR` must be set or SDL3 will print a warning.
+
+On macOS, the surface is created via Metal (`vkCreateMetalSurfaceEXT`). On Linux/Windows, it
+uses `SDL_Vulkan_CreateSurface` which selects the appropriate WSI (X11/Wayland).
 
 ### Environment notes
 
 - .NET 10.0 SDK (preview) is required. Installed via `dotnet-install.sh --channel 10.0`.
 - Rust stable toolchain is required. Managed via `rustup`.
 - `rumdl` is installed via `cargo install rumdl`.
-- Mesa Vulkan drivers (`mesa-vulkan-drivers`) provide the Lavapipe software Vulkan ICD for
-  headless Vulkan enumeration, but rendering is blocked by the Metal-only surface path.
+- Mesa Vulkan drivers (`mesa-vulkan-drivers`) provide the Lavapipe software Vulkan ICD.
 - The `DOTNET_ROOT` is `/usr/local/share/dotnet`. Cargo binaries live in `/usr/local/cargo/bin`
   (both on PATH).
