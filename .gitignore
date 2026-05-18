@@ -55,3 +55,7 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# Design / story review-respond loop scratch state. Created during authoring,
+# deleted before every commit. Never ships in the repo.
+.review-state/
