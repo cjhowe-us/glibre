@@ -1,4 +1,3 @@
 <Solution>
-  <Project Path="Editor/Mac/EditorMac.csproj" />
   <Project Path="Runtime/Runtime.csproj" />
 </Solution>
